@@ -377,7 +377,9 @@ Optional post-launch item.
     }
 )
 
-$projectData = Invoke-GithubGraphQL -Query @"
+$project = $null
+try {
+    $projectData = Invoke-GithubGraphQL -Query @"
 query(`$owner: String!, `$number: Int!) {
   organization(login: `$owner) {
     projectV2(number: `$number) {
@@ -387,22 +389,53 @@ query(`$owner: String!, `$number: Int!) {
   }
 }
 "@ -Variables @{
-    owner  = $Owner
-    number = $ProjectNumber
+        owner  = $Owner
+        number = $ProjectNumber
+    }
+
+    $project = $projectData.organization.projectV2
+}
+catch {
+    Write-Warning "Could not query ProjectV2. Continuing with issue creation only. Details: $($_.Exception.Message)"
 }
 
-$project = $projectData.organization.projectV2
-if (-not $project) {
-    throw "Project $Owner/$ProjectNumber was not found."
+if ($project) {
+    Write-Host "Project found: $($project.title)"
+}
+else {
+    Write-Warning "Project $Owner/$ProjectNumber not found or not accessible with this token. Issues will still be created."
 }
 
-Write-Host "Project found: $($project.title)"
+$existingIssuesResponse = Invoke-GithubRest -Method Get -Uri "https://api.github.com/repos/$Owner/$Repo/issues?state=all&per_page=100" -Body $null
+$existingIssues = @()
+if ($existingIssuesResponse -is [array]) {
+    $existingIssues = $existingIssuesResponse
+}
+elseif ($null -ne $existingIssuesResponse) {
+    $existingIssues = @($existingIssuesResponse)
+}
 
 foreach ($issue in $issues) {
-    $created = Invoke-GithubRest -Method Post -Uri "https://api.github.com/repos/$Owner/$Repo/issues" -Body @{
-        title  = $issue.Title
-        body   = $issue.Body.Trim()
-        labels = $issue.Labels
+    $matching = @($existingIssues | Where-Object { $_.title -eq $issue.Title })
+    $existing = $null
+    if ($matching.Count -gt 0) {
+        $existing = $matching[0]
+        if ($matching.Count -gt 1) {
+            Write-Warning ("Multiple issues matched title '{0}'. Using #{1}." -f $issue.Title, $existing.number)
+        }
+    }
+
+    if ($existing) {
+        $created = $existing
+        Write-Host ("Issue already exists: #{0} {1}" -f $created.number, $created.title)
+    }
+    else {
+        $created = Invoke-GithubRest -Method Post -Uri "https://api.github.com/repos/$Owner/$Repo/issues" -Body @{
+            title  = $issue.Title
+            body   = $issue.Body.Trim()
+            labels = $issue.Labels
+        }
+        $existingIssues += $created
     }
 
     $contentId = Invoke-GithubGraphQL -Query @"
@@ -424,7 +457,9 @@ query(`$url: URI!) {
         throw "Could not resolve issue node id for $($created.html_url)"
     }
 
-    Invoke-GithubGraphQL -Query @"
+    if ($project) {
+        try {
+            Invoke-GithubGraphQL -Query @"
 mutation(`$projectId: ID!, `$contentId: ID!) {
   addProjectV2ItemById(input: {
     projectId: `$projectId
@@ -436,11 +471,19 @@ mutation(`$projectId: ID!, `$contentId: ID!) {
   }
 }
 "@ -Variables @{
-        projectId = $project.id
-        contentId = $issueNode.id
-    } | Out-Null
+                projectId = $project.id
+                contentId = $issueNode.id
+            } | Out-Null
 
-    Write-Host ("Created and added to project: #{0} {1}" -f $created.number, $created.title)
+            Write-Host ("Created/verified and added to project: #{0} {1}" -f $created.number, $created.title)
+        }
+        catch {
+            Write-Warning ("Could not add issue #{0} to project: {1}" -f $created.number, $_.Exception.Message)
+        }
+    }
+    else {
+        Write-Host ("Created/verified issue only: #{0} {1}" -f $created.number, $created.title)
+    }
 }
 
 Write-Host "Completed issue sync."
