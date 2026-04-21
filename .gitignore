@@ -1,0 +1,29 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Rust and build outputs
+/target/
+/dist/
+/build/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# Editor and IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
