@@ -156,3 +156,14 @@ Always review outputs before using in production.
 PrometheOS Lite is part of the PrometheOS ecosystem.
 
 GitHub: [https://github.com/orgs/prometheosai](https://github.com/orgs/prometheosai)
+
+---
+
+## 📚 Documentation Layout
+
+Project documentation is organized under `/docs`:
+
+- `docs/prd` - product requirements and roadmap docs
+- `docs/operations` - project operations and management setup
+- `docs/guides` - contributor and usage guides
+- `docs/architecture` - technical design references
