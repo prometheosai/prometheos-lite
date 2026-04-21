@@ -1,0 +1,36 @@
+name: Bug
+description: Report a defect
+title: "fix: "
+labels:
+  - type: bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Bug Summary
+      description: What failed?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs Actual
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version, model/provider config.
+    validations:
+      required: false

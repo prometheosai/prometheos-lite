@@ -1,0 +1,31 @@
+name: Task
+description: Track a bounded technical task
+title: "chore: "
+labels:
+  - type: task
+body:
+  - type: input
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Single expected outcome for this task.
+    validations:
+      required: true
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation Plan
+      value: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of Done
+      value: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
