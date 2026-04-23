@@ -27,3 +27,6 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# PrometheOS output
+prometheos-output/
