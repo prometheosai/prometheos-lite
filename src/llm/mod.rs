@@ -47,7 +47,7 @@ struct AssistantMessage {
 impl LlmClient {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(300))
             .build()
             .context("failed to build HTTP client")?;
 
