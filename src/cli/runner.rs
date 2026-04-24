@@ -136,6 +136,7 @@ pub struct FlowRunner {
     flow: Flow,
     tracer: Option<prometheos_lite::flow::tracing::SharedTracer>,
     debug_mode: bool,
+    runtime: Option<prometheos_lite::flow::RuntimeContext>,
 }
 
 impl FlowRunner {
@@ -145,6 +146,7 @@ impl FlowRunner {
             flow,
             tracer: None,
             debug_mode: false,
+            runtime: None,
         }
     }
 
@@ -158,8 +160,22 @@ impl FlowRunner {
         self.tracer.as_ref()
     }
 
+    /// Set the runtime context for service injection
+    pub fn with_runtime(mut self, runtime: prometheos_lite::flow::RuntimeContext) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
     /// Load a flow from a JSON file
     pub fn from_json_file(path: PathBuf) -> Result<Self> {
+        Self::from_json_file_with_runtime(path, None)
+    }
+
+    /// Load a flow from a JSON file with a RuntimeContext
+    pub fn from_json_file_with_runtime(
+        path: PathBuf,
+        runtime: Option<prometheos_lite::flow::RuntimeContext>,
+    ) -> Result<Self> {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read flow file: {}", path.display()))?;
 
@@ -169,7 +185,7 @@ impl FlowRunner {
         // Validate flow file structure according to Flow JSON Schema v1
         flow_file.validate().context("Flow file validation failed")?;
 
-        let flow = Self::build_flow_from_file(flow_file)?;
+        let flow = Self::build_flow_from_file(flow_file, runtime.clone())?;
 
         // Create tracer for this flow
         let tracer = prometheos_lite::flow::tracing::create_tracer();
@@ -178,13 +194,21 @@ impl FlowRunner {
             flow,
             tracer: Some(tracer),
             debug_mode: false,
+            runtime,
         })
     }
 
     /// Build a Flow from a FlowFile using the NodeFactory
-    fn build_flow_from_file(file: FlowFile) -> Result<Flow> {
+    fn build_flow_from_file(
+        file: FlowFile,
+        runtime: Option<prometheos_lite::flow::RuntimeContext>,
+    ) -> Result<Flow> {
         let mut builder = FlowBuilder::new().start(file.start_node.clone());
-        let factory: Box<dyn NodeFactory> = Box::new(DefaultNodeFactory::new());
+        let factory: Box<dyn NodeFactory> = if let Some(rt) = runtime {
+            Box::new(DefaultNodeFactory::from_runtime(rt))
+        } else {
+            Box::new(DefaultNodeFactory::new())
+        };
 
         for node_def in &file.nodes {
             let node = factory.create(&node_def.node_type, node_def.config.clone())?;
@@ -251,6 +275,15 @@ impl DefaultNodeFactory {
             model_router: None,
             tool_runtime: None,
             memory_service: None,
+        }
+    }
+
+    /// Create a DefaultNodeFactory from a RuntimeContext
+    pub fn from_runtime(runtime: prometheos_lite::flow::RuntimeContext) -> Self {
+        Self {
+            model_router: runtime.model_router,
+            tool_runtime: runtime.tool_runtime,
+            memory_service: runtime.memory_service,
         }
     }
 
@@ -708,8 +741,10 @@ impl Node for FileWriterNode {
             .as_str()
             .context("Missing file_path in file writer node input")?;
 
-        // TODO: Integrate with actual FileWriter
-        // For now, return placeholder success
+        // Write the file to disk
+        std::fs::write(file_path, content)
+            .with_context(|| format!("Failed to write file: {}", file_path))?;
+
         Ok(serde_json::json!({
             "success": true,
             "file_path": file_path,
