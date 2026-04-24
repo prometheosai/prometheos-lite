@@ -107,8 +107,70 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 ## v1.2 Roadmap - Future Improvements
 
 ### Refactor & Enhancements
-- [ ] Issue #22: Implement real NodeFactory in CLI runner to map node_type to concrete nodes (LLM, tool, memory, conditional nodes)
-- [ ] Issue #23: Unify debug and production execution by adding lifecycle hooks to Flow::run
-- [ ] Issue #24: Persist run registry and flow events to SQLite for Maestro process restart survival
-- [ ] Issue #25: Replace brute-force semantic search with indexed vector retrieval (SQLite extension or pluggable backend)
-- [ ] Issue #26: Retire or isolate legacy agents/core modules after parity is proven
+- [x] Issue #22: Implement real NodeFactory in CLI runner to map node_type to concrete nodes (LLM, tool, memory, conditional nodes)
+- [x] Issue #23: Unify debug and production execution by adding lifecycle hooks to Flow::run
+- [x] Issue #24: Persist run registry and flow events to SQLite for Maestro process restart survival
+- [x] Issue #25: Replace brute-force semantic search with indexed vector retrieval (SQLite extension or pluggable backend)
+- [x] Issue #26: Retire or isolate legacy agents/core modules after parity is proven
+
+**Status:** v1.2 refactor complete - All enhancement items implemented
+
+---
+
+## v1.1.2 PRD - From Architecture → Execution
+
+**Codename:** "From Architecture → Execution"
+
+**Objective:** Transform PrometheOS Lite from modular flow runtime into fully operational Flow execution system with real nodes, real outputs, and real workflows.
+
+### Phase 1 — NodeFactory & Flow Execution
+- [x] Issue #1: Implement NodeFactory trait
+- [x] Issue #2: Replace PlaceholderNode with real nodes
+- [x] Issue #3: Define Flow JSON Schema v1
+- [x] Issue #4: Upgrade Flow Validation
+
+### Phase 2 — Native Flow Nodes
+- [x] Issue #5: Implement PlannerNode
+- [x] Issue #6: Implement CoderNode
+- [x] Issue #7: Implement ReviewerNode
+- [x] Issue #8: Implement Generic LLMNode
+
+### Phase 3 — File & Tool Integration
+- [x] Issue #9: Implement FileWriterNode
+- [x] Issue #10: Implement ToolNode
+- [x] Issue #11: Harden Tool Sandbox
+
+### Phase 4 — Memory Integration
+- [x] Issue #12: Implement ContextLoaderNode
+- [x] Issue #13: Implement MemoryWriteNode
+- [x] Issue #14: Finalize Memory Schema
+
+### Phase 5 — Tracing & Observability
+- [x] Issue #15: Integrate Tracer into Flow::run
+- [x] Issue #16: Implement Timeline Export
+- [x] Issue #17: Integrate Debug Mode
+
+### Phase 6 — CLI Integration
+- [x] Issue #18: Upgrade Flow CLI
+- [x] Issue #19: Implement Input Injection
+- [x] Issue #20: Implement Output Rendering
+
+### Phase 7 — Migration Completion
+- [x] Issue #21: Replace SequentialOrchestrator
+- [x] Issue #22: Convert Agents to Nodes
+- [x] Issue #23: Remove Legacy Dependencies
+
+### Phase 8 — Example Flows
+- [x] Issue #24: Create Code Generation Flow
+- [x] Issue #25: Create Tool Execution Flow
+- [x] Issue #26: Create Memory-Augmented Flow
+
+### Phase 9 — Testing
+- [x] Issue #27: Flow Execution Tests
+- [x] Issue #28: Node Tests
+- [x] Issue #29: Memory Tests
+- [x] Issue #30: Tool Sandbox Tests
+- [x] Issue #31: CLI Tests
+
+**Status:** v1.1.2 complete
+**See:** `docs/prd/prometheos-lite-prd-v1.1.2.md` for full specification
