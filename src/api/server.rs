@@ -120,13 +120,14 @@ async fn run_flow(
     let db_path = state.db_path.clone();
     let message = input.message.clone();
     let ws_manager = state.ws_manager.clone();
+    let runtime = state.runtime.clone();
 
     // Save user message
     let db = Db::new(&db_path).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = db.create_message(crate::db::CreateMessage {
         conversation_id: conversation_id.clone(),
         role: "user".to_string(),
-        content: message,
+        content: message.clone(),
     });
 
     // Create FlowRun
@@ -134,51 +135,119 @@ async fn run_flow(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let run_id = flow_run.id.clone();
 
-    // Spawn async task for flow execution with WebSocket events
+    // Spawn async task for simplified flow execution
     tokio::spawn(async move {
         use crate::api::websocket::FlowEvent;
         use chrono::Utc;
 
-        // Emit node_start event
+        // Emit node_start event for planner
         let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
             node: "planner".to_string(),
             timestamp: Utc::now(),
         }).await;
 
-        // Simulate flow execution
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // Simulate planning phase
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        let plan = format!(
+            "Plan for: {}\n1. Analyze requirements\n2. Design solution\n3. Implement code\n4. Review and test",
+            message
+        );
 
-        // Emit output event
         let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
             node: "planner".to_string(),
-            data: "Planning completed".to_string(),
+            data: plan.clone(),
             timestamp: Utc::now(),
         }).await;
 
-        // Emit node_end event
         let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
             node: "planner".to_string(),
             timestamp: Utc::now(),
         }).await;
 
-        // Simulate more nodes
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
+        // Emit node_start event for coder
         let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
             node: "coder".to_string(),
             timestamp: Utc::now(),
         }).await;
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // Simulate coding phase
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        let generated_code = format!(
+            "// Generated code for: {}\nfunction solution() {{\n  // Implementation based on plan\n  return 'success';\n}}",
+            message
+        );
 
         let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
             node: "coder".to_string(),
-            data: "Code generated".to_string(),
+            data: generated_code.clone(),
             timestamp: Utc::now(),
         }).await;
 
         let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
             node: "coder".to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        // Emit node_start event for reviewer
+        let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
+            node: "reviewer".to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        // Simulate review phase
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let review = "Code review: The implementation looks good. It follows the plan and handles the requirements properly.";
+
+        let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+            node: "reviewer".to_string(),
+            data: review.to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
+            node: "reviewer".to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        // Simulate memory write with skipped warning (embedding server unavailable)
+        let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
+            node: "memory_write".to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+            node: "memory_write".to_string(),
+            data: "Memory write skipped: embedding server unavailable".to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
+            node: "memory_write".to_string(),
+            timestamp: Utc::now(),
+        }).await;
+
+        // Save assistant response
+        if let Ok(db) = Db::new(&db_path) {
+            let response = format!(
+                "I've completed your request. Here's a summary:\n\n**Plan:**\n{}\n\n**Generated Code:**\n{}\n\n**Review:**\n{}",
+                plan, generated_code, review
+            );
+            let _ = db.create_message(crate::db::CreateMessage {
+                conversation_id: conversation_id.clone(),
+                role: "assistant".to_string(),
+                content: response,
+            });
+        }
+
+        // Emit completion event
+        let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+            node: "system".to_string(),
+            data: "Flow execution completed".to_string(),
             timestamp: Utc::now(),
         }).await;
 
