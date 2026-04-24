@@ -3,6 +3,8 @@
 use crate::flow::{Flow, SharedState};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -65,17 +67,34 @@ impl FlowRun {
 /// Run registry for tracking flow execution history
 pub struct RunRegistry {
     runs: HashMap<String, FlowRun>,
+    db: Option<RunDb>,
 }
 
 impl RunRegistry {
     pub fn new() -> Self {
         Self {
             runs: HashMap::new(),
+            db: None,
         }
     }
 
+    /// Create a RunRegistry with SQLite persistence
+    pub fn with_persistence(db_path: PathBuf) -> Result<Self> {
+        let db = RunDb::new(db_path)?;
+        Ok(Self {
+            runs: HashMap::new(),
+            db: Some(db),
+        })
+    }
+
     pub fn register(&mut self, run: FlowRun) {
-        self.runs.insert(run.id.clone(), run);
+        let run_id = run.id.clone();
+        self.runs.insert(run_id.clone(), run.clone());
+
+        // Persist to database if available
+        if let Some(db) = &mut self.db {
+            let _ = db.save_run(&run);
+        }
     }
 
     pub fn get(&self, run_id: &str) -> Option<&FlowRun> {
@@ -99,11 +118,253 @@ impl RunRegistry {
             .filter(|r| matches!(r.status, RunStatus::Running | RunStatus::Paused))
             .collect()
     }
+
+    /// Load runs from database on startup
+    pub fn load_from_db(&mut self) -> Result<()> {
+        if let Some(db) = &self.db {
+            let runs = db.load_all_runs()?;
+            for run in runs {
+                self.runs.insert(run.id.clone(), run);
+            }
+        }
+        Ok(())
+    }
+
+    /// Update a run in the database
+    pub fn update_run(&mut self, run: &FlowRun) -> Result<()> {
+        self.runs.insert(run.id.clone(), run.clone());
+        if let Some(db) = &mut self.db {
+            db.save_run(run)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for RunRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// SQLite database for persisting run registry and flow events
+pub struct RunDb {
+    conn: Connection,
+}
+
+impl RunDb {
+    /// Create or open a run database at the given path
+    pub fn new(db_path: PathBuf) -> Result<Self> {
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("Failed to open run database at: {}", db_path.display()))?;
+
+        let db = Self { conn };
+        db.init_schema()?;
+        Ok(db)
+    }
+
+    /// Initialize database schema
+    fn init_schema(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS flow_runs (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                state_snapshot TEXT
+            )",
+            [],
+        )
+        .context("Failed to create flow_runs table")?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS flow_events (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                node_id TEXT,
+                timestamp TEXT NOT NULL,
+                data TEXT,
+                FOREIGN KEY (run_id) REFERENCES flow_runs(id)
+            )",
+            [],
+        )
+        .context("Failed to create flow_events table")?;
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flow_runs_flow_id ON flow_runs(flow_id)",
+            [],
+        )
+        .context("Failed to create flow_runs index")?;
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flow_events_run_id ON flow_events(run_id)",
+            [],
+        )
+        .context("Failed to create flow_events index")?;
+
+        Ok(())
+    }
+
+    /// Save a flow run to the database
+    pub fn save_run(&self, run: &FlowRun) -> Result<()> {
+        let status_str = match run.status {
+            RunStatus::Pending => "pending",
+            RunStatus::Running => "running",
+            RunStatus::Completed => "completed",
+            RunStatus::Failed(_) => "failed",
+            RunStatus::Paused => "paused",
+        };
+
+        let state_json = run.state_snapshot.as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+
+        let completed_at_str = run.completed_at
+            .map(|t| t.to_rfc3339());
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO flow_runs (id, flow_id, status, started_at, completed_at, state_snapshot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                run.id,
+                run.flow_id,
+                status_str,
+                run.started_at.to_rfc3339(),
+                completed_at_str,
+                state_json,
+            ],
+        )
+        .context("Failed to save flow run")?;
+
+        Ok(())
+    }
+
+    /// Load all flow runs from the database
+    pub fn load_all_runs(&self) -> Result<Vec<FlowRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, flow_id, status, started_at, completed_at, state_snapshot
+             FROM flow_runs"
+        )
+        .context("Failed to prepare load_all_runs query")?;
+
+        let rows = stmt.query_map([], |row| {
+            let status_str: String = row.get(2)?;
+            let status = match status_str.as_str() {
+                "pending" => RunStatus::Pending,
+                "running" => RunStatus::Running,
+                "completed" => RunStatus::Completed,
+                "paused" => RunStatus::Paused,
+                "failed" => RunStatus::Failed("Unknown error".to_string()),
+                _ => RunStatus::Pending,
+            };
+
+            let started_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                .unwrap()
+                .with_timezone(&Utc);
+
+            let completed_at = row.get::<_, Option<String>>(4)?
+                .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc));
+
+            let state_snapshot = row.get::<_, Option<String>>(5)?
+                .and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(FlowRun {
+                id: row.get(0)?,
+                flow_id: row.get(1)?,
+                status,
+                started_at,
+                completed_at,
+                state_snapshot,
+            })
+        })
+        .context("Failed to query flow runs")?;
+
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(row.map_err(|e| anyhow::anyhow!(e))?);
+        }
+        Ok(runs)
+    }
+
+    /// Save a flow event to the database
+    pub fn save_event(&self, event: &FlowEvent) -> Result<()> {
+        let data_json = serde_json::to_string(&event.data)
+            .context("Failed to serialize event data")?;
+
+        self.conn.execute(
+            "INSERT INTO flow_events (id, run_id, event_type, node_id, timestamp, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.id,
+                event.run_id,
+                event.event_type,
+                event.node_id,
+                event.timestamp.to_rfc3339(),
+                data_json,
+            ],
+        )
+        .context("Failed to save flow event")?;
+
+        Ok(())
+    }
+
+    /// Load events for a specific run
+    pub fn load_events_for_run(&self, run_id: &str) -> Result<Vec<FlowEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, event_type, node_id, timestamp, data
+             FROM flow_events WHERE run_id = ?1 ORDER BY timestamp"
+        )
+        .context("Failed to prepare load_events_for_run query")?;
+
+        let rows = stmt.query_map(params![run_id], |row| {
+            let timestamp = DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                .unwrap()
+                .with_timezone(&Utc);
+
+            let data_json: String = row.get(5)?;
+            let data = serde_json::from_str(&data_json)
+                .unwrap_or(serde_json::Value::Null);
+
+            Ok(FlowEvent {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                event_type: row.get(2)?,
+                node_id: row.get(3)?,
+                timestamp,
+                data,
+            })
+        })
+        .context("Failed to query flow events")?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row.map_err(|e| anyhow::anyhow!(e))?);
+        }
+        Ok(events)
+    }
+}
+
+/// Flow event for tracking execution timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowEvent {
+    pub id: String,
+    pub run_id: String,
+    pub event_type: String,
+    pub node_id: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub data: serde_json::Value,
+}
+
+impl FlowEvent {
+    pub fn new(run_id: String, event_type: String, node_id: Option<String>, data: serde_json::Value) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            run_id,
+            event_type,
+            node_id,
+            timestamp: Utc::now(),
+            data,
+        }
     }
 }
 
@@ -117,6 +378,12 @@ impl Maestro {
         Self {
             registry: RunRegistry::new(),
         }
+    }
+
+    /// Create a Maestro with SQLite persistence
+    pub fn with_persistence(db_path: PathBuf) -> Result<Self> {
+        let registry = RunRegistry::with_persistence(db_path)?;
+        Ok(Self { registry })
     }
 
     /// Schedule and execute a flow
@@ -136,11 +403,21 @@ impl Maestro {
         let result = flow.run(&mut initial_state).await;
 
         // Update run status
-        if let Some(run) = self.registry.get_mut(&run_id) {
+        let run_status = if let Some(run) = self.registry.get_mut(&run_id) {
             match result {
                 Ok(_) => run.mark_completed(initial_state),
                 Err(e) => run.mark_failed(e.to_string()),
             }
+            run.status.clone()
+        } else {
+            return Err(anyhow::anyhow!("Run not found"));
+        };
+
+        // Persist the updated run
+        if let Some(run) = self.registry.get(&run_id) {
+            let mut run_clone = run.clone();
+            run_clone.status = run_status;
+            let _ = self.registry.update_run(&run_clone);
         }
 
         Ok(run_id)
@@ -154,6 +431,11 @@ impl Maestro {
     /// Get mutable reference to the run registry
     pub fn registry_mut(&mut self) -> &mut RunRegistry {
         &mut self.registry
+    }
+
+    /// Load runs from database on startup
+    pub fn load_from_db(&mut self) -> Result<()> {
+        self.registry.load_from_db()
     }
 }
 
@@ -394,6 +676,56 @@ mod tests {
             maestro.registry().get(&run_id).unwrap().status,
             RunStatus::Completed
         );
+    }
+
+    #[test]
+    fn test_run_db_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_runs.db");
+        let db = RunDb::new(db_path).unwrap();
+
+        let run = FlowRun::new("test_flow".to_string());
+        let run_id = run.id.clone();
+        db.save_run(&run).unwrap();
+
+        let loaded_runs = db.load_all_runs().unwrap();
+        assert_eq!(loaded_runs.len(), 1);
+        assert_eq!(loaded_runs[0].id, run_id);
+        assert_eq!(loaded_runs[0].flow_id, "test_flow");
+    }
+
+    #[test]
+    fn test_flow_event_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_events.db");
+        let db = RunDb::new(db_path).unwrap();
+
+        let event = FlowEvent::new(
+            "run_123".to_string(),
+            "node_start".to_string(),
+            Some("node1".to_string()),
+            serde_json::json!({ "test": "data" }),
+        );
+
+        db.save_event(&event).unwrap();
+
+        let loaded_events = db.load_events_for_run("run_123").unwrap();
+        assert_eq!(loaded_events.len(), 1);
+        assert_eq!(loaded_events[0].event_type, "node_start");
+        assert_eq!(loaded_events[0].node_id, Some("node1".to_string()));
+    }
+
+    #[test]
+    fn test_run_registry_with_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_registry.db");
+        let mut registry = RunRegistry::with_persistence(db_path).unwrap();
+
+        let run = FlowRun::new("test_flow".to_string());
+        let run_id = run.id.clone();
+        registry.register(run);
+
+        assert!(registry.get(&run_id).is_some());
     }
 
     #[test]

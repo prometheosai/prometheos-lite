@@ -1,11 +1,22 @@
-//! Migration utilities and parity tests for transitioning from Agent-based to Flow-based system
+//! Migration utilities for transitioning from agent-based to flow-based architecture
 
-use crate::agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent};
-use crate::flow::{AgentNode, Flow, SharedState};
+#[cfg(feature = "legacy")]
+use crate::legacy::agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent};
+#[cfg(feature = "legacy")]
+use crate::flow::AgentNode;
+#[cfg(feature = "legacy")]
+use crate::flow::Flow;
+#[cfg(feature = "legacy")]
+use crate::flow::SharedState;
+#[cfg(feature = "legacy")]
+use anyhow::Result;
+#[cfg(feature = "legacy")]
 use crate::llm::LlmClient;
+#[cfg(feature = "legacy")]
 use std::sync::Arc;
 
 /// Create a Flow that replicates the current Planner → Coder → Reviewer sequence
+#[cfg(feature = "legacy")]
 pub fn create_sequential_agent_flow(llm: LlmClient) -> Flow {
     let planner = Arc::new(PlannerAgent::new(llm.clone())) as Arc<dyn Agent>;
     let coder = Arc::new(CoderAgent::new(llm.clone())) as Arc<dyn Agent>;
@@ -39,10 +50,10 @@ pub fn create_sequential_agent_flow(llm: LlmClient) -> Flow {
         .expect("Failed to build sequential agent flow")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy"))]
 mod parity_tests {
     use super::*;
-    use crate::agents::Agent;
+    use crate::legacy::agents::Agent;
     use anyhow::Result;
     use async_trait::async_trait;
 

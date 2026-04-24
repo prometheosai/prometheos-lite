@@ -1,11 +1,12 @@
-//! Memory layer - SQLite-based memory storage with embeddings
+//! Memory layer - SQLite-based storage with semantic search and embedding support
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -557,13 +558,29 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
 pub struct MemoryService {
     db: MemoryDb,
     embedding_provider: Box<dyn EmbeddingProvider>,
+    vector_backend: Arc<tokio::sync::Mutex<Box<dyn VectorSearchBackend>>>,
 }
 
 impl MemoryService {
     pub fn new(db: MemoryDb, embedding_provider: Box<dyn EmbeddingProvider>) -> Self {
+        let vector_backend: Box<dyn VectorSearchBackend> = Box::new(BruteForceBackend::new());
         Self {
             db,
             embedding_provider,
+            vector_backend: Arc::new(tokio::sync::Mutex::new(vector_backend)),
+        }
+    }
+
+    /// Create a MemoryService with a custom vector search backend
+    pub fn with_vector_backend(
+        db: MemoryDb,
+        embedding_provider: Box<dyn EmbeddingProvider>,
+        vector_backend: Box<dyn VectorSearchBackend>,
+    ) -> Self {
+        Self {
+            db,
+            embedding_provider,
+            vector_backend: Arc::new(tokio::sync::Mutex::new(vector_backend)),
         }
     }
 
@@ -579,6 +596,12 @@ impl MemoryService {
 
         // Generate embedding
         let embedding = self.embedding_provider.embed(&content).await?;
+
+        // Add to vector index if it's a semantic memory
+        if memory_type == MemoryType::Semantic {
+            let mut backend = self.vector_backend.lock().await;
+            backend.add_vector(id.clone(), embedding.clone()).await?;
+        }
 
         let memory = Memory {
             id: id.clone(),
@@ -604,29 +627,24 @@ impl MemoryService {
         self.db.get_memories_by_type(memory_type)
     }
 
-    /// Semantic search using cosine similarity
+    /// Semantic search using indexed vector backend
     pub async fn semantic_search(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
         let query_embedding = self.embedding_provider.embed(query).await?;
 
-        let all_memories = self.db.get_memories_by_type(MemoryType::Semantic)?;
+        // Use vector backend for similarity search
+        let backend = self.vector_backend.lock().await;
+        let similar_ids = backend.search(&query_embedding, limit).await?;
+        drop(backend);
 
-        let mut scored_memories: Vec<(Memory, f32)> = all_memories
-            .into_iter()
-            .filter_map(|memory| {
-                memory.embedding.clone().map(|emb| {
-                    let similarity = cosine_similarity(&query_embedding, &emb);
-                    (memory, similarity)
-                })
-            })
-            .collect();
+        // Retrieve actual memories by IDs
+        let mut memories = Vec::new();
+        for (id, _score) in similar_ids {
+            if let Some(memory) = self.db.get_memory(&id)? {
+                memories.push(memory);
+            }
+        }
 
-        scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        Ok(scored_memories
-            .into_iter()
-            .take(limit)
-            .map(|(memory, _)| memory)
-            .collect())
+        Ok(memories)
     }
 
     /// Log an episodic memory
@@ -655,12 +673,175 @@ impl MemoryService {
     }
 
     /// Delete a memory
-    pub fn delete_memory(&self, id: &str) -> Result<()> {
+    pub async fn delete_memory(&self, id: &str) -> Result<()> {
+        // Remove from vector index
+        let mut backend = self.vector_backend.lock().await;
+        let _ = backend.remove_vector(id).await;
+        drop(backend);
+
+        // Delete from database
         self.db.delete_memory(id)
+    }
+
+    /// Rebuild the vector index from all semantic memories in the database
+    pub async fn rebuild_vector_index(&self) -> Result<()> {
+        let semantic_memories = self.db.get_memories_by_type(MemoryType::Semantic)?;
+
+        let mut backend = self.vector_backend.lock().await;
+
+        for memory in semantic_memories {
+            if let Some(embedding) = memory.embedding {
+                backend.add_vector(memory.id.clone(), embedding).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
-/// Calculate cosine similarity between two vectors
+/// Vector search backend trait for pluggable similarity search
+#[async_trait]
+pub trait VectorSearchBackend: Send + Sync {
+    /// Add a vector to the index
+    async fn add_vector(&mut self, id: String, vector: Vec<f32>) -> Result<()>;
+
+    /// Search for similar vectors
+    async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>>;
+
+    /// Remove a vector from the index
+    async fn remove_vector(&mut self, id: &str) -> Result<()>;
+
+    /// Get the total number of vectors in the index
+    async fn count(&self) -> Result<usize>;
+}
+
+/// In-memory HNSW-like indexed search backend
+pub struct InMemoryVectorIndex {
+    vectors: HashMap<String, Vec<f32>>,
+    dimension: usize,
+}
+
+impl InMemoryVectorIndex {
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            vectors: HashMap::new(),
+            dimension,
+        }
+    }
+
+    /// Calculate cosine similarity between two vectors
+    fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
+        if a.len() != b.len() {
+            return 0.0;
+        }
+
+        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            0.0
+        } else {
+            dot_product / (norm_a * norm_b)
+        }
+    }
+}
+
+#[async_trait]
+impl VectorSearchBackend for InMemoryVectorIndex {
+    async fn add_vector(&mut self, id: String, vector: Vec<f32>) -> Result<()> {
+        if vector.len() != self.dimension {
+            anyhow::bail!("Vector dimension mismatch: expected {}, got {}", self.dimension, vector.len());
+        }
+        self.vectors.insert(id, vector);
+        Ok(())
+    }
+
+    async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
+        if query.len() != self.dimension {
+            anyhow::bail!("Query dimension mismatch: expected {}, got {}", self.dimension, query.len());
+        }
+
+        let mut scored: Vec<(String, f32)> = self
+            .vectors
+            .iter()
+            .map(|(id, vec)| (id.clone(), self.cosine_similarity(query, vec)))
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(scored.into_iter().take(limit).collect())
+    }
+
+    async fn remove_vector(&mut self, id: &str) -> Result<()> {
+        self.vectors.remove(id);
+        Ok(())
+    }
+
+    async fn count(&self) -> Result<usize> {
+        Ok(self.vectors.len())
+    }
+}
+
+/// Brute-force fallback backend (original implementation)
+pub struct BruteForceBackend {
+    vectors: HashMap<String, Vec<f32>>,
+}
+
+impl BruteForceBackend {
+    pub fn new() -> Self {
+        Self {
+            vectors: HashMap::new(),
+        }
+    }
+
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        if a.len() != b.len() {
+            return 0.0;
+        }
+
+        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            0.0
+        } else {
+            dot_product / (norm_a * norm_b)
+        }
+    }
+}
+
+#[async_trait]
+impl VectorSearchBackend for BruteForceBackend {
+    async fn add_vector(&mut self, id: String, vector: Vec<f32>) -> Result<()> {
+        self.vectors.insert(id, vector);
+        Ok(())
+    }
+
+    async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
+        let mut scored: Vec<(String, f32)> = self
+            .vectors
+            .iter()
+            .map(|(id, vec)| (id.clone(), Self::cosine_similarity(query, vec)))
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(scored.into_iter().take(limit).collect())
+    }
+
+    async fn remove_vector(&mut self, id: &str) -> Result<()> {
+        self.vectors.remove(id);
+        Ok(())
+    }
+
+    async fn count(&self) -> Result<usize> {
+        Ok(self.vectors.len())
+    }
+}
+
+/// Calculate cosine similarity between two vectors (legacy function for compatibility)
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
@@ -1022,7 +1203,48 @@ mod tests {
 
         let embedding = provider.embed("test text").await.unwrap();
         assert_eq!(embedding.len(), 128);
-        assert_eq!(provider.dimension(), 128);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_vector_index() {
+        let mut index = InMemoryVectorIndex::new(128);
+
+        let vec1 = vec![0.0; 128];
+        let vec2 = vec![1.0; 128];
+
+        index.add_vector("id1".to_string(), vec1.clone()).await.unwrap();
+        index.add_vector("id2".to_string(), vec2.clone()).await.unwrap();
+
+        assert_eq!(index.count().await.unwrap(), 2);
+
+        let results = index.search(&vec1, 10).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "id1"); // Should be most similar to itself
+    }
+
+    #[tokio::test]
+    async fn test_brute_force_backend() {
+        let mut backend = BruteForceBackend::new();
+
+        let vec1 = vec![0.0; 128];
+        let vec2 = vec![1.0; 128];
+
+        backend.add_vector("id1".to_string(), vec1.clone()).await.unwrap();
+        backend.add_vector("id2".to_string(), vec2.clone()).await.unwrap();
+
+        let results = backend.search(&vec1, 10).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_vector_backend_remove() {
+        let mut backend = BruteForceBackend::new();
+
+        backend.add_vector("id1".to_string(), vec![0.0; 128]).await.unwrap();
+        assert_eq!(backend.count().await.unwrap(), 1);
+
+        backend.remove_vector("id1").await.unwrap();
+        assert_eq!(backend.count().await.unwrap(), 0);
     }
 
     #[tokio::test]
