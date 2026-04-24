@@ -32,7 +32,7 @@ Key tech-stack choices:
 | `src/main.rs`                               | Async binary entrypoint that delegates execution to `cli::run()`.                                                                                               | `@utility`  |
 | `src/lib.rs`                                | Public module root exposing agents, config, core, flow, fs, llm, logger.                                                                                        | `@core`     |
 | `src/cli`                                   | CLI command parsing and flow runner integration.                                                                                                                | `@utility`  |
-| `src/flow`                                  | Flow-centric runtime containing Node, Flow, SharedState, orchestration, memory, intelligence, debugging, tracing, policy, rate limiting, and migration support. | `@core`     |
+| `src/flow`                                  | Flow-centric runtime containing Node, Flow, SharedState, orchestration, memory, intelligence, debugging, tracing, policy, rate limiting, runtime, and migration support. | `@core`     |
 | `src/agents`                                | Deprecated legacy Planner/Coder/Reviewer agent abstraction.                                                                                                     | `@domain`   |
 | `src/core`                                  | Deprecated sequential orchestrator and execution context.                                                                                                       | `@domain`   |
 | `src/llm`                                   | Local-first LM Studio/OpenAI-compatible HTTP client.                                                                                                            | `@core`     |
@@ -40,7 +40,7 @@ Key tech-stack choices:
 | `src/logger`                                | Structured CLI logging and streaming output support.                                                                                                            | `@utility`  |
 | `src/config`                                | Loads `prometheos.config.json` and environment overrides.                                                                                                       | `@core`     |
 | `docs`                                      | Product, architecture, operations, and guide documentation referenced by README.                                                                                | `@utility`  |
-| `prometheos.config.json`                    | Expected runtime config file for provider, base URL, and model.                                                                                                 | `@core`     |
+| `prometheos.config.json`                    | Expected runtime config file for provider, base URL, model, embedding URL, and embedding dimension.                                                             | `@core`     |
 | External: LM Studio / OpenAI-compatible API | LLM backend accessed over HTTP.                                                                                                                                 | `@external` |
 | External: SQLite                            | Local persistence backend through rusqlite.                                                                                                                     | `@external` |
 
@@ -207,7 +207,11 @@ Principal types and functions:
   * `build`
 * `FlowNode`
 
-  * wraps a flow as a node for nested flow execution 
+  * wraps a flow as a node for nested flow execution
+* `RuntimeContext` in `src/flow/runtime.rs`
+
+  * Centralized service registry for ModelRouter, ToolRuntime, MemoryService
+  * Builder methods: `with_model_router`, `with_tool_runtime`, `with_memory_service`, `full` 
 
 Interaction paths:
 
@@ -252,6 +256,7 @@ Patterns:
 Principal types:
 
 * `LlmProvider`
+* `OpenAiProvider`
 * `ModelRouter`
 * `ToolSandboxProfile`
 * `ToolRuntime`
@@ -275,6 +280,7 @@ Interaction paths:
 
 * Uses `reqwest::Client` for provider calls.
 * Uses `tokio::process::Command` for process-level tool execution.
+* `OpenAiProvider` wraps `LlmClient` to bridge legacy and flow architectures.
 * Provides the abstraction layer that should eventually replace direct `src/llm` use.
 
 Patterns:
@@ -283,6 +289,7 @@ Patterns:
 * Tool sandbox profile with allow/block rules.
 * Process-level execution with timeout and output limits.
 * Streaming callback abstraction.
+* LlmProvider trait for pluggable model backends.
 
 Notable hotspot: process isolation exists as child process execution plus command policy, but not true container, chroot, WASM, or OS-level resource isolation. The name is a little more muscular than the implementation, naturally.
 
@@ -544,7 +551,7 @@ Patterns:
 Principal types:
 
 * `AppConfig`
-* `DEFAULT_CONFIG_PATH` 
+* `DEFAULT_CONFIG_PATH`
 
 Public functions:
 
@@ -556,6 +563,7 @@ Interaction paths:
 * Consumed by CLI and `LlmClient`.
 * Reads `prometheos.config.json`.
 * Supports `PROMETHEOS_BASE_URL` and `PROMETHEOS_MODEL` overrides.
+* Now includes `embedding_url` and `embedding_dimension` for memory service configuration.
 
 ### `src/fs` - File Parser / Writer
 
@@ -614,14 +622,22 @@ Canonical `flow` command lifecycle:
 1. User runs `cargo run -- flow path/to/flow.json --input '{...}'`.
 2. `src/main.rs` calls `cli::run()`.
 3. `src/cli/mod.rs` parses the command with clap.
-4. `src/cli/runner.rs` reads the JSON flow file into `FlowFile`.
-5. `FlowRunner::build_flow_from_file` creates a `Flow` using placeholder nodes.
-6. `FlowRunner::run_with_input` creates `SharedState`, stores input under `input.user_input`, and runs the flow.
-7. `Flow::run` executes each node using `prep → exec → post`.
-8. `post` returns an `Action`.
-9. `Flow` resolves `(current_node, action) → next_node`.
-10. Execution stops when no transition exists.
-11. CLI prints `state.get_all_outputs()`.
+4. `AppConfig::load()` reads `prometheos.config.json` for provider, base URL, model, embedding URL, and embedding dimension.
+5. `LlmClient::from_config()` creates a local-first LLM client.
+6. `OpenAiProvider` wraps the LlmClient to implement the `LlmProvider` trait.
+7. `ModelRouter` is initialized with the `OpenAiProvider`.
+8. `ToolRuntime` is created with a default sandbox profile.
+9. `MemoryService` is created with in-memory SQLite and `LocalEmbeddingProvider` from config.
+10. `RuntimeContext::full()` packages all services together.
+11. `src/cli/runner.rs` reads the JSON flow file into `FlowFile`.
+12. `FlowRunner::from_json_file_with_runtime` creates a `Flow` using `DefaultNodeFactory` with injected services.
+13. `FlowRunner::run_with_input` creates `SharedState`, stores input under `input.user_input`, and runs the flow.
+14. `Flow::run` executes each node using `prep → exec → post`.
+15. Nodes access real services (ModelRouter, ToolRuntime, MemoryService) through injected dependencies.
+16. `post` returns an `Action`.
+17. `Flow` resolves `(current_node, action) → next_node`.
+18. Execution stops when no transition exists.
+19. CLI prints `state.get_all_outputs()`.
 
 Legacy `run` command lifecycle:
 
