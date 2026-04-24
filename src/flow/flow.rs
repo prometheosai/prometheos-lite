@@ -7,6 +7,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Lifecycle hooks for flow execution
+pub trait FlowLifecycleHooks: Send + Sync {
+    /// Called before a node is executed
+    fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input);
+
+    /// Called after a node is executed
+    fn on_node_complete(&self, node_id: &NodeId, state: &SharedState, output: &Output);
+
+    /// Called before a state transition
+    fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId);
+
+    /// Called when the flow completes
+    fn on_flow_complete(&self, state: &SharedState);
+
+    /// Called when the flow fails
+    fn on_flow_error(&self, error: &anyhow::Error);
+}
+
+/// Default no-op lifecycle hooks
+pub struct NoOpHooks;
+
+impl FlowLifecycleHooks for NoOpHooks {
+    fn on_node_start(&self, _node_id: &NodeId, _state: &SharedState, _input: &Input) {}
+    fn on_node_complete(&self, _node_id: &NodeId, _state: &SharedState, _output: &Output) {}
+    fn on_transition(&self, _from: &NodeId, _action: &Action, _to: &NodeId) {}
+    fn on_flow_complete(&self, _state: &SharedState) {}
+    fn on_flow_error(&self, _error: &anyhow::Error) {}
+}
+
 /// Flow - a directed graph of nodes with state transitions
 #[derive(Clone)]
 pub struct Flow {
@@ -16,6 +45,8 @@ pub struct Flow {
     nodes: HashMap<NodeId, Arc<dyn Node>>,
     /// Transitions: (current_node, action) -> next_node
     transitions: HashMap<(NodeId, Action), NodeId>,
+    /// Optional tracer for logging and timeline events
+    tracer: Option<crate::flow::tracing::SharedTracer>,
 }
 
 impl Flow {
@@ -39,9 +70,42 @@ impl Flow {
         self.transitions.get(&(current.clone(), action.to_string()))
     }
 
+    /// Set the tracer for this flow
+    pub fn with_tracer(mut self, tracer: crate::flow::tracing::SharedTracer) -> Self {
+        self.tracer = Some(tracer);
+        self
+    }
+
+    /// Get the tracer if set
+    pub fn tracer(&self) -> Option<&crate::flow::tracing::SharedTracer> {
+        self.tracer.as_ref()
+    }
+
     /// Execute the flow with the given state
     pub async fn run(&mut self, state: &mut SharedState) -> Result<()> {
+        self.run_with_hooks(state, &NoOpHooks).await
+    }
+
+    /// Execute the flow with the given state and lifecycle hooks
+    pub async fn run_with_hooks<H: FlowLifecycleHooks>(
+        &mut self,
+        state: &mut SharedState,
+        hooks: &H,
+    ) -> Result<()> {
         let mut current = self.start.clone();
+
+        // Log flow start
+        if let Some(tracer) = &self.tracer {
+            if let Ok(mut t) = tracer.lock() {
+                t.log(
+                    crate::flow::tracing::LogLevel::Info,
+                    crate::flow::tracing::EventType::FlowStart,
+                    Some(self.start.clone()),
+                    "Flow execution started".to_string(),
+                    serde_json::json!({ "start_node": self.start }),
+                );
+            }
+        }
 
         loop {
             let node = self
@@ -52,16 +116,100 @@ impl Flow {
             // Prepare input from state
             let input = node.prep(state)?;
 
+            // Hook: before node execution
+            hooks.on_node_start(&current, state, &input);
+
+            // Log node start
+            if let Some(tracer) = &self.tracer {
+                if let Ok(mut t) = tracer.lock() {
+                    t.log(
+                        crate::flow::tracing::LogLevel::Info,
+                        crate::flow::tracing::EventType::NodeStart,
+                        Some(current.clone()),
+                        format!("Executing node: {}", current),
+                        serde_json::json!({ "input": &input }),
+                    );
+                }
+            }
+
+            let start_time = std::time::Instant::now();
+
             // Execute with retry
-            let output = self.execute_with_retry(node, input).await?;
+            let output = match self.execute_with_retry(node, input).await {
+                Ok(output) => output,
+                Err(e) => {
+                    hooks.on_flow_error(&e);
+                    return Err(e);
+                }
+            };
+
+            // Hook: after node execution
+            hooks.on_node_complete(&current, state, &output);
+
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+
+            // Log node completion
+            if let Some(tracer) = &self.tracer {
+                if let Ok(mut t) = tracer.lock() {
+                    t.log(
+                        crate::flow::tracing::LogLevel::Info,
+                        crate::flow::tracing::EventType::NodeEnd,
+                        Some(current.clone()),
+                        format!("Node completed: {}", current),
+                        serde_json::json!({ "output": &output, "duration_ms": duration_ms }),
+                    );
+                    t.add_timeline_event(
+                        crate::flow::tracing::EventType::NodeEnd,
+                        Some(current.clone()),
+                        Some(duration_ms),
+                        serde_json::json!({ "output": &output }),
+                    );
+                }
+            }
 
             // Post-process: update state and get action
-            let action = node.post(state, output);
+            let action = node.post(state, output.clone());
 
             // Find next node based on action
-            match self.transitions.get(&(current.clone(), action)) {
-                Some(next) => current = next.clone(),
-                None => break, // No transition, end of flow
+            match self.transitions.get(&(current.clone(), action.clone())) {
+                Some(next) => {
+                    // Hook: before transition
+                    hooks.on_transition(&current, &action, next);
+
+                    // Log transition
+                    if let Some(tracer) = &self.tracer {
+                        if let Ok(mut t) = tracer.lock() {
+                            t.log(
+                                crate::flow::tracing::LogLevel::Info,
+                                crate::flow::tracing::EventType::Transition,
+                                Some(current.clone()),
+                                format!("Transition: {} -> {} via {}", current, next, action),
+                                serde_json::json!({ "to": next, "action": action }),
+                            );
+                        }
+                    }
+
+                    current = next.clone();
+                }
+                None => {
+                    // Hook: flow complete
+                    hooks.on_flow_complete(state);
+
+                    // Log flow completion
+                    if let Some(tracer) = &self.tracer {
+                        if let Ok(mut t) = tracer.lock() {
+                            t.log(
+                                crate::flow::tracing::LogLevel::Info,
+                                crate::flow::tracing::EventType::FlowEnd,
+                                Some(current.clone()),
+                                "Flow execution completed".to_string(),
+                                serde_json::json!({ "final_node": current }),
+                            );
+                        }
+                    }
+
+                    break; // No transition, end of flow
+                }
             }
         }
 
@@ -151,7 +299,61 @@ impl Flow {
             }
         }
 
+        // Check for cycles (optional warning)
+        if let Some(cycle) = self.detect_cycle() {
+            eprintln!("Warning: Flow contains a cycle: {}", cycle.join(" -> "));
+        }
+
         Ok(())
+    }
+
+    /// Detect cycles in the flow graph using DFS
+    fn detect_cycle(&self) -> Option<Vec<String>> {
+        let mut visited = std::collections::HashSet::new();
+        let mut recursion_stack = std::collections::HashSet::new();
+        let mut path = Vec::new();
+
+        for node_id in self.nodes.keys() {
+            if !visited.contains(node_id) {
+                if let Some(cycle) = self.dfs_cycle(node_id, &mut visited, &mut recursion_stack, &mut path) {
+                    return Some(cycle);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn dfs_cycle(
+        &self,
+        node_id: &NodeId,
+        visited: &mut std::collections::HashSet<NodeId>,
+        recursion_stack: &mut std::collections::HashSet<NodeId>,
+        path: &mut Vec<NodeId>,
+    ) -> Option<Vec<String>> {
+        visited.insert(node_id.clone());
+        recursion_stack.insert(node_id.clone());
+        path.push(node_id.clone());
+
+        // Find all transitions from this node
+        for ((source, _), target) in &self.transitions {
+            if source == node_id {
+                if !visited.contains(target) {
+                    if let Some(cycle) = self.dfs_cycle(target, visited, recursion_stack, path) {
+                        return Some(cycle);
+                    }
+                } else if recursion_stack.contains(target) {
+                    // Found a cycle
+                    let cycle_start = path.iter().position(|n| n == target).unwrap();
+                    let cycle = path[cycle_start..].to_vec();
+                    return Some(cycle);
+                }
+            }
+        }
+
+        recursion_stack.remove(node_id);
+        path.pop();
+        None
     }
 }
 
@@ -160,6 +362,7 @@ pub struct FlowBuilder {
     start: Option<NodeId>,
     nodes: HashMap<NodeId, Arc<dyn Node>>,
     transitions: HashMap<(NodeId, Action), NodeId>,
+    tracer: Option<crate::flow::tracing::SharedTracer>,
 }
 
 impl FlowBuilder {
@@ -168,12 +371,19 @@ impl FlowBuilder {
             start: None,
             nodes: HashMap::new(),
             transitions: HashMap::new(),
+            tracer: None,
         }
     }
 
     /// Set the starting node
     pub fn start(mut self, node_id: NodeId) -> Self {
         self.start = Some(node_id);
+        self
+    }
+
+    /// Set the tracer for the flow
+    pub fn with_tracer(mut self, tracer: crate::flow::tracing::SharedTracer) -> Self {
+        self.tracer = Some(tracer);
         self
     }
 
@@ -238,14 +448,11 @@ impl FlowBuilder {
             .start
             .ok_or_else(|| anyhow::anyhow!("Start node not set"))?;
 
-        if self.nodes.is_empty() {
-            bail!("Flow must have at least one node");
-        }
-
         let flow = Flow {
             start,
             nodes: self.nodes,
             transitions: self.transitions,
+            tracer: self.tracer,
         };
 
         flow.validate()?;
@@ -593,6 +800,27 @@ mod tests {
             .build()
             .unwrap();
 
+        assert!(flow.validate().is_ok());
+    }
+
+    #[test]
+    fn test_flow_cycle_detection() {
+        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
+        let node3 = Arc::new(MockNode::new("node3".to_string(), "output3".to_string()));
+
+        let flow = Flow::builder()
+            .start("node1".to_string())
+            .add_node("node1".to_string(), node1)
+            .add_node("node2".to_string(), node2)
+            .add_node("node3".to_string(), node3)
+            .add_transition("node1".to_string(), "continue".to_string(), "node2".to_string())
+            .add_transition("node2".to_string(), "continue".to_string(), "node3".to_string())
+            .add_transition("node3".to_string(), "continue".to_string(), "node1".to_string())
+            .build()
+            .unwrap();
+
+        // Flow should validate successfully (cycle is just a warning)
         assert!(flow.validate().is_ok());
     }
 }
