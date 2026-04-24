@@ -195,3 +195,25 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - Fixed FileWriterNode to use `std::fs::write` instead of placeholder
 
 **Status:** v1.1.3 complete
+
+---
+
+## v1.1.4 Enhancement - Real Provider Wiring
+
+**Objective:** Wire real LLM and embedding providers into the flow execution path.
+
+### Implementation
+- [x] Create OpenAiProvider wrapper around LlmClient
+- [x] Initialize ModelRouter with real LlmProvider in CLI
+- [x] Add embedding_url and embedding_dimension to AppConfig
+- [x] Fix MemoryService embedding provider to use config
+- [x] Gate migration.rs behind legacy feature
+
+### Changes
+- Added `OpenAiProvider` in `src/flow/intelligence.rs` - LlmProvider trait implementation wrapping LlmClient
+- Updated `src/config/mod.rs` - Added embedding_url and embedding_dimension fields with defaults
+- Updated `src/cli/mod.rs` - ModelRouter now initialized with real OpenAiProvider from config
+- Updated `src/cli/mod.rs` - MemoryService now uses embedding_url from config
+- Updated `src/flow/mod.rs` - migration module export gated behind legacy feature
+
+**Status:** v1.1.4 complete
