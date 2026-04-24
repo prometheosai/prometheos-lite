@@ -3,19 +3,26 @@
 //! This module provides a bridge between the old Agent-based system and the new
 //! Flow-based system, enabling gradual migration.
 
-use crate::agents::Agent;
+#[cfg(feature = "legacy")]
+use crate::legacy::agents::Agent;
+#[cfg(feature = "legacy")]
 use crate::flow::{Action, Input, Node, NodeConfig, Output, SharedState};
+#[cfg(feature = "legacy")]
 use anyhow::Result;
+#[cfg(feature = "legacy")]
 use async_trait::async_trait;
+#[cfg(feature = "legacy")]
 use std::sync::Arc;
 
 /// AgentNode - adapter that wraps an Agent to implement the Node trait
+#[cfg(feature = "legacy")]
 pub struct AgentNode {
     id: String,
     agent: Arc<dyn Agent>,
     config: NodeConfig,
 }
 
+#[cfg(feature = "legacy")]
 impl AgentNode {
     /// Create a new AgentNode wrapping an Agent
     pub fn new(id: String, agent: Arc<dyn Agent>) -> Self {
@@ -37,6 +44,7 @@ impl AgentNode {
     }
 }
 
+#[cfg(feature = "legacy")]
 #[async_trait]
 impl Node for AgentNode {
     fn id(&self) -> String {
@@ -134,7 +142,7 @@ impl Node for AgentNode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
