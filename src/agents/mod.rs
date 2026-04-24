@@ -1,4 +1,16 @@
 //! Agent interfaces and implementations.
+//!
+//! # DEPRECATED
+//! This module is deprecated in favor of the new flow-centric architecture.
+//! Use the `flow` module instead, specifically:
+//! - `crate::flow::Node` trait instead of `Agent` trait
+//! - `crate::flow::AgentNode` adapter to wrap existing agents
+//! - `crate::flow::Flow` for orchestration instead of `SequentialOrchestrator`
+//!
+//! Migration guide:
+//! 1. Wrap existing agents with `AgentNode::new(agent)`
+//! 2. Build flows using `FlowBuilder`
+//! 3. Use `Flow::run()` for execution
 
 mod coder;
 mod planner;
@@ -11,8 +23,9 @@ pub use coder::CoderAgent;
 pub use planner::PlannerAgent;
 pub use reviewer::ReviewerAgent;
 
+#[deprecated(since = "0.2.0", note = "Use crate::flow::Node trait instead")]
 #[async_trait]
-pub trait Agent {
+pub trait Agent: Send + Sync {
     fn name(&self) -> &str;
 
     async fn run(&self, input: &str) -> Result<String>;

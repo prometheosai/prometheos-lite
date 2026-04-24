@@ -1,4 +1,16 @@
 //! Core orchestration logic.
+//!
+//! # DEPRECATED
+//! This module is deprecated in favor of the new flow-centric architecture.
+//! Use the `flow` module instead, specifically:
+//! - `crate::flow::Flow` for orchestration instead of `SequentialOrchestrator`
+//! - `crate::flow::FlowBuilder` to construct flows
+//! - `crate::flow::Node` trait for execution units
+//!
+//! Migration guide:
+//! 1. Replace `SequentialOrchestrator` with `FlowBuilder`
+//! 2. Wrap agents with `crate::flow::AgentNode::new(agent)`
+//! 3. Use `Flow::run()` for execution
 
 use anyhow::Result;
 
@@ -46,6 +58,7 @@ impl ExecutionResult {
     }
 }
 
+#[deprecated(since = "0.2.0", note = "Use crate::flow::FlowBuilder instead")]
 #[derive(Debug, Clone)]
 pub struct SequentialOrchestrator {
     llm: LlmClient,
