@@ -730,7 +730,19 @@ impl Node for FileWriterNode {
             .and_then(|v| v.as_str())
             .unwrap_or("output.txt")
             .to_string();
-        Ok(serde_json::json!({ "content": content, "file_path": file_path }))
+        
+        // Ensure prometheos-output directory exists
+        std::fs::create_dir_all("prometheos-output")
+            .context("Failed to create prometheos-output directory")?;
+        
+        // Prepend prometheos-output/ to the file path if not already absolute
+        let full_path = if file_path.starts_with("/") || file_path.contains(":") {
+            file_path
+        } else {
+            format!("prometheos-output/{}", file_path)
+        };
+        
+        Ok(serde_json::json!({ "content": content, "file_path": full_path }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
