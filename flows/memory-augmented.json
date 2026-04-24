@@ -1,0 +1,45 @@
+{
+  "version": "1",
+  "name": "Memory-Augmented Flow",
+  "description": "A flow that loads context from memory, processes it with LLM, and writes results back to memory",
+  "start_node": "context_loader",
+  "nodes": [
+    {
+      "id": "context_loader",
+      "node_type": "context_loader",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "llm_processor",
+      "node_type": "llm",
+      "config": {
+        "retries": 2,
+        "retry_delay_ms": 1000,
+        "prompt_template": "You are an AI assistant. Process the following context:\n\n{{prompt}}\n\nProvide a helpful response."
+      }
+    },
+    {
+      "id": "memory_writer",
+      "node_type": "memory_write",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "context_loader",
+      "action": "continue",
+      "to": "llm_processor"
+    },
+    {
+      "from": "llm_processor",
+      "action": "continue",
+      "to": "memory_writer"
+    }
+  ]
+}

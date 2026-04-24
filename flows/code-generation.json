@@ -1,0 +1,44 @@
+{
+  "version": "1",
+  "name": "Code Generation Flow",
+  "description": "A flow that plans, generates, and reviews code for a given task",
+  "start_node": "planner",
+  "nodes": [
+    {
+      "id": "planner",
+      "node_type": "planner",
+      "config": {
+        "retries": 2,
+        "retry_delay_ms": 1000
+      }
+    },
+    {
+      "id": "coder",
+      "node_type": "coder",
+      "config": {
+        "retries": 2,
+        "retry_delay_ms": 1000
+      }
+    },
+    {
+      "id": "reviewer",
+      "node_type": "reviewer",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "planner",
+      "action": "continue",
+      "to": "coder"
+    },
+    {
+      "from": "coder",
+      "action": "continue",
+      "to": "reviewer"
+    }
+  ]
+}
