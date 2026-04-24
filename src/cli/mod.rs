@@ -97,7 +97,37 @@ pub async fn run() -> anyhow::Result<()> {
             let logger = Logger::new(verbose);
             logger.info(&format!("Loading flow from: {}", path.display()));
 
-            let mut flow_runner = runner::FlowRunner::from_json_file(path)?;
+            // Load config and create RuntimeContext
+            let config = AppConfig::load()?;
+            logger.info(&format!("Loaded config for provider: {}", config.provider));
+
+            // Create RuntimeContext with services
+            // For now, create empty/default services - can be enhanced later with real providers
+            let model_router = std::sync::Arc::new(prometheos_lite::flow::ModelRouter::new(vec![]));
+            let tool_runtime = std::sync::Arc::new(prometheos_lite::flow::ToolRuntime::new(
+                prometheos_lite::flow::ToolSandboxProfile::new()
+            ));
+            
+            // Create in-memory memory service with local embedding provider (placeholder URL)
+            let embedding: Box<dyn prometheos_lite::flow::EmbeddingProvider> = Box::new(
+                prometheos_lite::flow::LocalEmbeddingProvider::new(
+                    "http://localhost:11434".to_string(),
+                    1536,
+                )
+            );
+            let in_memory_db = prometheos_lite::flow::MemoryDb::in_memory().unwrap();
+            let memory_service = std::sync::Arc::new(prometheos_lite::flow::MemoryService::new(
+                in_memory_db,
+                embedding,
+            ));
+
+            let runtime = prometheos_lite::flow::RuntimeContext::full(
+                model_router,
+                tool_runtime,
+                memory_service,
+            );
+
+            let mut flow_runner = runner::FlowRunner::from_json_file_with_runtime(path, Some(runtime))?;
             logger.info("Flow loaded successfully");
 
             let input_value = if let Some(input_str) = input {
