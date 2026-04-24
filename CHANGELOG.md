@@ -101,3 +101,14 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 **Status:** v1.1 complete - All phases implemented and tested
 **See:** `docs/prd/prometheos-lite-prd-v1.1.md` for full specification
+
+---
+
+## v1.2 Roadmap - Future Improvements
+
+### Refactor & Enhancements
+- [ ] Issue #22: Implement real NodeFactory in CLI runner to map node_type to concrete nodes (LLM, tool, memory, conditional nodes)
+- [ ] Issue #23: Unify debug and production execution by adding lifecycle hooks to Flow::run
+- [ ] Issue #24: Persist run registry and flow events to SQLite for Maestro process restart survival
+- [ ] Issue #25: Replace brute-force semantic search with indexed vector retrieval (SQLite extension or pluggable backend)
+- [ ] Issue #26: Retire or isolate legacy agents/core modules after parity is proven
