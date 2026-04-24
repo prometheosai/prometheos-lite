@@ -102,17 +102,23 @@ pub async fn run() -> anyhow::Result<()> {
             logger.info(&format!("Loaded config for provider: {}", config.provider));
 
             // Create RuntimeContext with services
-            // For now, create empty/default services - can be enhanced later with real providers
-            let model_router = std::sync::Arc::new(prometheos_lite::flow::ModelRouter::new(vec![]));
+            // Create LlmClient and wrap in OpenAiProvider for ModelRouter
+            let llm_client = LlmClient::from_config(&config)?;
+            let openai_provider = prometheos_lite::flow::OpenAiProvider::new(llm_client)
+                .with_name(config.provider.clone());
+            let model_router = std::sync::Arc::new(prometheos_lite::flow::ModelRouter::new(vec![
+                Box::new(openai_provider)
+            ]));
+            
             let tool_runtime = std::sync::Arc::new(prometheos_lite::flow::ToolRuntime::new(
                 prometheos_lite::flow::ToolSandboxProfile::new()
             ));
             
-            // Create in-memory memory service with local embedding provider (placeholder URL)
+            // Create in-memory memory service with local embedding provider from config
             let embedding: Box<dyn prometheos_lite::flow::EmbeddingProvider> = Box::new(
                 prometheos_lite::flow::LocalEmbeddingProvider::new(
-                    "http://localhost:11434".to_string(),
-                    1536,
+                    config.embedding_url.clone(),
+                    config.embedding_dimension,
                 )
             );
             let in_memory_db = prometheos_lite::flow::MemoryDb::in_memory().unwrap();
