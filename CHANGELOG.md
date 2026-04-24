@@ -174,3 +174,24 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 **Status:** v1.1.2 complete
 **See:** `docs/prd/prometheos-lite-prd-v1.1.2.md` for full specification
+
+---
+
+## v1.1.3 Enhancement - RuntimeContext & Service Injection
+
+**Objective:** Implement proper service injection to eliminate placeholder fallback behavior in nodes.
+
+### Implementation
+- [x] Create RuntimeContext struct for centralized service registry
+- [x] Add DefaultNodeFactory::from_runtime method
+- [x] Fix FileWriterNode to actually write files
+- [x] Update FlowRunner to use RuntimeContext
+- [x] Update CLI to create and inject RuntimeContext with real services
+
+### Changes
+- Added `src/flow/runtime.rs` - RuntimeContext with ModelRouter, ToolRuntime, MemoryService
+- Updated `src/cli/runner.rs` - RuntimeContext integration in FlowRunner and DefaultNodeFactory
+- Updated `src/cli/mod.rs` - CLI now creates RuntimeContext with real services
+- Fixed FileWriterNode to use `std::fs::write` instead of placeholder
+
+**Status:** v1.1.3 complete
