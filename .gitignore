@@ -30,3 +30,6 @@ Thumbs.db
 
 # PrometheOS output
 prometheos-output/
+
+# Database files
+*.db
