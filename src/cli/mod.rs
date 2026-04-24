@@ -42,6 +42,12 @@ enum Commands {
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
+        /// Enable debug mode with step-by-step execution
+        #[arg(short, long)]
+        debug: bool,
+        /// Export timeline to file
+        #[arg(long)]
+        export_timeline: Option<std::path::PathBuf>,
     },
 }
 
@@ -65,44 +71,28 @@ pub async fn run() -> anyhow::Result<()> {
             let llm = LlmClient::from_config(&config)?;
 
             // Use the deprecated orchestrator
-            #[allow(deprecated)]
-            let orchestrator =
-                prometheos_lite::core::SequentialOrchestrator::with_logger(llm, logger.clone());
+            #[cfg(feature = "legacy")]
+            {
+                #[allow(deprecated)]
+                let orchestrator =
+                    prometheos_lite::legacy::core::SequentialOrchestrator::with_logger(llm, logger.clone());
 
-            logger.info("Initializing orchestrator...");
-            let result = orchestrator.run(task).await?;
+                logger.info("Initializing orchestrator...");
+                let result = orchestrator.run(task).await?;
 
-            if let Some(plan) = result.plan() {
-                println!("\n[planner]\n{plan}");
-            }
-            if let Some(output) = result.generated_output() {
-                println!("\n[builder]\n{output}");
-
-                logger.info("Parsing generated files...");
-                let files = FileParser::parse_files(output)?;
-                logger.info(&format!("Found {} file(s) to write", files.len()));
-
-                if !files.is_empty() {
-                    logger.info("Writing files to disk...");
-                    let writer = FileWriter::new()?;
-                    let written = writer.write_files(&files)?;
-                    logger.success(&format!(
-                        "Written {} file(s) to {}",
-                        written.len(),
-                        writer.output_dir().display()
-                    ));
-                }
-            }
-            if let Some(review) = result.review() {
-                println!("\n[reviewer]\n{review}");
+                logger.success("Task completed successfully");
+                Ok(())
             }
 
-            logger.success("Task completed successfully");
+            #[cfg(not(feature = "legacy"))]
+            return Err(anyhow::anyhow!("Legacy 'run' command requires the 'legacy' feature flag. Use 'flow' command instead."));
         }
         Commands::Flow {
             path,
             input,
             verbose,
+            debug,
+            export_timeline,
         } => {
             let logger = Logger::new(verbose);
             logger.info(&format!("Loading flow from: {}", path.display()));
@@ -116,14 +106,36 @@ pub async fn run() -> anyhow::Result<()> {
                 serde_json::json!({})
             };
 
+            // Enable debug mode if requested
+            if debug {
+                logger.info("Debug mode enabled");
+                flow_runner.enable_debug_mode();
+            }
+
             logger.info("Executing flow...");
             let state = flow_runner.run_with_input(input_value).await?;
 
             logger.success("Flow execution completed");
+
+            // Render output
             println!(
                 "\n[output]\n{}",
                 serde_json::to_string_pretty(&state.get_all_outputs())?
             );
+
+            // Export timeline if requested
+            if let Some(timeline_path) = export_timeline {
+                if let Some(tracer) = flow_runner.tracer() {
+                    if let Ok(t) = tracer.lock() {
+                        let timeline_json = t.export_timeline().context("Failed to export timeline")?;
+                        std::fs::write(&timeline_path, timeline_json)
+                            .context("Failed to write timeline file")?;
+                        logger.info(&format!("Timeline exported to: {}", timeline_path.display()));
+                    }
+                } else {
+                    eprintln!("Warning: No tracer available for timeline export");
+                }
+            }
         }
     }
 
