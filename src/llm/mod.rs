@@ -72,9 +72,12 @@ impl LlmClient {
         self
     }
 
-    async fn generate_with_retry(&self, request: &ChatCompletionRequest<'_>) -> Result<ChatCompletionResponse> {
+    async fn generate_with_retry(
+        &self,
+        request: &ChatCompletionRequest<'_>,
+    ) -> Result<ChatCompletionResponse> {
         let mut last_error = None;
-        
+
         for attempt in 0..=self.max_retries {
             let response = self
                 .http
@@ -84,21 +87,18 @@ impl LlmClient {
                 .await;
 
             match response {
-                Ok(resp) => {
-                    match resp.error_for_status() {
-                        Ok(ok_resp) => {
-                            match ok_resp.json::<ChatCompletionResponse>().await {
-                                Ok(parsed) => return Ok(parsed),
-                                Err(e) => {
-                                    last_error = Some(anyhow::anyhow!("Failed to parse LLM response: {}", e));
-                                }
-                            }
-                        }
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(ok_resp) => match ok_resp.json::<ChatCompletionResponse>().await {
+                        Ok(parsed) => return Ok(parsed),
                         Err(e) => {
-                            last_error = Some(anyhow::anyhow!("LLM endpoint returned error: {}", e));
+                            last_error =
+                                Some(anyhow::anyhow!("Failed to parse LLM response: {}", e));
                         }
+                    },
+                    Err(e) => {
+                        last_error = Some(anyhow::anyhow!("LLM endpoint returned error: {}", e));
                     }
-                }
+                },
                 Err(e) => {
                     last_error = Some(anyhow::anyhow!("Failed to call LLM endpoint: {}", e));
                 }
@@ -155,11 +155,14 @@ impl LlmClient {
             .error_for_status()
             .context("LLM endpoint returned an error status")?;
 
-        let bytes = response.bytes().await.context("failed to read response body")?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to read response body")?;
         let text = String::from_utf8_lossy(&bytes);
-        
+
         let mut full_content = String::new();
-        
+
         for line in text.lines() {
             if line.starts_with("data: ") {
                 let data = &line[6..];

@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::flow::{Node, NodeConfig, Action, SharedState, Flow};
+use crate::flow::{Action, Flow, Node, NodeConfig, SharedState};
 
 /// Conditional node that branches based on state conditions
 pub struct ConditionalNode {
@@ -103,7 +103,7 @@ impl Node for LoopNode {
 
     fn post(&self, state: &mut SharedState, _output: serde_json::Value) -> Action {
         let count = self.get_iteration_count(state);
-        
+
         if count >= self.max_iterations {
             "break".to_string()
         } else {
@@ -135,14 +135,19 @@ impl BatchFlow {
 
     pub async fn run_batch(&self, items: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>> {
         let mut results = Vec::new();
-        
+
         for (index, item) in items.into_iter().enumerate() {
             let mut state = SharedState::new();
             state.set_input(format!("{}_item_{}", self.input_key, index), item);
-            
+
             let mut flow = self.flow.clone();
             flow.run(&mut state).await?;
-            results.push(state.get_output(&self.output_key).cloned().unwrap_or(serde_json::json!(null)));
+            results.push(
+                state
+                    .get_output(&self.output_key)
+                    .cloned()
+                    .unwrap_or(serde_json::json!(null)),
+            );
         }
 
         Ok(results)
@@ -158,15 +163,18 @@ impl BatchFlow {
     {
         let total = items.len();
         let mut results = Vec::new();
-        
+
         for (index, item) in items.into_iter().enumerate() {
             let mut state = SharedState::new();
             state.set_input(format!("{}_item_{}", self.input_key, index), item);
-            
+
             let mut flow = self.flow.clone();
             flow.run(&mut state).await?;
-            
-            let result = state.get_output(&self.output_key).cloned().unwrap_or(serde_json::json!(null));
+
+            let result = state
+                .get_output(&self.output_key)
+                .cloned()
+                .unwrap_or(serde_json::json!(null));
             progress_callback(index + 1, total, &result);
             results.push(result);
         }
@@ -206,25 +214,28 @@ impl Node for ParallelNode {
 
     async fn exec(&self, _input: serde_json::Value) -> Result<serde_json::Value> {
         let mut results = Vec::new();
-        
+
         // Execute flows in parallel with concurrency limit
         for chunk in self.flows.chunks(self.concurrency_limit) {
-            let futures: Vec<_> = chunk.iter().map(|flow| {
-                let mut flow = flow.clone();
-                async move {
-                    let mut state = SharedState::new();
-                    flow.run(&mut state).await?;
-                    Ok::<_, anyhow::Error>(state)
-                }
-            }).collect();
-            
+            let futures: Vec<_> = chunk
+                .iter()
+                .map(|flow| {
+                    let mut flow = flow.clone();
+                    async move {
+                        let mut state = SharedState::new();
+                        flow.run(&mut state).await?;
+                        Ok::<_, anyhow::Error>(state)
+                    }
+                })
+                .collect();
+
             let chunk_results = join_all(futures).await;
             for result in chunk_results {
                 let state = result?;
                 results.push(state.get_all_outputs());
             }
         }
-        
+
         Ok(serde_json::json!({ "results": results }))
     }
 
@@ -294,12 +305,12 @@ impl Node for ReflectionNode {
 
     fn post(&self, state: &mut SharedState, _output: serde_json::Value) -> Action {
         let count = self.get_iteration_count(state);
-        
+
         // Check iteration limit
         if count >= self.max_iterations {
             return "break".to_string();
         }
-        
+
         // Apply reflection function to decide whether to continue
         if (self.reflection_fn)(state) {
             self.increment_iteration(state);
@@ -317,7 +328,7 @@ impl Node for ReflectionNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::{FlowBuilder, Node, NodeConfig, Input, Output};
+    use crate::flow::{FlowBuilder, Input, Node, NodeConfig, Output};
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -373,7 +384,10 @@ mod tests {
     #[tokio::test]
     async fn test_conditional_node() {
         let condition = Box::new(|state: &SharedState| {
-            state.get_input("test").and_then(|v| v.as_bool()).unwrap_or(false)
+            state
+                .get_input("test")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         });
 
         let node = ConditionalNode::new(
@@ -399,7 +413,7 @@ mod tests {
         let node = LoopNode::new("loop_node".to_string(), 3);
 
         let mut state = SharedState::new();
-        
+
         // First 3 iterations should continue
         for i in 0..3 {
             let action = node.post(&mut state, serde_json::json!({}));
@@ -421,8 +435,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let batch = BatchFlow::new(base_flow, "batch_input".to_string(), "batch_output".to_string());
-        
+        let batch = BatchFlow::new(
+            base_flow,
+            "batch_input".to_string(),
+            "batch_output".to_string(),
+        );
+
         let items = vec![
             serde_json::json!("item1"),
             serde_json::json!("item2"),
@@ -471,7 +489,8 @@ mod tests {
     #[tokio::test]
     async fn test_reflection_node() {
         let reflection_fn = Box::new(|state: &SharedState| {
-            state.get_output("quality_score")
+            state
+                .get_output("quality_score")
                 .and_then(|v| v.as_f64())
                 .map(|score| score < 0.8)
                 .unwrap_or(false)
@@ -480,7 +499,7 @@ mod tests {
         let node = ReflectionNode::new("reflection".to_string(), reflection_fn, 5);
 
         let mut state = SharedState::new();
-        
+
         // Low quality score - should continue
         state.set_output("quality_score".to_string(), serde_json::json!(0.5));
         let action = node.post(&mut state, serde_json::json!({}));
@@ -510,8 +529,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let batch = BatchFlow::new(base_flow, "batch_input".to_string(), "batch_output".to_string());
-        
+        let batch = BatchFlow::new(
+            base_flow,
+            "batch_input".to_string(),
+            "batch_output".to_string(),
+        );
+
         let items = vec![
             serde_json::json!("item1"),
             serde_json::json!("item2"),
@@ -519,9 +542,12 @@ mod tests {
         ];
 
         let mut progress_calls = Vec::new();
-        let results = batch.run_batch_with_progress(items, |current, total, result| {
-            progress_calls.push((current, total, result.clone()));
-        }).await.unwrap();
+        let results = batch
+            .run_batch_with_progress(items, |current, total, result| {
+                progress_calls.push((current, total, result.clone()));
+            })
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 3);
         assert_eq!(progress_calls.len(), 3);

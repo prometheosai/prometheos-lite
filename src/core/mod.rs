@@ -82,17 +82,21 @@ impl SequentialOrchestrator {
         let task_str = context.task.clone();
 
         self.logger.info(&format!("Starting task: {}", task_str));
-        self.logger.log(AgentRole::Planner, "Initializing planning phase");
+        self.logger
+            .log(AgentRole::Planner, "Initializing planning phase");
 
         let planner = PlannerAgent::new(self.llm.clone());
         let plan = planner.run(&context.task).await?;
         self.logger.log(AgentRole::Planner, "Planning complete");
-        self.logger.log(AgentRole::Coder, "Initializing code generation phase");
+        self.logger
+            .log(AgentRole::Coder, "Initializing code generation phase");
 
         let coder = CoderAgent::new(self.llm.clone());
         let generated_output = coder.run(&plan).await?;
-        self.logger.log(AgentRole::Coder, "Code generation complete");
-        self.logger.log(AgentRole::Reviewer, "Initializing review phase");
+        self.logger
+            .log(AgentRole::Coder, "Code generation complete");
+        self.logger
+            .log(AgentRole::Reviewer, "Initializing review phase");
 
         let reviewer = ReviewerAgent::new(self.llm.clone());
         let review = reviewer.run(&generated_output).await?;

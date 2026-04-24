@@ -71,70 +71,78 @@ impl RateLimiter {
     /// Check if a request is allowed based on rate limits
     pub fn check_request_allowed(&mut self, node_id: Option<NodeId>) -> Result<()> {
         let now = Utc::now();
-        
+
         // Clean old records
         self.clean_old_records(&now);
-        
+
         // Check requests per minute
-        let requests_last_minute = self.requests.iter()
+        let requests_last_minute = self
+            .requests
+            .iter()
             .filter(|r| r.timestamp > now - chrono::Duration::minutes(1))
             .count();
-        
+
         if requests_last_minute >= self.config.max_requests_per_minute as usize {
             anyhow::bail!("Rate limit exceeded: too many requests per minute");
         }
-        
+
         // Check requests per hour
-        let requests_last_hour = self.requests.iter()
+        let requests_last_hour = self
+            .requests
+            .iter()
             .filter(|r| r.timestamp > now - chrono::Duration::hours(1))
             .count();
-        
+
         if requests_last_hour >= self.config.max_requests_per_hour as usize {
             anyhow::bail!("Rate limit exceeded: too many requests per hour");
         }
-        
+
         // Record the request
         self.requests.push(RequestRecord {
             timestamp: now,
             node_id,
         });
-        
+
         Ok(())
     }
 
     /// Check if token usage is within limits
     pub fn check_token_limit(&mut self, tokens: u32, node_id: Option<NodeId>) -> Result<()> {
         let now = Utc::now();
-        
+
         // Clean old records
         self.clean_old_records(&now);
-        
+
         // Calculate current token usage
-        let tokens_last_minute: u32 = self.token_usage.iter()
+        let tokens_last_minute: u32 = self
+            .token_usage
+            .iter()
             .filter(|t| t.timestamp > now - chrono::Duration::minutes(1))
             .map(|t| t.tokens)
             .sum();
-        
+
         if tokens_last_minute + tokens > self.config.max_tokens_per_minute {
             anyhow::bail!("Rate limit exceeded: token budget per minute exceeded");
         }
-        
-        let tokens_last_hour: u32 = self.token_usage.iter()
+
+        let tokens_last_hour: u32 = self
+            .token_usage
+            .iter()
             .filter(|t| t.timestamp > now - chrono::Duration::hours(1))
             .map(|t| t.tokens)
             .sum();
-        
+
         if tokens_last_hour + tokens > self.config.max_tokens_per_hour {
             anyhow::bail!("Rate limit exceeded: token budget per hour exceeded");
         }
-        
+
         // Record the token usage
         self.token_usage.push(TokenUsage {
             timestamp: now,
             tokens,
             node_id,
         });
-        
+
         Ok(())
     }
 
@@ -148,10 +156,13 @@ impl RateLimiter {
         if let Some(start) = self.current_execution_start {
             let elapsed = Utc::now() - start;
             let elapsed_ms = elapsed.num_milliseconds() as u64;
-            
+
             if elapsed_ms > self.config.max_execution_time_ms {
-                anyhow::bail!("Execution time limit exceeded: {}ms > {}ms", 
-                    elapsed_ms, self.config.max_execution_time_ms);
+                anyhow::bail!(
+                    "Execution time limit exceeded: {}ms > {}ms",
+                    elapsed_ms,
+                    self.config.max_execution_time_ms
+                );
             }
         }
         Ok(())
@@ -165,7 +176,7 @@ impl RateLimiter {
     /// Clean old records outside the time windows
     fn clean_old_records(&mut self, now: &DateTime<Utc>) {
         let one_hour_ago = *now - chrono::Duration::hours(1);
-        
+
         self.token_usage.retain(|t| t.timestamp > one_hour_ago);
         self.requests.retain(|r| r.timestamp > one_hour_ago);
     }
@@ -173,17 +184,21 @@ impl RateLimiter {
     /// Get current token usage statistics
     pub fn get_token_stats(&self) -> TokenStats {
         let now = Utc::now();
-        
-        let tokens_last_minute: u32 = self.token_usage.iter()
+
+        let tokens_last_minute: u32 = self
+            .token_usage
+            .iter()
             .filter(|t| t.timestamp > now - chrono::Duration::minutes(1))
             .map(|t| t.tokens)
             .sum();
-        
-        let tokens_last_hour: u32 = self.token_usage.iter()
+
+        let tokens_last_hour: u32 = self
+            .token_usage
+            .iter()
             .filter(|t| t.timestamp > now - chrono::Duration::hours(1))
             .map(|t| t.tokens)
             .sum();
-        
+
         TokenStats {
             tokens_last_minute,
             tokens_last_hour,
@@ -195,15 +210,19 @@ impl RateLimiter {
     /// Get current request statistics
     pub fn get_request_stats(&self) -> RequestStats {
         let now = Utc::now();
-        
-        let requests_last_minute = self.requests.iter()
+
+        let requests_last_minute = self
+            .requests
+            .iter()
             .filter(|r| r.timestamp > now - chrono::Duration::minutes(1))
             .count();
-        
-        let requests_last_hour = self.requests.iter()
+
+        let requests_last_hour = self
+            .requests
+            .iter()
             .filter(|r| r.timestamp > now - chrono::Duration::hours(1))
             .count();
-        
+
         RequestStats {
             requests_last_minute,
             requests_last_hour,
@@ -260,7 +279,11 @@ pub struct RateLimitedNode {
 }
 
 impl RateLimitedNode {
-    pub fn new(inner: Arc<dyn Node>, rate_limiter: SharedRateLimiter, estimated_tokens: u32) -> Self {
+    pub fn new(
+        inner: Arc<dyn Node>,
+        rate_limiter: SharedRateLimiter,
+        estimated_tokens: u32,
+    ) -> Self {
         let id = format!("rate_limited_{}", inner.id());
         Self {
             inner,
@@ -284,7 +307,7 @@ impl Node for RateLimitedNode {
             limiter.check_token_limit(self.estimated_tokens, Some(self.inner.id()))?;
             limiter.start_execution();
         }
-        
+
         self.inner.prep(state)
     }
 
@@ -293,7 +316,7 @@ impl Node for RateLimitedNode {
         if let Ok(limiter) = self.rate_limiter.lock() {
             limiter.check_execution_time()?;
         }
-        
+
         self.inner.exec(input).await
     }
 
@@ -302,7 +325,7 @@ impl Node for RateLimitedNode {
         if let Ok(mut limiter) = self.rate_limiter.lock() {
             limiter.stop_execution();
         }
-        
+
         self.inner.post(state, output)
     }
 
@@ -357,17 +380,29 @@ mod tests {
             max_requests_per_minute: 2,
             ..Default::default()
         };
-        
+
         let mut limiter = RateLimiter::new(config);
-        
+
         // First request should succeed
-        assert!(limiter.check_request_allowed(Some("node1".to_string())).is_ok());
-        
+        assert!(
+            limiter
+                .check_request_allowed(Some("node1".to_string()))
+                .is_ok()
+        );
+
         // Second request should succeed
-        assert!(limiter.check_request_allowed(Some("node1".to_string())).is_ok());
-        
+        assert!(
+            limiter
+                .check_request_allowed(Some("node1".to_string()))
+                .is_ok()
+        );
+
         // Third request should fail
-        assert!(limiter.check_request_allowed(Some("node1".to_string())).is_err());
+        assert!(
+            limiter
+                .check_request_allowed(Some("node1".to_string()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -376,17 +411,29 @@ mod tests {
             max_tokens_per_minute: 100,
             ..Default::default()
         };
-        
+
         let mut limiter = RateLimiter::new(config);
-        
+
         // First 50 tokens should succeed
-        assert!(limiter.check_token_limit(50, Some("node1".to_string())).is_ok());
-        
+        assert!(
+            limiter
+                .check_token_limit(50, Some("node1".to_string()))
+                .is_ok()
+        );
+
         // Next 40 tokens should succeed
-        assert!(limiter.check_token_limit(40, Some("node1".to_string())).is_ok());
-        
+        assert!(
+            limiter
+                .check_token_limit(40, Some("node1".to_string()))
+                .is_ok()
+        );
+
         // Next 20 tokens should fail (50 + 40 + 20 = 110 > 100)
-        assert!(limiter.check_token_limit(20, Some("node1".to_string())).is_err());
+        assert!(
+            limiter
+                .check_token_limit(20, Some("node1".to_string()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -395,17 +442,17 @@ mod tests {
             max_execution_time_ms: 100,
             ..Default::default()
         };
-        
+
         let mut limiter = RateLimiter::new(config);
-        
+
         limiter.start_execution();
-        
+
         // Should be within limit
         assert!(limiter.check_execution_time().is_ok());
-        
+
         // Simulate time passing
         std::thread::sleep(Duration::from_millis(150));
-        
+
         // Should exceed limit
         assert!(limiter.check_execution_time().is_err());
     }
@@ -414,13 +461,17 @@ mod tests {
     fn test_rate_limiter_stats() {
         let config = RateLimitConfig::default();
         let mut limiter = RateLimiter::new(config);
-        
-        limiter.check_token_limit(100, Some("node1".to_string())).unwrap();
-        limiter.check_request_allowed(Some("node1".to_string())).unwrap();
-        
+
+        limiter
+            .check_token_limit(100, Some("node1".to_string()))
+            .unwrap();
+        limiter
+            .check_request_allowed(Some("node1".to_string()))
+            .unwrap();
+
         let token_stats = limiter.get_token_stats();
         assert_eq!(token_stats.tokens_last_minute, 100);
-        
+
         let request_stats = limiter.get_request_stats();
         assert_eq!(request_stats.requests_last_minute, 1);
     }
@@ -431,27 +482,37 @@ mod tests {
             max_requests_per_minute: 1,
             ..Default::default()
         };
-        
+
         let mut limiter = RateLimiter::new(config);
-        
-        limiter.check_request_allowed(Some("node1".to_string())).unwrap();
-        assert!(limiter.check_request_allowed(Some("node1".to_string())).is_err());
-        
+
+        limiter
+            .check_request_allowed(Some("node1".to_string()))
+            .unwrap();
+        assert!(
+            limiter
+                .check_request_allowed(Some("node1".to_string()))
+                .is_err()
+        );
+
         limiter.reset();
-        assert!(limiter.check_request_allowed(Some("node1".to_string())).is_ok());
+        assert!(
+            limiter
+                .check_request_allowed(Some("node1".to_string()))
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn test_rate_limited_node() {
         let inner = Arc::new(TestNode::new("test".to_string()));
         let rate_limiter = create_default_rate_limiter();
-        
+
         let rate_limited_node = RateLimitedNode::new(inner, rate_limiter, 100);
-        
+
         let mut state = SharedState::new();
         let input = rate_limited_node.prep(&state).unwrap();
         let output = rate_limited_node.exec(input).await.unwrap();
-        
+
         let action = rate_limited_node.post(&mut state, output);
         assert_eq!(action, "continue");
     }

@@ -103,7 +103,9 @@ impl ModelRouter {
 
     /// Get the current provider
     pub fn current_provider(&self) -> Option<&dyn LlmProvider> {
-        self.providers.get(self.current_provider).map(|p| p.as_ref())
+        self.providers
+            .get(self.current_provider)
+            .map(|p| p.as_ref())
     }
 
     /// Set the current provider index
@@ -166,7 +168,7 @@ impl ToolSandboxProfile {
                 "uname".to_string(),
                 "env".to_string(),
                 "printenv".to_string(),
-                "cmd".to_string(), // Windows
+                "cmd".to_string(),        // Windows
                 "powershell".to_string(), // Windows
             ],
             blocked_commands: vec![
@@ -178,10 +180,10 @@ impl ToolSandboxProfile {
                 "mkfs".to_string(),
                 "fdisk".to_string(),
                 "format".to_string(), // Windows
-                "del".to_string(), // Windows
-                "rmdir".to_string(), // Windows
+                "del".to_string(),    // Windows
+                "rmdir".to_string(),  // Windows
             ],
-            timeout_ms: 30000, // 30 seconds
+            timeout_ms: 30000,                  // 30 seconds
             max_output_bytes: 10 * 1024 * 1024, // 10 MB
             allow_network: false,
             allowed_network_hosts: vec![],
@@ -330,11 +332,7 @@ impl ToolRuntime {
     }
 
     /// Execute a command as a tool
-    pub async fn execute_command(
-        &self,
-        command: &str,
-        args: Vec<String>,
-    ) -> Result<String> {
+    pub async fn execute_command(&self, command: &str, args: Vec<String>) -> Result<String> {
         // Check if command is allowed
         if !self.profile.is_command_allowed(command) {
             anyhow::bail!("Command '{}' is not allowed by sandbox profile", command);
@@ -342,14 +340,9 @@ impl ToolRuntime {
 
         let timeout = Duration::from_millis(self.profile.timeout_ms);
 
-        let output = tokio::time::timeout(
-            timeout,
-            Command::new(command)
-                .args(&args)
-                .output(),
-        )
-        .await
-        .context("Command execution timed out")??;
+        let output = tokio::time::timeout(timeout, Command::new(command).args(&args).output())
+            .await
+            .context("Command execution timed out")??;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -357,7 +350,7 @@ impl ToolRuntime {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         // Check output size limit
         if stdout.len() > self.profile.max_output_bytes {
             anyhow::bail!("Output exceeds maximum size limit");
@@ -408,7 +401,7 @@ impl LlmUtilities {
         initial_delay_ms: u64,
     ) -> Result<String> {
         let mut last_error = None;
-        
+
         for attempt in 0..=max_retries {
             match self.router.generate(prompt).await {
                 Ok(result) => return Ok(result),
@@ -438,7 +431,7 @@ impl LlmUtilities {
     {
         let callback = Arc::new(callback);
         let mut last_error = None;
-        
+
         for attempt in 0..=max_retries {
             match self.router.generate_stream(prompt, callback.clone()).await {
                 Ok(result) => return Ok(result),
@@ -520,7 +513,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_router_basic() {
-        let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), false));
+        let provider = Box::new(MockLlmProvider::new(
+            "test".to_string(),
+            "gpt-4".to_string(),
+            false,
+        ));
         let router = ModelRouter::new(vec![provider]);
 
         let result = router.generate("test prompt").await.unwrap();
@@ -530,8 +527,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_router_fallback() {
-        let provider1 = Box::new(MockLlmProvider::new("failing".to_string(), "gpt-3".to_string(), true));
-        let provider2 = Box::new(MockLlmProvider::new("working".to_string(), "gpt-4".to_string(), false));
+        let provider1 = Box::new(MockLlmProvider::new(
+            "failing".to_string(),
+            "gpt-3".to_string(),
+            true,
+        ));
+        let provider2 = Box::new(MockLlmProvider::new(
+            "working".to_string(),
+            "gpt-4".to_string(),
+            false,
+        ));
         let router = ModelRouter::new(vec![provider1, provider2]);
 
         let result = router.generate("test prompt").await.unwrap();
@@ -540,9 +545,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_router_fallback_chain() {
-        let provider1 = Box::new(MockLlmProvider::new("p1".to_string(), "gpt-3".to_string(), true));
-        let provider2 = Box::new(MockLlmProvider::new("p2".to_string(), "gpt-4".to_string(), true));
-        let provider3 = Box::new(MockLlmProvider::new("p3".to_string(), "claude".to_string(), false));
+        let provider1 = Box::new(MockLlmProvider::new(
+            "p1".to_string(),
+            "gpt-3".to_string(),
+            true,
+        ));
+        let provider2 = Box::new(MockLlmProvider::new(
+            "p2".to_string(),
+            "gpt-4".to_string(),
+            true,
+        ));
+        let provider3 = Box::new(MockLlmProvider::new(
+            "p3".to_string(),
+            "claude".to_string(),
+            false,
+        ));
         let router = ModelRouter::new(vec![provider1, provider2, provider3])
             .with_fallback_chain(vec![0, 2, 1]);
 
@@ -583,13 +600,13 @@ mod tests {
     #[tokio::test]
     async fn test_tool_trait() {
         let tool = MockTool::new("test_tool".to_string(), "A test tool".to_string());
-        
+
         assert_eq!(tool.name(), "test_tool");
         assert_eq!(tool.description(), "A test tool");
-        
+
         let input = serde_json::json!({ "arg": "value" });
         let output = tool.call(input).await.unwrap();
-        
+
         assert_eq!(output["tool"], "test_tool");
     }
 
@@ -604,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_sandbox_profile_command_checking() {
         let profile = ToolSandboxProfile::new();
-        
+
         assert!(profile.is_command_allowed("echo hello"));
         assert!(profile.is_command_allowed("cat file.txt"));
         assert!(!profile.is_command_allowed("rm file.txt"));
@@ -614,19 +631,19 @@ mod tests {
     #[test]
     fn test_tool_sandbox_profile_network_checking() {
         let mut profile = ToolSandboxProfile::new();
-        
+
         // Network disabled by default
         assert!(!profile.is_network_allowed("example.com"));
-        
+
         // Enable network
         profile.allow_network = true;
         assert!(profile.is_network_allowed("example.com"));
-        
+
         // Add blocked host
         profile.blocked_network_hosts = vec!["malicious.com".to_string()];
         assert!(!profile.is_network_allowed("malicious.com"));
         assert!(profile.is_network_allowed("example.com"));
-        
+
         // Add allowed host
         profile.allowed_network_hosts = vec!["trusted.com".to_string()];
         assert!(profile.is_network_allowed("trusted.com"));
@@ -636,14 +653,14 @@ mod tests {
     #[test]
     fn test_tool_sandbox_profile_file_checking() {
         let profile = ToolSandboxProfile::new();
-        
+
         // File read enabled by default
         assert!(profile.is_file_read_allowed("/home/user/file.txt"));
         assert!(!profile.is_file_read_allowed("/etc/passwd"));
-        
+
         // File write disabled by default
         assert!(!profile.is_file_write_allowed("/home/user/file.txt"));
-        
+
         // Enable file write
         let mut profile = ToolSandboxProfile::new();
         profile.allow_file_write = true;
@@ -655,49 +672,50 @@ mod tests {
     async fn test_tool_runtime_execute_command() {
         // Use a custom profile that allows the appropriate command for each platform
         #[cfg(unix)]
-        let profile = ToolSandboxProfile::custom(
-            vec!["echo".to_string()],
-            vec![],
-            30000,
-            10 * 1024 * 1024,
-        );
-        
+        let profile =
+            ToolSandboxProfile::custom(vec!["echo".to_string()], vec![], 30000, 10 * 1024 * 1024);
+
         #[cfg(windows)]
-        let profile = ToolSandboxProfile::custom(
-            vec!["cmd".to_string()],
-            vec![],
-            30000,
-            10 * 1024 * 1024,
-        );
-        
+        let profile =
+            ToolSandboxProfile::custom(vec!["cmd".to_string()], vec![], 30000, 10 * 1024 * 1024);
+
         let runtime = ToolRuntime::new(profile);
-        
+
         #[cfg(unix)]
-        let result = runtime.execute_command("echo", vec!["hello".to_string()]).await;
-        
+        let result = runtime
+            .execute_command("echo", vec!["hello".to_string()])
+            .await;
+
         #[cfg(windows)]
-        let result = runtime.execute_command("cmd", vec!["/C".to_string(), "echo".to_string(), "hello".to_string()]).await;
-        
+        let result = runtime
+            .execute_command(
+                "cmd",
+                vec!["/C".to_string(), "echo".to_string(), "hello".to_string()],
+            )
+            .await;
+
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_tool_runtime_command_blocked() {
-        let profile = ToolSandboxProfile::custom(
-            vec!["echo".to_string()],
-            vec![],
-            30000,
-            10 * 1024 * 1024,
-        );
+        let profile =
+            ToolSandboxProfile::custom(vec!["echo".to_string()], vec![], 30000, 10 * 1024 * 1024);
         let runtime = ToolRuntime::new(profile);
-        
-        let result = runtime.execute_command("rm", vec!["-rf".to_string(), "/".to_string()]).await;
+
+        let result = runtime
+            .execute_command("rm", vec!["-rf".to_string(), "/".to_string()])
+            .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_llm_utilities_call() {
-        let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), false));
+        let provider = Box::new(MockLlmProvider::new(
+            "test".to_string(),
+            "gpt-4".to_string(),
+            false,
+        ));
         let router = ModelRouter::new(vec![provider]);
         let utils = LlmUtilities::new(router);
 
@@ -708,7 +726,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_utilities_call_with_retry() {
-        let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), false));
+        let provider = Box::new(MockLlmProvider::new(
+            "test".to_string(),
+            "gpt-4".to_string(),
+            false,
+        ));
         let router = ModelRouter::new(vec![provider]);
         let utils = LlmUtilities::new(router);
 
@@ -718,13 +740,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_utilities_call_stream() {
-        let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), false));
+        let provider = Box::new(MockLlmProvider::new(
+            "test".to_string(),
+            "gpt-4".to_string(),
+            false,
+        ));
         let router = ModelRouter::new(vec![provider]);
         let utils = LlmUtilities::new(router);
 
-        let result = utils.call_stream("test prompt", |_chunk| {
-            // Just verify the callback is called
-        }).await.unwrap();
+        let result = utils
+            .call_stream("test prompt", |_chunk| {
+                // Just verify the callback is called
+            })
+            .await
+            .unwrap();
 
         assert!(result.contains("gpt-4"));
     }

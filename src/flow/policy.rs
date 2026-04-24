@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::flow::{Node, NodeConfig, SharedState, Input, Output, Action};
+use crate::flow::{Action, Input, Node, NodeConfig, Output, SharedState};
 
 /// Policy violation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +76,11 @@ impl ConstitutionPolicy {
     }
 
     /// Validate after node execution
-    pub fn validate_post(&self, state: &SharedState, output: &Output) -> Result<Vec<PolicyViolation>> {
+    pub fn validate_post(
+        &self,
+        state: &SharedState,
+        output: &Output,
+    ) -> Result<Vec<PolicyViolation>> {
         if !self.enabled {
             return Ok(Vec::new());
         }
@@ -125,19 +129,22 @@ impl Node for PolicyNode {
 
     fn prep(&self, state: &SharedState) -> Result<Input> {
         let input = self.inner.prep(state)?;
-        
+
         // Pre-validation
-        let violations = self.policy.validate_pre(state, &input)
+        let violations = self
+            .policy
+            .validate_pre(state, &input)
             .context("Pre-policy validation failed")?;
-        
+
         if !violations.is_empty() {
-            let error_msg: String = violations.iter()
+            let error_msg: String = violations
+                .iter()
                 .map(|v| format!("{}: {}", v.rule_id, v.description))
                 .collect::<Vec<_>>()
                 .join("; ");
             anyhow::bail!("Policy violations detected: {}", error_msg);
         }
-        
+
         Ok(input)
     }
 
@@ -158,7 +165,7 @@ impl Node for PolicyNode {
                 eprintln!("Post-policy validation error: {}", e);
             }
         }
-        
+
         self.inner.post(state, output)
     }
 
@@ -189,7 +196,7 @@ impl PolicyRule for InputSizeLimitRule {
 
     fn validate_pre(&self, _state: &SharedState, input: &Input) -> Result<(), PolicyViolation> {
         let size = serde_json::to_vec(input).map(|v| v.len()).unwrap_or(0);
-        
+
         if size > self.max_size_bytes {
             Err(PolicyViolation {
                 rule_id: self.id(),
@@ -233,7 +240,7 @@ impl PolicyRule for ContentFilterRule {
 
     fn validate_post(&self, _state: &SharedState, output: &Output) -> Result<(), PolicyViolation> {
         let output_str = serde_json::to_string(output).unwrap_or_default();
-        
+
         for word in &self.forbidden_words {
             if output_str.to_lowercase().contains(&word.to_lowercase()) {
                 return Err(PolicyViolation {
@@ -244,7 +251,7 @@ impl PolicyRule for ContentFilterRule {
                 });
             }
         }
-        
+
         Ok(())
     }
 }
@@ -334,11 +341,11 @@ mod tests {
     fn test_input_size_limit_rule() {
         let rule = InputSizeLimitRule::new(100);
         let state = SharedState::new();
-        
+
         // Small input should pass
         let small_input = serde_json::json!({ "key": "value" });
         assert!(rule.validate_pre(&state, &small_input).is_ok());
-        
+
         // Large input should fail
         let large_input = serde_json::json!({ "key": "x".repeat(200) });
         assert!(rule.validate_pre(&state, &large_input).is_err());
@@ -348,11 +355,11 @@ mod tests {
     fn test_content_filter_rule() {
         let rule = ContentFilterRule::new(vec!["forbidden".to_string()]);
         let state = SharedState::new();
-        
+
         // Clean output should pass
         let clean_output = serde_json::json!({ "text": "hello world" });
         assert!(rule.validate_post(&state, &clean_output).is_ok());
-        
+
         // Forbidden content should fail
         let bad_output = serde_json::json!({ "text": "this is forbidden" });
         assert!(rule.validate_post(&state, &bad_output).is_err());
@@ -361,12 +368,12 @@ mod tests {
     #[test]
     fn test_state_mutation_rule() {
         let rule = StateMutationRule::new(false);
-        
+
         // Empty state should pass
         let clean_state = SharedState::new();
         let output = serde_json::json!({});
         assert!(rule.validate_post(&clean_state, &output).is_ok());
-        
+
         // State with working data should fail
         let mut dirty_state = SharedState::new();
         dirty_state.set_working("key".to_string(), serde_json::json!("value"));
@@ -378,14 +385,14 @@ mod tests {
         let mut policy = ConstitutionPolicy::new();
         policy.add_rule(Arc::new(InputSizeLimitRule::new(100)));
         policy.add_rule(Arc::new(ContentFilterRule::new(vec!["bad".to_string()])));
-        
+
         let state = SharedState::new();
         let input = serde_json::json!({ "key": "value" });
-        
+
         // Valid input should pass
         let violations = policy.validate_pre(&state, &input).unwrap();
         assert!(violations.is_empty());
-        
+
         // Invalid input should have violations
         let large_input = serde_json::json!({ "key": "x".repeat(200) });
         let violations = policy.validate_pre(&state, &large_input).unwrap();
@@ -397,13 +404,13 @@ mod tests {
         let inner = Arc::new(TestNode::new("test".to_string()));
         let mut policy = ConstitutionPolicy::new();
         policy.add_rule(Arc::new(InputSizeLimitRule::new(1000)));
-        
+
         let policy_node = PolicyNode::new(inner, Arc::new(policy));
-        
+
         let mut state = SharedState::new();
         let input = policy_node.prep(&state).unwrap();
         let output = policy_node.exec(input).await.unwrap();
-        
+
         let action = policy_node.post(&mut state, output);
         assert_eq!(action, "continue");
     }

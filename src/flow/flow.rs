@@ -1,10 +1,10 @@
 //! Flow execution engine with validation and retry support.
 
 use crate::flow::{Action, Input, Node, NodeConfig, NodeId, Output, SharedState};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Flow - a directed graph of nodes with state transitions
@@ -44,7 +44,9 @@ impl Flow {
         let mut current = self.start.clone();
 
         loop {
-            let node = self.nodes.get(&current)
+            let node = self
+                .nodes
+                .get(&current)
                 .ok_or_else(|| anyhow::anyhow!("Node not found: {}", current))?;
 
             // Prepare input from state
@@ -67,7 +69,11 @@ impl Flow {
     }
 
     /// Execute a node with retry logic
-    async fn execute_with_retry(&self, node: &Arc<dyn Node>, input: serde_json::Value) -> Result<serde_json::Value> {
+    async fn execute_with_retry(
+        &self,
+        node: &Arc<dyn Node>,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let config = node.config();
         let mut last_error = None;
 
@@ -77,7 +83,9 @@ impl Flow {
                 Err(e) => {
                     last_error = Some(e);
                     if attempt < config.retries {
-                        let delay = Duration::from_millis(config.retry_delay_ms * 2_u64.pow(attempt as u32));
+                        let delay = Duration::from_millis(
+                            config.retry_delay_ms * 2_u64.pow(attempt as u32),
+                        );
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -100,14 +108,19 @@ impl Flow {
                 bail!("Transition source node '{}' not found", node_id);
             }
             if !self.nodes.contains_key(target_id) {
-                bail!("Transition target '{}' (from {} via {}) not found", target_id, node_id, action);
+                bail!(
+                    "Transition target '{}' (from {} via {}) not found",
+                    target_id,
+                    node_id,
+                    action
+                );
             }
         }
 
         // Check for unreachable nodes
         let mut reachable = std::collections::HashSet::new();
         let mut to_visit = vec![self.start.clone()];
-        
+
         while let Some(node_id) = to_visit.pop() {
             if reachable.insert(node_id.clone()) {
                 // Find all transitions from this node
@@ -127,9 +140,11 @@ impl Flow {
 
         // Check for dead ends (nodes with no outgoing transitions)
         for node_id in self.nodes.keys() {
-            let has_outgoing = self.transitions.iter()
+            let has_outgoing = self
+                .transitions
+                .iter()
                 .any(|((source, _), _)| source == node_id);
-            
+
             if !has_outgoing && node_id != &self.start {
                 // This is a terminal node, which is allowed
                 // But warn if it's not explicitly marked as terminal
@@ -219,8 +234,10 @@ impl FlowBuilder {
 
     /// Build the flow, validating structure
     pub fn build(self) -> Result<Flow> {
-        let start = self.start.ok_or_else(|| anyhow::anyhow!("Start node not set"))?;
-        
+        let start = self
+            .start
+            .ok_or_else(|| anyhow::anyhow!("Start node not set"))?;
+
         if self.nodes.is_empty() {
             bail!("Flow must have at least one node");
         }
@@ -262,11 +279,7 @@ impl FlowNode {
 
     /// Create a FlowNode with custom configuration
     pub fn with_config(id: NodeId, flow: Flow, config: NodeConfig) -> Self {
-        Self {
-            id,
-            flow,
-            config,
-        }
+        Self { id, flow, config }
     }
 
     /// Get the inner flow
@@ -294,11 +307,11 @@ impl Node for FlowNode {
     async fn exec(&self, input: Input) -> Result<Output> {
         // Deserialize input to SharedState
         let mut state: SharedState = serde_json::from_value(input)?;
-        
+
         // Execute the nested flow (Flow is now cloneable via Arc)
         let mut flow = self.flow.clone();
         flow.run(&mut state).await?;
-        
+
         // Return the updated state as output
         Ok(serde_json::to_value(state)?)
     }
@@ -319,7 +332,7 @@ impl Node for FlowNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::{NodeConfig, Input, Output};
+    use crate::flow::{Input, NodeConfig, Output};
     use async_trait::async_trait;
 
     // Test node implementation
@@ -372,7 +385,11 @@ mod tests {
             .start("node1".to_string())
             .add_node("node1".to_string(), Arc::new(node1))
             .add_node("node2".to_string(), Arc::new(node2))
-            .add_transition("node1".to_string(), "continue".to_string(), "node2".to_string())
+            .add_transition(
+                "node1".to_string(),
+                "continue".to_string(),
+                "node2".to_string(),
+            )
             .build();
 
         assert!(flow.is_ok());
@@ -396,7 +413,11 @@ mod tests {
         let flow = Flow::builder()
             .start("node1".to_string())
             .add_node("node1".to_string(), Arc::new(node1))
-            .add_transition("node1".to_string(), "continue".to_string(), "node2".to_string())
+            .add_transition(
+                "node1".to_string(),
+                "continue".to_string(),
+                "node2".to_string(),
+            )
             .build();
 
         assert!(flow.is_err());
@@ -420,11 +441,11 @@ mod tests {
     async fn test_flow_node() {
         let node = Arc::new(MockNode::new("test".to_string(), "output".to_string()));
         let mut state = SharedState::new();
-        
+
         let input = node.prep(&state).unwrap();
         let output = node.exec(input).await.unwrap();
         let action = node.post(&mut state, output);
-        
+
         assert_eq!(action, "continue");
         assert!(state.get_working("last_output").is_some());
     }
@@ -438,7 +459,11 @@ mod tests {
             .start("node1".to_string())
             .add_node("node1".to_string(), node1)
             .add_node("node2".to_string(), node2)
-            .add_transition("node1".to_string(), "continue".to_string(), "node2".to_string())
+            .add_transition(
+                "node1".to_string(),
+                "continue".to_string(),
+                "node2".to_string(),
+            )
             .build()
             .unwrap();
 
@@ -489,13 +514,17 @@ mod tests {
             .start("outer_node".to_string())
             .add_node("outer_node".to_string(), Arc::new(outer_node))
             .add_node("nested".to_string(), Arc::new(flow_node))
-            .add_transition("outer_node".to_string(), "continue".to_string(), "nested".to_string())
+            .add_transition(
+                "outer_node".to_string(),
+                "continue".to_string(),
+                "nested".to_string(),
+            )
             .build()
             .unwrap();
 
         let mut state = SharedState::new();
         state.set_input("test".to_string(), serde_json::json!("value"));
-        
+
         outer_flow.run(&mut state).await.unwrap();
 
         // Verify both nodes executed
@@ -521,9 +550,21 @@ mod tests {
     #[test]
     fn test_flow_builder_linear() {
         let nodes = vec![
-            ("node1".to_string(), Arc::new(MockNode::new("node1".to_string(), "output1".to_string())) as Arc<dyn Node>),
-            ("node2".to_string(), Arc::new(MockNode::new("node2".to_string(), "output2".to_string())) as Arc<dyn Node>),
-            ("node3".to_string(), Arc::new(MockNode::new("node3".to_string(), "output3".to_string())) as Arc<dyn Node>),
+            (
+                "node1".to_string(),
+                Arc::new(MockNode::new("node1".to_string(), "output1".to_string()))
+                    as Arc<dyn Node>,
+            ),
+            (
+                "node2".to_string(),
+                Arc::new(MockNode::new("node2".to_string(), "output2".to_string()))
+                    as Arc<dyn Node>,
+            ),
+            (
+                "node3".to_string(),
+                Arc::new(MockNode::new("node3".to_string(), "output3".to_string()))
+                    as Arc<dyn Node>,
+            ),
         ];
 
         let flow = FlowBuilder::linear(nodes).unwrap().build().unwrap();
@@ -533,8 +574,16 @@ mod tests {
     #[test]
     fn test_flow_builder_add_nodes() {
         let nodes = vec![
-            ("node1".to_string(), Arc::new(MockNode::new("node1".to_string(), "output1".to_string())) as Arc<dyn Node>),
-            ("node2".to_string(), Arc::new(MockNode::new("node2".to_string(), "output2".to_string())) as Arc<dyn Node>),
+            (
+                "node1".to_string(),
+                Arc::new(MockNode::new("node1".to_string(), "output1".to_string()))
+                    as Arc<dyn Node>,
+            ),
+            (
+                "node2".to_string(),
+                Arc::new(MockNode::new("node2".to_string(), "output2".to_string()))
+                    as Arc<dyn Node>,
+            ),
         ];
 
         let flow = FlowBuilder::new()

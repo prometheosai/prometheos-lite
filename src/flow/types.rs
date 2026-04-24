@@ -144,27 +144,36 @@ mod tests {
     fn test_shared_state_with_input() {
         let mut input = HashMap::new();
         input.insert("task".to_string(), serde_json::json!("test task"));
-        
+
         let state = SharedState::with_input(input.clone());
-        assert_eq!(state.get_input("task"), Some(&serde_json::json!("test task")));
+        assert_eq!(
+            state.get_input("task"),
+            Some(&serde_json::json!("test task"))
+        );
     }
 
     #[test]
     fn test_shared_state_getters_setters() {
         let mut state = SharedState::new();
-        
+
         state.set_input("key1".to_string(), serde_json::json!("value1"));
         assert_eq!(state.get_input("key1"), Some(&serde_json::json!("value1")));
-        
+
         state.set_context("key2".to_string(), serde_json::json!("value2"));
-        assert_eq!(state.get_context("key2"), Some(&serde_json::json!("value2")));
-        
+        assert_eq!(
+            state.get_context("key2"),
+            Some(&serde_json::json!("value2"))
+        );
+
         state.set_working("key3".to_string(), serde_json::json!("value3"));
-        assert_eq!(state.get_working("key3"), Some(&serde_json::json!("value3")));
-        
+        assert_eq!(
+            state.get_working("key3"),
+            Some(&serde_json::json!("value3"))
+        );
+
         state.set_output("key4".to_string(), serde_json::json!("value4"));
         assert_eq!(state.get_output("key4"), Some(&serde_json::json!("value4")));
-        
+
         state.set_meta("key5".to_string(), serde_json::json!("value5"));
         assert_eq!(state.get_meta("key5"), Some(&serde_json::json!("value5")));
     }
@@ -174,7 +183,7 @@ mod tests {
         let mut state = SharedState::new();
         state.set_working("key1".to_string(), serde_json::json!("value1"));
         state.set_working("key2".to_string(), serde_json::json!("value2"));
-        
+
         assert_eq!(state.working.len(), 2);
         state.clear_working();
         assert!(state.working.is_empty());
@@ -184,13 +193,13 @@ mod tests {
     fn test_shared_state_merge() {
         let mut state1 = SharedState::new();
         state1.set_input("key1".to_string(), serde_json::json!("old"));
-        
+
         let mut state2 = SharedState::new();
         state2.set_input("key1".to_string(), serde_json::json!("new"));
         state2.set_input("key2".to_string(), serde_json::json!("value2"));
-        
+
         state1.merge(state2);
-        
+
         assert_eq!(state1.get_input("key1"), Some(&serde_json::json!("new")));
         assert_eq!(state1.get_input("key2"), Some(&serde_json::json!("value2")));
     }
@@ -199,10 +208,13 @@ mod tests {
     fn test_shared_state_serialization() {
         let mut state = SharedState::new();
         state.set_input("task".to_string(), serde_json::json!("test"));
-        
+
         let serialized = serde_json::to_string(&state).unwrap();
         let deserialized: SharedState = serde_json::from_str(&serialized).unwrap();
-        
-        assert_eq!(deserialized.get_input("task"), Some(&serde_json::json!("test")));
+
+        assert_eq!(
+            deserialized.get_input("task"),
+            Some(&serde_json::json!("test"))
+        );
     }
 }

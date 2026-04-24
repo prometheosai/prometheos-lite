@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::flow::{Node, NodeConfig, Input, Output, Action, SharedState};
+use crate::flow::{Action, Input, Node, NodeConfig, Output, SharedState};
 
 /// Memory entry with metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,26 +54,32 @@ impl MemoryDb {
     pub fn new(db_path: PathBuf) -> Result<Self> {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open database at: {}", db_path.display()))?;
-        
-        let db = Self { conn: Arc::new(Mutex::new(conn)) };
+
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
         db.init_schema()?;
         Ok(db)
     }
 
     /// Create an in-memory database for testing
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .context("Failed to create in-memory database")?;
-        
-        let db = Self { conn: Arc::new(Mutex::new(conn)) };
+        let conn = Connection::open_in_memory().context("Failed to create in-memory database")?;
+
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
         db.init_schema()?;
         Ok(db)
     }
 
     /// Initialize database schema
     fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,
@@ -85,7 +91,8 @@ impl MemoryDb {
                 updated_at TEXT NOT NULL
             )",
             [],
-        ).context("Failed to create memories table")?;
+        )
+        .context("Failed to create memories table")?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS relationships (
@@ -99,38 +106,45 @@ impl MemoryDb {
                 FOREIGN KEY (target_id) REFERENCES memories(id)
             )",
             [],
-        ).context("Failed to create relationships table")?;
+        )
+        .context("Failed to create relationships table")?;
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_type ON memories(memory_type)",
             [],
-        ).context("Failed to create memory_type index")?;
+        )
+        .context("Failed to create memory_type index")?;
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_relationship_source ON relationships(source_id)",
             [],
-        ).context("Failed to create relationship_source index")?;
+        )
+        .context("Failed to create relationship_source index")?;
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_relationship_target ON relationships(target_id)",
             [],
-        ).context("Failed to create relationship_target index")?;
+        )
+        .context("Failed to create relationship_target index")?;
 
         Ok(())
     }
 
     /// Create a new memory entry
     pub fn create_memory(&self, memory: &Memory) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+
         let embedding_blob = memory.embedding.as_ref().map(|e| {
             e.iter()
                 .flat_map(|&f| f.to_le_bytes().to_vec())
                 .collect::<Vec<u8>>()
         });
 
-        let metadata_json = serde_json::to_string(&memory.metadata)
-            .context("Failed to serialize metadata")?;
+        let metadata_json =
+            serde_json::to_string(&memory.metadata).context("Failed to serialize metadata")?;
 
         let memory_type_str = match memory.memory_type {
             MemoryType::Episodic => "episodic",
@@ -158,15 +172,19 @@ impl MemoryDb {
 
     /// Get a memory by ID
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
-        let mut stmt = conn.prepare(
-            "SELECT id, content, memory_type, embedding, metadata, created_at, updated_at
-             FROM memories WHERE id = ?1"
-        ).context("Failed to prepare get_memory query")?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
-        let mut rows = stmt.query(params![id])
-            .context("Failed to query memory")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, memory_type, embedding, metadata, created_at, updated_at
+             FROM memories WHERE id = ?1",
+            )
+            .context("Failed to prepare get_memory query")?;
+
+        let mut rows = stmt.query(params![id]).context("Failed to query memory")?;
 
         if let Some(row) = rows.next()? {
             Ok(Some(self.row_to_memory(row)?))
@@ -177,8 +195,11 @@ impl MemoryDb {
 
     /// Get all memories of a specific type
     pub fn get_memories_by_type(&self, memory_type: MemoryType) -> Result<Vec<Memory>> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+
         let memory_type_str = match memory_type {
             MemoryType::Episodic => "episodic",
             MemoryType::Semantic => "semantic",
@@ -186,14 +207,16 @@ impl MemoryDb {
             MemoryType::Working => "working",
         };
 
-        let mut stmt = conn.prepare(
-            "SELECT id, content, memory_type, embedding, metadata, created_at, updated_at
-             FROM memories WHERE memory_type = ?1"
-        ).context("Failed to prepare get_memories_by_type query")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, memory_type, embedding, metadata, created_at, updated_at
+             FROM memories WHERE memory_type = ?1",
+            )
+            .context("Failed to prepare get_memories_by_type query")?;
 
-        let rows = stmt.query_map(params![memory_type_str], |row| {
-            self.row_to_memory(row)
-        }).context("Failed to query memories by type")?;
+        let rows = stmt
+            .query_map(params![memory_type_str], |row| self.row_to_memory(row))
+            .context("Failed to query memories by type")?;
 
         let mut memories = Vec::new();
         for row in rows {
@@ -205,8 +228,11 @@ impl MemoryDb {
 
     /// Create a relationship between memories
     pub fn create_relationship(&self, relationship: &MemoryRelationship) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+
         conn.execute(
             "INSERT INTO relationships (id, source_id, target_id, relationship_type, strength, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -225,25 +251,32 @@ impl MemoryDb {
 
     /// Get relationships for a memory
     pub fn get_relationships(&self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
-        let mut stmt = conn.prepare(
-            "SELECT id, source_id, target_id, relationship_type, strength, created_at
-             FROM relationships WHERE source_id = ?1 OR target_id = ?1"
-        ).context("Failed to prepare get_relationships query")?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
-        let rows = stmt.query_map(params![memory_id], |row| {
-            Ok(MemoryRelationship {
-                id: row.get(0)?,
-                source_id: row.get(1)?,
-                target_id: row.get(2)?,
-                relationship_type: row.get(3)?,
-                strength: row.get(4)?,
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                    .unwrap()
-                    .with_timezone(&Utc),
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source_id, target_id, relationship_type, strength, created_at
+             FROM relationships WHERE source_id = ?1 OR target_id = ?1",
+            )
+            .context("Failed to prepare get_relationships query")?;
+
+        let rows = stmt
+            .query_map(params![memory_id], |row| {
+                Ok(MemoryRelationship {
+                    id: row.get(0)?,
+                    source_id: row.get(1)?,
+                    target_id: row.get(2)?,
+                    relationship_type: row.get(3)?,
+                    strength: row.get(4)?,
+                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
             })
-        }).context("Failed to query relationships")?;
+            .context("Failed to query relationships")?;
 
         let mut relationships = Vec::new();
         for row in rows {
@@ -255,17 +288,22 @@ impl MemoryDb {
 
     /// Search memories by content (simple text search)
     pub fn search_memories(&self, query: &str) -> Result<Vec<Memory>> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
-        let mut stmt = conn.prepare(
-            "SELECT id, content, memory_type, embedding, metadata, created_at, updated_at
-             FROM memories WHERE content LIKE ?1"
-        ).context("Failed to prepare search_memories query")?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, memory_type, embedding, metadata, created_at, updated_at
+             FROM memories WHERE content LIKE ?1",
+            )
+            .context("Failed to prepare search_memories query")?;
 
         let search_pattern = format!("%{}%", query);
-        let rows = stmt.query_map(params![search_pattern], |row| {
-            self.row_to_memory(row)
-        }).context("Failed to search memories")?;
+        let rows = stmt
+            .query_map(params![search_pattern], |row| self.row_to_memory(row))
+            .context("Failed to search memories")?;
 
         let mut memories = Vec::new();
         for row in rows {
@@ -277,11 +315,17 @@ impl MemoryDb {
 
     /// Delete a memory
     pub fn delete_memory(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
-        
-        conn.execute("DELETE FROM relationships WHERE source_id = ?1 OR target_id = ?1", params![id])
-            .context("Failed to delete relationships")?;
-        
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+
+        conn.execute(
+            "DELETE FROM relationships WHERE source_id = ?1 OR target_id = ?1",
+            params![id],
+        )
+        .context("Failed to delete relationships")?;
+
         conn.execute("DELETE FROM memories WHERE id = ?1", params![id])
             .context("Failed to delete memory")?;
 
@@ -366,8 +410,9 @@ impl LocalEmbeddingProvider {
 impl EmbeddingProvider for LocalEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/embed", self.base_url);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .json(&serde_json::json!({ "text": text }))
             .send()
@@ -375,7 +420,10 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
             .context("Failed to send embedding request")?;
 
         if !response.status().is_success() {
-            anyhow::bail!("Embedding request failed with status: {}", response.status());
+            anyhow::bail!(
+                "Embedding request failed with status: {}",
+                response.status()
+            );
         }
 
         let result: serde_json::Value = response
@@ -387,7 +435,11 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
             .as_array()
             .context("Missing embedding in response")?
             .iter()
-            .map(|v| v.as_f64().context("Invalid embedding value").map(|f| f as f32))
+            .map(|v| {
+                v.as_f64()
+                    .context("Invalid embedding value")
+                    .map(|f| f as f32)
+            })
             .collect::<Result<Vec<f32>>>()?;
 
         Ok(embedding)
@@ -423,8 +475,9 @@ impl ExternalEmbeddingProvider {
 impl EmbeddingProvider for ExternalEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/embeddings", self.base_url);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&serde_json::json!({
@@ -436,7 +489,10 @@ impl EmbeddingProvider for ExternalEmbeddingProvider {
             .context("Failed to send embedding request")?;
 
         if !response.status().is_success() {
-            anyhow::bail!("Embedding request failed with status: {}", response.status());
+            anyhow::bail!(
+                "Embedding request failed with status: {}",
+                response.status()
+            );
         }
 
         let result: serde_json::Value = response
@@ -448,7 +504,11 @@ impl EmbeddingProvider for ExternalEmbeddingProvider {
             .as_array()
             .context("Missing embedding in response")?
             .iter()
-            .map(|v| v.as_f64().context("Invalid embedding value").map(|f| f as f32))
+            .map(|v| {
+                v.as_f64()
+                    .context("Invalid embedding value")
+                    .map(|f| f as f32)
+            })
             .collect::<Result<Vec<f32>>>()?;
 
         Ok(embedding)
@@ -474,7 +534,7 @@ impl FallbackEmbeddingProvider {
 impl EmbeddingProvider for FallbackEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let mut last_error = None;
-        
+
         for provider in &self.providers {
             match provider.embed(text).await {
                 Ok(embedding) => return Ok(embedding),
@@ -489,10 +549,7 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
     }
 
     fn dimension(&self) -> usize {
-        self.providers
-            .first()
-            .map(|p| p.dimension())
-            .unwrap_or(0)
+        self.providers.first().map(|p| p.dimension()).unwrap_or(0)
     }
 }
 
@@ -552,7 +609,7 @@ impl MemoryService {
         let query_embedding = self.embedding_provider.embed(query).await?;
 
         let all_memories = self.db.get_memories_by_type(MemoryType::Semantic)?;
-        
+
         let mut scored_memories: Vec<(Memory, f32)> = all_memories
             .into_iter()
             .filter_map(|memory| {
@@ -578,7 +635,8 @@ impl MemoryService {
         content: String,
         metadata: serde_json::Value,
     ) -> Result<String> {
-        self.create_memory(content, MemoryType::Episodic, metadata).await
+        self.create_memory(content, MemoryType::Episodic, metadata)
+            .await
     }
 
     /// Create a relationship between memories
@@ -659,25 +717,28 @@ impl Node for ContextLoaderNode {
             .get_input(&self.query_key)
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        
+
         Ok(serde_json::json!({ "query": query }))
     }
 
     async fn exec(&self, input: Input) -> Result<Output> {
-        let query = input["query"]
-            .as_str()
-            .context("Missing query in input")?;
+        let query = input["query"].as_str().context("Missing query in input")?;
 
-        let memories = self.memory_service.semantic_search(query, self.limit).await?;
-        
+        let memories = self
+            .memory_service
+            .semantic_search(query, self.limit)
+            .await?;
+
         let memories_json: Vec<serde_json::Value> = memories
             .into_iter()
-            .map(|m| serde_json::json!({
-                "id": m.id,
-                "content": m.content,
-                "memory_type": format!("{:?}", m.memory_type),
-                "metadata": m.metadata,
-            }))
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "content": m.content,
+                    "memory_type": format!("{:?}", m.memory_type),
+                    "metadata": m.metadata,
+                })
+            })
             .collect();
 
         Ok(serde_json::json!({ "memories": memories_json }))
@@ -732,10 +793,12 @@ impl Node for MemoryWriteNode {
             .get_input(&self.content_key)
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        
-        let metadata = state.get_meta("memory_metadata").cloned()
+
+        let metadata = state
+            .get_meta("memory_metadata")
+            .cloned()
             .unwrap_or(serde_json::json!({}));
-        
+
         Ok(serde_json::json!({
             "content": content,
             "metadata": metadata
@@ -747,10 +810,11 @@ impl Node for MemoryWriteNode {
             .as_str()
             .context("Missing content in input")?
             .to_string();
-        
+
         let metadata = input["metadata"].clone();
 
-        let memory_id = self.memory_service
+        let memory_id = self
+            .memory_service
             .create_memory(content, self.memory_type.clone(), metadata)
             .await?;
 
@@ -782,7 +846,7 @@ mod tests {
     #[test]
     fn test_create_and_get_memory() {
         let db = MemoryDb::in_memory().unwrap();
-        
+
         let memory = Memory {
             id: Uuid::new_v4().to_string(),
             content: "Test memory content".to_string(),
@@ -794,7 +858,7 @@ mod tests {
         };
 
         db.create_memory(&memory).unwrap();
-        
+
         let retrieved = db.get_memory(&memory.id).unwrap();
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
@@ -805,7 +869,7 @@ mod tests {
     #[test]
     fn test_memories_by_type() {
         let db = MemoryDb::in_memory().unwrap();
-        
+
         let episodic = Memory {
             id: Uuid::new_v4().to_string(),
             content: "Episodic memory".to_string(),
@@ -841,7 +905,7 @@ mod tests {
     #[test]
     fn test_create_relationship() {
         let db = MemoryDb::in_memory().unwrap();
-        
+
         let memory1 = Memory {
             id: Uuid::new_v4().to_string(),
             content: "Memory 1".to_string(),
@@ -884,7 +948,7 @@ mod tests {
     #[test]
     fn test_search_memories() {
         let db = MemoryDb::in_memory().unwrap();
-        
+
         let memory = Memory {
             id: Uuid::new_v4().to_string(),
             content: "The quick brown fox jumps over the lazy dog".to_string(),
@@ -908,7 +972,7 @@ mod tests {
     #[test]
     fn test_delete_memory() {
         let db = MemoryDb::in_memory().unwrap();
-        
+
         let memory = Memory {
             id: Uuid::new_v4().to_string(),
             content: "To be deleted".to_string(),
@@ -920,12 +984,12 @@ mod tests {
         };
 
         db.create_memory(&memory).unwrap();
-        
+
         let retrieved = db.get_memory(&memory.id).unwrap();
         assert!(retrieved.is_some());
 
         db.delete_memory(&memory.id).unwrap();
-        
+
         let retrieved = db.get_memory(&memory.id).unwrap();
         assert!(retrieved.is_none());
     }
@@ -955,7 +1019,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_embedding_provider() {
         let provider = MockEmbeddingProvider::new(128);
-        
+
         let embedding = provider.embed("test text").await.unwrap();
         assert_eq!(embedding.len(), 128);
         assert_eq!(provider.dimension(), 128);
@@ -965,9 +1029,9 @@ mod tests {
     async fn test_fallback_embedding_provider() {
         let provider1 = Box::new(MockEmbeddingProvider::new(128)) as Box<dyn EmbeddingProvider>;
         let provider2 = Box::new(MockEmbeddingProvider::new(256)) as Box<dyn EmbeddingProvider>;
-        
+
         let fallback = FallbackEmbeddingProvider::new(vec![provider1, provider2]);
-        
+
         let embedding = fallback.embed("test").await.unwrap();
         assert_eq!(embedding.len(), 128);
         assert_eq!(fallback.dimension(), 128);
@@ -979,11 +1043,14 @@ mod tests {
         let provider = Box::new(MockEmbeddingProvider::new(128)) as Box<dyn EmbeddingProvider>;
         let service = MemoryService::new(db, provider);
 
-        let id = service.create_memory(
-            "Test memory content".to_string(),
-            MemoryType::Semantic,
-            serde_json::json!({ "key": "value" }),
-        ).await.unwrap();
+        let id = service
+            .create_memory(
+                "Test memory content".to_string(),
+                MemoryType::Semantic,
+                serde_json::json!({ "key": "value" }),
+            )
+            .await
+            .unwrap();
 
         let memory = service.get_memory(&id).unwrap();
         assert!(memory.is_some());
@@ -998,10 +1065,13 @@ mod tests {
         let provider = Box::new(MockEmbeddingProvider::new(128)) as Box<dyn EmbeddingProvider>;
         let service = MemoryService::new(db, provider);
 
-        let id = service.log_episode(
-            "Episode content".to_string(),
-            serde_json::json!({ "type": "conversation" }),
-        ).await.unwrap();
+        let id = service
+            .log_episode(
+                "Episode content".to_string(),
+                serde_json::json!({ "type": "conversation" }),
+            )
+            .await
+            .unwrap();
 
         let memory = service.get_memory(&id).unwrap();
         assert!(memory.is_some());
@@ -1015,17 +1085,23 @@ mod tests {
         let provider = Box::new(MockEmbeddingProvider::new(128)) as Box<dyn EmbeddingProvider>;
         let service = MemoryService::new(db, provider);
 
-        service.create_memory(
-            "First semantic memory".to_string(),
-            MemoryType::Semantic,
-            serde_json::json!({}),
-        ).await.unwrap();
+        service
+            .create_memory(
+                "First semantic memory".to_string(),
+                MemoryType::Semantic,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
 
-        service.create_memory(
-            "Second semantic memory".to_string(),
-            MemoryType::Semantic,
-            serde_json::json!({}),
-        ).await.unwrap();
+        service
+            .create_memory(
+                "Second semantic memory".to_string(),
+                MemoryType::Semantic,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
 
         let results = service.semantic_search("semantic", 10).await.unwrap();
         assert!(results.len() > 0);
@@ -1051,11 +1127,14 @@ mod tests {
         let service = Arc::new(MemoryService::new(db, provider));
 
         // Create some semantic memories
-        service.create_memory(
-            "Test memory about coding".to_string(),
-            MemoryType::Semantic,
-            serde_json::json!({}),
-        ).await.unwrap();
+        service
+            .create_memory(
+                "Test memory about coding".to_string(),
+                MemoryType::Semantic,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
 
         let node = ContextLoaderNode::new(
             "context_loader".to_string(),
@@ -1090,8 +1169,14 @@ mod tests {
         );
 
         let mut state = SharedState::new();
-        state.set_input("content".to_string(), serde_json::json!("This is an episode"));
-        state.set_meta("memory_metadata".to_string(), serde_json::json!({ "type": "test" }));
+        state.set_input(
+            "content".to_string(),
+            serde_json::json!("This is an episode"),
+        );
+        state.set_meta(
+            "memory_metadata".to_string(),
+            serde_json::json!({ "type": "test" }),
+        );
 
         let input = node.prep(&state).unwrap();
         let output = node.exec(input).await.unwrap();

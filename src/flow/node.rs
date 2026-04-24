@@ -147,14 +147,14 @@ mod tests {
         };
 
         assert_eq!(node.id(), "test_node");
-        
+
         let state = SharedState::new();
         let input = node.prep(&state).unwrap();
         assert!(input.is_object());
-        
+
         let output = node.exec(input).await.unwrap();
         assert!(output.is_object());
-        
+
         let mut state = SharedState::new();
         let action = node.post(&mut state, output);
         assert_eq!(action, "continue");

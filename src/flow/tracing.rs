@@ -90,7 +90,14 @@ impl Tracer {
     }
 
     /// Log an event
-    pub fn log(&mut self, level: LogLevel, event_type: EventType, node_id: Option<NodeId>, message: String, metadata: serde_json::Value) {
+    pub fn log(
+        &mut self,
+        level: LogLevel,
+        event_type: EventType,
+        node_id: Option<NodeId>,
+        message: String,
+        metadata: serde_json::Value,
+    ) {
         if !self.enabled || level < self.min_level {
             return;
         }
@@ -106,7 +113,13 @@ impl Tracer {
     }
 
     /// Add a timeline event
-    pub fn add_timeline_event(&mut self, event_type: EventType, node_id: Option<NodeId>, duration_ms: Option<u64>, details: serde_json::Value) {
+    pub fn add_timeline_event(
+        &mut self,
+        event_type: EventType,
+        node_id: Option<NodeId>,
+        duration_ms: Option<u64>,
+        details: serde_json::Value,
+    ) {
         if !self.enabled {
             return;
         }
@@ -132,7 +145,10 @@ impl Tracer {
 
     /// Get logs for a specific node
     pub fn get_logs_for_node(&self, node_id: &NodeId) -> Vec<&LogEntry> {
-        self.logs.iter().filter(|log| log.node_id.as_ref() == Some(node_id)).collect()
+        self.logs
+            .iter()
+            .filter(|log| log.node_id.as_ref() == Some(node_id))
+            .collect()
     }
 
     /// Get timeline
@@ -148,12 +164,14 @@ impl Tracer {
 
     /// Export logs as JSON
     pub fn export_logs(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.logs).map_err(|e| anyhow::anyhow!("Failed to export logs: {}", e))
+        serde_json::to_string_pretty(&self.logs)
+            .map_err(|e| anyhow::anyhow!("Failed to export logs: {}", e))
     }
 
     /// Export timeline as JSON
     pub fn export_timeline(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.timeline).map_err(|e| anyhow::anyhow!("Failed to export timeline: {}", e))
+        serde_json::to_string_pretty(&self.timeline)
+            .map_err(|e| anyhow::anyhow!("Failed to export timeline: {}", e))
     }
 }
 
@@ -181,12 +199,24 @@ pub fn create_tracer_with_level(level: LogLevel) -> SharedTracer {
 macro_rules! trace_log {
     ($tracer:expr, $level:expr, $event_type:expr, $node_id:expr, $message:expr) => {
         if let Ok(mut tracer) = $tracer.lock() {
-            tracer.log($level, $event_type, $node_id, $message.to_string(), serde_json::json!({}));
+            tracer.log(
+                $level,
+                $event_type,
+                $node_id,
+                $message.to_string(),
+                serde_json::json!({}),
+            );
         }
     };
     ($tracer:expr, $level:expr, $event_type:expr, $node_id:expr, $message:expr, $metadata:expr) => {
         if let Ok(mut tracer) = $tracer.lock() {
-            tracer.log($level, $event_type, $node_id, $message.to_string(), $metadata);
+            tracer.log(
+                $level,
+                $event_type,
+                $node_id,
+                $message.to_string(),
+                $metadata,
+            );
         }
     };
 }
@@ -208,7 +238,7 @@ mod tests {
     #[test]
     fn test_tracer_log() {
         let mut tracer = Tracer::new();
-        
+
         tracer.log(
             LogLevel::Info,
             EventType::NodeStart,
@@ -224,7 +254,7 @@ mod tests {
     #[test]
     fn test_tracer_level_filtering() {
         let mut tracer = Tracer::with_level(LogLevel::Warning);
-        
+
         tracer.log(
             LogLevel::Debug,
             EventType::NodeStart,
@@ -232,7 +262,7 @@ mod tests {
             "Debug message".to_string(),
             serde_json::json!({}),
         );
-        
+
         tracer.log(
             LogLevel::Warning,
             EventType::NodeStart,
@@ -248,7 +278,7 @@ mod tests {
     #[test]
     fn test_tracer_timeline() {
         let mut tracer = Tracer::new();
-        
+
         tracer.add_timeline_event(
             EventType::NodeStart,
             Some("node1".to_string()),
@@ -263,7 +293,7 @@ mod tests {
     #[test]
     fn test_tracer_filter_by_node() {
         let mut tracer = Tracer::new();
-        
+
         tracer.log(
             LogLevel::Info,
             EventType::NodeStart,
@@ -271,7 +301,7 @@ mod tests {
             "Message 1".to_string(),
             serde_json::json!({}),
         );
-        
+
         tracer.log(
             LogLevel::Info,
             EventType::NodeStart,
@@ -297,14 +327,14 @@ mod tests {
 
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: LogEntry = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.message, "Test");
     }
 
     #[test]
     fn test_tracer_export() {
         let mut tracer = Tracer::new();
-        
+
         tracer.log(
             LogLevel::Info,
             EventType::NodeStart,

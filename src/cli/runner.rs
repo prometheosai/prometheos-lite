@@ -47,8 +47,8 @@ impl FlowRunner {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read flow file: {}", path.display()))?;
 
-        let flow_file: FlowFile = serde_json::from_str(&content)
-            .context("Failed to parse flow file")?;
+        let flow_file: FlowFile =
+            serde_json::from_str(&content).context("Failed to parse flow file")?;
 
         let flow = Self::build_flow_from_file(flow_file)?;
         Ok(Self::new(flow))
@@ -136,19 +136,17 @@ mod tests {
             name: "test_flow".to_string(),
             description: Some("A test flow".to_string()),
             start_node: "node1".to_string(),
-            nodes: vec![
-                NodeDefinition {
-                    id: "node1".to_string(),
-                    node_type: "placeholder".to_string(),
-                    config: None,
-                },
-            ],
+            nodes: vec![NodeDefinition {
+                id: "node1".to_string(),
+                node_type: "placeholder".to_string(),
+                config: None,
+            }],
             transitions: vec![],
         };
 
         let json = serde_json::to_string(&flow_file).unwrap();
         let parsed: FlowFile = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.name, "test_flow");
         assert_eq!(parsed.start_node, "node1");
     }
@@ -159,7 +157,7 @@ mod tests {
         let node = Arc::new(PlaceholderNode::new("test".to_string()));
         builder.start("test".to_string());
         builder.add_node("test".to_string(), node);
-        
+
         let flow = builder.build().unwrap();
         let mut runner = FlowRunner::new(flow);
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::flow::{Flow, Node, SharedState, NodeId};
+use crate::flow::{Flow, Node, NodeId, SharedState};
 
 /// State snapshot for debugging
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,12 +59,15 @@ impl DebugSession {
 
     /// Add a breakpoint at a specific node
     pub fn add_breakpoint(&mut self, node_id: NodeId, condition: Option<String>) {
-        self.breakpoints.insert(node_id.clone(), Breakpoint {
-            node_id,
-            condition,
-            hit_count: 0,
-            enabled: true,
-        });
+        self.breakpoints.insert(
+            node_id.clone(),
+            Breakpoint {
+                node_id,
+                condition,
+                hit_count: 0,
+                enabled: true,
+            },
+        );
     }
 
     /// Remove a breakpoint
@@ -139,7 +142,9 @@ impl DebugSession {
                 break;
             }
 
-            let node = self.flow.get_node(&current)
+            let node = self
+                .flow
+                .get_node(&current)
                 .ok_or_else(|| anyhow::anyhow!("Node not found: {}", current))?;
 
             // Prepare input
@@ -211,7 +216,10 @@ impl DebugFlow {
     }
 
     pub async fn run_debug(&self, state: &mut SharedState) -> Result<DebugResult> {
-        let mut session = self.debug_session.lock().map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+        let mut session = self
+            .debug_session
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
         session.run_debug(state).await
     }
 }
@@ -315,7 +323,7 @@ mod tests {
 
         let json = serde_json::to_string(&snapshot).unwrap();
         let parsed: StateSnapshot = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.node_id, "test");
     }
 }

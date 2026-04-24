@@ -28,11 +28,7 @@ impl AgentNode {
 
     /// Create an AgentNode with custom configuration
     pub fn with_config(id: String, agent: Arc<dyn Agent>, config: NodeConfig) -> Self {
-        Self {
-            id,
-            agent,
-            config,
-        }
+        Self { id, agent, config }
     }
 
     /// Get the inner agent
@@ -53,18 +49,21 @@ impl Node for AgentNode {
         let input = match node_name {
             "planner" => {
                 // Planner gets the original task
-                state.get_input("task")
+                state
+                    .get_input("task")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string()
             }
             "builder" => {
                 // Coder gets the plan from meta (stored by planner)
-                state.get_meta("plan")
+                state
+                    .get_meta("plan")
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| {
                         // Fallback to input if plan not in meta
-                        state.get_input("task")
+                        state
+                            .get_input("task")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                     })
@@ -72,11 +71,13 @@ impl Node for AgentNode {
             }
             "reviewer" => {
                 // Reviewer gets the generated output from meta (stored by coder)
-                state.get_meta("generated_output")
+                state
+                    .get_meta("generated_output")
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| {
                         // Fallback to plan if generated_output not in meta
-                        state.get_meta("plan")
+                        state
+                            .get_meta("plan")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                     })
@@ -84,7 +85,8 @@ impl Node for AgentNode {
             }
             _ => {
                 // Default: try to get from input
-                state.get_input("task")
+                state
+                    .get_input("task")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string()
@@ -96,10 +98,7 @@ impl Node for AgentNode {
 
     async fn exec(&self, input: Input) -> Result<Output> {
         // Extract the input string
-        let input_str = input
-            .get("input")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let input_str = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
 
         // Run the agent
         let result = self.agent.run(input_str).await?;
@@ -110,10 +109,7 @@ impl Node for AgentNode {
     fn post(&self, state: &mut SharedState, output: Output) -> Action {
         // Store the result in the appropriate section based on the node type
         let node_name = self.agent.name();
-        let result = output
-            .get("result")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let result = output.get("result").and_then(|v| v.as_str()).unwrap_or("");
 
         match node_name {
             "planner" => {

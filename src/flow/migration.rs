@@ -13,11 +13,28 @@ pub fn create_sequential_agent_flow(llm: LlmClient) -> Flow {
 
     Flow::builder()
         .start("planner".to_string())
-        .add_node("planner".to_string(), Arc::new(AgentNode::new("planner".to_string(), planner)))
-        .add_node("coder".to_string(), Arc::new(AgentNode::new("coder".to_string(), coder)))
-        .add_node("reviewer".to_string(), Arc::new(AgentNode::new("reviewer".to_string(), reviewer)))
-        .add_transition("planner".to_string(), "continue".to_string(), "coder".to_string())
-        .add_transition("coder".to_string(), "continue".to_string(), "reviewer".to_string())
+        .add_node(
+            "planner".to_string(),
+            Arc::new(AgentNode::new("planner".to_string(), planner)),
+        )
+        .add_node(
+            "coder".to_string(),
+            Arc::new(AgentNode::new("coder".to_string(), coder)),
+        )
+        .add_node(
+            "reviewer".to_string(),
+            Arc::new(AgentNode::new("reviewer".to_string(), reviewer)),
+        )
+        .add_transition(
+            "planner".to_string(),
+            "continue".to_string(),
+            "coder".to_string(),
+        )
+        .add_transition(
+            "coder".to_string(),
+            "continue".to_string(),
+            "reviewer".to_string(),
+        )
         .build()
         .expect("Failed to build sequential agent flow")
 }
@@ -75,11 +92,28 @@ mod parity_tests {
 
         let mut flow = Flow::builder()
             .start("planner".to_string())
-            .add_node("planner".to_string(), Arc::new(AgentNode::new("planner".to_string(), planner)))
-            .add_node("coder".to_string(), Arc::new(AgentNode::new("coder".to_string(), coder)))
-            .add_node("reviewer".to_string(), Arc::new(AgentNode::new("reviewer".to_string(), reviewer)))
-            .add_transition("planner".to_string(), "continue".to_string(), "coder".to_string())
-            .add_transition("coder".to_string(), "continue".to_string(), "reviewer".to_string())
+            .add_node(
+                "planner".to_string(),
+                Arc::new(AgentNode::new("planner".to_string(), planner)),
+            )
+            .add_node(
+                "coder".to_string(),
+                Arc::new(AgentNode::new("coder".to_string(), coder)),
+            )
+            .add_node(
+                "reviewer".to_string(),
+                Arc::new(AgentNode::new("reviewer".to_string(), reviewer)),
+            )
+            .add_transition(
+                "planner".to_string(),
+                "continue".to_string(),
+                "coder".to_string(),
+            )
+            .add_transition(
+                "coder".to_string(),
+                "continue".to_string(),
+                "reviewer".to_string(),
+            )
             .build()
             .expect("Failed to build flow");
 
@@ -95,7 +129,10 @@ mod parity_tests {
 
         // Verify the sequence
         let plan = state.get_meta("plan").and_then(|v| v.as_str()).unwrap();
-        let code = state.get_meta("generated_output").and_then(|v| v.as_str()).unwrap();
+        let code = state
+            .get_meta("generated_output")
+            .and_then(|v| v.as_str())
+            .unwrap();
         let review = state.get_meta("review").and_then(|v| v.as_str()).unwrap();
 
         assert!(plan.contains("PLAN:"));
@@ -107,7 +144,7 @@ mod parity_tests {
     async fn test_flow_parity_with_sequential_execution() {
         // This test verifies that the Flow produces equivalent output to the old SequentialOrchestrator
         // In a real scenario, this would compare actual outputs from the same LLM
-        
+
         let planner = Arc::new(MockPlanner) as Arc<dyn Agent>;
         let coder = Arc::new(MockCoder) as Arc<dyn Agent>;
         let reviewer = Arc::new(MockReviewer) as Arc<dyn Agent>;
@@ -115,18 +152,37 @@ mod parity_tests {
         // Execute via Flow
         let mut flow = Flow::builder()
             .start("planner".to_string())
-            .add_node("planner".to_string(), Arc::new(AgentNode::new("planner".to_string(), planner.clone())))
-            .add_node("coder".to_string(), Arc::new(AgentNode::new("coder".to_string(), coder.clone())))
-            .add_node("reviewer".to_string(), Arc::new(AgentNode::new("reviewer".to_string(), reviewer.clone())))
-            .add_transition("planner".to_string(), "continue".to_string(), "coder".to_string())
-            .add_transition("coder".to_string(), "continue".to_string(), "reviewer".to_string())
+            .add_node(
+                "planner".to_string(),
+                Arc::new(AgentNode::new("planner".to_string(), planner.clone())),
+            )
+            .add_node(
+                "coder".to_string(),
+                Arc::new(AgentNode::new("coder".to_string(), coder.clone())),
+            )
+            .add_node(
+                "reviewer".to_string(),
+                Arc::new(AgentNode::new("reviewer".to_string(), reviewer.clone())),
+            )
+            .add_transition(
+                "planner".to_string(),
+                "continue".to_string(),
+                "coder".to_string(),
+            )
+            .add_transition(
+                "coder".to_string(),
+                "continue".to_string(),
+                "reviewer".to_string(),
+            )
             .build()
             .expect("Failed to build flow");
 
         let mut flow_state = SharedState::new();
         flow_state.set_input("task".to_string(), serde_json::json!("test task"));
-        
-        flow.run(&mut flow_state).await.expect("Flow execution failed");
+
+        flow.run(&mut flow_state)
+            .await
+            .expect("Flow execution failed");
 
         // Execute sequentially (old way)
         let task = "test task";
@@ -135,9 +191,18 @@ mod parity_tests {
         let review = reviewer.run(&code).await.unwrap();
 
         // Compare outputs
-        let flow_plan = flow_state.get_meta("plan").and_then(|v| v.as_str()).unwrap();
-        let flow_code = flow_state.get_meta("generated_output").and_then(|v| v.as_str()).unwrap();
-        let flow_review = flow_state.get_meta("review").and_then(|v| v.as_str()).unwrap();
+        let flow_plan = flow_state
+            .get_meta("plan")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let flow_code = flow_state
+            .get_meta("generated_output")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let flow_review = flow_state
+            .get_meta("review")
+            .and_then(|v| v.as_str())
+            .unwrap();
 
         assert_eq!(flow_plan, plan);
         assert_eq!(flow_code, code);
@@ -153,11 +218,28 @@ mod parity_tests {
         // Valid flow
         let valid_flow = Flow::builder()
             .start("planner".to_string())
-            .add_node("planner".to_string(), Arc::new(AgentNode::new("planner".to_string(), planner.clone())))
-            .add_node("coder".to_string(), Arc::new(AgentNode::new("coder".to_string(), coder.clone())))
-            .add_node("reviewer".to_string(), Arc::new(AgentNode::new("reviewer".to_string(), reviewer.clone())))
-            .add_transition("planner".to_string(), "continue".to_string(), "coder".to_string())
-            .add_transition("coder".to_string(), "continue".to_string(), "reviewer".to_string())
+            .add_node(
+                "planner".to_string(),
+                Arc::new(AgentNode::new("planner".to_string(), planner.clone())),
+            )
+            .add_node(
+                "coder".to_string(),
+                Arc::new(AgentNode::new("coder".to_string(), coder.clone())),
+            )
+            .add_node(
+                "reviewer".to_string(),
+                Arc::new(AgentNode::new("reviewer".to_string(), reviewer.clone())),
+            )
+            .add_transition(
+                "planner".to_string(),
+                "continue".to_string(),
+                "coder".to_string(),
+            )
+            .add_transition(
+                "coder".to_string(),
+                "continue".to_string(),
+                "reviewer".to_string(),
+            )
             .build();
 
         assert!(valid_flow.is_ok());
@@ -165,10 +247,23 @@ mod parity_tests {
         // Invalid flow - unreachable node
         let invalid_flow = Flow::builder()
             .start("planner".to_string())
-            .add_node("planner".to_string(), Arc::new(AgentNode::new("planner".to_string(), planner)))
-            .add_node("coder".to_string(), Arc::new(AgentNode::new("coder".to_string(), coder)))
-            .add_node("reviewer".to_string(), Arc::new(AgentNode::new("reviewer".to_string(), reviewer)))
-            .add_transition("planner".to_string(), "continue".to_string(), "coder".to_string())
+            .add_node(
+                "planner".to_string(),
+                Arc::new(AgentNode::new("planner".to_string(), planner)),
+            )
+            .add_node(
+                "coder".to_string(),
+                Arc::new(AgentNode::new("coder".to_string(), coder)),
+            )
+            .add_node(
+                "reviewer".to_string(),
+                Arc::new(AgentNode::new("reviewer".to_string(), reviewer)),
+            )
+            .add_transition(
+                "planner".to_string(),
+                "continue".to_string(),
+                "coder".to_string(),
+            )
             .build();
 
         assert!(invalid_flow.is_err());

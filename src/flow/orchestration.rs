@@ -128,13 +128,13 @@ impl Maestro {
     ) -> Result<String> {
         let mut run = FlowRun::new(flow_id.clone());
         run.mark_running();
-        
+
         let run_id = run.id.clone();
         self.registry.register(run);
 
         // Execute the flow
         let result = flow.run(&mut initial_state).await;
-        
+
         // Update run status
         if let Some(run) = self.registry.get_mut(&run_id) {
             match result {
@@ -177,8 +177,12 @@ impl ContinuationEngine {
     /// Create checkpoint directory if it doesn't exist
     fn ensure_checkpoint_dir(&self) -> Result<()> {
         if !self.checkpoint_dir.exists() {
-            fs::create_dir_all(&self.checkpoint_dir)
-                .with_context(|| format!("Failed to create checkpoint directory: {}", self.checkpoint_dir.display()))?;
+            fs::create_dir_all(&self.checkpoint_dir).with_context(|| {
+                format!(
+                    "Failed to create checkpoint directory: {}",
+                    self.checkpoint_dir.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -191,8 +195,9 @@ impl ContinuationEngine {
         let state_json = serde_json::to_string_pretty(state)
             .with_context(|| "Failed to serialize SharedState")?;
 
-        fs::write(&checkpoint_path, state_json)
-            .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+        fs::write(&checkpoint_path, state_json).with_context(|| {
+            format!("Failed to write checkpoint: {}", checkpoint_path.display())
+        })?;
 
         Ok(checkpoint_path)
     }
@@ -225,8 +230,9 @@ impl ContinuationEngine {
         let checkpoint_path = self.checkpoint_dir.join(format!("{}.json", run_id));
 
         if checkpoint_path.exists() {
-            fs::remove_file(&checkpoint_path)
-                .with_context(|| format!("Failed to delete checkpoint: {}", checkpoint_path.display()))?;
+            fs::remove_file(&checkpoint_path).with_context(|| {
+                format!("Failed to delete checkpoint: {}", checkpoint_path.display())
+            })?;
         }
 
         Ok(())
@@ -237,13 +243,16 @@ impl ContinuationEngine {
         self.ensure_checkpoint_dir()?;
 
         let mut checkpoints = Vec::new();
-        
-        for entry in fs::read_dir(&self.checkpoint_dir)
-            .with_context(|| format!("Failed to read checkpoint directory: {}", self.checkpoint_dir.display()))?
-        {
+
+        for entry in fs::read_dir(&self.checkpoint_dir).with_context(|| {
+            format!(
+                "Failed to read checkpoint directory: {}",
+                self.checkpoint_dir.display()
+            )
+        })? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     checkpoints.push(stem.to_string());
@@ -264,7 +273,7 @@ impl Default for ContinuationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::{FlowBuilder, Node, NodeConfig, Input, Output};
+    use crate::flow::{FlowBuilder, Input, Node, NodeConfig, Output};
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -316,10 +325,10 @@ mod tests {
     #[test]
     fn test_flow_run_status_transitions() {
         let mut run = FlowRun::new("test_flow".to_string());
-        
+
         run.mark_running();
         assert_eq!(run.status, RunStatus::Running);
-        
+
         let state = SharedState::new();
         run.mark_completed(state);
         assert_eq!(run.status, RunStatus::Completed);
@@ -330,7 +339,7 @@ mod tests {
     fn test_flow_run_failure() {
         let mut run = FlowRun::new("test_flow".to_string());
         run.mark_failed("test error".to_string());
-        
+
         assert!(matches!(run.status, RunStatus::Failed(_)));
         assert!(run.completed_at.is_some());
     }
@@ -340,9 +349,9 @@ mod tests {
         let mut registry = RunRegistry::new();
         let run = FlowRun::new("test_flow".to_string());
         let run_id = run.id.clone();
-        
+
         registry.register(run);
-        
+
         assert!(registry.get(&run_id).is_some());
         assert_eq!(registry.list_by_flow("test_flow").len(), 1);
     }
@@ -350,15 +359,15 @@ mod tests {
     #[test]
     fn test_run_registry_list_active() {
         let mut registry = RunRegistry::new();
-        
+
         let mut run1 = FlowRun::new("flow1".to_string());
         run1.mark_running();
         registry.register(run1);
-        
+
         let mut run2 = FlowRun::new("flow2".to_string());
         run2.mark_completed(SharedState::new());
         registry.register(run2);
-        
+
         let active = registry.list_active();
         assert_eq!(active.len(), 1);
     }
@@ -366,47 +375,56 @@ mod tests {
     #[tokio::test]
     async fn test_maestro_schedule_flow() {
         let mut maestro = Maestro::new();
-        
+
         let node = SimpleNode::new("node1".to_string());
         let flow = FlowBuilder::new()
             .start("node1".to_string())
             .add_node("node1".to_string(), Arc::new(node))
             .build()
             .unwrap();
-        
+
         let state = SharedState::new();
-        let run_id = maestro.schedule_flow("test_flow".to_string(), flow, state).await.unwrap();
-        
+        let run_id = maestro
+            .schedule_flow("test_flow".to_string(), flow, state)
+            .await
+            .unwrap();
+
         assert!(maestro.registry().get(&run_id).is_some());
-        assert_eq!(maestro.registry().get(&run_id).unwrap().status, RunStatus::Completed);
+        assert_eq!(
+            maestro.registry().get(&run_id).unwrap().status,
+            RunStatus::Completed
+        );
     }
 
     #[test]
     fn test_continuation_engine_save_load() {
         let temp_dir = tempfile::tempdir().unwrap();
         let engine = ContinuationEngine::new(temp_dir.path().to_path_buf());
-        
+
         let mut state = SharedState::new();
         state.set_input("test".to_string(), serde_json::json!("value"));
-        
+
         let run_id = "test_run_123";
         engine.save_checkpoint(run_id, &state).unwrap();
-        
+
         assert!(engine.has_checkpoint(run_id));
-        
+
         let loaded_state = engine.load_checkpoint(run_id).unwrap();
-        assert_eq!(loaded_state.get_input("test"), Some(&serde_json::json!("value")));
+        assert_eq!(
+            loaded_state.get_input("test"),
+            Some(&serde_json::json!("value"))
+        );
     }
 
     #[test]
     fn test_continuation_engine_list_checkpoints() {
         let temp_dir = tempfile::tempdir().unwrap();
         let engine = ContinuationEngine::new(temp_dir.path().to_path_buf());
-        
+
         let state = SharedState::new();
         engine.save_checkpoint("run1", &state).unwrap();
         engine.save_checkpoint("run2", &state).unwrap();
-        
+
         let checkpoints = engine.list_checkpoints().unwrap();
         assert_eq!(checkpoints.len(), 2);
         assert!(checkpoints.contains(&"run1".to_string()));
@@ -417,10 +435,10 @@ mod tests {
     fn test_continuation_engine_delete_checkpoint() {
         let temp_dir = tempfile::tempdir().unwrap();
         let engine = ContinuationEngine::new(temp_dir.path().to_path_buf());
-        
+
         let state = SharedState::new();
         engine.save_checkpoint("run1", &state).unwrap();
-        
+
         assert!(engine.has_checkpoint("run1"));
         engine.delete_checkpoint("run1").unwrap();
         assert!(!engine.has_checkpoint("run1"));
