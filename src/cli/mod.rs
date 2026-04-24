@@ -49,6 +49,15 @@ enum Commands {
         #[arg(long)]
         export_timeline: Option<std::path::PathBuf>,
     },
+    /// Start the API server for the local chat interface
+    Serve {
+        /// Host address to bind to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on (default: 3000)
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+    },
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -172,6 +181,63 @@ pub async fn run() -> anyhow::Result<()> {
                     eprintln!("Warning: No tracer available for timeline export");
                 }
             }
+        }
+        Commands::Serve { host, port } => {
+            let logger = Logger::new(true);
+            logger.info(&format!("Starting API server on {}:{}", host, port));
+
+            // Load config and create RuntimeContext
+            let config = AppConfig::load()?;
+            logger.info(&format!("Loaded config for provider: {}", config.provider));
+
+            // Create RuntimeContext with services
+            let llm_client = LlmClient::from_config(&config)?;
+            let openai_provider = prometheos_lite::flow::OpenAiProvider::new(llm_client)
+                .with_name(config.provider.clone());
+            let model_router = std::sync::Arc::new(prometheos_lite::flow::ModelRouter::new(vec![
+                Box::new(openai_provider)
+            ]));
+            
+            let tool_runtime = std::sync::Arc::new(prometheos_lite::flow::ToolRuntime::new(
+                prometheos_lite::flow::ToolSandboxProfile::new()
+            ));
+            
+            // Create in-memory memory service with local embedding provider from config
+            let embedding: Box<dyn prometheos_lite::flow::EmbeddingProvider> = Box::new(
+                prometheos_lite::flow::LocalEmbeddingProvider::new(
+                    config.embedding_url.clone(),
+                    config.embedding_dimension,
+                )
+            );
+            let in_memory_db = prometheos_lite::flow::MemoryDb::in_memory().unwrap();
+            let memory_service = std::sync::Arc::new(prometheos_lite::flow::MemoryService::new(
+                in_memory_db,
+                embedding,
+            ));
+
+            let runtime = prometheos_lite::flow::RuntimeContext::full(
+                model_router,
+                tool_runtime,
+                memory_service,
+            );
+
+            // Create database
+            let db_path = "prometheos.db".to_string();
+            let _db = prometheos_lite::db::Db::new(&db_path)?;
+            logger.info("Database initialized: prometheos.db");
+
+            // Create AppState
+            let app_state = std::sync::Arc::new(prometheos_lite::api::AppState::new(
+                db_path,
+                std::sync::Arc::new(runtime)
+            ));
+
+            // Parse address
+            let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()
+                .context("Invalid host or port")?;
+
+            // Start server
+            prometheos_lite::api::run_server(addr, app_state).await?;
         }
     }
 
