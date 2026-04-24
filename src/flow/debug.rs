@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::flow::{Flow, Node, NodeId, SharedState};
+use crate::flow::{Action, Flow, FlowLifecycleHooks, Input, NodeId, Output, SharedState};
 
 /// State snapshot for debugging
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +35,59 @@ pub struct DebugSession {
     snapshots: Vec<StateSnapshot>,
     step_mode: StepMode,
     current_step: u32,
+    paused: bool,
+    pause_reason: Option<String>,
+}
+
+/// Debug lifecycle hooks implementation
+struct DebugHooks {
+    session: Arc<Mutex<DebugSession>>,
+}
+
+impl DebugHooks {
+    fn new(session: Arc<Mutex<DebugSession>>) -> Self {
+        Self { session }
+    }
+}
+
+impl FlowLifecycleHooks for DebugHooks {
+    fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input) {
+        let mut session = self.session.lock().unwrap();
+        if session.should_pause(node_id) {
+            session.paused = true;
+            session.pause_reason = Some(format!("Paused at node: {}", node_id));
+        }
+    }
+
+    fn on_node_complete(&self, node_id: &NodeId, state: &SharedState, output: &Output) {
+        let mut session = self.session.lock().unwrap();
+        session.snapshots.push(StateSnapshot {
+            timestamp: Utc::now(),
+            node_id: node_id.clone(),
+            state: state.clone(),
+            input: serde_json::json!({}), // Input not available here
+            output: Some(output.clone()),
+            action: None,
+        });
+    }
+
+    fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId) {
+        let mut session = self.session.lock().unwrap();
+        if let Some(last_snapshot) = session.snapshots.last_mut() {
+            last_snapshot.action = Some(action.clone());
+        }
+    }
+
+    fn on_flow_complete(&self, state: &SharedState) {
+        let mut session = self.session.lock().unwrap();
+        session.paused = false;
+    }
+
+    fn on_flow_error(&self, error: &anyhow::Error) {
+        let mut session = self.session.lock().unwrap();
+        session.paused = true;
+        session.pause_reason = Some(format!("Error: {}", error));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +107,8 @@ impl DebugSession {
             snapshots: Vec::new(),
             step_mode: StepMode::Run,
             current_step: 0,
+            paused: false,
+            pause_reason: None,
         }
     }
 
@@ -127,63 +182,53 @@ impl DebugSession {
         }
     }
 
-    /// Execute flow with debugging
+    /// Execute flow with debugging using lifecycle hooks
     pub async fn run_debug(&mut self, state: &mut SharedState) -> Result<DebugResult> {
-        let mut current = self.flow.start_node().clone();
-        let mut snapshots = Vec::new();
-        let mut paused = false;
-        let mut pause_reason = None;
+        let session_arc = Arc::new(Mutex::new(self.clone_without_flow()));
+        let hooks = DebugHooks::new(session_arc.clone());
 
-        loop {
-            // Check if we should pause before execution
-            if self.should_pause(&current) {
-                paused = true;
-                pause_reason = Some(format!("Paused at node: {}", current));
-                break;
-            }
+        // Reset pause state
+        self.paused = false;
+        self.pause_reason = None;
 
-            let node = self
-                .flow
-                .get_node(&current)
-                .ok_or_else(|| anyhow::anyhow!("Node not found: {}", current))?;
+        // Execute with hooks
+        let result = self.flow.run_with_hooks(state, &hooks).await;
 
-            // Prepare input
-            let input = node.prep(state)?;
+        // Update self from the session that was updated by hooks
+        let session = session_arc.lock().unwrap();
+        self.snapshots = session.snapshots.clone();
+        self.paused = session.paused;
+        self.pause_reason = session.pause_reason.clone();
 
-            // Execute
-            let output = node.exec(input.clone()).await?;
-
-            // Post-process
-            let action = node.post(state, output.clone());
-
-            // Take snapshot
-            snapshots.push(StateSnapshot {
-                timestamp: Utc::now(),
-                node_id: current.clone(),
-                state: state.clone(),
-                input,
-                output: Some(output),
-                action: Some(action.clone()),
-            });
-
-            // Find next node
-            match self.flow.get_next_node(&current, &action) {
-                Some(next) => current = next.clone(),
-                None => break,
-            }
+        if result.is_err() {
+            self.paused = true;
         }
 
-        self.snapshots.extend(snapshots);
         Ok(DebugResult {
             snapshots: self.snapshots.clone(),
-            paused,
-            pause_reason,
+            paused: self.paused,
+            pause_reason: self.pause_reason.clone(),
         })
+    }
+
+    /// Clone the session without the flow (to avoid cloning the flow)
+    fn clone_without_flow(&self) -> DebugSession {
+        DebugSession {
+            flow: self.flow.clone(),
+            breakpoints: self.breakpoints.clone(),
+            snapshots: Vec::new(),
+            step_mode: self.step_mode,
+            current_step: self.current_step,
+            paused: self.paused,
+            pause_reason: self.pause_reason.clone(),
+        }
     }
 
     /// Resume execution after pause
     pub async fn resume(&mut self, state: &mut SharedState) -> Result<DebugResult> {
         self.step_mode = StepMode::Run;
+        self.paused = false;
+        self.pause_reason = None;
         self.run_debug(state).await
     }
 }
@@ -227,7 +272,7 @@ impl DebugFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::{FlowBuilder, NodeConfig};
+    use crate::flow::{FlowBuilder, Node, NodeConfig};
     use async_trait::async_trait;
     use std::sync::Arc;
 
