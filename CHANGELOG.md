@@ -285,21 +285,21 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #21: Artifacts Panel (list files, show content, copy button)
 
 ### Phase 6 — Flow Integration
-- [ ] Issue #22: Connect Chat → Flow (message → SharedState.input → execute codegen.flow.json)
-- [ ] Issue #23: Default Flow Binding (hardcode examples/codegen.flow.json for MVP)
-- [ ] Issue #24: Output Parsing (capture outputs, display in chat)
+- [x] Issue #22: Connect Chat → Flow (message → SharedState.input → execute codegen.flow.json)
+- [x] Issue #23: Default Flow Binding (hardcode examples/codegen.flow.json for MVP)
+- [x] Issue #24: Output Parsing (capture outputs, display in chat)
 
 ### Phase 7 — UX Polish
-- [ ] Issue #25: Loading States (spinner during execution, disable input while running)
-- [ ] Issue #26: Error Handling UI (show node errors, show memory skipped warnings)
-- [ ] Issue #27: Conversation Persistence (reload messages on refresh)
-- [ ] Issue #28: Basic Styling (minimal clean UI, dark mode optional)
+- [x] Issue #25: Loading States (spinner during execution, disable input while running)
+- [x] Issue #26: Error Handling UI (show node errors, show memory skipped warnings)
+- [x] Issue #27: Conversation Persistence (reload messages on refresh)
+- [x] Issue #28: Basic Styling (minimal clean UI, dark mode optional)
 
 ### Phase 8 — Testing
-- [ ] Issue #29: API Tests (endpoints return correct data)
-- [ ] Issue #30: Flow Execution Tests via API (POST → run → result stored)
-- [ ] Issue #31: WebSocket Tests (receives events)
-- [ ] Issue #32: Frontend Smoke Test (send message, receive response, show files)
+- [x] Issue #29: API Tests (endpoints return correct data)
+- [x] Issue #30: Flow Execution Tests via API (POST → run → result stored)
+- [x] Issue #31: WebSocket Tests (receives events)
+- [x] Issue #32: Frontend Smoke Test (send message, receive response, show files)
 
-**Status:** v1.2 planning phase - 32 issues across 8 phases
+**Status:** v1.2 complete
 **See:** `docs/prd/prometheos-lite-prd-v1.2.md` for full specification
