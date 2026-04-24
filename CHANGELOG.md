@@ -217,3 +217,30 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - Updated `src/flow/mod.rs` - migration module export gated behind legacy feature
 
 **Status:** v1.1.4 complete
+
+---
+
+## v1.1.5 Enhancement - Demo-Ready Flow
+
+**Objective:** Create a complete, demo-ready code generation flow with proper documentation, testing, and graceful error handling.
+
+### Implementation
+- [x] Add file_writer and memory_write nodes to codegen flow
+- [x] Make FileWriterNode write to prometheos-output/ directory
+- [x] Add graceful degradation to MemoryWriteNode for embedding server failures
+- [x] Add E2E tests for codegen flow structure and transitions
+- [x] Create examples/README.md with flow documentation
+- [x] Create docs/guides/how-flows-work.md comprehensive guide
+- [x] Merge OVERVIEW V1.md and OVERVIEW V1.1.md into single OVERVIEW.md
+- [x] Remove versioned OVERVIEW files
+
+### Changes
+- Updated `flows/code-generation.json` - Added file_writer and memory_write nodes with transitions
+- Updated `src/cli/runner.rs` - FileWriterNode now writes to prometheos-output/, MemoryWriteNode handles embedding failures gracefully
+- Added `tests/codegen_flow_test.rs` - E2E tests for flow structure, JSON validity, and transitions
+- Added `examples/README.md` - Documentation for available flows, flow file format, and troubleshooting
+- Added `docs/guides/how-flows-work.md` - Comprehensive guide on flow execution, node lifecycle, and patterns
+- Added `OVERVIEW.md` - Merged architecture documentation from versioned files
+- Deleted `OVERVIEW V1.md` and `OVERVIEW V1.1.md` - Consolidated to single source of truth
+
+**Status:** v1.1.5 complete
