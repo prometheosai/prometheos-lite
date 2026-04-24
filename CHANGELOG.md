@@ -21,12 +21,13 @@ The next major milestone is defining and scaffolding the modular project structu
 *   **Error Handling:** Retry logic with exponential backoff in LLM client (3 retries by default)
 *   **Impact:** Full file generation pipeline with real-time logging and robust error handling
 
-## [v0.5.0] - Production Ready (Issues #18-#21 Complete)
+## [v0.5.0] - Production Ready (Issues #18-#19 Complete)
 *   **Phase 7 - Release Readiness:** LLM timeout increased to 300s for complex tasks, full pipeline testing with SaaS landing page generation
 *   **Bug Fixes:** File parser regex fixed to correctly associate markdown headers with code blocks
 *   **Testing:** Verified end-to-end pipeline with LM Studio (google/gemma-4-eb model)
 *   **Impact:** Production-ready multi-agent CLI capable of handling complex generation tasks
 *   **Status:** All core features from v1.0 PRD implemented and tested
+*   **Note:** Issues #20-#21 (plugin interface, web log viewer) superseded by v1.1 flow architecture
 
 ## [v1.1.0] - Flow-Centric Architecture (Next Major)
 *   **Phase 1 - Flow Core:** Node trait, Flow engine, SharedState, action routing
