@@ -25,6 +25,7 @@ pub use flow::*;
 pub use flow_types::*;
 pub use intelligence::*;
 pub use memory::*;
+#[cfg(feature = "legacy")]
 pub use migration::*;
 pub use node::*;
 pub use orchestration::{FlowEvent, RunDb};
