@@ -14,6 +14,7 @@ pub mod node;
 pub mod orchestration;
 pub mod policy;
 pub mod rate_limit;
+pub mod runtime;
 pub mod tracing;
 pub mod types;
 
@@ -30,5 +31,6 @@ pub use orchestration::{FlowEvent, RunDb};
 pub use orchestration::*;
 pub use policy::*;
 pub use rate_limit::*;
+pub use runtime::*;
 pub use tracing::*;
 pub use types::*;
