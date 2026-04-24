@@ -19,12 +19,14 @@ pub mod types;
 
 pub use adapter::*;
 pub use debug::*;
+pub use flow::{FlowLifecycleHooks, NoOpHooks};
 pub use flow::*;
 pub use flow_types::*;
 pub use intelligence::*;
 pub use memory::*;
 pub use migration::*;
 pub use node::*;
+pub use orchestration::{FlowEvent, RunDb};
 pub use orchestration::*;
 pub use policy::*;
 pub use rate_limit::*;
