@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
+use anyhow::Context;
 
 use prometheos_lite::{
     config::AppConfig,
-    core::SequentialOrchestrator,
     fs::{FileParser, FileWriter},
     logger::Logger,
     llm::LlmClient,
 };
+
+mod runner;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -22,9 +24,21 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Run PrometheOS on a task prompt.
+    #[deprecated(since = "0.2.0", note = "Use 'flow' command instead")]
     Run {
         /// Task prompt to execute.
         task: String,
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Run a flow from a JSON file
+    Flow {
+        /// Path to the flow file
+        path: std::path::PathBuf,
+        /// Input data for the flow (JSON string)
+        #[arg(short, long)]
+        input: Option<String>,
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -36,15 +50,21 @@ pub async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Run { task, verbose } => {
+            eprintln!("WARNING: The 'run' command is deprecated. Use 'flow' command instead.");
+            eprintln!("See migration guide: https://github.com/prometheos-ai/prometheos-lite/blob/main/docs/migration.md");
+            
             let logger = Logger::new(verbose);
-            logger.info(&format!("Starting PrometheOS Lite"));
+            logger.info(&format!("Starting PrometheOS Lite (DEPRECATED)"));
             logger.info(&format!("Task: {}", task));
 
             let config = AppConfig::load()?;
             logger.info(&format!("Loaded config for provider: {}", config.provider));
 
             let llm = LlmClient::from_config(&config)?;
-            let orchestrator = SequentialOrchestrator::with_logger(llm, logger.clone());
+            
+            // Use the deprecated orchestrator
+            #[allow(deprecated)]
+            let orchestrator = prometheos_lite::core::SequentialOrchestrator::with_logger(llm, logger.clone());
             
             logger.info("Initializing orchestrator...");
             let result = orchestrator.run(task).await?;
@@ -71,6 +91,25 @@ pub async fn run() -> anyhow::Result<()> {
             }
 
             logger.success("Task completed successfully");
+        }
+        Commands::Flow { path, input, verbose } => {
+            let logger = Logger::new(verbose);
+            logger.info(&format!("Loading flow from: {}", path.display()));
+
+            let mut flow_runner = runner::FlowRunner::from_json_file(path)?;
+            logger.info("Flow loaded successfully");
+
+            let input_value = if let Some(input_str) = input {
+                serde_json::from_str(&input_str).context("Failed to parse input JSON")?
+            } else {
+                serde_json::json!({})
+            };
+
+            logger.info("Executing flow...");
+            let state = flow_runner.run_with_input(input_value).await?;
+            
+            logger.success("Flow execution completed");
+            println!("\n[output]\n{}", serde_json::to_string_pretty(&state.get_all_outputs())?);
         }
     }
 
