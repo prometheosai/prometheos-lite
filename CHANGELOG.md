@@ -244,3 +244,62 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - Deleted `OVERVIEW V1.md` and `OVERVIEW V1.1.md` - Consolidated to single source of truth
 
 **Status:** v1.1.5 complete
+
+---
+
+## v1.2 PRD - Local Chat Interface
+
+**Codename:** "Human Interface Layer"
+
+**Objective:** Expose PrometheOS Lite Flow runtime through a ChatGPT-style local interface with projects, conversations, real-time execution, and generated artifacts.
+
+### Phase 1 — Backend API Foundation
+- [x] Issue #1: Create API Server Module (src/api/server.rs with axum/warp, async tokio, JSON responses, global app state)
+- [x] Issue #2: Global AppState (struct with Db and RuntimeContext, shared across routes, thread-safe Arc)
+- [x] Issue #3: Health Endpoint (GET /health returning { "status": "ok" })
+
+### Phase 2 — SQLite UI Database
+- [x] Issue #4: DB Module (src/db/mod.rs using rusqlite or sqlx)
+- [x] Issue #5: Schema Creation (tables: projects, conversations, messages, flow_runs, artifacts)
+- [x] Issue #6: Project Repository (GET /projects, POST /projects)
+- [x] Issue #7: Conversation Repository (GET /projects/:id/conversations, POST /projects/:id/conversations)
+- [x] Issue #8: Message Repository (GET /conversations/:id/messages, POST /conversations/:id/messages)
+
+### Phase 3 — Flow Execution API
+- [x] Issue #9: Run Flow Endpoint (POST /conversations/:id/run with message input, save user message, create FlowRun, spawn async task, execute flow)
+- [x] Issue #10: FlowRun Tracking (store id, conversation_id, status, started_at, completed_at)
+- [x] Issue #11: Artifact Storage (save file_path, content, run_id)
+
+### Phase 4 — WebSocket Streaming
+- [x] Issue #12: WebSocket Server (WS /ws/runs/:id)
+- [x] Issue #13: Event Model (type: node_start | node_end | output | error, node, data, timestamp)
+- [x] Issue #14: Hook Flow → WS (emit events on node start, node end, output update, errors)
+
+### Phase 5 — Frontend (Next.js)
+- [x] Issue #15: Next.js App Setup (app/, components/, lib/ structure)
+- [x] Issue #16: Projects Page (list projects, create project)
+- [x] Issue #17: Conversations Sidebar (list conversations per project, create new conversation)
+- [x] Issue #18: Chat UI (message list, input box, submit handler)
+- [x] Issue #19: WebSocket Integration (connect to /ws/runs/:id, stream updates live)
+- [x] Issue #20: Run Timeline UI (display Planning, Coding, Reviewing, Writing files, Done)
+- [x] Issue #21: Artifacts Panel (list files, show content, copy button)
+
+### Phase 6 — Flow Integration
+- [ ] Issue #22: Connect Chat → Flow (message → SharedState.input → execute codegen.flow.json)
+- [ ] Issue #23: Default Flow Binding (hardcode examples/codegen.flow.json for MVP)
+- [ ] Issue #24: Output Parsing (capture outputs, display in chat)
+
+### Phase 7 — UX Polish
+- [ ] Issue #25: Loading States (spinner during execution, disable input while running)
+- [ ] Issue #26: Error Handling UI (show node errors, show memory skipped warnings)
+- [ ] Issue #27: Conversation Persistence (reload messages on refresh)
+- [ ] Issue #28: Basic Styling (minimal clean UI, dark mode optional)
+
+### Phase 8 — Testing
+- [ ] Issue #29: API Tests (endpoints return correct data)
+- [ ] Issue #30: Flow Execution Tests via API (POST → run → result stored)
+- [ ] Issue #31: WebSocket Tests (receives events)
+- [ ] Issue #32: Frontend Smoke Test (send message, receive response, show files)
+
+**Status:** v1.2 planning phase - 32 issues across 8 phases
+**See:** `docs/prd/prometheos-lite-prd-v1.2.md` for full specification
