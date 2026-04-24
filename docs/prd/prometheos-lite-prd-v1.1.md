@@ -568,3 +568,272 @@ And yes, this version is finally something that:
 * and doesn’t collapse under its own ambition
 
 Now it’s just execution.
+
+# PrometheOS Lite v1.1 Flow Architecture Implementation Plan
+
+This plan implements the complete flow-centric architecture defined in the v1.1 PRD, migrating from the current agent-based system to a universal execution runtime with SQLite memory, process-isolated tools, and parallel flow support.
+
+---
+
+## Technical Decisions
+
+**Memory Backend:** SQLite + sqlite-vec for local-first semantic retrieval with structured tables for metadata and relationships. Local embeddings via provider abstraction (default: local HTTP, fallback: external API).
+
+**Tool Isolation:** Separate child processes with capability/whitelist permission profiles. Docker optional in v1.2+, not required.
+
+**Implementation Strategy:** Sequential phases with working checkpoints. Temporary adapter to wrap agents as nodes, then full migration to Flow runtime.
+
+**Testing:** Preserve existing v1 tests, add comprehensive flow-specific test suite targeting complexity risks.
+
+**Dependencies:** tokio, rusqlite/sqlx, sqlite-vec, tokio::process, tracing, uuid, chrono, tempfile.
+
+---
+
+## Phase 1: Flow Core (Foundation)
+
+### 1.1 Core Types
+- Define `SharedState` struct with typed fields (input, context, working, output, meta)
+- Define `Action`, `NodeId`, `Input`, `Output` types
+- Implement `SharedState` helpers for safe access
+- Add unit tests for type safety
+
+### 1.2 Node Trait
+- Implement `Node` trait with `id()`, `prep()`, `exec()`, `post()`, `config()`
+- Implement `NodeConfig` with retries, retry_delay_ms, timeout_ms
+- Add unit tests for trait contract
+
+### 1.3 Flow Engine
+- Implement `Flow` struct with start node, nodes HashMap, transitions HashMap
+- Implement `run()` execution loop with state mutation
+- Add action routing via transition map lookup
+- Implement flow validation (dead ends, unreachable nodes, cycles)
+- Add unit tests for linear flows
+
+### 1.4 Retry System
+- Implement `execute_with_retry()` with exponential backoff
+- Add configurable delay handling
+- Implement failure propagation
+- Add unit tests for retry scenarios
+
+### 1.5 Flow as Node
+- Implement `FlowNode` wrapper to compose flows
+- Add nested flow support
+- Add unit tests for nested execution
+
+### 1.6 Migration Adapter
+- Create `AgentNode` adapter wrapping existing Agent trait
+- Migrate `PlannerAgent`, `CoderAgent`, `ReviewerAgent` to Node implementations
+- Create linear Flow: Planner → Coder → Reviewer
+- Add parity tests comparing Flow output vs SequentialOrchestrator output
+
+**Checkpoint:** Flow Core passes all tests, existing agents run as nodes, parity validated.
+
+---
+
+## Phase 2: Orchestration
+
+### 2.1 Maestro
+- Implement `Maestro` for flow scheduling
+- Add multi-flow orchestration support
+- Implement lifecycle tracking
+- Add run registry for flow execution history
+- Add unit tests
+
+### 2.2 Continuation Engine
+- Implement checkpointing (serialize SharedState to disk)
+- Implement resume logic (deserialize and continue)
+- Add interruption handling
+- Implement replay execution capability
+- Add unit tests for checkpoint/resume
+
+### 2.3 Flow Types
+- Implement branching flow support (conditional transitions)
+- Implement looping flows (cycle detection and limits)
+- Implement batch flows (iterable input processing)
+- Add unit tests for each flow type
+
+**Checkpoint:** Maestro orchestrates flows, continuation engine persists/resumes state, all flow types operational.
+
+---
+
+## Phase 3: Intelligence
+
+### 3.1 Model Router
+- Implement `LlmProvider` trait for provider abstraction
+- Implement `ModelRouter` with provider/model selection
+- Add fallback chains for reliability
+- Implement streaming support via callback
+- Add unit tests
+
+### 3.2 Tool Runtime
+- Implement `Tool` trait with `name()`, `call()`
+- Implement `ToolSandboxProfile` with capability/whitelist permissions
+- Implement child process execution via `tokio::process`
+- Add timeout and output size limits
+- Implement network access control
+- Add unit tests for sandbox enforcement
+
+### 3.3 LLM Utilities
+- Implement unified `call_llm()` utility
+- Implement streaming output handler
+- Add token limiter (optional)
+- Implement retry backoff strategy
+- Add unit tests
+
+**Checkpoint:** Model router handles multi-provider scenarios, tools run in isolated processes with permission enforcement.
+
+---
+
+## Phase 4: Memory
+
+### 4.1 SQLite Schema
+- Add rusqlite/sqlx dependencies
+- Define schema: memories, semantic_chunks, chunk_embeddings, memory_relationships, flow_runs, flow_events, tool_executions
+- Implement database migration system
+- Add unit tests for schema
+
+### 4.2 Embedding Provider
+- Implement `EmbeddingProvider` trait
+- Implement local HTTP embedding provider (default)
+- Implement external API-compatible provider (fallback)
+- Add unit tests
+
+### 4.3 Memory Service
+- Implement `MemoryService` for CRUD operations
+- Implement semantic retrieval via sqlite-vec
+- Implement episodic logging
+- Implement graph relationship queries
+- Add unit tests
+
+### 4.4 Flow Integration
+- Implement `ContextLoaderNode` for memory retrieval
+- Implement `MemoryWriteNode` for persistence
+- Add SharedState ↔ MemoryService sync layer
+- Add integration tests
+
+**Checkpoint:** SQLite memory service stores/retrieves data, semantic search operational, flows read/write memory.
+
+---
+
+## Phase 5: Advanced Execution
+
+### 5.1 Parallel Flows
+- Implement async parallel node execution
+- Add concurrency limits
+- Implement parallel flow coordination
+- Add unit tests for parallel execution
+
+### 5.2 Self-Reflection Loops
+- Implement looping nodes for agent-like cycles
+- Add loop limit detection
+- Implement reflection nodes
+- Add unit tests
+
+### 5.3 Batch Processing
+- Implement batch flow for iterable inputs
+- Add progress tracking
+- Implement error aggregation
+- Add unit tests
+
+**Checkpoint:** Parallel flows respect concurrency limits, self-reflection loops operate safely, batch processing works.
+
+---
+
+## Phase 6: Developer Experience
+
+### 6.1 CLI Runner
+- Update CLI to run flows via Maestro
+- Add flow file loading (JSON/YAML)
+- Preserve verbose flag and logging
+- Add unit tests
+
+### 6.2 Flow Builder DSL
+- Implement simplified flow creation API
+- Add builder pattern for Flow construction
+- Add validation at build time
+- Add unit tests
+
+### 6.3 Debug Mode
+- Implement step-by-step execution
+- Add state snapshot logging
+- Implement breakpoint capability
+- Add unit tests
+
+### 6.4 Logging & Tracing
+- Integrate tracing crate
+- Implement structured logging
+- Add event timeline tracking
+- Add log filtering
+
+**Checkpoint:** CLI runs flows, DSL simplifies flow creation, debug mode enables inspection, tracing provides observability.
+
+---
+
+## Phase 7: Safety & Control
+
+### 7.1 Policy Hooks
+- Implement policy hook system
+- Add pre/post execution validation
+- Implement constitution-policy integration
+- Add unit tests
+
+### 7.2 Tool Sandbox Enforcement
+- Implement permission model validation
+- Add capability checking
+- Implement whitelist enforcement
+- Add security tests
+
+### 7.3 Rate Limiting
+- Implement token budgeting
+- Add execution guardrails
+- Implement rate limiter
+- Add unit tests
+
+**Checkpoint:** Policy hooks validate flows, tool sandbox enforces permissions, rate limiting prevents abuse.
+
+---
+
+## Migration & Cleanup
+
+### 8.1 Remove Legacy Code
+- Remove `SequentialOrchestrator` after parity validation
+- Remove old `Agent` trait if redundant
+- Update CLI to use Flow runtime exclusively
+- Remove deprecated modules
+
+### 8.2 Documentation
+- Update README with flow architecture
+- Add flow construction examples
+- Document migration guide
+- Update CHANGELOG
+
+### 8.3 Final Testing
+- Run full test suite (v1 + v1.1 tests)
+- Validate all 7 phases operational
+- Performance benchmark (sub-100ms orchestration overhead)
+- End-to-end testing with LM Studio
+
+**Final:** Complete v1.1 flow architecture operational, legacy code removed, documentation updated.
+
+---
+
+## Validation Gates
+
+1. Existing v1 CLI behavior reproducible as Flow
+2. Planner/Coder/Reviewer Flow produces files
+3. Failed node retries correctly
+4. Failed tool execution isolated
+5. Memory writes, embeds, retrieves
+6. Parallel flow respects concurrency limits
+7. All validation gates pass before phase completion
+
+---
+
+## Risk Mitigation
+
+- **Complexity explosion:** Each phase has working checkpoint, tests validate incrementally
+- **SharedState type safety:** Typed struct instead of HashMap, validation at compile time
+- **Graph validation:** Flow construction validates completeness, unreachable nodes, cycles
+- **Memory ambiguity:** Concrete SQLite schema with clear table definitions
+- **Sandbox ambiguity:** Capability/whitelist profiles with enforcement tests
+- **Migration risk:** Parity tests ensure output equivalence before removing legacy code

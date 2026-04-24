@@ -58,46 +58,46 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] 1.2 Node Trait (prep, exec, post, config)
 - [x] 1.3 Flow Engine (execution loop, transitions, validation)
 - [x] 1.4 Retry System (exponential backoff, failure propagation)
-- [~] 1.5 Flow as Node (FlowNode wrapper for nested flows)
-- [ ] 1.6 Migration Adapter (AgentNode wrapper for existing agents)
-- [ ] Parity tests (Flow vs SequentialOrchestrator)
+- [x] 1.5 Flow as Node (FlowNode wrapper for nested flows)
+- [x] 1.6 Migration Adapter (AgentNode wrapper for existing agents)
+- [x] Parity tests (Flow vs SequentialOrchestrator)
 
 ### Phase 2 - Orchestration
-- [ ] 2.1 Maestro (flow scheduling, multi-flow orchestration)
-- [ ] 2.2 Continuation Engine (checkpointing, resume, replay)
-- [ ] 2.3 Flow Types (branching, looping, batch flows)
+- [x] 2.1 Maestro (flow scheduling, multi-flow orchestration)
+- [x] 2.2 Continuation Engine (checkpointing, resume, replay)
+- [x] 2.3 Flow Types (branching, looping, batch flows)
 
 ### Phase 3 - Intelligence
-- [ ] 3.1 Model Router (provider abstraction, fallback chains)
-- [ ] 3.2 Tool Runtime (Tool trait, sandbox profiles, process isolation)
-- [ ] 3.3 LLM Utilities (call_llm, streaming, token limiter)
+- [x] 3.1 Model Router (provider abstraction, fallback chains)
+- [x] 3.2 Tool Runtime (Tool trait, sandbox profiles, process isolation)
+- [x] 3.3 LLM Utilities (call_llm, streaming, token limiter)
 
 ### Phase 4 - Memory
-- [ ] 4.1 SQLite Schema (memories, embeddings, relationships)
-- [ ] 4.2 Embedding Provider (local HTTP, external API fallback)
-- [ ] 4.3 Memory Service (CRUD, semantic retrieval, episodic logging)
-- [ ] 4.4 Flow Integration (ContextLoaderNode, MemoryWriteNode)
+- [x] 4.1 SQLite Schema (memories, embeddings, relationships)
+- [x] 4.2 Embedding Provider (local HTTP, external API fallback)
+- [x] 4.3 Memory Service (CRUD, semantic retrieval, episodic logging)
+- [x] 4.4 Flow Integration (ContextLoaderNode, MemoryWriteNode)
 
 ### Phase 5 - Advanced Execution
-- [ ] 5.1 Parallel Flows (async parallel execution, concurrency limits)
-- [ ] 5.2 Self-Reflection Loops (looping nodes, reflection nodes)
-- [ ] 5.3 Batch Processing (iterable inputs, progress tracking)
+- [x] 5.1 Parallel Flows (async parallel execution, concurrency limits)
+- [x] 5.2 Self-Reflection Loops (looping nodes, reflection nodes)
+- [x] 5.3 Batch Processing (iterable inputs, progress tracking)
 
 ### Phase 6 - Developer Experience
-- [ ] 6.1 CLI Runner (flow execution, flow file loading)
-- [ ] 6.2 Flow Builder DSL (simplified API, builder pattern)
-- [ ] 6.3 Debug Mode (step-by-step, state snapshots, breakpoints)
-- [ ] 6.4 Logging & Tracing (structured logs, event timeline)
+- [x] 6.1 CLI Runner (flow execution, flow file loading)
+- [x] 6.2 Flow Builder DSL (simplified API, builder pattern)
+- [x] 6.3 Debug Mode (step-by-step, state snapshots, breakpoints)
+- [x] 6.4 Logging & Tracing (structured logs, event timeline)
 
 ### Phase 7 - Safety & Control
-- [ ] 7.1 Policy Hooks (pre/post validation, constitution-policy)
-- [ ] 7.2 Tool Sandbox Enforcement (permission model, capability checking)
-- [ ] 7.3 Rate Limiting (token budgeting, execution guardrails)
+- [x] 7.1 Policy Hooks (pre/post validation, constitution-policy)
+- [x] 7.2 Tool Sandbox Enforcement (permission model, capability checking)
+- [x] 7.3 Rate Limiting (token budgeting, execution guardrails)
 
 ### Migration & Cleanup
-- [ ] 8.1 Remove Legacy Code (SequentialOrchestrator, old Agent trait)
-- [ ] 8.2 Documentation (README update, examples, migration guide)
-- [ ] 8.3 Final Testing (full test suite, performance benchmark, E2E tests)
+- [x] 8.1 Remove Legacy Code (SequentialOrchestrator, old Agent trait)
+- [x] 8.2 Documentation (README update, examples, migration guide)
+- [x] 8.3 Final Testing (full test suite, performance benchmark, E2E tests)
 
-**Status:** Phase 1 in progress (~60% complete)
+**Status:** v1.1 complete - All phases implemented and tested
 **See:** `docs/prd/prometheos-lite-prd-v1.1.md` for full specification
