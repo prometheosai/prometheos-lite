@@ -12,6 +12,18 @@ pub struct AppConfig {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default = "default_embedding_url")]
+    pub embedding_url: String,
+    #[serde(default = "default_embedding_dimension")]
+    pub embedding_dimension: usize,
+}
+
+fn default_embedding_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+fn default_embedding_dimension() -> usize {
+    1536
 }
 
 impl AppConfig {
