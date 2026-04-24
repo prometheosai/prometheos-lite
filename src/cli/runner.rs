@@ -160,6 +160,11 @@ impl FlowRunner {
         self.tracer.as_ref()
     }
 
+    /// Get the flow
+    pub fn get_flow(&self) -> &Flow {
+        &self.flow
+    }
+
     /// Set the runtime context for service injection
     pub fn with_runtime(mut self, runtime: prometheos_lite::flow::RuntimeContext) -> Self {
         self.runtime = Some(runtime);
@@ -865,13 +870,24 @@ impl Node for MemoryWriteNode {
             .context("Missing content in memory write node input")?;
 
         if let Some(service) = &self.memory_service {
-            // Use MemoryService for actual write
-            let memory_id = service.create_memory(content.to_string(), prometheos_lite::flow::MemoryType::Semantic, serde_json::json!({})).await?;
-            Ok(serde_json::json!({ "memory_id": memory_id }))
+            // Use MemoryService for actual write, but handle embedding server failures gracefully
+            match service.create_memory(content.to_string(), prometheos_lite::flow::MemoryType::Semantic, serde_json::json!({})).await {
+                Ok(memory_id) => Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" })),
+                Err(e) => {
+                    // Log the error but don't fail the flow - embedding server might be unavailable
+                    eprintln!("Memory write failed (embedding server unavailable?): {}", e);
+                    Ok(serde_json::json!({ 
+                        "memory_id": "skipped", 
+                        "status": "skipped",
+                        "reason": "embedding server unavailable"
+                    }))
+                }
+            }
         } else {
             // Fallback to placeholder if no MemoryService
             Ok(serde_json::json!({
-                "memory_id": "placeholder_id"
+                "memory_id": "placeholder_id",
+                "status": "placeholder"
             }))
         }
     }
