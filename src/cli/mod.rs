@@ -197,11 +197,11 @@ pub async fn run() -> anyhow::Result<()> {
             let model_router = std::sync::Arc::new(prometheos_lite::flow::ModelRouter::new(vec![
                 Box::new(openai_provider)
             ]));
-            
+
             let tool_runtime = std::sync::Arc::new(prometheos_lite::flow::ToolRuntime::new(
                 prometheos_lite::flow::ToolSandboxProfile::new()
             ));
-            
+
             // Create in-memory memory service with local embedding provider from config
             let embedding: Box<dyn prometheos_lite::flow::EmbeddingProvider> = Box::new(
                 prometheos_lite::flow::LocalEmbeddingProvider::new(
