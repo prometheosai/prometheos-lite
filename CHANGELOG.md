@@ -303,3 +303,45 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 **Status:** v1.2 complete
 **See:** `docs/prd/prometheos-lite-prd-v1.2.md` for full specification
+
+---
+
+## v1.2.1 PRD - Intent Classification Layer
+
+**Codename:** "Intent-Aware Routing"
+
+**Objective:** Implement intent classification layer to route conversational messages to direct LLM responses and coding tasks to full flow execution, eliminating verbose responses for simple interactions.
+
+### Phase 9 — Intent Classification
+- [x] Issue #1: Create Intent Types Module (Intent enum, IntentClassificationResult, Handler)
+- [x] Issue #2: Implement Rule-Based Classifier (conversation patterns, coding task patterns, question patterns)
+- [x] Issue #3: Implement Hybrid Classifier (rule-based fast path, LLM fallback for ambiguous cases)
+- [x] Issue #4: Implement Intent Router (route intents to appropriate handlers)
+- [x] Issue #5: Create Control Markdown Files (SOUL.md, SKILLS.md, FLOWS.md, TOOLS.md, MEMORY.md, PROJECT.md)
+- [x] Issue #6: Integrate Intent Classifier into run_flow endpoint
+- [x] Issue #7: Add Concise Conversation Prompt (under 120 words for non-coding intents)
+- [x] Issue #8: Add Intent Override Commands (/run, /ask, /chat for manual routing)
+- [x] Issue #9: Add Execution Tracing (intent_detected, confidence, routing_decision logs)
+- [x] Issue #10: Add Intent Caching (common intents like "hi", "thanks" cached to avoid LLM calls)
+- [x] Issue #11: Move Control Files to .prometheos folder
+- [x] Issue #12: Implement ControlFiles Loader (load and use control files for prompt construction)
+
+### Changes
+- Added `src/intent/mod.rs` - Intent classification module exports
+- Added `src/intent/types.rs` - Intent enum, IntentClassificationResult, Handler types
+- Added `src/intent/rules.rs` - Rule-based classifier with pattern matching
+- Added `src/intent/classifier.rs` - Hybrid classifier with caching and LLM fallback
+- Added `src/intent/router.rs` - Intent routing to handlers
+- Added `src/control/mod.rs` - ControlFiles loader for .prometheos directory
+- Added `.prometheos/SOUL.md` - System identity and behavior
+- Added `.prometheos/SKILLS.md` - Available abilities mapped to intents
+- Added `.prometheos/FLOWS.md` - Available flows with intent mappings
+- Added `.prometheos/TOOLS.md` - Executable tools and permissions
+- Added `.prometheos/MEMORY.md` - Memory policy
+- Added `.prometheos/PROJECT.md` - Project context
+- Updated `src/lib.rs` - Exported intent and control modules
+- Updated `src/api/server.rs` - Integrated intent classification, override commands, control files loading
+- Updated `PROJECT.md` - Updated control files paths to .prometheos/
+
+**Status:** v1.2.1 complete
+**See:** `docs/prd/prometheos-lite-prd-v1.2.1.md` for full specification
