@@ -1,8 +1,10 @@
 pub mod api;
 pub mod config;
+pub mod control;
 pub mod db;
 pub mod flow;
 pub mod fs;
+pub mod intent;
 pub mod llm;
 pub mod logger;
 
