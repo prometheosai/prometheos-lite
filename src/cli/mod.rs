@@ -8,7 +8,7 @@ use prometheos_lite::{
     logger::Logger,
 };
 
-mod runner;
+pub mod runner;
 
 #[derive(Debug, Parser)]
 #[command(
