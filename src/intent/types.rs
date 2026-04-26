@@ -18,6 +18,10 @@ pub enum Intent {
     ToolAction,
     /// Project-level operations
     ProjectAction,
+    /// Planning requests (PRD, spec, design)
+    Planning,
+    /// Approval command (to continue with implementation)
+    Approval,
     /// Ambiguous - needs LLM classification
     Ambiguous,
 }
@@ -32,6 +36,8 @@ impl Intent {
             Intent::FileEdit => "file_edit",
             Intent::ToolAction => "tool_action",
             Intent::ProjectAction => "project_action",
+            Intent::Planning => "planning",
+            Intent::Approval => "approval",
             Intent::Ambiguous => "ambiguous",
         }
     }
@@ -73,6 +79,10 @@ pub enum Handler {
     ToolExecution,
     /// Project operations handler
     ProjectAction,
+    /// Planning handler (generates plan only, waits for approval)
+    Planning,
+    /// Approval handler (continues with implementation after plan approval)
+    Approval,
 }
 
 impl Handler {
@@ -84,6 +94,8 @@ impl Handler {
             Intent::FileEdit => Handler::FileEdit,
             Intent::ToolAction => Handler::ToolExecution,
             Intent::ProjectAction => Handler::ProjectAction,
+            Intent::Planning => Handler::Planning,
+            Intent::Approval => Handler::CodeGenFlow, // Approval continues with full implementation
             Intent::Ambiguous => Handler::DirectLlm, // Default to direct LLM for ambiguous
         }
     }

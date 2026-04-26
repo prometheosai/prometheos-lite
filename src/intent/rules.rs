@@ -45,6 +45,16 @@ impl RuleClassifier {
             return Some(Intent::ProjectAction);
         }
 
+        // Planning patterns (PRD, spec, design)
+        if Self::is_planning_request(trimmed) {
+            return Some(Intent::Planning);
+        }
+
+        // Approval commands (to continue with implementation after plan review)
+        if Self::is_approval_command(trimmed) {
+            return Some(Intent::Approval);
+        }
+
         // No rule matched - ambiguous
         None
     }
@@ -81,6 +91,16 @@ impl RuleClassifier {
 
     /// Check if message is a coding task
     fn is_coding_task(message: &str) -> bool {
+        // First check if it's a planning request (PRD, design, spec)
+        let planning_patterns = [
+            "prd", "product requirement", "specification", "spec",
+            "design document", "architecture",
+            "plan", "planning",
+        ];
+        if planning_patterns.iter().any(|&pattern| message.to_lowercase().contains(pattern)) {
+            return false;
+        }
+
         let coding_verbs = [
             "build", "create", "implement", "generate", "make",
             "write code", "code", "program", "develop",
@@ -133,12 +153,38 @@ impl RuleClassifier {
     /// Check if message is a project action
     fn is_project_action(message: &str) -> bool {
         let project_patterns = [
-            "new project", "create project", "init project",
-            "project structure", "project setup",
-            "add to project", "remove from project",
+            "create a new project",
+            "initialize a project",
+            "set up a new project",
+            "start a new project",
         ];
 
         project_patterns.iter().any(|&pattern| message.contains(pattern))
+    }
+
+    /// Check if message is a planning request
+    fn is_planning_request(message: &str) -> bool {
+        let planning_patterns = [
+            "prd", "product requirement", "specification", "spec",
+            "design document", "architecture",
+            "plan", "planning",
+            "create a prd", "write a prd", "generate a prd",
+            "create a spec", "write a spec",
+        ];
+
+        planning_patterns.iter().any(|&pattern| message.to_lowercase().contains(pattern))
+    }
+
+    /// Check if message is an approval command (to continue with implementation)
+    fn is_approval_command(message: &str) -> bool {
+        let approval_patterns = [
+            "implement this plan", "implement the plan",
+            "continue", "proceed", "go ahead",
+            "yes implement", "yes continue",
+            "approve", "approved",
+        ];
+
+        approval_patterns.iter().any(|&pattern| message.to_lowercase().contains(pattern))
     }
 
     /// Check if message has an action verb
