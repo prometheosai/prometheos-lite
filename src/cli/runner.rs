@@ -870,7 +870,7 @@ impl Node for MemoryWriteNode {
 
         if let Some(service) = &self.memory_service {
             // Use MemoryService for actual write, but handle embedding server failures gracefully
-            match service.create_memory(content.to_string(), prometheos_lite::flow::MemoryType::Semantic, serde_json::json!({})).await {
+            match service.create_memory(content.to_string(), prometheos_lite::flow::MemoryKind::Semantic, serde_json::json!({})).await {
                 Ok(memory_id) => Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" })),
                 Err(e) => {
                     // Log the error but don't fail the flow - embedding server might be unavailable
