@@ -143,6 +143,7 @@ async fn run_flow(
         use crate::intent::{IntentClassifier, IntentRouter, Handler, Intent};
         use crate::control::ControlFiles;
         use chrono::Utc;
+        use crate::flow::MemoryKind;
 
         // Load control files
         let control_files = match ControlFiles::load() {
@@ -180,6 +181,40 @@ async fn run_flow(
             message.clone()
         } else {
             actual_message
+        };
+
+        // Log user message as episodic memory (async, non-blocking)
+        if let Some(memory_service) = runtime.memory_service.as_ref() {
+            let _ = memory_service.queue_episode(
+                format!("User: {}", message_to_process),
+                None, // user_id
+                None, // project_id
+                Some(conversation_id.clone()),
+                serde_json::json!({
+                    "role": "user",
+                    "flow_run_id": run_id,
+                }),
+            );
+        }
+
+        // Load relevant context from memory before LLM calls
+        let relevant_context = if let Some(memory_service) = runtime.memory_service.as_ref() {
+            match memory_service.semantic_search(&message_to_process, 5).await {
+                Ok(memories) => {
+                    let context: Vec<String> = memories.iter()
+                        .filter(|m| m.kind != crate::flow::MemoryKind::Episodic) // Skip raw episodes
+                        .map(|m| m.content.clone())
+                        .collect();
+                    if !context.is_empty() {
+                        Some(format!("Relevant Memory Context:\n{}", context.join("\n")))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None
+            }
+        } else {
+            None
         };
 
         // Classify intent
@@ -259,6 +294,13 @@ async fn run_flow(
                 // Concise conversation prompt with control files
                 let conversation_prompt = control_files.build_conversation_prompt(&message_to_process);
 
+                // Emit thinking event
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "system".to_string(),
+                    data: "Thinking...".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
                 let response = match llm_client.generate(&conversation_prompt).await {
                     Ok(resp) => resp,
                     Err(e) => {
@@ -279,9 +321,16 @@ async fn run_flow(
                     let _ = db.create_message(crate::db::CreateMessage {
                         conversation_id: conversation_id.clone(),
                         role: "assistant".to_string(),
-                        content: response,
+                        content: response.clone(),
                     });
                 }
+
+                // Emit assistant response via WebSocket
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "assistant".to_string(),
+                    data: response,
+                    timestamp: Utc::now(),
+                }).await;
 
                 // Emit completion event
                 let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
@@ -292,6 +341,277 @@ async fn run_flow(
 
                 if let Ok(db) = Db::new(&db_path) {
                     let _ = db.update_flow_run_status(&run_id, "completed");
+                }
+            }
+            Handler::Approval => {
+                // Approval handler - continues with full CodeGenFlow after user approves the plan
+                // This reuses the existing CodeGenFlow logic
+                let config = match AppConfig::load() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "system".to_string(),
+                            message: format!("Failed to load config: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                let llm_client = match LlmClient::from_config(&config) {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "system".to_string(),
+                            message: format!("Failed to create LLM client: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "system".to_string(),
+                    data: "User approved the plan. Starting implementation...".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Continue with CodeGenFlow logic
+                // Emit node_start event for coder
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
+                    node: "coder".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Real LLM call for coding phase
+                let coder_prompt = format!(
+                    "You are a coding AI. Implement the following plan:\n\n{}\n\nProvide clean, well-commented code.",
+                    message_to_process
+                );
+
+                let generated_code = match llm_client.generate(&coder_prompt).await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "coder".to_string(),
+                            message: format!("LLM call failed: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "coder".to_string(),
+                    data: generated_code.clone(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
+                    node: "coder".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Emit node_start event for reviewer
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
+                    node: "reviewer".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Real LLM call for review phase
+                let reviewer_prompt = format!(
+                    "You are a code reviewer. Review the following implementation:\n\n{}\n\nProvide constructive feedback.",
+                    generated_code
+                );
+
+                let review = match llm_client.generate(&reviewer_prompt).await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "reviewer".to_string(),
+                            message: format!("LLM call failed: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "reviewer".to_string(),
+                    data: review.clone(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
+                    node: "reviewer".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Memory write with embedding
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
+                    node: "memory_write".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Generate embedding for the conversation
+                let memory_content = format!("Task: {}\n\nCode: {}\n\nReview: {}",
+                    message_to_process, generated_code, review);
+                
+                match state.embedding_provider.embed(&memory_content).await {
+                    Ok(embedding) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                            node: "memory_write".to_string(),
+                            data: format!("Memory stored with embedding (dimension: {})", embedding.len()),
+                            timestamp: Utc::now(),
+                        }).await;
+                    }
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "memory_write".to_string(),
+                            message: format!("Memory write failed: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                    }
+                }
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
+                    node: "memory_write".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Combine outputs for assistant response
+                let assistant_response = format!(
+                    "## Implementation\n\n{}\n\n## Review\n\n{}",
+                    generated_code, review
+                );
+
+                // Save assistant message
+                if let Ok(db) = Db::new(&db_path) {
+                    let _ = db.create_message(CreateMessage {
+                        conversation_id: conversation_id.clone(),
+                        role: "assistant".to_string(),
+                        content: assistant_response.clone(),
+                    });
+                }
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "assistant".to_string(),
+                    data: assistant_response,
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Emit completion event
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "system".to_string(),
+                    data: "Implementation completed".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                if let Ok(db) = Db::new(&db_path) {
+                    let _ = db.update_flow_run_status(&run_id, "completed");
+                }
+            }
+            Handler::Planning => {
+                // Planning handler - generates plan/PRD only, waits for user approval
+                let config = match AppConfig::load() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "system".to_string(),
+                            message: format!("Failed to load config: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                let llm_client = match LlmClient::from_config(&config) {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "system".to_string(),
+                            message: format!("Failed to create LLM client: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                // Emit node_start event for planner
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
+                    node: "planner".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Generate plan/PRD
+                let planner_prompt = format!(
+                    "You are a product manager and technical writer. Create a detailed PRD (Product Requirements Document) in GitHub Issues format for the following request:\n\n{}\n\nInclude:\n- Title\n- Summary\n- Goals\n- User Stories\n- Technical Requirements\n- Acceptance Criteria\n- Success Metrics\nFormat the response as a GitHub Issue with proper markdown.",
+                    message_to_process
+                );
+
+                let plan = match llm_client.generate(&planner_prompt).await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "planner".to_string(),
+                            message: format!("LLM call failed: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                        if let Ok(db) = Db::new(&db_path) {
+                            let _ = db.update_flow_run_status(&run_id, "failed");
+                        }
+                        return;
+                    }
+                };
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "planner".to_string(),
+                    data: plan.clone(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
+                    node: "planner".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Save assistant message with the plan
+                if let Ok(db) = Db::new(&db_path) {
+                    let _ = db.create_message(CreateMessage {
+                        conversation_id: conversation_id.clone(),
+                        role: "assistant".to_string(),
+                        content: plan.clone(),
+                    });
+                }
+
+                // Emit completion event with waiting for approval status
+                let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                    node: "system".to_string(),
+                    data: "Plan generated. Review the PRD above. To proceed with implementation, say 'Implement this plan' or 'Continue'. To modify the plan, provide your feedback.".to_string(),
+                    timestamp: Utc::now(),
+                }).await;
+
+                // Update status to waiting for approval
+                if let Ok(db) = Db::new(&db_path) {
+                    let _ = db.update_flow_run_status(&run_id, "waiting_for_approval");
                 }
             }
             Handler::CodeGenFlow => {
@@ -333,10 +653,17 @@ async fn run_flow(
                 }).await;
 
                 // Real LLM call for planning phase
-                let planner_prompt = format!(
-                    "You are a planning AI. Create a detailed plan for the following task:\n\n{}\n\nProvide a step-by-step plan with clear objectives.",
-                    message_to_process
-                );
+                let planner_prompt = if let Some(context) = &relevant_context {
+                    format!(
+                        "You are a planning AI. Create a detailed plan for the following task:\n\n{}\n\n{}\n\nProvide a step-by-step plan with clear objectives.",
+                        context, message_to_process
+                    )
+                } else {
+                    format!(
+                        "You are a planning AI. Create a detailed plan for the following task:\n\n{}\n\nProvide a step-by-step plan with clear objectives.",
+                        message_to_process
+                    )
+                };
 
                 let plan = match llm_client.generate(&planner_prompt).await {
                     Ok(response) => response,
@@ -358,6 +685,21 @@ async fn run_flow(
                     data: plan.clone(),
                     timestamp: Utc::now(),
                 }).await;
+
+                // Log assistant response as episodic memory (async, non-blocking)
+                if let Some(memory_service) = runtime.memory_service.as_ref() {
+                    let _ = memory_service.queue_episode(
+                        format!("Assistant (planner): {}", plan),
+                        None, // user_id
+                        None, // project_id
+                        Some(conversation_id.clone()),
+                        serde_json::json!({
+                            "role": "assistant",
+                            "node": "planner",
+                            "flow_run_id": run_id,
+                        }),
+                    );
+                }
 
                 let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
                     node: "planner".to_string(),
@@ -396,6 +738,21 @@ async fn run_flow(
                     data: generated_code.clone(),
                     timestamp: Utc::now(),
                 }).await;
+
+                // Log assistant response as episodic memory (async, non-blocking)
+                if let Some(memory_service) = runtime.memory_service.as_ref() {
+                    let _ = memory_service.queue_episode(
+                        format!("Assistant (coder): {}", generated_code),
+                        None, // user_id
+                        None, // project_id
+                        Some(conversation_id.clone()),
+                        serde_json::json!({
+                            "role": "assistant",
+                            "node": "coder",
+                            "flow_run_id": run_id,
+                        }),
+                    );
+                }
 
                 let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
                     node: "coder".to_string(),
@@ -440,17 +797,32 @@ async fn run_flow(
                     timestamp: Utc::now(),
                 }).await;
 
-                // Simulate memory write with skipped warning
+                // Memory write with embedding
                 let _ = ws_manager.send_event(&run_id, FlowEvent::NodeStart {
                     node: "memory_write".to_string(),
                     timestamp: Utc::now(),
                 }).await;
 
-                let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
-                    node: "memory_write".to_string(),
-                    message: "Memory write skipped: Embedding server unavailable".to_string(),
-                    timestamp: Utc::now(),
-                }).await;
+                // Generate embedding for the conversation
+                let memory_content = format!("Task: {}\n\nPlan: {}\n\nCode: {}\n\nReview: {}",
+                    message_to_process, plan, generated_code, review);
+                
+                match state.embedding_provider.embed(&memory_content).await {
+                    Ok(embedding) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
+                            node: "memory_write".to_string(),
+                            data: format!("Memory stored with embedding (dimension: {})", embedding.len()),
+                            timestamp: Utc::now(),
+                        }).await;
+                    }
+                    Err(e) => {
+                        let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
+                            node: "memory_write".to_string(),
+                            message: format!("Memory write failed: {}", e),
+                            timestamp: Utc::now(),
+                        }).await;
+                    }
+                }
 
                 let _ = ws_manager.send_event(&run_id, FlowEvent::NodeEnd {
                     node: "memory_write".to_string(),
