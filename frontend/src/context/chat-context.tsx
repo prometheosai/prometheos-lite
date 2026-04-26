@@ -33,6 +33,7 @@ type State = {
   projects: ChatProject[]
   conversations: ChatConversation[]
   currentConversationId: string | null
+  currentProjectId: string | null
   loading: boolean
   error: string | null
 }
@@ -52,6 +53,7 @@ type ChatContextType = State & {
   archiveConversation: (id: string) => void
   duplicateConversation: (id: string) => void
   setCurrentConversation: (id: string | null) => void
+  setCurrentProject: (id: string | null) => void
   addMessage: (conversationId: string, msg: { role: Role; content: string }) => void
   refreshData: () => Promise<void>
 }
@@ -62,6 +64,7 @@ const initialState: State = {
   ],
   conversations: [],
   currentConversationId: null,
+  currentProjectId: typeof window !== "undefined" ? localStorage.getItem("currentProjectId") ?? null : null,
   loading: true,
   error: null,
 }
@@ -73,6 +76,7 @@ type Action =
   | { type: "SET_ERROR"; error: string | null }
   | { type: "LOAD"; payload: State }
   | { type: "SET_CURRENT"; id: string | null }
+  | { type: "SET_CURRENT_PROJECT"; id: string | null }
   | { type: "UPSERT_PROJECT"; project: ChatProject }
   | { type: "RENAME_PROJECT"; id: string; name: string }
   | { type: "SET_PROJECT_ICON"; id: string; icon: string }
@@ -94,6 +98,8 @@ function reducer(state: State, action: Action): State {
       return action.payload
     case "SET_CURRENT":
       return { ...state, currentConversationId: action.id }
+    case "SET_CURRENT_PROJECT":
+      return { ...state, currentProjectId: action.id }
     case "UPSERT_PROJECT": {
       const exists = state.projects.some((p) => p.id === action.project.id)
       return {
@@ -122,6 +128,7 @@ function reducer(state: State, action: Action): State {
         conversations: state.conversations.map((c) =>
           c.projectId === action.id ? { ...c, projectId: null } : c
         ),
+        currentProjectId: state.currentProjectId === action.id ? null : state.currentProjectId,
       }
     }
     case "UPSERT_CONV": {
@@ -397,6 +404,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: "SET_CURRENT", id })
   }, [])
 
+  const setCurrentProject = useCallback((id: string | null) => {
+    dispatch({ type: "SET_CURRENT_PROJECT", id })
+    if (typeof window !== "undefined") {
+      if (id) {
+        localStorage.setItem("currentProjectId", id)
+      } else {
+        localStorage.removeItem("currentProjectId")
+      }
+    }
+  }, [])
+
   const currentConversation = useMemo(
     () => state.conversations.find((c) => c.id === state.currentConversationId) || null,
     [state.conversations, state.currentConversationId]
@@ -420,6 +438,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         archiveConversation,
         duplicateConversation,
         setCurrentConversation,
+        setCurrentProject,
         addMessage,
         refreshData,
       }}

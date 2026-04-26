@@ -17,6 +17,8 @@ import {
   Star,
   PanelLeft,
   PanelRight,
+  ChevronDown,
+  Search,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -26,6 +28,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Separator } from "@/components/ui/separator"
 import { useChat } from "@/context/chat-context"
 import { cn } from "@/lib/utils"
+import { groupChatsByTime, getChatPreview } from "@/lib/chat-utils"
+import { SearchCommandPalette } from "./search-command-palette"
+import { ProfileModal } from "./profile-modal"
 
 const chatIconOptions = [
   { key: "message-square", label: "Chat", Icon: MessageSquare },
@@ -52,7 +57,40 @@ export function LeftSidebar() {
   const [selectedChatIcon, setSelectedChatIcon] = useState("message-square")
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null)
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null)
-  const { projects, conversations, currentConversationId, createProject, createConversation, setCurrentConversation, setProjectIcon, setConversationIcon, renameProject, renameConversation, deleteProject, archiveProject, duplicateProject, deleteConversation, archiveConversation, duplicateConversation } = useChat()
+  const [collapsedTimeGroups, setCollapsedTimeGroups] = useState<Record<string, Record<string, boolean>>>({})
+  const [showMoreGroups, setShowMoreGroups] = useState<Record<string, Record<string, boolean>>>({})
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const { projects, conversations, currentConversationId, currentProjectId, createProject, createConversation, setCurrentConversation, setCurrentProject, setProjectIcon, setConversationIcon, renameProject, renameConversation, deleteProject, archiveProject, duplicateProject, deleteConversation, archiveConversation, duplicateConversation } = useChat()
+
+  // Load collapsed time groups from localStorage on mount
+  useEffect(() => {
+    const savedCollapsedGroups = localStorage.getItem("sidebar:collapsedGroups")
+    if (savedCollapsedGroups) {
+      try {
+        setCollapsedTimeGroups(JSON.parse(savedCollapsedGroups))
+      } catch (e) {
+        console.error("Failed to parse collapsed groups from localStorage:", e)
+      }
+    }
+  }, [])
+
+  // Save collapsed time groups to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem("sidebar:collapsedGroups", JSON.stringify(collapsedTimeGroups))
+  }, [collapsedTimeGroups])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault()
+        setSearchOpen(true)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [])
 
   const iconMap: Record<string, any> = {
     "folder": Folder,
@@ -242,14 +280,317 @@ export function LeftSidebar() {
   }
 
   const grouped = projects.reduce((acc, project) => {
+    const projectChats = conversations.filter(c => c.projectId === project.id)
     acc[project.id] = {
       projectName: project.name,
-      items: conversations.filter(c => c.projectId === project.id),
+      items: projectChats,
+      grouped: groupChatsByTime(projectChats),
     }
     return acc
-  }, {} as Record<string, { projectName: string; items: typeof conversations }>)
+  }, {} as Record<string, { projectName: string; items: typeof conversations; grouped: ReturnType<typeof groupChatsByTime> }>)
 
   const unsortedConversations = conversations.filter(c => !c.projectId || c.projectId === "unsorted")
+  const unsortedGrouped = groupChatsByTime(unsortedConversations)
+
+  const TimeGroupSection = ({
+    project,
+    grouped,
+    currentConversationId,
+    editingConversationId,
+    setEditingConversationId,
+    setCurrentConversation,
+    setConversationIcon,
+    renameConversation,
+    deleteConversation,
+    archiveConversation,
+    duplicateConversation,
+    collapsedTimeGroups,
+    setCollapsedTimeGroups,
+    showMoreGroups,
+    setShowMoreGroups,
+    RenderIcon,
+    EditableText,
+    chatIconOptions,
+  }: {
+    project: any
+    grouped: ReturnType<typeof groupChatsByTime> | undefined
+    currentConversationId: string | null
+    editingConversationId: string | null
+    setEditingConversationId: (id: string | null) => void
+    setCurrentConversation: (id: string) => void
+    setConversationIcon: (id: string, icon: string) => void
+    renameConversation: (id: string, title: string) => void
+    deleteConversation: (id: string) => void
+    archiveConversation: (id: string) => void
+    duplicateConversation: (id: string) => void
+    collapsedTimeGroups: Record<string, Record<string, boolean>>
+    setCollapsedTimeGroups: React.Dispatch<React.SetStateAction<Record<string, Record<string, boolean>>>>
+    showMoreGroups: Record<string, Record<string, boolean>>
+    setShowMoreGroups: React.Dispatch<React.SetStateAction<Record<string, Record<string, boolean>>>>
+    RenderIcon: any
+    EditableText: any
+    chatIconOptions: readonly any[]
+  }) => {
+    if (!grouped) return null
+
+    const timeGroups = [
+      { key: "today", label: "Today", chats: grouped.today },
+      { key: "thisWeek", label: "This Week", chats: grouped.thisWeek },
+      { key: "older", label: "Older", chats: grouped.older },
+    ]
+
+    return (
+      <>
+        {timeGroups.map(({ key, label, chats }) => {
+          if (chats.length === 0) return null
+
+          const isCollapsed = collapsedTimeGroups[project.id]?.[key] ?? (key !== "today")
+          const showMore = showMoreGroups[project.id]?.[key] ?? false
+          const visibleChats = showMore ? chats : chats.slice(0, 7)
+
+          return (
+            <div key={key} className="ml-4">
+              <Collapsible
+                open={!isCollapsed}
+                onOpenChange={(open) => {
+                  setCollapsedTimeGroups(prev => ({
+                    ...prev,
+                    [project.id]: { ...prev[project.id], [key]: !open }
+                  }))
+                }}
+              >
+                <CollapsibleTrigger className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors w-full">
+                  <ChevronDown className={cn("h-3 w-3 transition-transform", isCollapsed && "-rotate-90")} />
+                  <span>{label}</span>
+                  <span className="text-muted-foreground">({chats.length})</span>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-1">
+                  {visibleChats.map((conv) => (
+                    <Tooltip key={conv.id}>
+                      <TooltipTrigger asChild>
+                        <div
+                          className={cn(
+                            "flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ml-2 text-sm transition-all duration-200",
+                            currentConversationId === conv.id
+                              ? "bg-sidebar-accent/60 text-sidebar-accent-foreground"
+                              : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                          )}
+                          onClick={() => setCurrentConversation(conv.id)}
+                          aria-current={currentConversationId === conv.id ? "page" : undefined}
+                        >
+                          {currentConversationId === conv.id && (
+                            <div className="h-1.5 w-1.5 rounded-full bg-primary" />
+                          )}
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+                              <div className="hover:bg-sidebar-accent/50 rounded p-1">
+                                <RenderIcon name={conv.icon} className="h-4 w-4" />
+                              </div>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="start" className="w-48">
+                              {chatIconOptions.map((option) => (
+                                <DropdownMenuItem
+                                  key={option.key}
+                                  onClick={() => setConversationIcon(conv.id, option.key)}
+                                >
+                                  <option.Icon className="h-4 w-4 mr-2" />
+                                  {option.label}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                          <EditableText
+                            value={conv.title}
+                            isEditing={editingConversationId === conv.id}
+                            onSave={(newTitle: string) => {
+                              renameConversation(conv.id, newTitle)
+                              setEditingConversationId(null)
+                            }}
+                            onCancel={() => setEditingConversationId(null)}
+                            onStartEdit={(e?: React.MouseEvent) => {
+                              e?.stopPropagation()
+                              setEditingConversationId(conv.id)
+                            }}
+                            onEdit={() => setEditingConversationId(conv.id)}
+                            onDelete={() => deleteConversation(conv.id)}
+                            onArchive={() => archiveConversation(conv.id)}
+                            onDuplicate={() => duplicateConversation(conv.id)}
+                            className="truncate flex-1"
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="right" className="max-w-xs">
+                        <p className="text-xs">{getChatPreview(conv)}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                  {chats.length > 7 && !showMore && (
+                    <button
+                      className="ml-2 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      onClick={() => setShowMoreGroups(prev => ({
+                        ...prev,
+                        [project.id]: { ...prev[project.id], [key]: true }
+                      }))}
+                    >
+                      Show more ({chats.length - 7} remaining)
+                    </button>
+                  )}
+                </CollapsibleContent>
+              </Collapsible>
+            </div>
+          )
+        })}
+      </>
+    )
+  }
+
+  const UnassignedTimeGroupSection = ({
+    grouped,
+    currentConversationId,
+    editingConversationId,
+    setEditingConversationId,
+    setCurrentConversation,
+    setConversationIcon,
+    renameConversation,
+    deleteConversation,
+    archiveConversation,
+    duplicateConversation,
+    collapsedTimeGroups,
+    setCollapsedTimeGroups,
+    showMoreGroups,
+    setShowMoreGroups,
+    RenderIcon,
+    EditableText,
+    chatIconOptions,
+  }: {
+    grouped: ReturnType<typeof groupChatsByTime>
+    currentConversationId: string | null
+    editingConversationId: string | null
+    setEditingConversationId: (id: string | null) => void
+    setCurrentConversation: (id: string) => void
+    setConversationIcon: (id: string, icon: string) => void
+    renameConversation: (id: string, title: string) => void
+    deleteConversation: (id: string) => void
+    archiveConversation: (id: string) => void
+    duplicateConversation: (id: string) => void
+    collapsedTimeGroups: Record<string, Record<string, boolean>>
+    setCollapsedTimeGroups: React.Dispatch<React.SetStateAction<Record<string, Record<string, boolean>>>>
+    showMoreGroups: Record<string, Record<string, boolean>>
+    setShowMoreGroups: React.Dispatch<React.SetStateAction<Record<string, Record<string, boolean>>>>
+    RenderIcon: any
+    EditableText: any
+    chatIconOptions: readonly any[]
+  }) => {
+    const timeGroups = [
+      { key: "today", label: "Today", chats: grouped.today },
+      { key: "thisWeek", label: "This Week", chats: grouped.thisWeek },
+      { key: "older", label: "Older", chats: grouped.older },
+    ]
+
+    return (
+      <>
+        {timeGroups.map(({ key, label, chats }) => {
+          if (chats.length === 0) return null
+
+          const isCollapsed = collapsedTimeGroups["unassigned"]?.[key] ?? (key !== "today")
+          const showMore = showMoreGroups["unassigned"]?.[key] ?? false
+          const visibleChats = showMore ? chats : chats.slice(0, 7)
+
+          return (
+            <div key={key}>
+              <Collapsible
+                open={!isCollapsed}
+                onOpenChange={(open) => {
+                  setCollapsedTimeGroups(prev => ({
+                    ...prev,
+                    unassigned: { ...prev.unassigned, [key]: !open }
+                  }))
+                }}
+              >
+                <CollapsibleTrigger className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors w-full">
+                  <ChevronDown className={cn("h-3 w-3 transition-transform", isCollapsed && "-rotate-90")} />
+                  <span>{label}</span>
+                  <span className="text-muted-foreground">({chats.length})</span>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-1">
+                  {visibleChats.map((conv) => (
+                    <Tooltip key={conv.id}>
+                      <TooltipTrigger asChild>
+                        <div
+                          className={cn(
+                            "flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-all duration-200",
+                            currentConversationId === conv.id
+                              ? "bg-sidebar-accent/60 text-sidebar-accent-foreground"
+                              : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                          )}
+                          onClick={() => setCurrentConversation(conv.id)}
+                          aria-current={currentConversationId === conv.id ? "page" : undefined}
+                        >
+                          {currentConversationId === conv.id && (
+                            <div className="h-1.5 w-1.5 rounded-full bg-primary" />
+                          )}
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+                              <div className="hover:bg-sidebar-accent/50 rounded p-1">
+                                <RenderIcon name={conv.icon} className="h-4 w-4" />
+                              </div>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="start" className="w-48">
+                              {chatIconOptions.map((option) => (
+                                <DropdownMenuItem
+                                  key={option.key}
+                                  onClick={() => setConversationIcon(conv.id, option.key)}
+                                >
+                                  <option.Icon className="h-4 w-4 mr-2" />
+                                  {option.label}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                          <EditableText
+                            value={conv.title}
+                            isEditing={editingConversationId === conv.id}
+                            onSave={(newTitle: string) => {
+                              renameConversation(conv.id, newTitle)
+                              setEditingConversationId(null)
+                            }}
+                            onCancel={() => setEditingConversationId(null)}
+                            onStartEdit={(e?: React.MouseEvent) => {
+                              e?.stopPropagation()
+                              setEditingConversationId(conv.id)
+                            }}
+                            onEdit={() => setEditingConversationId(conv.id)}
+                            onDelete={() => deleteConversation(conv.id)}
+                            onArchive={() => archiveConversation(conv.id)}
+                            onDuplicate={() => duplicateConversation(conv.id)}
+                            className="truncate flex-1"
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="right" className="max-w-xs">
+                        <p className="text-xs">{getChatPreview(conv)}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                  {chats.length > 7 && !showMore && (
+                    <button
+                      className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      onClick={() => setShowMoreGroups(prev => ({
+                        ...prev,
+                        unassigned: { ...prev.unassigned, [key]: true }
+                      }))}
+                    >
+                      Show more ({chats.length - 7} remaining)
+                    </button>
+                  )}
+                </CollapsibleContent>
+              </Collapsible>
+            </div>
+          )
+        })}
+      </>
+    )
+  }
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -273,6 +614,7 @@ export function LeftSidebar() {
                 size="icon"
                 onClick={() => setCollapsed(!collapsed)}
                 className="ml-auto"
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
               >
                 {collapsed ? <PanelRight className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
               </Button>
@@ -283,8 +625,39 @@ export function LeftSidebar() {
           </Tooltip>
         </div>
 
+        {/* Search */}
+        <div className="px-4 pb-4">
+          {collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setSearchOpen(true)}
+                  className="w-full"
+                  aria-label="Search chats and projects"
+                >
+                  <Search className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Search (⌘K)</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Button
+              variant="outline"
+              className="w-full justify-start text-muted-foreground"
+              onClick={() => setSearchOpen(true)}
+              aria-label="Search chats and projects"
+            >
+              <Search className="h-4 w-4 mr-2" />
+              Search...
+              <span className="ml-auto text-xs text-muted-foreground">⌘K</span>
+            </Button>
+          )}
+        </div>
+
         {/* New Chat Button */}
-        <div className="p-4">
+        <div className="px-4 pb-4">
           {collapsed ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -293,6 +666,7 @@ export function LeftSidebar() {
                   size="icon"
                   onClick={() => createConversation({ icon: selectedChatIcon })}
                   className="w-full"
+                  aria-label="Create new chat"
                 >
                   <Plus className="h-4 w-4" />
                 </Button>
@@ -302,7 +676,7 @@ export function LeftSidebar() {
           ) : (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="w-full justify-start">
+                <Button variant="outline" className="w-full justify-start" aria-label="Create new chat">
                   <Plus className="h-4 w-4 mr-2" />
                   New chat
                 </Button>
@@ -395,66 +769,34 @@ export function LeftSidebar() {
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  {projects.filter(p => p.id !== "unsorted").map((project) => (
-                    <div key={project.id} className="space-y-1">
-                      <div className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-sidebar-accent cursor-pointer group">
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <div className="hover:bg-sidebar-accent/50 rounded p-1 group-hover:bg-sidebar-accent/30 transition-colors">
-                              <RenderIcon name={project.icon} className="h-4 w-4" />
-                            </div>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="start" className="w-48">
-                            {projectIconOptions.map((option) => (
-                              <DropdownMenuItem
-                                key={option.key}
-                                onClick={() => setProjectIcon(project.id, option.key)}
-                              >
-                                <option.Icon className="h-4 w-4 mr-2" />
-                                {option.label}
-                              </DropdownMenuItem>
-                            ))}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                        <EditableText
-                          value={project.name}
-                          isEditing={editingProjectId === project.id}
-                          onSave={(newName) => {
-                            renameProject(project.id, newName)
-                            setEditingProjectId(null)
-                          }}
-                          onCancel={() => setEditingProjectId(null)}
-                          onStartEdit={() => setEditingProjectId(project.id)}
-                          onEdit={() => setEditingProjectId(project.id)}
-                          onDelete={() => deleteProject(project.id)}
-                          onArchive={() => archiveProject(project.id)}
-                          onDuplicate={() => duplicateProject(project.id)}
-                          onAddChat={() => createConversation({ projectId: project.id })}
-                          className="text-sm text-sidebar-foreground truncate flex-1"
-                        />
-                      </div>
-                      {grouped[project.id]?.items.map((conv) => (
+                  {projects.filter(p => p.id !== "unsorted").length === 0 ? (
+                    <div className="px-2 py-4 text-center">
+                      <p className="text-xs text-muted-foreground">No projects yet</p>
+                      <p className="text-xs text-muted-foreground">Create a project to organize your chats</p>
+                    </div>
+                  ) : (
+                    projects.filter(p => p.id !== "unsorted").map((project) => (
+                      <div key={project.id} className="space-y-1">
                         <div
-                          key={conv.id}
                           className={cn(
-                            "flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer ml-4 text-sm transition-all duration-200 hover-glow",
-                            currentConversationId === conv.id
-                              ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                              : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                            "flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-sidebar-accent cursor-pointer group transition-all",
+                            currentProjectId === project.id
+                              ? "bg-sidebar-accent/80 border-l-2 border-primary"
+                              : ""
                           )}
-                          onClick={() => setCurrentConversation(conv.id)}
+                          onClick={() => setCurrentProject(project.id)}
                         >
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                              <div className="hover:bg-sidebar-accent/50 rounded p-1">
-                                <RenderIcon name={conv.icon} className="h-4 w-4" />
+                              <div className="hover:bg-sidebar-accent/50 rounded p-1 group-hover:bg-sidebar-accent/30 transition-colors">
+                                <RenderIcon name={project.icon} className="h-4 w-4" />
                               </div>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="start" className="w-48">
-                              {chatIconOptions.map((option) => (
+                              {projectIconOptions.map((option) => (
                                 <DropdownMenuItem
                                   key={option.key}
-                                  onClick={() => setConversationIcon(conv.id, option.key)}
+                                  onClick={() => setProjectIcon(project.id, option.key)}
                                 >
                                   <option.Icon className="h-4 w-4 mr-2" />
                                   {option.label}
@@ -463,38 +805,59 @@ export function LeftSidebar() {
                             </DropdownMenuContent>
                           </DropdownMenu>
                           <EditableText
-                            value={conv.title}
-                            isEditing={editingConversationId === conv.id}
-                            onSave={(newTitle) => {
-                              renameConversation(conv.id, newTitle)
-                              setEditingConversationId(null)
+                            value={project.name}
+                            isEditing={editingProjectId === project.id}
+                            onSave={(newName) => {
+                              renameProject(project.id, newName)
+                              setEditingProjectId(null)
                             }}
-                            onCancel={() => setEditingConversationId(null)}
-                            onStartEdit={(e) => {
-                              e?.stopPropagation()
-                              setEditingConversationId(conv.id)
-                            }}
-                            onEdit={() => setEditingConversationId(conv.id)}
-                            onDelete={() => deleteConversation(conv.id)}
-                            onArchive={() => archiveConversation(conv.id)}
-                            onDuplicate={() => duplicateConversation(conv.id)}
-                            className="truncate flex-1"
+                            onCancel={() => setEditingProjectId(null)}
+                            onStartEdit={() => setEditingProjectId(project.id)}
+                            onEdit={() => setEditingProjectId(project.id)}
+                            onDelete={() => deleteProject(project.id)}
+                            onArchive={() => archiveProject(project.id)}
+                            onDuplicate={() => duplicateProject(project.id)}
+                            onAddChat={() => createConversation({ projectId: project.id })}
+                            className={cn(
+                              "text-sm text-sidebar-foreground truncate flex-1",
+                              currentProjectId === project.id ? "font-semibold" : ""
+                            )}
                           />
                         </div>
-                      ))}
-                    </div>
-                  ))}
+                        <TimeGroupSection
+                          project={project}
+                          grouped={grouped[project.id]?.grouped}
+                          currentConversationId={currentConversationId}
+                          editingConversationId={editingConversationId}
+                          setEditingConversationId={setEditingConversationId}
+                          setCurrentConversation={setCurrentConversation}
+                          setConversationIcon={setConversationIcon}
+                          renameConversation={renameConversation}
+                          deleteConversation={deleteConversation}
+                          archiveConversation={archiveConversation}
+                          duplicateConversation={duplicateConversation}
+                          collapsedTimeGroups={collapsedTimeGroups}
+                          setCollapsedTimeGroups={setCollapsedTimeGroups}
+                          showMoreGroups={showMoreGroups}
+                          setShowMoreGroups={setShowMoreGroups}
+                          RenderIcon={RenderIcon}
+                          EditableText={EditableText}
+                          chatIconOptions={chatIconOptions}
+                        />
+                      </div>
+                    ))
+                  )}
                 </CollapsibleContent>
               </Collapsible>
             )}
 
-            {/* Chats */}
+            {/* Unassigned Chats */}
             {!collapsed && (
               <Collapsible defaultOpen className="space-y-2">
                 <CollapsibleTrigger className="flex items-center justify-between w-full px-2 py-1.5 rounded-md hover:bg-sidebar-accent transition-colors">
                   <div className="flex items-center gap-2 text-sm font-medium text-sidebar-foreground">
                     <MessageSquare className="h-4 w-4" />
-                    <span>Chats</span>
+                    <span>Unassigned Chats</span>
                     <span className="text-xs text-muted-foreground ml-auto">
                       {unsortedConversations.length}
                     </span>
@@ -524,55 +887,32 @@ export function LeftSidebar() {
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  {unsortedConversations.map((conv) => (
-                    <div
-                      key={conv.id}
-                      className={cn(
-                        "flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-all duration-200 hover-glow",
-                        currentConversationId === conv.id
-                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                          : "text-sidebar-foreground hover:bg-sidebar-accent/50"
-                      )}
-                      onClick={() => setCurrentConversation(conv.id)}
-                    >
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                          <div className="hover:bg-sidebar-accent/50 rounded p-1">
-                            <RenderIcon name={conv.icon} className="h-4 w-4" />
-                          </div>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" className="w-48">
-                          {chatIconOptions.map((option) => (
-                            <DropdownMenuItem
-                              key={option.key}
-                              onClick={() => setConversationIcon(conv.id, option.key)}
-                            >
-                              <option.Icon className="h-4 w-4 mr-2" />
-                              {option.label}
-                            </DropdownMenuItem>
-                          ))}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                      <EditableText
-                        value={conv.title}
-                        isEditing={editingConversationId === conv.id}
-                        onSave={(newTitle) => {
-                          renameConversation(conv.id, newTitle)
-                          setEditingConversationId(null)
-                        }}
-                        onCancel={() => setEditingConversationId(null)}
-                        onStartEdit={(e) => {
-                          e?.stopPropagation()
-                          setEditingConversationId(conv.id)
-                        }}
-                        onEdit={() => setEditingConversationId(conv.id)}
-                        onDelete={() => deleteConversation(conv.id)}
-                        onArchive={() => archiveConversation(conv.id)}
-                        onDuplicate={() => duplicateConversation(conv.id)}
-                        className="truncate flex-1"
-                      />
+                  {unsortedConversations.length === 0 ? (
+                    <div className="px-2 py-4 text-center">
+                      <p className="text-xs text-muted-foreground">No unassigned chats</p>
+                      <p className="text-xs text-muted-foreground">Create a chat or add it to a project</p>
                     </div>
-                  ))}
+                  ) : (
+                    <UnassignedTimeGroupSection
+                      grouped={unsortedGrouped}
+                      currentConversationId={currentConversationId}
+                      editingConversationId={editingConversationId}
+                      setEditingConversationId={setEditingConversationId}
+                      setCurrentConversation={setCurrentConversation}
+                      setConversationIcon={setConversationIcon}
+                      renameConversation={renameConversation}
+                      deleteConversation={deleteConversation}
+                      archiveConversation={archiveConversation}
+                      duplicateConversation={duplicateConversation}
+                      collapsedTimeGroups={collapsedTimeGroups}
+                      setCollapsedTimeGroups={setCollapsedTimeGroups}
+                      showMoreGroups={showMoreGroups}
+                      setShowMoreGroups={setShowMoreGroups}
+                      RenderIcon={RenderIcon}
+                      EditableText={EditableText}
+                      chatIconOptions={chatIconOptions}
+                    />
+                  )}
                 </CollapsibleContent>
               </Collapsible>
             )}
@@ -584,19 +924,33 @@ export function LeftSidebar() {
           {collapsed ? (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="w-full">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="w-full"
+                  onClick={() => setProfileOpen(true)}
+                  aria-label="Open profile settings"
+                >
                   <User className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="right">Profile</TooltipContent>
             </Tooltip>
           ) : (
-            <Button variant="ghost" className="w-full justify-start">
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              onClick={() => setProfileOpen(true)}
+              aria-label="Open profile settings"
+            >
               <User className="h-4 w-4 mr-2" />
               <span>Profile</span>
             </Button>
           )}
         </div>
+
+        <SearchCommandPalette open={searchOpen} onOpenChange={setSearchOpen} />
+        <ProfileModal open={profileOpen} onOpenChange={setProfileOpen} />
       </div>
     </TooltipProvider>
   )

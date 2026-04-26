@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { LeftSidebar } from "./left-sidebar"
+import dynamic from "next/dynamic"
 import { RightSidebar } from "./right-sidebar"
 import { ConversationArea } from "./conversation-area"
 import { useTheme } from "next-themes"
@@ -11,6 +11,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { type FlowEvent } from "@/lib/api"
 import { useChat } from "@/context/chat-context"
+
+const LeftSidebar = dynamic(() => import("./left-sidebar").then(mod => ({ default: mod.LeftSidebar })), { ssr: false })
 
 interface AppLayoutProps {
   children?: React.ReactNode
