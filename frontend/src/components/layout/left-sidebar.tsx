@@ -26,7 +26,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Separator } from "@/components/ui/separator"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { useChat } from "@/context/chat-context"
+import { useProfile } from "@/context/profile-context"
 import { cn } from "@/lib/utils"
 import { groupChatsByTime, getChatPreview } from "@/lib/chat-utils"
 import { SearchCommandPalette } from "./search-command-palette"
@@ -54,14 +56,15 @@ const projectIconOptions = [
 export function LeftSidebar() {
   const [collapsed, setCollapsed] = useState(false)
   const [selectedProjectIcon, setSelectedProjectIcon] = useState("folder")
-  const [selectedChatIcon, setSelectedChatIcon] = useState("message-square")
+  const [selectedChatIcon, setSelectedChatIcon] = useState(chatIconOptions[0].key)
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null)
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null)
   const [collapsedTimeGroups, setCollapsedTimeGroups] = useState<Record<string, Record<string, boolean>>>({})
   const [showMoreGroups, setShowMoreGroups] = useState<Record<string, Record<string, boolean>>>({})
   const [searchOpen, setSearchOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
-  const { projects, conversations, currentConversationId, currentProjectId, createProject, createConversation, setCurrentConversation, setCurrentProject, setProjectIcon, setConversationIcon, renameProject, renameConversation, deleteProject, archiveProject, duplicateProject, deleteConversation, archiveConversation, duplicateConversation } = useChat()
+  const { projects, conversations, currentConversation, setCurrentConversation, setCurrentProject, currentProjectId, createConversation, createProject, setProjectIcon, setConversationIcon, renameProject, renameConversation, deleteProject, archiveProject, duplicateProject, deleteConversation, archiveConversation, duplicateConversation } = useChat()
+  const { profile } = useProfile()
 
   // Load collapsed time groups from localStorage on mount
   useEffect(() => {
@@ -626,7 +629,7 @@ export function LeftSidebar() {
         </div>
 
         {/* Search */}
-        <div className="px-4 pb-4">
+        <div className="px-4 py-4 flex items-center justify-center">
           {collapsed ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -657,7 +660,7 @@ export function LeftSidebar() {
         </div>
 
         {/* New Chat Button */}
-        <div className="px-4 pb-4">
+        <div className="px-4 py-4 flex items-center justify-center">
           {collapsed ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -827,7 +830,7 @@ export function LeftSidebar() {
                         <TimeGroupSection
                           project={project}
                           grouped={grouped[project.id]?.grouped}
-                          currentConversationId={currentConversationId}
+                          currentConversationId={currentConversation?.id || null}
                           editingConversationId={editingConversationId}
                           setEditingConversationId={setEditingConversationId}
                           setCurrentConversation={setCurrentConversation}
@@ -851,13 +854,13 @@ export function LeftSidebar() {
               </Collapsible>
             )}
 
-            {/* Unassigned Chats */}
+            {/* Chats */}
             {!collapsed && (
               <Collapsible defaultOpen className="space-y-2">
                 <CollapsibleTrigger className="flex items-center justify-between w-full px-2 py-1.5 rounded-md hover:bg-sidebar-accent transition-colors">
                   <div className="flex items-center gap-2 text-sm font-medium text-sidebar-foreground">
                     <MessageSquare className="h-4 w-4" />
-                    <span>Unassigned Chats</span>
+                    <span>Chats</span>
                     <span className="text-xs text-muted-foreground ml-auto">
                       {unsortedConversations.length}
                     </span>
@@ -895,7 +898,7 @@ export function LeftSidebar() {
                   ) : (
                     <UnassignedTimeGroupSection
                       grouped={unsortedGrouped}
-                      currentConversationId={currentConversationId}
+                      currentConversationId={currentConversation?.id || null}
                       editingConversationId={editingConversationId}
                       setEditingConversationId={setEditingConversationId}
                       setCurrentConversation={setCurrentConversation}
@@ -931,7 +934,15 @@ export function LeftSidebar() {
                   onClick={() => setProfileOpen(true)}
                   aria-label="Open profile settings"
                 >
-                  <User className="h-4 w-4" />
+                  {profile.avatarUrl ? (
+                    <Avatar className="h-6 w-6">
+                      <img src={profile.avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+                    </Avatar>
+                  ) : (
+                    <Avatar className="h-6 w-6">
+                      <AvatarFallback className="text-xs">{profile.initials}</AvatarFallback>
+                    </Avatar>
+                  )}
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="right">Profile</TooltipContent>
@@ -943,7 +954,15 @@ export function LeftSidebar() {
               onClick={() => setProfileOpen(true)}
               aria-label="Open profile settings"
             >
-              <User className="h-4 w-4 mr-2" />
+              {profile.avatarUrl ? (
+                <Avatar className="h-6 w-6 mr-2">
+                  <img src={profile.avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+                </Avatar>
+              ) : (
+                <Avatar className="h-6 w-6 mr-2">
+                  <AvatarFallback className="text-xs">{profile.initials}</AvatarFallback>
+                </Avatar>
+              )}
               <span>Profile</span>
             </Button>
           )}

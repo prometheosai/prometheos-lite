@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { ThemeProvider } from '@/components/theme-provider'
 import { ChatProvider } from '@/context/chat-context'
+import { ProfileProvider } from '@/context/profile-context'
 
 export const metadata: Metadata = {
   title: 'PrometheOS Lite',
@@ -22,9 +23,11 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <ChatProvider>
-            {children}
-          </ChatProvider>
+          <ProfileProvider>
+            <ChatProvider>
+              {children}
+            </ChatProvider>
+          </ProfileProvider>
         </ThemeProvider>
       </body>
     </html>

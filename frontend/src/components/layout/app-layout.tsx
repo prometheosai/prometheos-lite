@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import dynamic from "next/dynamic"
 import { RightSidebar } from "./right-sidebar"
 import { ConversationArea } from "./conversation-area"
@@ -24,8 +24,21 @@ const modelProviders = [
   { key: "llama", label: "Llama", type: "local" },
   { key: "openai", label: "OpenAI", type: "cloud" },
   { key: "anthropic", label: "Anthropic", type: "cloud" },
-  { key: "groq", label: "Groq", type: "cloud" },
 ] as const
+
+function ClientIcon({ icon: Icon, className }: { icon: any; className?: string }) {
+  const [isClient, setIsClient] = useState(false)
+  
+  useEffect(() => {
+    setIsClient(true)
+  }, [])
+  
+  if (!isClient) {
+    return null
+  }
+  
+  return <Icon className={className} />
+}
 
 export function AppLayout({ children, hideConversation = false }: AppLayoutProps) {
   const { theme, setTheme } = useTheme()
@@ -70,9 +83,9 @@ export function AppLayout({ children, hideConversation = false }: AppLayoutProps
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
-                    <Cpu className="h-4 w-4" />
+                    <ClientIcon icon={Cpu} className="h-4 w-4" />
                     <span className="hidden sm:inline">{activeProvider.label}</span>
-                    <ChevronDown className="h-3 w-3" />
+                    <ClientIcon icon={ChevronDown} className="h-3 w-3" />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
@@ -100,9 +113,9 @@ export function AppLayout({ children, hideConversation = false }: AppLayoutProps
                   className="hidden sm:flex"
                 >
                   {theme === "dark" ? (
-                    <Sun className="h-4 w-4" />
+                    <ClientIcon icon={Sun} className="h-4 w-4" />
                   ) : (
-                    <Moon className="h-4 w-4" />
+                    <ClientIcon icon={Moon} className="h-4 w-4" />
                   )}
                 </Button>
               </TooltipTrigger>

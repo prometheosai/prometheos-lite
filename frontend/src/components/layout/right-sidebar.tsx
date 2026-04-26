@@ -199,9 +199,9 @@ export function RightSidebar({ events, status }: RightSidebarProps) {
                     </div>
                   </div>
                   <Tabs value={flowSubTab} onValueChange={(v) => setFlowSubTab(v as any)}>
-                    <TabsList className="w-full grid grid-cols-2 h-8">
-                      <TabsTrigger value="timeline" className="text-xs h-7">Timeline</TabsTrigger>
-                      <TabsTrigger value="models" className="text-xs h-7">Models</TabsTrigger>
+                    <TabsList className="w-full grid grid-cols-2 h-10 place-items-center pb-2">
+                      <TabsTrigger value="timeline" className="text-xs h-8">Timeline</TabsTrigger>
+                      <TabsTrigger value="models" className="text-xs h-8">Models</TabsTrigger>
                     </TabsList>
                     <TabsContent value="timeline" className="mt-2 space-y-2">
                       {events.length === 0 ? (
