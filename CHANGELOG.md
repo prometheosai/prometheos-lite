@@ -345,3 +345,4 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 **Status:** v1.2.1 complete
 **See:** `docs/prd/prometheos-lite-prd-v1.2.1.md` for full specification
+
