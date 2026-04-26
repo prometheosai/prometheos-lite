@@ -16,6 +16,20 @@ pub struct AppConfig {
     pub embedding_url: String,
     #[serde(default = "default_embedding_dimension")]
     pub embedding_dimension: usize,
+    #[serde(default = "default_memory_db_path")]
+    pub memory_db_path: String,
+    #[serde(default = "default_context_window_size")]
+    pub context_window_size: usize,
+    #[serde(default = "default_memory_budget")]
+    pub memory_budget: MemoryBudget,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryBudget {
+    pub project_facts: f32,
+    pub user_preferences: f32,
+    pub recent_episodes: f32,
+    pub decisions_constraints: f32,
 }
 
 fn default_embedding_url() -> String {
@@ -24,6 +38,23 @@ fn default_embedding_url() -> String {
 
 fn default_embedding_dimension() -> usize {
     1536
+}
+
+fn default_memory_db_path() -> String {
+    "prometheos_memory.db".to_string()
+}
+
+fn default_context_window_size() -> usize {
+    4096
+}
+
+fn default_memory_budget() -> MemoryBudget {
+    MemoryBudget {
+        project_facts: 0.4,
+        user_preferences: 0.25,
+        recent_episodes: 0.2,
+        decisions_constraints: 0.15,
+    }
 }
 
 impl AppConfig {
