@@ -123,16 +123,18 @@ pub async fn run() -> anyhow::Result<()> {
                 prometheos_lite::flow::ToolSandboxProfile::new()
             ));
             
-            // Create in-memory memory service with local embedding provider from config
+            // Create persistent memory service with local embedding provider from config
             let embedding: Box<dyn prometheos_lite::flow::EmbeddingProvider> = Box::new(
                 prometheos_lite::flow::LocalEmbeddingProvider::new(
                     config.embedding_url.clone(),
                     config.embedding_dimension,
                 )
             );
-            let in_memory_db = prometheos_lite::flow::MemoryDb::in_memory().unwrap();
+            let persistent_db = prometheos_lite::flow::MemoryDb::new(
+                std::path::PathBuf::from(config.memory_db_path.clone())
+            ).unwrap();
             let memory_service = std::sync::Arc::new(prometheos_lite::flow::MemoryService::new(
-                in_memory_db,
+                persistent_db,
                 embedding,
             ));
 
@@ -202,23 +204,25 @@ pub async fn run() -> anyhow::Result<()> {
                 prometheos_lite::flow::ToolSandboxProfile::new()
             ));
 
-            // Create in-memory memory service with local embedding provider from config
+            // Create persistent memory service with local embedding provider from config
             let embedding: Box<dyn prometheos_lite::flow::EmbeddingProvider> = Box::new(
                 prometheos_lite::flow::LocalEmbeddingProvider::new(
                     config.embedding_url.clone(),
                     config.embedding_dimension,
                 )
             );
-            let in_memory_db = prometheos_lite::flow::MemoryDb::in_memory().unwrap();
+            let persistent_db = prometheos_lite::flow::MemoryDb::new(
+                std::path::PathBuf::from(config.memory_db_path.clone())
+            ).unwrap();
             let memory_service = std::sync::Arc::new(prometheos_lite::flow::MemoryService::new(
-                in_memory_db,
+                persistent_db,
                 embedding,
             ));
 
             let runtime = prometheos_lite::flow::RuntimeContext::full(
                 model_router,
                 tool_runtime,
-                memory_service,
+                memory_service.clone(),
             );
 
             // Create database
@@ -226,10 +230,20 @@ pub async fn run() -> anyhow::Result<()> {
             let _db = prometheos_lite::db::Db::new(&db_path)?;
             logger.info("Database initialized: prometheos.db");
 
+            // Create embedding provider for API server
+            let api_embedding: std::sync::Arc<dyn prometheos_lite::flow::EmbeddingProvider> = std::sync::Arc::new(
+                prometheos_lite::flow::LocalEmbeddingProvider::new(
+                    config.embedding_url.clone(),
+                    config.embedding_dimension,
+                )
+            );
+
             // Create AppState
             let app_state = std::sync::Arc::new(prometheos_lite::api::AppState::new(
                 db_path,
-                std::sync::Arc::new(runtime)
+                std::sync::Arc::new(runtime),
+                api_embedding,
+                memory_service
             ));
 
             // Parse address
