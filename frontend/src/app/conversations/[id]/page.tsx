@@ -10,6 +10,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [thinking, setThinking] = useState(false);
   const [events, setEvents] = useState<FlowEvent[]>([]);
   const [darkMode, setDarkMode] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -51,7 +52,18 @@ export default function ConversationPage({ params }: { params: { id: string } })
     const userMessage = input;
     setInput('');
     setRunning(true);
+    setThinking(true);
     setEvents([]);
+
+    // Add user message immediately to the UI
+    const tempUserMessage: Message = {
+      id: `temp-${Date.now()}`,
+      conversation_id: params.id,
+      role: 'user',
+      content: userMessage,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, tempUserMessage]);
 
     try {
       // Run flow which saves the message and starts execution
@@ -61,8 +73,35 @@ export default function ConversationPage({ params }: { params: { id: string } })
       const ws = connectWebSocket(flowRun.id, (event) => {
         setEvents((prev) => [...prev, event]);
         
+        // Show thinking state during LLM processing
+        if (event.type === 'output' && event.data.data === 'Thinking...') {
+          setThinking(true);
+        }
+        
+        // Display assistant response when received
+        if (event.type === 'output' && event.data.node === 'assistant' && event.data.data) {
+          setThinking(false);
+          const assistantMessage: Message = {
+            id: `assistant-${Date.now()}`,
+            conversation_id: params.id,
+            role: 'assistant',
+            content: event.data.data,
+            created_at: new Date().toISOString(),
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
+        }
+        
+        // Check if direct response completed
+        if (event.type === 'output' && event.data.data === 'Direct response completed') {
+          setThinking(false);
+          setRunning(false);
+          // Reload messages to ensure persistence
+          setTimeout(loadMessages, 500);
+        }
+        
         // Check if flow is complete (after memory_write node)
         if (event.type === 'node_end' && event.data.node === 'memory_write') {
+          setThinking(false);
           setRunning(false);
           // Reload messages to get assistant response
           setTimeout(loadMessages, 500);
@@ -70,6 +109,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
         
         // Handle errors
         if (event.type === 'error') {
+          setThinking(false);
           setRunning(false);
         }
       });
@@ -77,7 +117,10 @@ export default function ConversationPage({ params }: { params: { id: string } })
       wsRef.current = ws;
     } catch (error) {
       console.error('Failed to run flow:', error);
+      setThinking(false);
       setRunning(false);
+      // Remove the temporary user message on error
+      setMessages((prev) => prev.filter((m) => m.id !== tempUserMessage.id));
     }
   };
 
@@ -144,6 +187,20 @@ export default function ConversationPage({ params }: { params: { id: string } })
                   </div>
                 </div>
               ))}
+              {thinking && (
+                <div className="flex justify-start">
+                  <div className={`max-w-2xl px-4 py-2 rounded-lg ${
+                    darkMode
+                      ? 'bg-gray-800 border border-gray-700 text-gray-100'
+                      : 'bg-white border shadow-sm'
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="animate-spin" size={16} />
+                      <span className="text-sm text-gray-500">Thinking...</span>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
           )}

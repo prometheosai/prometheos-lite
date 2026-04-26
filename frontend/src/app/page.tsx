@@ -1,5 +1,5 @@
-import ProjectsPage from './projects/page'
+import { AppLayout } from '@/components/layout/app-layout'
 
 export default function Home() {
-  return <ProjectsPage />
+  return <AppLayout />
 }
