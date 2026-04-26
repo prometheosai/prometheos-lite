@@ -7,6 +7,7 @@ pub mod fs;
 pub mod intent;
 pub mod llm;
 pub mod logger;
+pub mod utils;
 
 // Legacy modules - deprecated in favor of flow-centric architecture
 // Use the "legacy" feature flag to enable these for backward compatibility
