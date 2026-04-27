@@ -80,15 +80,20 @@ fn validate_node_definition(node: &NodeDefinition) -> Result<()> {
         bail!("Node type cannot be empty");
     }
 
-    // Validate node_type is one of the known types
+    // Validate node_type is one of the known types (strict by default)
     let valid_types = [
         "planner", "coder", "reviewer", "llm", "tool",
-        "file_writer", "context_loader", "memory_write", "conditional"
+        "file_writer", "context_loader", "memory_write", "conditional",
+        "passthrough",
     ];
 
     if !valid_types.contains(&node.node_type.as_str()) {
-        // Warn but don't fail - will default to passthrough
-        eprintln!("Warning: Unknown node type '{}', will use passthrough", node.node_type);
+        bail!(
+            "Unknown node type '{}' in node '{}'. Valid types: {}",
+            node.node_type,
+            node.id,
+            valid_types.join(", ")
+        );
     }
 
     // Validate config if present
