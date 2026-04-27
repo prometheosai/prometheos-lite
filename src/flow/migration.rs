@@ -1,18 +1,19 @@
-//! Migration utilities for transitioning from agent-based to flow-based architecture
+//! Migration utilities for transitioning from legacy Agent-based flows to Node-based flows
+//!
+//! This module is deprecated and kept for backward compatibility testing.
+//! New code should use the Node trait directly.
 
-#[cfg(feature = "legacy")]
-use crate::flow::AgentNode;
-#[cfg(feature = "legacy")]
-use crate::flow::Flow;
-#[cfg(feature = "legacy")]
-use crate::flow::SharedState;
-#[cfg(feature = "legacy")]
+#![cfg(feature = "legacy")]
+#![allow(deprecated)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
+use crate::flow::adapter::AgentNode;
+use crate::flow::{Action, Flow, Node, NodeId, SharedState};
 use crate::legacy::agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent};
-#[cfg(feature = "legacy")]
 use crate::llm::LlmClient;
-#[cfg(feature = "legacy")]
 use anyhow::Result;
-#[cfg(feature = "legacy")]
 use std::sync::Arc;
 
 /// Create a Flow that replicates the current Planner → Coder → Reviewer sequence
@@ -51,6 +52,7 @@ pub fn create_sequential_agent_flow(llm: LlmClient) -> Flow {
 }
 
 #[cfg(all(test, feature = "legacy"))]
+#[allow(deprecated)]
 mod parity_tests {
     use super::*;
     use crate::legacy::agents::Agent;

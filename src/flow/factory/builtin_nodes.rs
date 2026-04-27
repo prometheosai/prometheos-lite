@@ -74,6 +74,11 @@ impl Node for PlannerNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        // Check budget before LLM call
+        state
+            .check_llm_budget()
+            .context("LLM call budget exceeded")?;
+
         let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
@@ -163,6 +168,11 @@ impl Node for CoderNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        // Check budget before LLM call
+        state
+            .check_llm_budget()
+            .context("LLM call budget exceeded")?;
+
         let plan = state
             .get_working("plan")
             .cloned()
@@ -269,6 +279,11 @@ impl Node for ReviewerNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        // Check budget before LLM call
+        state
+            .check_llm_budget()
+            .context("LLM call budget exceeded")?;
+
         let generated = state
             .get_output("generated")
             .cloned()
@@ -375,6 +390,11 @@ impl Node for LlmNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        // Check budget before LLM call
+        state
+            .check_llm_budget()
+            .context("LLM call budget exceeded")?;
+
         let prompt = state
             .get_input("prompt")
             .and_then(|v| v.as_str())
@@ -480,6 +500,11 @@ impl Node for ToolNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        // Check budget before tool call
+        state
+            .check_tool_budget()
+            .context("Tool call budget exceeded")?;
+
         let tool_name = state
             .get_input("tool_name")
             .and_then(|v| v.as_str())
@@ -662,12 +687,18 @@ impl Node for ContextLoaderNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
-        let query = state
-            .get_input("context_query")
+        // Check budget before memory read
+        state
+            .check_memory_read_budget()
+            .context("Memory read budget exceeded")?;
+
+        let task = state
+            .get_input("task")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        Ok(serde_json::json!({ "query": query }))
+
+        Ok(serde_json::json!({ "task": task }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
@@ -725,12 +756,18 @@ impl Node for MemoryWriteNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
-        let content = state
-            .get_input("memory_content")
+        // Check budget before memory write
+        state
+            .check_memory_write_budget()
+            .context("Memory write budget exceeded")?;
+
+        let task = state
+            .get_input("task")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        Ok(serde_json::json!({ "content": content }))
+
+        Ok(serde_json::json!({ "task": task }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {

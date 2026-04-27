@@ -147,6 +147,7 @@ impl Node for AgentNode {
 }
 
 #[cfg(all(test, feature = "legacy"))]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::sync::Arc;

@@ -19,26 +19,61 @@ pub type Input = serde_json::Value;
 pub type Output = serde_json::Value;
 
 /// SharedState - explicit state management with typed fields
-///
-/// Convention:
-/// - input: Original user input and parameters
-/// - context: Retrieved from memory, long-term context
-/// - working: Intermediate computation results
-/// - output: Final results to return to user
-/// - meta: Metadata (timestamps, execution IDs, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SharedState {
+    /// Input to the flow
     pub input: HashMap<String, serde_json::Value>,
-    pub context: HashMap<String, serde_json::Value>,
+    /// Working data during execution
     pub working: HashMap<String, serde_json::Value>,
+    /// Output from the flow
     pub output: HashMap<String, serde_json::Value>,
+    /// Context data (runtime, config, etc.)
+    pub context: HashMap<String, serde_json::Value>,
+    /// Metadata (budget, personality, etc.)
     pub meta: HashMap<String, serde_json::Value>,
+    /// Budget guard for enforcing resource limits (not serialized)
+    #[serde(skip)]
+    #[serde(default)]
+    pub budget_guard: Option<Arc<Mutex<BudgetGuard>>>,
+}
+
+impl Clone for SharedState {
+    fn clone(&self) -> Self {
+        Self {
+            input: self.input.clone(),
+            working: self.working.clone(),
+            output: self.output.clone(),
+            context: self.context.clone(),
+            meta: self.meta.clone(),
+            budget_guard: self.budget_guard.clone(),
+        }
+    }
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            input: HashMap::new(),
+            working: HashMap::new(),
+            output: HashMap::new(),
+            context: HashMap::new(),
+            meta: HashMap::new(),
+            budget_guard: None,
+        }
+    }
 }
 
 impl SharedState {
     /// Create a new empty SharedState
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            input: HashMap::new(),
+            working: HashMap::new(),
+            output: HashMap::new(),
+            context: HashMap::new(),
+            meta: HashMap::new(),
+            budget_guard: None,
+        }
     }
 
     /// Create SharedState with initial input
@@ -158,37 +193,27 @@ impl SharedState {
         self.get_meta("budget_report")
     }
 
-    /// Store BudgetGuard reference in meta for nodes to access
+    /// Set the budget guard for enforcing resource limits
     pub fn set_budget_guard(&mut self, guard: Arc<Mutex<BudgetGuard>>) {
-        // Store as a JSON-serializable placeholder - actual guard access is via separate method
-        // The guard itself is stored in a separate map keyed by a known ID
-        let report = if let Ok(g) = guard.lock() {
-            g.get_report()
-        } else {
-            serde_json::json!({})
-        };
-        self.set_budget_report(report);
+        // Update the budget report for compatibility first
+        if let Ok(guard_locked) = guard.lock() {
+            self.set_budget_report(guard_locked.get_report());
+        }
+        // Then set the guard
+        self.budget_guard = Some(guard);
     }
 
-    /// Get the BudgetGuard from meta (if set)
-    /// This requires the guard to have been stored via set_budget_guard
+    /// Get the budget guard
     pub fn get_budget_guard(&self) -> Option<Arc<Mutex<BudgetGuard>>> {
-        // This would need the guard to be stored separately
-        // For now, return None - the actual implementation would store the guard
-        // in a thread-local or pass it through execution context
-        None
+        self.budget_guard.as_ref().cloned()
     }
 
     /// Check if an LLM call is allowed under current budget
     /// Returns error if budget would be exceeded
     pub fn check_llm_budget(&self) -> anyhow::Result<()> {
-        if let Some(report) = self.get_budget_report() {
-            let current: u64 = report["usage"]["llm_calls"].as_u64().unwrap_or(0);
-            let limit: u64 = report["budget"]["max_llm_calls"]
-                .as_u64()
-                .unwrap_or(u64::MAX);
-            if current >= limit {
-                anyhow::bail!("LLM call budget exceeded: {} >= {}", current, limit);
+        if let Some(guard) = &self.budget_guard {
+            if let Ok(g) = guard.lock() {
+                return g.check_llm_call();
             }
         }
         Ok(())
@@ -196,13 +221,9 @@ impl SharedState {
 
     /// Check if a tool call is allowed under current budget
     pub fn check_tool_budget(&self) -> anyhow::Result<()> {
-        if let Some(report) = self.get_budget_report() {
-            let current: u64 = report["usage"]["tool_calls"].as_u64().unwrap_or(0);
-            let limit: u64 = report["budget"]["max_tool_calls"]
-                .as_u64()
-                .unwrap_or(u64::MAX);
-            if current >= limit {
-                anyhow::bail!("Tool call budget exceeded: {} >= {}", current, limit);
+        if let Some(guard) = &self.budget_guard {
+            if let Ok(g) = guard.lock() {
+                return g.check_tool_call();
             }
         }
         Ok(())
@@ -210,13 +231,9 @@ impl SharedState {
 
     /// Check if memory read is allowed under current budget
     pub fn check_memory_read_budget(&self) -> anyhow::Result<()> {
-        if let Some(report) = self.get_budget_report() {
-            let current: u64 = report["usage"]["memory_reads"].as_u64().unwrap_or(0);
-            let limit: u64 = report["budget"]["max_memory_reads"]
-                .as_u64()
-                .unwrap_or(u64::MAX);
-            if current >= limit {
-                anyhow::bail!("Memory read budget exceeded: {} >= {}", current, limit);
+        if let Some(guard) = &self.budget_guard {
+            if let Ok(g) = guard.lock() {
+                return g.check_memory_read();
             }
         }
         Ok(())
@@ -224,13 +241,9 @@ impl SharedState {
 
     /// Check if memory write is allowed under current budget
     pub fn check_memory_write_budget(&self) -> anyhow::Result<()> {
-        if let Some(report) = self.get_budget_report() {
-            let current: u64 = report["usage"]["memory_writes"].as_u64().unwrap_or(0);
-            let limit: u64 = report["budget"]["max_memory_writes"]
-                .as_u64()
-                .unwrap_or(u64::MAX);
-            if current >= limit {
-                anyhow::bail!("Memory write budget exceeded: {} >= {}", current, limit);
+        if let Some(guard) = &self.budget_guard {
+            if let Ok(g) = guard.lock() {
+                return g.check_memory_write();
             }
         }
         Ok(())

@@ -7,6 +7,7 @@ use std::time::Instant;
 use super::{BudgetUsage, ExecutionBudget};
 
 /// Budget guard for enforcing resource limits
+#[derive(Debug)]
 pub struct BudgetGuard {
     budget: ExecutionBudget,
     usage: Arc<Mutex<BudgetUsage>>,

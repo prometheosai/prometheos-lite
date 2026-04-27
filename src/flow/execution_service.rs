@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::flow::budget::{BudgetGuard, ExecutionBudget};
@@ -235,6 +236,12 @@ impl FlowExecutionService {
             state.set_personality_mode(mode);
         }
 
+        // Set budget guard in state for boundary-level enforcement
+        if let Some(budget) = &options.budget {
+            let guard = Arc::new(Mutex::new(BudgetGuard::new(budget.clone())));
+            state.set_budget_guard(guard);
+        }
+
         // 6. Execute
         let result = flow.run(&mut state).await;
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -352,6 +359,12 @@ impl FlowExecutionService {
 
         if let Some(ref mode) = options.personality_mode {
             state.set_personality_mode(mode);
+        }
+
+        // Set budget guard in state for boundary-level enforcement
+        if let Some(budget) = &options.budget {
+            let guard = Arc::new(Mutex::new(BudgetGuard::new(budget.clone())));
+            state.set_budget_guard(guard);
         }
 
         let result = flow.run(&mut state).await;
