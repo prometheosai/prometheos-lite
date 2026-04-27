@@ -107,10 +107,17 @@ impl Flow {
     ) -> Result<()> {
         let mut current = self.start.clone();
 
+        // Generate one run_id and trace_id for the entire execution, store in SharedState
+        let run_id = state.get_run_id()
+            .unwrap_or_else(|| crate::flow::tracing::Tracer::generate_run_id());
+        let trace_id = state.get_trace_id()
+            .unwrap_or_else(|| crate::flow::tracing::Tracer::generate_trace_id());
+        state.set_run_id(&run_id);
+        state.set_trace_id(&trace_id);
+
         // Log flow start
         if let Some(tracer) = &self.tracer {
             if let Ok(mut t) = tracer.lock() {
-                let run_id = crate::flow::tracing::Tracer::generate_run_id();
                 t.log_run_event(
                     crate::flow::tracing::TraceEvent::RunStarted { run_id: run_id.clone(), flow_name: "flow".to_string() },
                     "Flow execution started".to_string()
@@ -119,10 +126,31 @@ impl Flow {
         }
 
         loop {
-            // Check budget before each step
+            // Check budget before each step and update state with budget report
             if let Some(guard) = &self.budget_guard {
                 guard.update_runtime().context("Budget check: runtime exceeded")?;
                 guard.record_step().context("Budget check: steps exceeded")?;
+
+                // Update budget report in state so nodes can inspect it
+                state.set_budget_report(guard.get_report());
+
+                // Emit budget trace event
+                if let Some(tracer) = &self.tracer {
+                    if let Ok(mut t) = tracer.lock() {
+                        let usage = guard.get_usage();
+                        let budget = guard.get_budget();
+                        t.log_flow_event(
+                            crate::flow::tracing::TraceEvent::BudgetChecked {
+                                run_id: run_id.clone(),
+                                resource: "steps".to_string(),
+                                current: usage.steps as u64,
+                                limit: budget.max_steps as u64,
+                            },
+                            None,
+                            format!("Budget check: steps {}/{}", usage.steps, budget.max_steps),
+                        );
+                    }
+                }
             }
 
             let node = self
@@ -136,13 +164,11 @@ impl Flow {
             // Hook: before node execution
             hooks.on_node_start(&current, state, &input);
 
-            // Log node start
+            // Log node start (reuse same run_id and trace_id)
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
-                    let run_id = crate::flow::tracing::Tracer::generate_run_id();
-                    let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
                     t.log_flow_event(
-                        crate::flow::tracing::TraceEvent::NodeStarted { run_id, trace_id, node_id: current.clone() },
+                        crate::flow::tracing::TraceEvent::NodeStarted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone() },
                         Some(current.clone()),
                         format!("Executing node: {}", current)
                     );
@@ -155,6 +181,16 @@ impl Flow {
             let output = match self.execute_with_retry(node, input).await {
                 Ok(output) => output,
                 Err(e) => {
+                    // Log node failure before returning
+                    if let Some(tracer) = &self.tracer {
+                        if let Ok(mut t) = tracer.lock() {
+                            t.log_flow_event(
+                                crate::flow::tracing::TraceEvent::NodeFailed { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), error: e.to_string() },
+                                Some(current.clone()),
+                                format!("Node failed: {}", current)
+                            );
+                        }
+                    }
                     hooks.on_flow_error(&e);
                     return Err(e);
                 }
@@ -165,18 +201,16 @@ impl Flow {
 
             let duration_ms = start_time.elapsed().as_millis() as u64;
 
-            // Log node completion
+            // Log node completion (reuse same run_id and trace_id)
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
-                    let run_id = crate::flow::tracing::Tracer::generate_run_id();
-                    let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
                     t.log_flow_event(
                         crate::flow::tracing::TraceEvent::NodeCompleted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), duration_ms },
                         Some(current.clone()),
                         format!("Node completed: {}", current)
                     );
                     t.add_timeline_event(
-                        crate::flow::tracing::TraceEvent::NodeCompleted { run_id, trace_id, node_id: current.clone(), duration_ms },
+                        crate::flow::tracing::TraceEvent::NodeCompleted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), duration_ms },
                         Some(current.clone()),
                         Some(duration_ms),
                         serde_json::json!({ "output": &output }),
@@ -187,18 +221,33 @@ impl Flow {
             // Post-process: update state and get action
             let action = node.post(state, output.clone());
 
+            // Record budget usage based on node type
+            if let Some(guard) = &self.budget_guard {
+                let node_type = node.id();
+                if ["planner", "coder", "reviewer", "llm"].contains(&node_type.as_str()) {
+                    let _ = guard.record_llm_call();
+                } else if node_type == "tool" {
+                    let _ = guard.record_tool_call();
+                } else if node_type == "context_loader" {
+                    let _ = guard.record_memory_read();
+                } else if node_type == "memory_write" {
+                    let _ = guard.record_memory_write();
+                }
+                // Update budget report in state after recording
+                state.set_budget_report(guard.get_report());
+            }
+
             // Find next node based on action
             match self.transitions.get(&(current.clone(), action.clone())) {
                 Some(next) => {
                     // Hook: before transition
                     hooks.on_transition(&current, &action, next);
 
-                    // Log transition
+                    // Log transition (reuse same run_id)
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
-                            let run_id = crate::flow::tracing::Tracer::generate_run_id();
                             t.log_flow_event(
-                                crate::flow::tracing::TraceEvent::TransitionTaken { run_id, from: current.clone(), action: action.clone(), to: next.clone() },
+                                crate::flow::tracing::TraceEvent::TransitionTaken { run_id: run_id.clone(), from: current.clone(), action: action.clone(), to: next.clone() },
                                 Some(current.clone()),
                                 format!("Transition: {} -> {} via {}", current, next, action)
                             );
@@ -211,13 +260,12 @@ impl Flow {
                     // Hook: flow complete
                     hooks.on_flow_complete(state);
 
-                    // Log flow completion
+                    // Log flow completion (reuse same run_id)
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
-                            let run_id = crate::flow::tracing::Tracer::generate_run_id();
                             let total_duration = std::time::Instant::now().elapsed().as_millis() as u64;
                             t.log_run_event(
-                                crate::flow::tracing::TraceEvent::RunCompleted { run_id, duration_ms: total_duration },
+                                crate::flow::tracing::TraceEvent::RunCompleted { run_id: run_id.clone(), duration_ms: total_duration },
                                 "Flow execution completed".to_string()
                             );
                         }
