@@ -6,24 +6,36 @@ use std::collections::HashMap;
 
 use super::tracing::RunId;
 
-/// Final output from a flow execution
+/// FinalOutput - the contract for flow execution results
+///
+/// This struct represents the complete output of a flow execution,
+/// including the primary result, additional outputs, metadata,
+/// evaluation metrics, and budget information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalOutput {
-    /// Run ID for this execution
-    pub run_id: RunId,
-    /// Flow name
+    /// Unique identifier for this flow execution
+    pub run_id: String,
+    /// Trace ID for tracking individual operations within the run
+    pub trace_id: String,
+    /// Name of the flow that was executed
     pub flow_name: String,
-    /// Primary output value (from FlowFile.outputs.primary)
+    /// Primary output from the flow (the main result)
     pub primary: serde_json::Value,
-    /// Additional outputs (from FlowFile.outputs.include)
-    pub additional: HashMap<String, serde_json::Value>,
-    /// Timestamp when output was generated
+    /// Additional outputs from the flow (named results)
+    pub additional: std::collections::HashMap<String, serde_json::Value>,
+    /// Evaluation metrics for this execution
+    pub evaluation: Evaluation,
+    /// Budget usage report (if budget was enforced)
+    pub budget_report: Option<serde_json::Value>,
+    /// Number of trace events generated during execution
+    pub events_count: usize,
+    /// Timestamp when the flow execution started
     pub timestamp: DateTime<Utc>,
-    /// Execution duration in milliseconds
+    /// Duration of the flow execution in milliseconds
     pub duration_ms: u64,
-    /// Whether the execution succeeded
+    /// Whether the flow execution succeeded
     pub success: bool,
-    /// Error message if execution failed
+    /// Error message if the flow execution failed
     pub error: Option<String>,
 }
 
@@ -31,16 +43,24 @@ impl FinalOutput {
     /// Create a new successful FinalOutput
     pub fn success(
         run_id: RunId,
+        trace_id: String,
         flow_name: String,
         primary: serde_json::Value,
         additional: HashMap<String, serde_json::Value>,
+        evaluation: Evaluation,
+        budget_report: Option<serde_json::Value>,
+        events_count: usize,
         duration_ms: u64,
     ) -> Self {
         Self {
             run_id,
+            trace_id,
             flow_name,
             primary,
             additional,
+            evaluation,
+            budget_report,
+            events_count,
             timestamp: Utc::now(),
             duration_ms,
             success: true,
@@ -51,15 +71,20 @@ impl FinalOutput {
     /// Create a new failed FinalOutput
     pub fn failure(
         run_id: RunId,
+        trace_id: String,
         flow_name: String,
         error: String,
         duration_ms: u64,
     ) -> Self {
         Self {
-            run_id,
-            flow_name,
+            run_id: run_id.clone(),
+            trace_id,
+            flow_name: flow_name.clone(),
             primary: serde_json::Value::Null,
             additional: HashMap::new(),
+            evaluation: Evaluation::empty(run_id, flow_name),
+            budget_report: None,
+            events_count: 0,
             timestamp: Utc::now(),
             duration_ms,
             success: false,
@@ -133,6 +158,22 @@ impl Evaluation {
         }
     }
 
+    /// Create an empty Evaluation (for failed executions)
+    pub fn empty(run_id: RunId, flow_name: String) -> Self {
+        Self {
+            run_id,
+            flow_name,
+            nodes_executed: 0,
+            nodes_failed: 0,
+            transitions_taken: 0,
+            duration_ms: 0,
+            avg_node_duration_ms: 0.0,
+            memory_usage_bytes: None,
+            custom_metrics: HashMap::new(),
+            timestamp: Utc::now(),
+        }
+    }
+
     /// Add a custom metric
     pub fn with_custom_metric(mut self, key: String, value: serde_json::Value) -> Self {
         self.custom_metrics.insert(key, value);
@@ -167,19 +208,34 @@ mod tests {
     #[test]
     fn test_final_output_success() {
         let run_id = "test-run-123".to_string();
+        let trace_id = "test-trace-abc".to_string();
         let mut additional = HashMap::new();
         additional.insert("review".to_string(), serde_json::json!("Good code"));
 
+        let evaluation = Evaluation::new(
+            run_id.clone(),
+            "codegen".to_string(),
+            3,
+            0,
+            2,
+            1000,
+        );
+
         let output = FinalOutput::success(
             run_id.clone(),
+            trace_id,
             "codegen".to_string(),
             serde_json::json!("generated code"),
             additional,
+            evaluation,
+            None,
+            5,
             1000,
         );
 
         assert!(output.success);
         assert_eq!(output.run_id, run_id);
+        assert_eq!(output.trace_id, trace_id);
         assert_eq!(output.flow_name, "codegen");
         assert!(output.contains("review"));
     }
@@ -187,8 +243,10 @@ mod tests {
     #[test]
     fn test_final_output_failure() {
         let run_id = "test-run-456".to_string();
+        let trace_id = "test-trace-def".to_string();
         let output = FinalOutput::failure(
             run_id.clone(),
+            trace_id,
             "codegen".to_string(),
             "LLM timeout".to_string(),
             500,
@@ -196,6 +254,7 @@ mod tests {
 
         assert!(!output.success);
         assert_eq!(output.run_id, run_id);
+        assert_eq!(output.trace_id, trace_id);
         assert_eq!(output.error, Some("LLM timeout".to_string()));
     }
 
