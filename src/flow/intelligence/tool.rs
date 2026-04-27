@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
 
+use crate::tools::{ToolPermission, ToolPolicy};
+
 /// Tool input and output types
 pub type ToolInput = serde_json::Value;
 pub type ToolOutput = serde_json::Value;
@@ -26,10 +28,15 @@ pub struct ToolSandboxProfile {
     pub allow_file_write: bool,
     pub max_memory_mb: usize,
     pub max_cpu_percent: f64,
+    /// Declarative tool policy (WHAT is allowed)
+    #[serde(skip)]
+    pub tool_policy: ToolPolicy,
 }
 
 impl ToolSandboxProfile {
     pub fn new() -> Self {
+        let tool_policy = ToolPolicy::conservative();
+        
         Self {
             allowed_commands: vec![
                 "echo".to_string(),
@@ -73,15 +80,16 @@ impl ToolSandboxProfile {
             ],
             timeout_ms: 30000,                  // 30 seconds
             max_output_bytes: 10 * 1024 * 1024, // 10 MB
-            allow_network: false,
+            allow_network: tool_policy.is_allowed(ToolPermission::Network),
             allowed_network_hosts: vec![],
             blocked_network_hosts: vec![],
-            allow_file_read: true,
+            allow_file_read: tool_policy.is_allowed(ToolPermission::FileRead),
             allowed_file_paths: vec![],
             blocked_file_paths: vec!["/etc".to_string(), "/sys".to_string(), "/proc".to_string()],
-            allow_file_write: false,
+            allow_file_write: tool_policy.is_allowed(ToolPermission::FileWrite),
             max_memory_mb: 512,
             max_cpu_percent: 80.0,
+            tool_policy,
         }
     }
 
@@ -91,11 +99,33 @@ impl ToolSandboxProfile {
         timeout_ms: u64,
         max_output_bytes: usize,
     ) -> Self {
+        let tool_policy = ToolPolicy::conservative();
+        
         Self {
             allowed_commands,
             blocked_commands,
             timeout_ms,
             max_output_bytes,
+            allow_network: tool_policy.is_allowed(ToolPermission::Network),
+            allowed_network_hosts: vec![],
+            blocked_network_hosts: vec![],
+            allow_file_read: tool_policy.is_allowed(ToolPermission::FileRead),
+            allowed_file_paths: vec![],
+            blocked_file_paths: vec!["/etc".to_string(), "/sys".to_string(), "/proc".to_string()],
+            allow_file_write: tool_policy.is_allowed(ToolPermission::FileWrite),
+            max_memory_mb: 512,
+            max_cpu_percent: 80.0,
+            tool_policy,
+        }
+    }
+
+    /// Create a profile with a custom tool policy
+    pub fn with_tool_policy(tool_policy: ToolPolicy) -> Self {
+        Self {
+            allow_network: tool_policy.is_allowed(ToolPermission::Network),
+            allow_file_read: tool_policy.is_allowed(ToolPermission::FileRead),
+            allow_file_write: tool_policy.is_allowed(ToolPermission::FileWrite),
+            tool_policy,
             ..Self::new()
         }
     }
@@ -221,9 +251,14 @@ impl ToolRuntime {
 
     /// Execute a command as a tool
     pub async fn execute_command(&self, command: &str, args: Vec<String>) -> Result<String> {
-        // Check if command is allowed
+        // Check if command is allowed by sandbox profile
         if !self.profile.is_command_allowed(command) {
             anyhow::bail!("Command '{}' is not allowed by sandbox profile", command);
+        }
+
+        // Check if command requires Shell permission
+        if !self.profile.tool_policy.is_allowed(ToolPermission::Shell) {
+            anyhow::bail!("Shell execution is not allowed by tool policy");
         }
 
         let timeout = Duration::from_millis(self.profile.timeout_ms);
