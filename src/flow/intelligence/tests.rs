@@ -209,14 +209,11 @@ fn test_tool_sandbox_profile_file_checking() {
 
 #[tokio::test]
 async fn test_tool_runtime_execute_command() {
-    // Use a custom profile that allows the appropriate command for each platform
-    #[cfg(unix)]
-    let profile =
-        ToolSandboxProfile::custom(vec!["echo".to_string()], vec![], 30000, 10 * 1024 * 1024);
+    use crate::tools::{ToolPermission, ToolPolicy};
 
-    #[cfg(windows)]
-    let profile =
-        ToolSandboxProfile::custom(vec!["cmd".to_string()], vec![], 30000, 10 * 1024 * 1024);
+    let tool_policy = ToolPolicy::new()
+        .with_permission(ToolPermission::Shell);
+    let profile = ToolSandboxProfile::with_tool_policy(tool_policy);
 
     let runtime = ToolRuntime::new(profile);
 
