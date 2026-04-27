@@ -4,16 +4,12 @@ use anyhow::Result;
 use std::error::Error;
 
 /// Convert any error to a user-friendly string message
-pub fn error_to_string<E: Error>(err: &E) -> String {
-    if let Some(source) = err.source() {
-        format!("{}: {}", err, source)
-    } else {
-        err.to_string()
-    }
+pub fn error_to_string<E: std::fmt::Display>(err: &E) -> String {
+    err.to_string()
 }
 
 /// Wrap an error with additional context using anyhow
-pub fn wrap_error<E: Error + Send + Sync + 'static>(err: E, context: String) -> anyhow::Error {
+pub fn wrap_error<E: std::error::Error + Send + Sync + 'static>(err: E, context: String) -> anyhow::Error {
     anyhow::anyhow!(err).context(context)
 }
 
@@ -35,16 +31,16 @@ pub fn result_to_option_log<T, E: std::fmt::Display>(result: Result<T, E>, conte
 
 /// Retry an operation with exponential backoff
 pub async fn retry_with_backoff<F, Fut, T>(
-    operation: F,
+    mut operation: F,
     max_retries: u32,
     initial_delay_ms: u64,
 ) -> Result<T>
 where
-    F: Fn() -> Fut,
+    F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
     let mut delay = initial_delay_ms;
-    
+
     for attempt in 0..=max_retries {
         match operation().await {
             Ok(value) => return Ok(value),
@@ -56,7 +52,7 @@ where
             Err(e) => return Err(e),
         }
     }
-    
+
     anyhow::bail!("Max retries exceeded")
 }
 
@@ -72,9 +68,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_uuid() {
-        let err = anyhow::anyhow!("test error");
-        let wrapped = wrap_error(err, "context");
+    fn test_wrap_error() {
+        use std::io;
+        let err = io::Error::new(io::ErrorKind::NotFound, "test error");
+        let wrapped = wrap_error(err, "context".to_string());
         assert!(wrapped.to_string().contains("context"));
     }
 
@@ -84,7 +81,7 @@ mod tests {
         let result = retry_with_backoff(
             || {
                 attempts += 1;
-                async {
+                async move {
                     if attempts < 3 {
                         Err::<(), anyhow::Error>(anyhow::anyhow!("not yet"))
                     } else {

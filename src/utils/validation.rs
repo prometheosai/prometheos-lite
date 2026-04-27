@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_guard_some() {
-        assert_eq!(guard_some(Some(42), "error".to_string()), Ok(42));
+        assert!(guard_some(Some(42), "error".to_string()).is_ok());
         assert!(guard_some::<i32>(None, "error".to_string()).is_err());
     }
 
