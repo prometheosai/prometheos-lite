@@ -184,33 +184,55 @@ impl FlowExecutionService {
     ) -> Result<FinalOutput> {
         let start = Instant::now();
 
-        // 1. Classify intent
+        // 1. Generate run_id and trace_id upfront (explicit, not magical)
+        let run_id = crate::flow::tracing::Tracer::generate_run_id();
+        let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
+
+        // 2. Classify intent
         let classification = self.classify(message, options.override_intent.clone()).await?;
         let intent = classification.intent;
 
-        // 2. Load flow
+        // 3. Load flow
         let flow_file = self.load_flow(&intent)?;
         let flow_name = flow_file.name.clone();
 
-        // 3. Build flow
+        // 4. Build flow
         let mut flow = self.build_flow(&flow_file, &options)?;
 
-        // 4. Prepare state
+        // 5. Prepare state with IDs pre-set
         let mut state = SharedState::new();
         state.set_input("message".to_string(), serde_json::json!(message));
+        state.set_run_id(&run_id);
+        state.set_trace_id(&trace_id);
 
         if let Some(ref mode) = options.personality_mode {
             state.set_personality_mode(mode);
         }
 
-        // 5. Execute
+        // 6. Execute
         let result = flow.run(&mut state).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // 6. Produce FinalOutput
+        // 7. Extract budget report from state
+        let budget_report = state.get_budget_report().cloned();
+
+        // 8. Count trace events from tracer if available
+        let events_count = if let Some(tracer) = &options.tracer {
+            if let Ok(t) = tracer.lock() {
+                t.get_logs().len()
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // 9. Produce evaluation
+        let evaluation = Self::evaluate(&state, &flow_name, duration_ms);
+
+        // 10. Produce FinalOutput
         match result {
             Ok(()) => {
-                let run_id = state.get_run_id().unwrap_or_else(|| Tracer::generate_run_id());
                 let primary = state.get_output("llm_response")
                     .or_else(|| state.get_output("generated"))
                     .or_else(|| state.get_output("review"))
@@ -224,19 +246,20 @@ impl FlowExecutionService {
                     }
                 }
 
-                let final_output = FinalOutput::success(
+                Ok(FinalOutput::success(
                     run_id,
+                    trace_id,
                     flow_name,
                     primary,
                     additional,
+                    evaluation,
+                    budget_report,
+                    events_count,
                     duration_ms,
-                );
-
-                Ok(final_output)
+                ))
             }
             Err(e) => {
-                let run_id = state.get_run_id().unwrap_or_else(|| Tracer::generate_run_id());
-                Ok(FinalOutput::failure(run_id, flow_name, e.to_string(), duration_ms))
+                Ok(FinalOutput::failure(run_id, trace_id, flow_name, e.to_string(), duration_ms))
             }
         }
     }
@@ -251,10 +274,16 @@ impl FlowExecutionService {
         let start = Instant::now();
         let flow_name = flow_file.name.clone();
 
+        // Generate run_id and trace_id upfront
+        let run_id = crate::flow::tracing::Tracer::generate_run_id();
+        let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
+
         let mut flow = self.build_flow(flow_file, &options)?;
 
         let mut state = SharedState::new();
         state.set_input("message".to_string(), serde_json::json!(message));
+        state.set_run_id(&run_id);
+        state.set_trace_id(&trace_id);
 
         if let Some(ref mode) = options.personality_mode {
             state.set_personality_mode(mode);
@@ -263,9 +292,21 @@ impl FlowExecutionService {
         let result = flow.run(&mut state).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        // Extract budget report, count events, produce evaluation
+        let budget_report = state.get_budget_report().cloned();
+        let events_count = if let Some(tracer) = &options.tracer {
+            if let Ok(t) = tracer.lock() {
+                t.get_logs().len()
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let evaluation = Self::evaluate(&state, &flow_name, duration_ms);
+
         match result {
             Ok(()) => {
-                let run_id = state.get_run_id().unwrap_or_else(|| Tracer::generate_run_id());
                 let primary = state.get_output("llm_response")
                     .or_else(|| state.get_output("generated"))
                     .or_else(|| state.get_output("review"))
@@ -279,11 +320,20 @@ impl FlowExecutionService {
                     }
                 }
 
-                Ok(FinalOutput::success(run_id, flow_name, primary, additional, duration_ms))
+                Ok(FinalOutput::success(
+                    run_id,
+                    trace_id,
+                    flow_name,
+                    primary,
+                    additional,
+                    evaluation,
+                    budget_report,
+                    events_count,
+                    duration_ms,
+                ))
             }
             Err(e) => {
-                let run_id = state.get_run_id().unwrap_or_else(|| Tracer::generate_run_id());
-                Ok(FinalOutput::failure(run_id, flow_name, e.to_string(), duration_ms))
+                Ok(FinalOutput::failure(run_id, trace_id, flow_name, e.to_string(), duration_ms))
             }
         }
     }
