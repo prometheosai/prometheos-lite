@@ -15,7 +15,7 @@ pub type RunId = String;
 pub type TraceId = String;
 
 /// Event types for tracing - Two-layer model
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TraceEvent {
     // Run-level events (system-level)
     RunStarted { run_id: RunId, flow_name: String },
@@ -27,6 +27,26 @@ pub enum TraceEvent {
     NodeCompleted { run_id: RunId, trace_id: TraceId, node_id: NodeId, duration_ms: u64 },
     NodeFailed { run_id: RunId, trace_id: TraceId, node_id: NodeId, error: String },
     TransitionTaken { run_id: RunId, from: NodeId, action: String, to: NodeId },
+
+    // Flow lifecycle events
+    FlowLoaded { run_id: RunId, flow_name: String, path: String },
+    FlowValidationFailed { run_id: RunId, errors: Vec<String> },
+
+    // Budget events
+    BudgetChecked { run_id: RunId, resource: String, current: u64, limit: u64 },
+    BudgetExceeded { run_id: RunId, resource: String, current: u64, limit: u64 },
+
+    // Tool events
+    ToolRequested { run_id: RunId, trace_id: TraceId, tool_name: String },
+    ToolCompleted { run_id: RunId, trace_id: TraceId, tool_name: String, duration_ms: u64 },
+
+    // Memory events
+    MemoryRead { run_id: RunId, trace_id: TraceId, query: String, results_count: u32 },
+    MemoryWrite { run_id: RunId, trace_id: TraceId, kind: String },
+
+    // Output events
+    EvaluationCompleted { run_id: RunId, trace_id: TraceId, score: Option<f64> },
+    OutputGenerated { run_id: RunId, trace_id: TraceId, output_key: String },
 }
 
 /// Log level
@@ -60,6 +80,7 @@ pub struct TimelineEvent {
 }
 
 /// Tracer for structured logging and event timeline
+#[derive(Debug)]
 pub struct Tracer {
     logs: Vec<LogEntry>,
     timeline: Vec<TimelineEvent>,
@@ -146,6 +167,8 @@ impl Tracer {
     pub fn log_run_event(&mut self, event: TraceEvent, message: String) {
         let level = match &event {
             TraceEvent::RunFailed { .. } => LogLevel::Error,
+            TraceEvent::FlowValidationFailed { .. } => LogLevel::Error,
+            TraceEvent::BudgetExceeded { .. } => LogLevel::Warning,
             _ => LogLevel::Info,
         };
         self.log(level, event, None, message, serde_json::json!({}));
@@ -155,6 +178,7 @@ impl Tracer {
     pub fn log_flow_event(&mut self, event: TraceEvent, node_id: Option<NodeId>, message: String) {
         let level = match &event {
             TraceEvent::NodeFailed { .. } => LogLevel::Error,
+            TraceEvent::BudgetExceeded { .. } => LogLevel::Warning,
             _ => LogLevel::Info,
         };
         self.log(level, event, node_id, message, serde_json::json!({}));
