@@ -127,6 +127,10 @@ impl Node for PolicyNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "policy"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<Input> {
         let input = self.inner.prep(state)?;
 

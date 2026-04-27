@@ -24,6 +24,10 @@ impl Node for IdWrapper {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        self.inner.kind()
+    }
+
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
         self.inner.prep(state)
     }
@@ -57,6 +61,10 @@ impl PlannerNode {
 impl Node for PlannerNode {
     fn id(&self) -> String {
         "planner".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "planner"
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
@@ -121,6 +129,10 @@ impl Node for CoderNode {
         "coder".to_string()
     }
 
+    fn kind(&self) -> &str {
+        "coder"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
         let plan = state.get_working("plan").cloned().unwrap_or(serde_json::json!(null));
         let task = state
@@ -182,6 +194,10 @@ impl ReviewerNode {
 impl Node for ReviewerNode {
     fn id(&self) -> String {
         "reviewer".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "reviewer"
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
@@ -251,6 +267,10 @@ impl Node for LlmNode {
         "llm".to_string()
     }
 
+    fn kind(&self) -> &str {
+        "llm"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
         let prompt = state
             .get_input("prompt")
@@ -312,6 +332,10 @@ impl ToolNode {
 impl Node for ToolNode {
     fn id(&self) -> String {
         "tool".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "tool"
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
@@ -378,6 +402,10 @@ impl FileWriterNode {
 impl Node for FileWriterNode {
     fn id(&self) -> String {
         "file_writer".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "file_writer"
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
@@ -451,6 +479,10 @@ impl Node for ContextLoaderNode {
         "context_loader".to_string()
     }
 
+    fn kind(&self) -> &str {
+        "context_loader"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
         let query = state
             .get_input("context_query")
@@ -505,6 +537,10 @@ impl MemoryWriteNode {
 impl Node for MemoryWriteNode {
     fn id(&self) -> String {
         "memory_write".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "memory_write"
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
@@ -573,6 +609,10 @@ impl Node for ConditionalNode {
         "conditional".to_string()
     }
 
+    fn kind(&self) -> &str {
+        "conditional"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
         let condition = state
             .get_input("condition")
@@ -629,6 +669,10 @@ impl PassthroughNode {
 impl Node for PassthroughNode {
     fn id(&self) -> String {
         "passthrough".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "passthrough"
     }
 
     fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {

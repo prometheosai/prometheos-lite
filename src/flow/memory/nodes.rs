@@ -53,6 +53,10 @@ impl Node for MemoryExtractorNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "memory_extractor"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<Input> {
         let user_message = state
             .get_input(&self.user_message_key)
@@ -220,6 +224,10 @@ impl Node for ContextLoaderNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "context_loader"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<Input> {
         let query = state
             .get_input(&self.query_key)
@@ -294,6 +302,10 @@ impl MemoryWriteNode {
 impl Node for MemoryWriteNode {
     fn id(&self) -> String {
         self.id.clone()
+    }
+
+    fn kind(&self) -> &str {
+        "memory_write"
     }
 
     fn prep(&self, state: &SharedState) -> Result<Input> {

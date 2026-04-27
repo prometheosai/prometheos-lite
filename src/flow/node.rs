@@ -61,11 +61,15 @@ impl NodeConfig {
 /// Lifecycle:
 /// 1. prep() - Prepare input from SharedState
 /// 2. exec() - Execute with input, produce output
-/// 3. post() - Process output, update SharedState, return Action
+/// 3. post() - Process output, update SharedState, return Action for next transition
 #[async_trait]
 pub trait Node: Send + Sync {
     /// Unique identifier for this node
     fn id(&self) -> NodeId;
+
+    /// Node kind/type for budget classification (e.g., "planner", "coder", "llm", "tool")
+    /// This is stable even if id() is wrapped by IdWrapper
+    fn kind(&self) -> &str;
 
     /// Prepare input from SharedState
     fn prep(&self, state: &SharedState) -> Result<Input>;
@@ -120,6 +124,10 @@ mod tests {
     impl Node for TestNode {
         fn id(&self) -> NodeId {
             self.id.clone()
+        }
+
+        fn kind(&self) -> &str {
+            "test"
         }
 
         fn prep(&self, _state: &SharedState) -> Result<Input> {

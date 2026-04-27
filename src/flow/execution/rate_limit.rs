@@ -300,6 +300,10 @@ impl Node for RateLimitedNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "rate_limited"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
         // Check rate limits before execution
         if let Ok(mut limiter) = self.rate_limiter.lock() {

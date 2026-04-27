@@ -51,6 +51,10 @@ impl Node for AgentNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "agent"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<Input> {
         // Extract input from SharedState based on node type
         let node_name = self.agent.name();

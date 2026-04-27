@@ -36,6 +36,10 @@ impl Node for ConditionalNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "conditional"
+    }
+
     fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
@@ -91,6 +95,10 @@ impl LoopNode {
 impl Node for LoopNode {
     fn id(&self) -> String {
         self.id.clone()
+    }
+
+    fn kind(&self) -> &str {
+        "loop"
     }
 
     fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {
@@ -208,6 +216,10 @@ impl Node for ParallelNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "parallel"
+    }
+
     fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
@@ -293,6 +305,10 @@ impl ReflectionNode {
 impl Node for ReflectionNode {
     fn id(&self) -> String {
         self.id.clone()
+    }
+
+    fn kind(&self) -> &str {
+        "reflection"
     }
 
     fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {

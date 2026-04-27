@@ -221,16 +221,16 @@ impl Flow {
             // Post-process: update state and get action
             let action = node.post(state, output.clone());
 
-            // Record budget usage based on node type
+            // Record budget usage based on node kind (stable even if id is wrapped)
             if let Some(guard) = &self.budget_guard {
-                let node_type = node.id();
-                if ["planner", "coder", "reviewer", "llm"].contains(&node_type.as_str()) {
+                let node_kind = node.kind();
+                if ["planner", "coder", "reviewer", "llm"].contains(&node_kind) {
                     let _ = guard.record_llm_call();
-                } else if node_type == "tool" {
+                } else if node_kind == "tool" {
                     let _ = guard.record_tool_call();
-                } else if node_type == "context_loader" {
+                } else if node_kind == "context_loader" {
                     let _ = guard.record_memory_read();
-                } else if node_type == "memory_write" {
+                } else if node_kind == "memory_write" {
                     let _ = guard.record_memory_write();
                 }
                 // Update budget report in state after recording
@@ -578,6 +578,10 @@ impl Node for FlowNode {
         self.id.clone()
     }
 
+    fn kind(&self) -> &str {
+        "flow"
+    }
+
     fn prep(&self, state: &SharedState) -> Result<Input> {
         // Pass the entire state as input to the nested flow
         Ok(serde_json::to_value(state)?)
@@ -635,6 +639,10 @@ mod tests {
     impl Node for MockNode {
         fn id(&self) -> NodeId {
             self.id.clone()
+        }
+
+        fn kind(&self) -> &str {
+            "mock"
         }
 
         fn prep(&self, _state: &SharedState) -> Result<Input> {

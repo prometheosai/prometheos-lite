@@ -292,6 +292,10 @@ mod tests {
             self.id.clone()
         }
 
+        fn kind(&self) -> &str {
+            "test"
+        }
+
         fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {
             Ok(serde_json::json!({}))
         }
