@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::budget::ExecutionBudget;
+use super::budget::BudgetGuard;
 
 /// Node identifier - unique string for each node in a flow
 pub type NodeId = String;
@@ -119,6 +120,42 @@ impl SharedState {
     pub fn get_personality_mode(&self) -> Option<String> {
         self.get_meta("personality_mode")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
+    }
+
+    /// Set the run ID in meta (one per flow execution)
+    pub fn set_run_id(&mut self, run_id: &str) {
+        self.set_meta("run_id".to_string(), serde_json::json!(run_id));
+    }
+
+    /// Get the run ID from meta
+    pub fn get_run_id(&self) -> Option<String> {
+        self.get_meta("run_id")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    }
+
+    /// Set the trace ID in meta (one per flow execution)
+    pub fn set_trace_id(&mut self, trace_id: &str) {
+        self.set_meta("trace_id".to_string(), serde_json::json!(trace_id));
+    }
+
+    /// Get the trace ID from meta
+    pub fn get_trace_id(&self) -> Option<String> {
+        self.get_meta("trace_id")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    }
+
+    /// Store a BudgetGuard reference in meta (as a JSON report)
+    /// Note: BudgetGuard is not serializable, so we store its report.
+    /// The actual guard lives in Flow.budget_guard and is checked at the flow loop level.
+    /// Nodes should use check_budget_* methods on SharedState to record against
+    /// the guard stored in the flow execution context.
+    pub fn set_budget_report(&mut self, report: serde_json::Value) {
+        self.set_meta("budget_report".to_string(), report);
+    }
+
+    /// Get the budget report from meta
+    pub fn get_budget_report(&self) -> Option<&serde_json::Value> {
+        self.get_meta("budget_report")
     }
 
     /// Clear the working section (useful between node executions)
