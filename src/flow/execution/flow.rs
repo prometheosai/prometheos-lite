@@ -1,7 +1,7 @@
 //! Flow execution engine with validation and retry support.
 
-use crate::flow::{Action, Input, Node, NodeConfig, NodeId, Output, SharedState};
-use anyhow::{Result, bail};
+use crate::flow::{Action, Input, Node, NodeConfig, NodeId, Output, SharedState, BudgetGuard, ExecutionBudget};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,6 +47,8 @@ pub struct Flow {
     transitions: HashMap<(NodeId, Action), NodeId>,
     /// Optional tracer for logging and timeline events
     tracer: Option<crate::flow::tracing::SharedTracer>,
+    /// Optional budget guard for enforcing resource limits
+    budget_guard: Option<BudgetGuard>,
 }
 
 impl Flow {
@@ -81,6 +83,17 @@ impl Flow {
         self.tracer.as_ref()
     }
 
+    /// Set the budget guard for this flow
+    pub fn with_budget_guard(mut self, budget_guard: BudgetGuard) -> Self {
+        self.budget_guard = Some(budget_guard);
+        self
+    }
+
+    /// Get the budget guard if set
+    pub fn budget_guard(&self) -> Option<&BudgetGuard> {
+        self.budget_guard.as_ref()
+    }
+
     /// Execute the flow with the given state
     pub async fn run(&mut self, state: &mut SharedState) -> Result<()> {
         self.run_with_hooks(state, &NoOpHooks).await
@@ -97,17 +110,21 @@ impl Flow {
         // Log flow start
         if let Some(tracer) = &self.tracer {
             if let Ok(mut t) = tracer.lock() {
-                t.log(
-                    crate::flow::tracing::LogLevel::Info,
-                    crate::flow::tracing::EventType::FlowStart,
-                    Some(self.start.clone()),
-                    "Flow execution started".to_string(),
-                    serde_json::json!({ "start_node": self.start }),
+                let run_id = crate::flow::tracing::Tracer::generate_run_id();
+                t.log_run_event(
+                    crate::flow::tracing::TraceEvent::RunStarted { run_id: run_id.clone(), flow_name: "flow".to_string() },
+                    "Flow execution started".to_string()
                 );
             }
         }
 
         loop {
+            // Check budget before each step
+            if let Some(guard) = &self.budget_guard {
+                guard.update_runtime().context("Budget check: runtime exceeded")?;
+                guard.record_step().context("Budget check: steps exceeded")?;
+            }
+
             let node = self
                 .nodes
                 .get(&current)
@@ -122,12 +139,12 @@ impl Flow {
             // Log node start
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
-                    t.log(
-                        crate::flow::tracing::LogLevel::Info,
-                        crate::flow::tracing::EventType::NodeStart,
+                    let run_id = crate::flow::tracing::Tracer::generate_run_id();
+                    let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
+                    t.log_flow_event(
+                        crate::flow::tracing::TraceEvent::NodeStarted { run_id, trace_id, node_id: current.clone() },
                         Some(current.clone()),
-                        format!("Executing node: {}", current),
-                        serde_json::json!({ "input": &input }),
+                        format!("Executing node: {}", current)
                     );
                 }
             }
@@ -151,15 +168,15 @@ impl Flow {
             // Log node completion
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
-                    t.log(
-                        crate::flow::tracing::LogLevel::Info,
-                        crate::flow::tracing::EventType::NodeEnd,
+                    let run_id = crate::flow::tracing::Tracer::generate_run_id();
+                    let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
+                    t.log_flow_event(
+                        crate::flow::tracing::TraceEvent::NodeCompleted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), duration_ms },
                         Some(current.clone()),
-                        format!("Node completed: {}", current),
-                        serde_json::json!({ "output": &output, "duration_ms": duration_ms }),
+                        format!("Node completed: {}", current)
                     );
                     t.add_timeline_event(
-                        crate::flow::tracing::EventType::NodeEnd,
+                        crate::flow::tracing::TraceEvent::NodeCompleted { run_id, trace_id, node_id: current.clone(), duration_ms },
                         Some(current.clone()),
                         Some(duration_ms),
                         serde_json::json!({ "output": &output }),
@@ -179,12 +196,11 @@ impl Flow {
                     // Log transition
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
-                            t.log(
-                                crate::flow::tracing::LogLevel::Info,
-                                crate::flow::tracing::EventType::Transition,
+                            let run_id = crate::flow::tracing::Tracer::generate_run_id();
+                            t.log_flow_event(
+                                crate::flow::tracing::TraceEvent::TransitionTaken { run_id, from: current.clone(), action: action.clone(), to: next.clone() },
                                 Some(current.clone()),
-                                format!("Transition: {} -> {} via {}", current, next, action),
-                                serde_json::json!({ "to": next, "action": action }),
+                                format!("Transition: {} -> {} via {}", current, next, action)
                             );
                         }
                     }
@@ -198,12 +214,11 @@ impl Flow {
                     // Log flow completion
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
-                            t.log(
-                                crate::flow::tracing::LogLevel::Info,
-                                crate::flow::tracing::EventType::FlowEnd,
-                                Some(current.clone()),
-                                "Flow execution completed".to_string(),
-                                serde_json::json!({ "final_node": current }),
+                            let run_id = crate::flow::tracing::Tracer::generate_run_id();
+                            let total_duration = std::time::Instant::now().elapsed().as_millis() as u64;
+                            t.log_run_event(
+                                crate::flow::tracing::TraceEvent::RunCompleted { run_id, duration_ms: total_duration },
+                                "Flow execution completed".to_string()
                             );
                         }
                     }
@@ -363,6 +378,7 @@ pub struct FlowBuilder {
     nodes: HashMap<NodeId, Arc<dyn Node>>,
     transitions: HashMap<(NodeId, Action), NodeId>,
     tracer: Option<crate::flow::tracing::SharedTracer>,
+    budget_guard: Option<BudgetGuard>,
 }
 
 impl FlowBuilder {
@@ -372,6 +388,7 @@ impl FlowBuilder {
             nodes: HashMap::new(),
             transitions: HashMap::new(),
             tracer: None,
+            budget_guard: None,
         }
     }
 
@@ -384,6 +401,12 @@ impl FlowBuilder {
     /// Set the tracer for the flow
     pub fn with_tracer(mut self, tracer: crate::flow::tracing::SharedTracer) -> Self {
         self.tracer = Some(tracer);
+        self
+    }
+
+    /// Set the budget guard for the flow
+    pub fn with_budget_guard(mut self, budget_guard: BudgetGuard) -> Self {
+        self.budget_guard = Some(budget_guard);
         self
     }
 
@@ -453,6 +476,7 @@ impl FlowBuilder {
             nodes: self.nodes,
             transitions: self.transitions,
             tracer: self.tracer,
+            budget_guard: self.budget_guard,
         };
 
         flow.validate()?;

@@ -548,6 +548,115 @@ impl ContinuationEngine {
 
 impl Default for ContinuationEngine {
     fn default() -> Self {
-        Self::new(PathBuf::from(".checkpoints"))
+        Self::new(PathBuf::from(".prometheos/checkpoints"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_flow_run_creation() {
+        let flow_run = FlowRun::new("test_flow".to_string());
+        assert_eq!(flow_run.flow_id, "test_flow");
+        assert_eq!(flow_run.status, RunStatus::Pending);
+        assert!(flow_run.completed_at.is_none());
+        assert!(flow_run.state_snapshot.is_none());
+    }
+
+    #[test]
+    fn test_flow_run_status_transitions() {
+        let mut flow_run = FlowRun::new("test_flow".to_string());
+        
+        flow_run.mark_running();
+        assert_eq!(flow_run.status, RunStatus::Running);
+        
+        let state = SharedState::new();
+        flow_run.mark_completed(state.clone());
+        assert_eq!(flow_run.status, RunStatus::Completed);
+        assert!(flow_run.completed_at.is_some());
+        assert!(flow_run.state_snapshot.is_some());
+        
+        flow_run.mark_failed("test error".to_string());
+        assert!(matches!(flow_run.status, RunStatus::Failed(_)));
+    }
+
+    #[test]
+    fn test_rundb_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        let run_db = RunDb::new(db_path.clone()).unwrap();
+        
+        let mut flow_run = FlowRun::new("test_flow".to_string());
+        flow_run.mark_running();
+        run_db.save_run(&flow_run).unwrap();
+        
+        let state = SharedState::new();
+        flow_run.mark_completed(state.clone());
+        run_db.save_run(&flow_run).unwrap();
+        
+        // Verify we can save without errors
+        assert!(run_db.save_run(&flow_run).is_ok());
+    }
+
+    #[test]
+    fn test_continuation_engine_checkpoint() {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+        
+        let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
+        
+        let run_id = "test_run_123";
+        let mut state = SharedState::new();
+        state.set_input("test_key".to_string(), serde_json::json!("test_value"));
+        
+        // Save checkpoint
+        let checkpoint_path = continuation_engine.save_checkpoint(run_id, &state).unwrap();
+        assert!(checkpoint_path.exists());
+        
+        // Check if checkpoint exists
+        assert!(continuation_engine.has_checkpoint(run_id));
+        
+        // Load checkpoint
+        let loaded_state = continuation_engine.load_checkpoint(run_id).unwrap();
+        let loaded_value = loaded_state.get_input("test_key");
+        assert_eq!(loaded_value, Some(&serde_json::json!("test_value")));
+        
+        // Delete checkpoint
+        continuation_engine.delete_checkpoint(run_id).unwrap();
+        assert!(!continuation_engine.has_checkpoint(run_id));
+    }
+
+    #[test]
+    fn test_continuation_engine_list_checkpoints() {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+        
+        let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
+        
+        let state = SharedState::new();
+        continuation_engine.save_checkpoint("run1", &state).unwrap();
+        continuation_engine.save_checkpoint("run2", &state).unwrap();
+        continuation_engine.save_checkpoint("run3", &state).unwrap();
+        
+        let checkpoints = continuation_engine.list_checkpoints().unwrap();
+        assert_eq!(checkpoints.len(), 3);
+        assert!(checkpoints.contains(&"run1".to_string()));
+        assert!(checkpoints.contains(&"run2".to_string()));
+        assert!(checkpoints.contains(&"run3".to_string()));
+    }
+
+    #[test]
+    fn test_continuation_engine_load_nonexistent_checkpoint() {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+        
+        let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
+        
+        let result = continuation_engine.load_checkpoint("nonexistent");
+        assert!(result.is_err());
     }
 }
