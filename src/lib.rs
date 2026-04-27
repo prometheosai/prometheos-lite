@@ -7,6 +7,8 @@ pub mod fs;
 pub mod intent;
 pub mod llm;
 pub mod logger;
+pub mod personality;
+pub mod tools;
 pub mod utils;
 
 // Legacy modules - deprecated in favor of flow-centric architecture
