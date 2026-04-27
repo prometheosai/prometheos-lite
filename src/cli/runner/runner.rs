@@ -3,11 +3,8 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use prometheos_lite::flow::{Flow, FlowBuilder, Node, SharedState};
-
-use super::types::FlowFile;
-use super::factory::NodeFactory;
-use super::nodes::IdWrapper;
+use prometheos_lite::flow::{Flow, FlowBuilder, SharedState, NodeFactory, DefaultNodeFactory, IdWrapper, JsonLoader, YamlLoader, validate_flow_file, FlowLoader};
+use prometheos_lite::flow::loader::FlowFile;
 
 /// CLI Runner for executing flows
 pub struct FlowRunner {
@@ -54,19 +51,45 @@ impl FlowRunner {
         Self::from_json_file_with_runtime(path, None)
     }
 
+    /// Load a flow from a YAML file
+    pub fn from_yaml_file(path: std::path::PathBuf) -> Result<Self> {
+        Self::from_yaml_file_with_runtime(path, None)
+    }
+
     /// Load a flow from a JSON file with a RuntimeContext
     pub fn from_json_file_with_runtime(
         path: std::path::PathBuf,
         runtime: Option<prometheos_lite::flow::RuntimeContext>,
     ) -> Result<Self> {
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read flow file: {}", path.display()))?;
-
-        let flow_file: FlowFile =
-            serde_json::from_str(&content).context("Failed to parse flow file")?;
+        let loader = JsonLoader::new();
+        let flow_file = loader.load_from_path(&path)?;
 
         // Validate flow file structure according to Flow JSON Schema v1
-        flow_file.validate().context("Flow file validation failed")?;
+        validate_flow_file(&flow_file).context("Flow file validation failed")?;
+
+        let flow = Self::build_flow_from_file(flow_file, runtime.clone())?;
+
+        // Create tracer for this flow
+        let tracer = prometheos_lite::flow::tracing::create_tracer();
+
+        Ok(Self {
+            flow,
+            tracer: Some(tracer),
+            debug_mode: false,
+            runtime,
+        })
+    }
+
+    /// Load a flow from a YAML file with a RuntimeContext
+    pub fn from_yaml_file_with_runtime(
+        path: std::path::PathBuf,
+        runtime: Option<prometheos_lite::flow::RuntimeContext>,
+    ) -> Result<Self> {
+        let loader = YamlLoader::new();
+        let flow_file = loader.load_from_path(&path)?;
+
+        // Validate flow file structure according to Flow JSON Schema v1
+        validate_flow_file(&flow_file).context("Flow file validation failed")?;
 
         let flow = Self::build_flow_from_file(flow_file, runtime.clone())?;
 
@@ -88,9 +111,9 @@ impl FlowRunner {
     ) -> Result<Flow> {
         let mut builder = FlowBuilder::new().start(file.start_node.clone());
         let factory: Box<dyn NodeFactory> = if let Some(rt) = runtime {
-            Box::new(super::factory::DefaultNodeFactory::from_runtime(rt))
+            Box::new(DefaultNodeFactory::from_runtime(rt))
         } else {
-            Box::new(super::factory::DefaultNodeFactory::new())
+            Box::new(DefaultNodeFactory::new())
         };
 
         for node_def in &file.nodes {

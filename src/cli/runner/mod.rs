@@ -2,10 +2,8 @@
 
 mod types;
 mod runner;
-mod factory;
-mod nodes;
 mod tests;
 
 pub use types::*;
 pub use runner::FlowRunner;
-pub use factory::{NodeFactory, DefaultNodeFactory};
+pub use prometheos_lite::flow::{NodeFactory, DefaultNodeFactory};

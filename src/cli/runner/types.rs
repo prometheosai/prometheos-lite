@@ -3,12 +3,28 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Flow inputs specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowInputs {
+    pub required: Vec<String>,
+}
+
+/// Flow outputs specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowOutputs {
+    pub primary: String,
+    pub include: Vec<String>,
+}
+
 /// Flow file format for serialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowFile {
+    pub version: String,
     pub name: String,
     pub description: Option<String>,
     pub start_node: String,
+    pub inputs: Option<FlowInputs>,
+    pub outputs: Option<FlowOutputs>,
     pub nodes: Vec<NodeDefinition>,
     pub transitions: Vec<TransitionDefinition>,
 }
@@ -16,6 +32,11 @@ pub struct FlowFile {
 impl FlowFile {
     /// Validate the flow file structure according to Flow JSON Schema v1
     pub fn validate(&self) -> Result<()> {
+        // Validate version is not empty
+        if self.version.is_empty() {
+            anyhow::bail!("Flow version cannot be empty");
+        }
+
         // Validate name is not empty
         if self.name.is_empty() {
             anyhow::bail!("Flow name cannot be empty");
@@ -29,6 +50,20 @@ impl FlowFile {
         // Validate nodes is not empty
         if self.nodes.is_empty() {
             anyhow::bail!("Flow must have at least one node");
+        }
+
+        // Validate inputs if defined
+        if let Some(ref inputs) = self.inputs {
+            if inputs.required.is_empty() {
+                anyhow::bail!("Flow inputs.required cannot be empty if inputs is defined");
+            }
+        }
+
+        // Validate outputs if defined
+        if let Some(ref outputs) = self.outputs {
+            if outputs.primary.is_empty() {
+                anyhow::bail!("Flow outputs.primary cannot be empty if outputs is defined");
+            }
         }
 
         // Validate each node definition
