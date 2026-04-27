@@ -1,0 +1,51 @@
+version: "1.0"
+name: "Code Generation Flow"
+description: "Generate code from task description with planning, coding, and review"
+
+inputs:
+  required:
+    - "task"
+
+outputs:
+  primary: "generated_code"
+  include:
+    - "plan"
+    - "generated_code"
+    - "review"
+
+nodes:
+  - id: "planner"
+    node_type: "planner"
+    config:
+      model: "gpt-4"
+      max_steps: 5
+
+  - id: "coder"
+    node_type: "coder"
+    config:
+      model: "gpt-4"
+      max_iterations: 3
+
+  - id: "reviewer"
+    node_type: "reviewer"
+    config:
+      model: "gpt-4"
+
+transitions:
+  - from: "planner"
+    action: "continue"
+    to: "coder"
+  - from: "coder"
+    action: "needs_revision"
+    to: "coder"
+  - from: "coder"
+    action: "complete"
+    to: "reviewer"
+  - from: "reviewer"
+    action: "approved"
+    to: "end"
+  - from: "reviewer"
+    action: "needs_revision"
+    to: "coder"
+
+start_node: "planner"

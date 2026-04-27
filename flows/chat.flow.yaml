@@ -1,0 +1,27 @@
+version: "1.0"
+name: "Direct Chat Flow"
+description: "Simple direct LLM chat without code generation"
+
+inputs:
+  required:
+    - "message"
+
+outputs:
+  primary: "response"
+  include:
+    - "response"
+
+nodes:
+  - id: "llm"
+    node_type: "llm"
+    config:
+      model: "gpt-4"
+      prompt: "You are a helpful AI assistant."
+      temperature: 0.7
+
+transitions:
+  - from: "llm"
+    action: "continue"
+    to: "end"
+
+start_node: "llm"

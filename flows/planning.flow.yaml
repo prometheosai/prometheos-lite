@@ -1,0 +1,27 @@
+version: "1.0"
+name: "Planning Flow"
+description: "Break down tasks into steps for execution"
+
+inputs:
+  required:
+    - "task"
+
+outputs:
+  primary: "plan"
+  include:
+    - "plan"
+    - "steps"
+
+nodes:
+  - id: "planner"
+    node_type: "planner"
+    config:
+      model: "gpt-4"
+      max_steps: 5
+
+transitions:
+  - from: "planner"
+    action: "continue"
+    to: "end"
+
+start_node: "planner"

@@ -1,0 +1,26 @@
+version: "1.0"
+name: "Approval Flow"
+description: "Review and approve proposed changes"
+
+inputs:
+  required:
+    - "proposal"
+
+outputs:
+  primary: "decision"
+  include:
+    - "decision"
+    - "feedback"
+
+nodes:
+  - id: "reviewer"
+    node_type: "reviewer"
+    config:
+      model: "gpt-4"
+
+transitions:
+  - from: "reviewer"
+    action: "continue"
+    to: "end"
+
+start_node: "reviewer"
