@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::budget::ExecutionBudget;
+
 /// Node identifier - unique string for each node in a flow
 pub type NodeId = String;
 
@@ -94,6 +96,29 @@ impl SharedState {
     /// Set a value in meta section
     pub fn set_meta(&mut self, key: String, value: serde_json::Value) {
         self.meta.insert(key, value);
+    }
+
+    /// Set the execution budget in meta
+    pub fn set_budget(&mut self, budget: ExecutionBudget) {
+        let budget_json = serde_json::to_value(budget).unwrap_or(serde_json::json!({}));
+        self.set_meta("budget".to_string(), budget_json);
+    }
+
+    /// Get the execution budget from meta
+    pub fn get_budget(&self) -> Option<ExecutionBudget> {
+        self.get_meta("budget")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Set the personality mode in meta
+    pub fn set_personality_mode(&mut self, mode: &str) {
+        self.set_meta("personality_mode".to_string(), serde_json::json!(mode));
+    }
+
+    /// Get the personality mode from meta
+    pub fn get_personality_mode(&self) -> Option<String> {
+        self.get_meta("personality_mode")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
     }
 
     /// Clear the working section (useful between node executions)
