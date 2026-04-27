@@ -1,8 +1,19 @@
 {
-  "version": "1",
+  "version": "1.0",
   "name": "Code Generation Flow",
   "description": "A flow that plans, generates, reviews code, writes files, and logs to memory",
   "start_node": "planner",
+  "inputs": {
+    "required": [
+      "task"
+    ]
+  },
+  "outputs": {
+    "primary": "generated",
+    "include": [
+      "review"
+    ]
+  },
   "nodes": [
     {
       "id": "planner",
