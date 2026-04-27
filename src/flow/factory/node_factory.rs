@@ -82,9 +82,12 @@ impl NodeFactory for DefaultNodeFactory {
             "context_loader" => Ok(Arc::new(super::builtin_nodes::ContextLoaderNode::new(node_config, self.memory_service.clone()))),
             "memory_write" => Ok(Arc::new(super::builtin_nodes::MemoryWriteNode::new(node_config, self.memory_service.clone()))),
             "conditional" => Ok(Arc::new(super::builtin_nodes::ConditionalNode::new(node_config))),
+            "passthrough" => Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(node_config))),
             _ => {
-                // Default to passthrough for unknown types
-                Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(node_config)))
+                anyhow::bail!(
+                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough",
+                    node_type
+                )
             }
         }
     }
