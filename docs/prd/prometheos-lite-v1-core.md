@@ -1,24 +1,41 @@
-Got it. Based on the updated repo, you are **already past the old “V1 starts from zero” plan**. Tiny miracle. We can stop pretending you still need to invent flows, state, runtime injection, tracing, and run persistence from scratch.
+Got it. Based on the updated repo, you are **already past the old "V1 starts from zero" plan**. The repo has a working flow engine, state management, runtime injection, tracing, and run persistence. But there is a critical problem the original PRD missed:
+
+**The codebase has two competing architectures.**
+
+```txt
+Path A (CLI):  FlowRunner → Nodes → Runtime → State → Trace
+Path B (API):  handler → LlmClient.generate() → output
+```
+
+The API handlers in `codegen.rs`, `direct_llm.rs`, and `planning.rs` call `LlmClient::generate()` directly with hardcoded prompts. They don't use `FlowRunner`, `Flow`, `NodeFactory`, or any flow infrastructure. This is a parallel architecture, not a thin layer problem.
+
+The repo also has an intent classification system (`src/intent/`) that the PRD never mentioned. It already routes `IntentClassifier → IntentRouter → Handler`. The missing piece is the bridge from intent to flow.
 
 Your current repo already has:
 
-* Rust 2024 backend with `axum`, `tokio`, `clap`, `rusqlite`, `reqwest`, `serde`, `uuid` and friends. 
-* Flow-centric architecture exposed from `src/flow`, including `flow`, `node`, `runtime`, `memory`, `policy`, `rate_limit`, `tracing`, `orchestration`, and migration modules. 
-* Deprecated legacy mode behind feature flag, meaning the repo has already committed to flow-first architecture instead of old agent-core confusion. 
-* CLI entrypoint through `src/main.rs → cli::run()`. 
-* CLI `flow` command with JSON flow loading, debug mode, timeline export, runtime creation, model router, tool runtime, and memory service wiring. 
-* A `FlowRunner`, `FlowFile`, `NodeFactory`, and concrete nodes like planner, coder, reviewer, LLM, tool, file writer, context loader, memory write, conditional, and passthrough. 
-* `SharedState` already split into `input`, `context`, `working`, `output`, and `meta`, with serialization and merge support. This is exactly the state shape V1 needed. 
-* Run registry, flow runs, SQLite persistence, flow events, Maestro scheduling, and continuation checkpoints. 
+* Rust 2024 backend with `axum`, `tokio`, `clap`, `rusqlite`, `reqwest`, `serde`, `uuid` and friends.
+* Flow-centric architecture exposed from `src/flow`, including `flow`, `node`, `runtime`, `memory`, `policy`, `rate_limit`, `tracing`, `orchestration`, and migration modules.
+* Intelligence layer with `ModelRouter`, `LlmProvider`, `ToolRuntime`, `ToolSandboxProfile`, and `LlmUtilities`.
+* Memory layer with `MemoryDb`, `MemoryService`, `EmbeddingProvider`, and vector operations.
+* Debug mode with breakpoints, step mode, and state snapshots.
+* Intent classification system with hybrid rule-based + LLM fallback, intent router, and handler dispatch.
+* Deprecated legacy mode behind feature flag, meaning the repo has already committed to flow-first architecture.
+* CLI entrypoint through `src/main.rs → cli::run()`.
+* CLI `flow` command with JSON flow loading, debug mode, timeline export, runtime creation, model router, tool runtime, and memory service wiring.
+* A `FlowRunner`, `FlowFile`, `NodeFactory`, and concrete nodes like planner, coder, reviewer, LLM, tool, file writer, context loader, memory write, conditional, and passthrough.
+* `SharedState` already split into `input`, `context`, `working`, `output`, and `meta`, with serialization and merge support.
+* Run registry, flow runs, SQLite persistence, flow events, Maestro scheduling, and continuation checkpoints.
+* Database layer (`src/db/`) with repositories for conversations, messages, flow runs.
+* Control files (`src/control/`) for personality prompts and system configuration.
 
-So the new V1 is not “build the engine.”
+So the new V1 is not "build the engine."
 The new V1 is:
 
 ```txt
-make the existing engine boringly reliable, YAML-native, testable, bounded, and ready for future agents
+unify all execution paths under FlowRunner and make the engine boringly reliable, YAML-native, testable, bounded, and ready for future agents
 ```
 
-That is much better. Less glamorous. More real. The universe apologizes.
+The real V1 objective: **Kill Path B. Unify under Path A.** This is not a thin API refactor. It is a controlled rewrite of the execution layer.
 
 ---
 
@@ -44,22 +61,29 @@ V1 must not introduce first-class agents, swarm behavior, learning, or meta-opti
 
 ## Already Implemented
 
-| Area               | Current repo status                           | V1 action                                       |
-| ------------------ | --------------------------------------------- | ----------------------------------------------- |
-| Rust backend       | Exists, single crate, Rust 2024               | Keep                                            |
-| CLI                | `run`, `flow`, `serve` commands exist         | Extend                                          |
-| Flow engine        | Exists under `src/flow`                       | Harden                                          |
-| RuntimeContext     | Exists with model/tool/memory services        | Keep, refine                                    |
-| SharedState        | Exists with input/context/working/output/meta | Use as V1 state                                 |
-| NodeFactory        | Exists in CLI runner                          | Move/refactor into library core                 |
-| Flow JSON loader   | Exists                                        | Add YAML support                                |
-| Trace/timeline     | Exists                                        | Standardize event schema                        |
-| Run persistence    | Exists via `RunDb`                            | Wire consistently                               |
-| Continuation       | Exists via checkpoint files                   | Integrate with run lifecycle                    |
-| Memory service     | Exists                                        | Keep minimal V1 integration                     |
-| API server         | Exists                                        | Make thinner                                    |
-| Personality engine | Not implemented                               | Add minimal V1 only                             |
-| ToolRegistry       | Current tool runtime is command-oriented      | Replace/extend later, but add V1-safe interface |
+| Area               | Current repo status                                                    | V1 action                                                |
+| ------------------ | ---------------------------------------------------------------------- | -------------------------------------------------------- |
+| Rust backend       | Exists, single crate, Rust 2024                                        | Keep                                                     |
+| CLI                | `run`, `flow`, `serve` commands exist                                  | Extend                                                   |
+| Flow engine        | Exists under `src/flow`                                                | Harden                                                   |
+| RuntimeContext     | Exists with model/tool/memory services                                 | Keep, refine                                             |
+| SharedState        | Exists with input/context/working/output/meta                          | Use as V1 state                                          |
+| NodeFactory        | Exists in CLI runner                                                   | Move/refactor into library core                          |
+| Flow JSON loader   | Exists                                                                 | Add YAML support                                         |
+| Trace/timeline     | Exists (8 event types, no run_id/trace_id on LogEntry/TimelineEvent)   | Standardize: two-layer model, add run_id/trace_id       |
+| Run persistence    | Exists via `RunDb`                                                     | Wire consistently                                        |
+| Continuation       | Exists via checkpoint files                                            | Integrate with run lifecycle                             |
+| Memory service     | Exists (`MemoryDb`, `MemoryService`, `EmbeddingProvider`, vector ops)  | Keep minimal V1 integration                              |
+| Intelligence layer | Exists (`ModelRouter`, `LlmProvider`, `ToolRuntime`, `ToolSandboxProfile`) | Keep, extend with ToolPermission model              |
+| Debug mode         | Exists (`DebugSession`, breakpoints, step mode, state snapshots)       | Keep                                                     |
+| Intent system      | Exists (`IntentClassifier`, `IntentRouter`, `RuleClassifier`)          | Add FlowSelector bridge, route through FlowRunner        |
+| Database layer     | Exists (`src/db/` with repositories)                                   | Keep                                                     |
+| Control files      | Exists (`src/control/` for personality prompts)                        | Integrate with personality engine                        |
+| LLM client         | Exists (`src/llm/`)                                                    | Keep                                                     |
+| Legacy adapter     | Exists (`src/flow/adapter.rs` behind feature flag)                     | Keep behind feature flag                                 |
+| API server         | Exists but **bypasses flow engine entirely** — direct LLM calls        | **Rewrite: route through FlowRunner**                   |
+| Personality engine | Not implemented                                                        | Add minimal V1 only                                      |
+| ToolRegistry       | Current tool runtime is command-oriented with `ToolSandboxProfile`     | Add declarative ToolPermission layer, keep sandbox profile |
 
 ---
 
@@ -114,6 +138,27 @@ The four-mode model is good: Companion, Navigator, Anchor, Mirror.
 
 The blind-spots doc is right: per-tool capability security matters, but full per-invocation sandboxing can be V1.1/V3. For V1 Core, define the model and enforce conservative defaults. 
 
+## 6. All execution unifies under FlowRunner
+
+The API currently bypasses the flow engine entirely, calling `LlmClient::generate()` directly with hardcoded prompts. This creates a parallel architecture. V1 eliminates this: all execution paths — CLI and API — route through FlowRunner. The API direct-LLM path is killed.
+
+```txt
+V1: Intent → FlowSelector → FlowRunner → Nodes → FinalOutput
+```
+
+This is not a thin API refactor. It is a controlled rewrite of the execution layer.
+
+## 7. Intent classification is the front door
+
+The existing intent system (`IntentClassifier → IntentRouter`) is not optional. It becomes the entry point for all user input. V1 adds the missing bridge: `FlowSelector` maps classified intent to a flow definition.
+
+```txt
+V1: Intent → Flow
+V2: Intent → Agent → Skill → Flow
+```
+
+Intent is promoted to the front door of the system. It does not go through handlers that call LLM directly.
+
 ---
 
 # Target Architecture
@@ -122,81 +167,138 @@ The blind-spots doc is right: per-tool capability security matters, but full per
 src/
   api/
     mod.rs
-    server.rs              # thin router only after refactor
+    router.rs
+    server.rs
     state.rs
     websocket.rs
+    conversations.rs
+    health.rs
+    messages.rs
+    projects.rs
+    flow_runs/
+      mod.rs
+      handler.rs          # REWRITE: Intent → FlowSelector → FlowRunner
+      approval.rs         # REWRITE: use flow engine
+      codegen.rs          # REWRITE: use flow engine
+      direct_llm.rs       # REWRITE: use flow engine
+      planning.rs         # REWRITE: use flow engine
+      errors.rs
+      events.rs
 
   cli/
     mod.rs
-    runner.rs              # split later
-    commands/
+    commands/             # NEW: split CLI commands
       flow.rs
       serve.rs
       run.rs
+    runtime_builder.rs    # NEW: shared RuntimeContext construction
+    runner/
+      mod.rs
+      runner.rs
+      types.rs            # STAYS: FlowFile loading (add YAML support)
+      tests.rs
 
   config/
     mod.rs
+    settings/
+
+  control/
+    mod.rs
+
+  db/
+    mod.rs
+    models.rs
+    repository/
 
   flow/
     mod.rs
-    flow.rs
-    node.rs
-    types.rs
-    runtime.rs
-    tracing.rs
-    orchestration.rs
-    memory.rs
-    intelligence.rs
-    policy.rs
-    rate_limit.rs
+    adapter.rs            # EXISTS: legacy Agent→Node (keep behind feature flag)
+    debug.rs              # EXISTS: debug session, breakpoints
+    node.rs               # EXISTS: Node trait, NodeConfig
+    runtime.rs            # EXISTS: RuntimeContext
+    tracing.rs            # EXISTS: UPDATE: two-layer trace, run_id/trace_id
+    types.rs              # EXISTS: SharedState, NodeId, etc.
+    migration.rs          # EXISTS: legacy migration (keep behind feature flag)
 
-    loader/
+    execution/            # EXISTS
+      mod.rs
+      flow.rs             # EXISTS: Flow, FlowBuilder, FlowNode
+      flow_types.rs       # EXISTS: ConditionalNode, LoopNode, etc.
+      orchestration.rs    # EXISTS: Maestro, RunDb, FlowRun, ContinuationEngine
+      policy.rs           # EXISTS: ConstitutionPolicy, PolicyNode
+      rate_limit.rs       # EXISTS: RateLimiter, RateLimitedNode (KEEP)
+
+    intelligence/         # EXISTS
+      mod.rs
+      provider.rs         # EXISTS: LlmProvider, OpenAiProvider
+      router.rs           # EXISTS: ModelRouter
+      tool.rs             # EXISTS: ToolRuntime, ToolSandboxProfile, Tool trait
+      utils.rs            # EXISTS: LlmUtilities
+
+    memory/               # EXISTS
+      mod.rs
+      db.rs               # EXISTS: MemoryDb
+      embedding.rs        # EXISTS: EmbeddingProvider
+      nodes.rs            # EXISTS: memory flow nodes
+      service.rs          # EXISTS: MemoryService
+      types.rs            # EXISTS: MemoryType, MemoryKind
+      vector.rs           # EXISTS: vector operations
+
+    loader/               # NEW (Issue #1 + #3)
       mod.rs
       yaml.rs
       json.rs
       validate.rs
 
-    factory/
+    factory/              # NEW (Issue #2)
       mod.rs
-      node_factory.rs
-      builtin_nodes.rs
+      node_factory.rs     # MOVED from cli/runner/factory.rs
+      builtin_nodes.rs    # MOVED from cli/runner/nodes.rs
 
-    output/
+    output/               # NEW (Issue #6 + #7)
       mod.rs
       final_output.rs
       evaluation.rs
 
-    budget/
+    budget/               # NEW (Issue #5)
       mod.rs
       execution_budget.rs
       budget_guard.rs
 
-    testing/
+    testing/              # NEW (Issue #13)
       mod.rs
       fixtures.rs
       flow_test_runner.rs
 
-  personality/
+  intent/                 # EXISTS
+    mod.rs
+    classifier.rs         # EXISTS: IntentClassifier
+    router.rs             # EXISTS: IntentRouter
+    rules.rs              # EXISTS: RuleClassifier
+    types.rs              # EXISTS: ParsedIntent, IntentType
+    flow_selector.rs      # NEW: Intent → Flow mapping bridge
+
+  personality/            # NEW (Issue #10)
     mod.rs
     mode.rs
     selector.rs
     constitution.rs
     prompt.rs
 
-  tools/
+  tools/                  # NEW (Issue #11 + #12)
     mod.rs
-    tool.rs
     registry.rs
-    permissions.rs
-    command_tool.rs
+    permissions.rs        # declarative ToolPermission model
+    metadata.rs           # ToolMetadata with schema_hash
 
-  utils/
+  llm/                    # EXISTS
     mod.rs
-    ids.rs
-    json.rs
-    time.rs
-    errors.rs
-    paths.rs
+    client/
+
+  fs/                     # EXISTS
+  logger/                 # EXISTS
+  utils/                  # EXISTS
+  legacy/                 # EXISTS (behind feature flag)
 ```
 
 Important: you do **not** need a workspace/multi-crate split immediately. Since the repo is currently a single Rust crate, keep V1 single-crate unless the refactor becomes painful. We are not moving furniture during a fire drill.
@@ -251,6 +353,49 @@ outputs:
 ```
 
 Compatibility JSON can map to the same internal `FlowFile`.
+
+## Intent → Flow Bridge
+
+The existing intent classification system (`IntentClassifier → IntentRouter`) routes user input to handlers. V1 adds the missing bridge: `FlowSelector` maps classified intent to a flow definition.
+
+```rust
+pub trait FlowSelector {
+    fn select(intent: &ParsedIntent) -> FlowRef;
+}
+```
+
+Mapping:
+
+```txt
+DirectChat  → flows/chat.flow.yaml
+Planning    → flows/planning.flow.yaml
+CodeGen     → flows/codegen.flow.yaml
+Approval    → flows/approval.flow.yaml
+```
+
+V1 execution flow:
+
+```txt
+User Input
+ ↓
+IntentClassifier
+ ↓
+IntentRouter
+ ↓
+FlowSelector (NEW BRIDGE)
+ ↓
+FlowLoader
+ ↓
+FlowRunner
+ ↓
+Nodes
+ ↓
+SharedState
+ ↓
+Trace + Evaluation
+ ↓
+FinalOutput
+```
 
 ## SharedState
 
@@ -321,6 +466,35 @@ No fake “truth system” yet. Humanity survives.
 ---
 
 # V1 Core Issues
+
+## Issue #0 — FlowFile schema upgrade
+
+**Priority:** Critical
+**Status:** New
+**Depends on:** Current `FlowFile` struct
+
+### Context
+
+The PRD's YAML contract specifies `version`, `inputs.required`, and `outputs` fields, but the current FlowFile struct in `src/cli/runner/types.rs` has none of these. The example `codegen.flow.json` includes `"version": "1"` but it's silently ignored during deserialization.
+
+Flow becomes a contract, not just config — this enables validation, testing, replay, benchmarking, and future learning. This is non-negotiable for V5+.
+
+### Tasks
+
+* Add `version: String` field to `FlowFile` struct
+* Add `inputs: FlowInputs` struct with `required: Vec<String>` field
+* Add `outputs: FlowOutputs` struct with `primary: String` and `include: Vec<String>` fields
+* Update `codegen.flow.json` to validate against new schema
+* Add validation in FlowLoader to check required fields
+
+### Acceptance Criteria
+
+* FlowFile struct includes version, inputs, outputs fields
+* FlowLoader validates these fields exist
+* codegen.flow.json passes validation
+* Missing required fields return actionable validation error
+
+---
 
 ## Issue #1 — Make YAML the canonical Flow format
 
@@ -434,7 +608,14 @@ pub trait FlowLoader {
 
 ### Context
 
-The repo already has tracing/timeline and `flow_events` persistence.  V1 must standardize the event names so later harness/replay/learning can rely on them.
+The repo already has tracing/timeline and `flow_events` persistence. V1 must standardize the event names so later harness/replay/learning can rely on them.
+
+**Two-layer trace model:**
+
+- **Run-level events** (lifecycle of a full execution): RunStarted, RunCompleted, RunFailed
+- **Flow-level events** (within a run): FlowLoaded, FlowValidationFailed, NodeStarted, NodeCompleted, NodeFailed, TransitionTaken, BudgetChecked, ToolRequested, ToolCompleted, MemoryRead, MemoryWrite, EvaluationCompleted, OutputGenerated
+
+Current EventType enum has only 8 variants. LogEntry and TimelineEvent lack run_id/trace_id. Only FlowEvent (in orchestration.rs) has run_id. V1 must add run_id/trace_id to all event structs.
 
 ### Required events
 
@@ -480,7 +661,9 @@ OutputGenerated
 
 ### Context
 
-The blind-spots doc is right: no budget means an agent/flow can burn tokens and tool calls like a caffeinated raccoon with a credit card. Cost awareness must start in V1. 
+The blind-spots doc is right: no budget means an agent/flow can burn tokens and tool calls like a caffeinated raccoon with a credit card. Cost awareness must start in V1.
+
+**Note:** ExecutionBudget is distinct from existing RateLimitConfig. RateLimitConfig protects API/provider (per-minute/hour token/request limits). ExecutionBudget protects runtime (per-run step/call/time limits). Both stay — they serve different purposes.
 
 ### Budget model
 
@@ -698,6 +881,8 @@ pub enum PersonalityMode {
 
 `ToolRuntime` currently executes allowed commands with a sandbox profile. That is useful but not enough for the future ToolRegistry/MCP world. V1 should introduce permission vocabulary without building every adapter yet.
 
+**Note:** ToolPermission is a declarative flow-level model. Existing ToolSandboxProfile is the runtime enforcement layer. They integrate, not replace. ToolPermission = WHAT is allowed. ToolSandboxProfile = HOW it is enforced.
+
 ### Model
 
 ```rust
@@ -839,21 +1024,26 @@ flow_failure_rate
 
 ---
 
-## Issue #15 — API thin-layer refactor
+## Issue #15 — API execution layer rewrite
 
 **Priority:** Critical
-**Status:** Partially needed
+**Status:** Required
 
 ### Context
 
-Earlier analysis found `server.rs` was doing too much. If you’ve reduced it, good. If not, this remains critical. API must call the same flow runtime as CLI.
+The API handlers in `codegen.rs`, `direct_llm.rs`, and `planning.rs` call `LlmClient::generate()` directly with hardcoded prompts. They don't use `FlowRunner`, `Flow`, `NodeFactory`, or any flow infrastructure. This is a parallel architecture, not a thin layer problem.
+
+The fix is Intent → FlowSelector → FlowRunner. This is a controlled rewrite of the execution layer, not a refactor. Migration cost is real: this will break behavior initially, expose missing nodes, require new flow definitions, and force prompt refactors.
 
 ### Target
 
 ```txt
 HTTP request
  → parse input
- → create run
+ → IntentClassifier
+ → IntentRouter
+ → FlowSelector (NEW BRIDGE)
+ → FlowLoader
  → execute FlowRunner/Maestro
  → stream events
  → return FinalOutput
@@ -861,16 +1051,17 @@ HTTP request
 
 ### Tasks
 
-* Move orchestration out of API routes.
-* API should not manually call LLM for planner/coder/reviewer.
-* API should not build prompts directly.
-* API should only select/load flow and execute.
+* Create `src/intent/flow_selector.rs` — Intent → Flow mapping bridge
+* Rewrite API handlers: Intent → FlowSelector → FlowRunner
+* Remove all direct `LlmClient::generate()` calls from API routes
+* API and CLI produce same FinalOutput contract
+* WebSocket events mirror trace events
 
 ### Acceptance Criteria
 
-* No direct `LlmClient::generate` in API route handlers.
-* WebSocket events mirror trace events.
-* API and CLI produce same FinalOutput contract.
+* No direct `LlmClient::generate()` calls in API route handlers
+* API routes through FlowRunner for all execution paths
+* API and CLI produce same FinalOutput contract
 
 ---
 
@@ -963,6 +1154,9 @@ V1 is done when:
 11. Benchmarks produce baseline JSON
 12. Minimal personality mode selector works
 13. Tool permission model exists with conservative defaults
+14. Intent routes through FlowSelector to FlowRunner
+15. API produces same FinalOutput as CLI
+16. No direct LlmClient::generate() calls in API route handlers
 ```
 
 ---
@@ -1157,16 +1351,57 @@ Do not confuse them. One is a jacket. The other is a spine.
 Given the repo is already ahead, your next order is:
 
 ```txt
-1. YAML loader
-2. Move NodeFactory/built-in nodes from CLI to flow core
-3. Standardize trace event schema
-4. Add FinalOutput + Evaluation
-5. Add ExecutionBudget
-6. Wire RunDb/Continuation into CLI/API path
-7. Add flow test runner
-8. Add benchmark baseline
-9. Add minimal personality mode selector
-10. Refactor API/CLI thin layers
+Phase 0 — Schema Foundation
+Add version, inputs, outputs fields to FlowFile struct
+Update codegen.flow.json to validate against new schema
+
+Phase 1 — Loader + Factory
+Add serde_yaml to Cargo.toml
+Create src/flow/loader/ with FlowLoader trait, YAML loader, JSON loader, validation
+Rename from_json_file_with_runtime → from_file_with_runtime
+Move NodeFactory + built-in nodes from cli/runner/ to src/flow/factory/
+
+Phase 2 — Trace + Output
+Define TraceEventKind enum with two-layer model (run-level + flow-level)
+Add run_id + trace_id to LogEntry, TimelineEvent
+Create src/flow/output/final_output.rs with FinalOutput struct
+Create src/flow/output/evaluation.rs with Evaluation struct
+
+Phase 3 — Budget System
+Create src/flow/budget/execution_budget.rs with ExecutionBudget struct
+Create src/flow/budget/budget_guard.rs with BudgetGuard
+Check budget before each node, LLM call, tool call, memory operation
+Emit BudgetChecked events
+Keep existing RateLimitConfig as-is (different purpose)
+
+Phase 4 — CLI Stabilization
+Extract RuntimeBuilder from duplicated CLI code
+Split CLI commands into commands/flow.rs, commands/serve.rs, commands/run.rs
+Add flow resume <run_id>, flow events <run_id> subcommands
+
+Phase 5 — API Rewrite (Real Work)
+Create src/intent/flow_selector.rs — Intent → Flow mapping bridge
+Rewrite API handlers: Intent → FlowSelector → FlowRunner
+Remove all direct LlmClient::generate() calls from API routes
+API and CLI produce same FinalOutput contract
+WebSocket events mirror trace events
+
+Phase 6 — Persistence + Replay
+Wire RunDb/ContinuationEngine into CLI/API execution path
+Save state snapshot on completion, failure, pause, budget exceeded
+Add flow replay <run_id> command (observational, no re-execution)
+
+Phase 7 — Testing + Benchmarks
+Create src/flow/testing/ with flow test runner
+Mock LLM mode for deterministic testing
+Create benchmarks/ with baseline tasks
+CLI: prometheos bench run
+
+Phase 8 — Guardrails + Personality
+Create src/tools/permissions.rs with ToolPermission/ToolPolicy (declarative)
+Create src/tools/metadata.rs with ToolMetadata + schema_hash
+Integrate ToolPermission with existing ToolSandboxProfile
+Create src/personality/ with PersonalityMode, selector, constitution filter
 ```
 
 ---
@@ -1174,7 +1409,7 @@ Given the repo is already ahead, your next order is:
 # One-line implementation instruction for another LLM
 
 ```txt
-Implement PrometheOS Lite V1 Core by hardening the existing Rust flow-centric architecture: add YAML flow loading, move node factory and built-in nodes from CLI into flow core, standardize trace events, enforce execution budgets, return a FinalOutput contract with evaluation, integrate run persistence/replay, add flow testing and benchmark baselines, implement minimal personality mode selection, and keep agents/swarm/learning out of V1 except as future-facing data model stubs.
+Implement PrometheOS Lite V1 Core by unifying all execution paths under FlowRunner: add Intent→FlowSelector bridge, rewrite API execution layer to route through flow engine instead of direct LLM calls, add YAML flow loading, move node factory and built-in nodes from CLI into flow core, standardize trace events with two-layer model, enforce execution budgets, return a FinalOutput contract with evaluation, integrate run persistence/replay, add flow testing and benchmark baselines, implement minimal personality mode selection, and keep agents/swarm/learning out of V1 except as future-facing data model stubs.
 ```
 
 That’s the path. Not the fantasy path. The actual one.
