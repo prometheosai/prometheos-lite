@@ -37,3 +37,13 @@ jobs:
 
       - name: Tests
         run: cargo test --all-targets --all-features
+
+      - name: Anti-regression check (no direct LLM calls in API)
+        run: |
+          # Fail if API handlers contain direct LlmClient::generate() calls
+          # All execution must go through FlowExecutionService
+          if grep -rn "LlmClient::generate\|llm_client\.generate" src/api/; then
+            echo "ERROR: Direct LLM calls found in API handlers. Use FlowExecutionService instead."
+            exit 1
+          fi
+          echo "OK: No direct LLM calls in API handlers"
