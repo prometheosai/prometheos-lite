@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use prometheos_lite::{
-    logger::Logger,
     flow::testing::{FlowTestRunner, TestFixture},
+    logger::Logger,
 };
 
 #[derive(Debug, Parser)]
@@ -73,8 +73,7 @@ impl RunBenchCommand {
                     "message": "test message"
                 }));
 
-                let test_runner = FlowTestRunner::new(flow_path.clone())
-                    .with_tracing();
+                let test_runner = FlowTestRunner::new(flow_path.clone()).with_tracing();
 
                 let start = Instant::now();
                 let result = test_runner.run_test(&fixture).await;
@@ -100,7 +99,11 @@ impl RunBenchCommand {
                 results.push(benchmark_result);
 
                 if result.is_ok() {
-                    logger.success(&format!("  Iteration {} completed in {}ms", i + 1, duration_ms));
+                    logger.success(&format!(
+                        "  Iteration {} completed in {}ms",
+                        i + 1,
+                        duration_ms
+                    ));
                 } else {
                     logger.error(&format!("  Iteration {} failed", i + 1));
                 }
@@ -117,10 +120,13 @@ impl RunBenchCommand {
     }
 
     fn generate_report(&self, results: &[BenchmarkResult]) -> BenchmarkReport {
-        let mut task_stats: std::collections::HashMap<String, TaskStats> = std::collections::HashMap::new();
+        let mut task_stats: std::collections::HashMap<String, TaskStats> =
+            std::collections::HashMap::new();
 
         for result in results {
-            let stats = task_stats.entry(result.task.clone()).or_insert_with(TaskStats::new);
+            let stats = task_stats
+                .entry(result.task.clone())
+                .or_insert_with(TaskStats::new);
             stats.total_runs += 1;
             if result.success {
                 stats.successful_runs += 1;
@@ -148,8 +154,8 @@ impl RunBenchCommand {
                 task,
                 task_success_rate: success_rate,
                 median_runtime_ms,
-                llm_calls_per_run: 0, // TODO: Track LLM calls
-                tool_calls_per_run: 0, // TODO: Track tool calls
+                llm_calls_per_run: 0,      // TODO: Track LLM calls
+                tool_calls_per_run: 0,     // TODO: Track tool calls
                 budget_exceeded_rate: 0.0, // TODO: Track budget exceeded
                 flow_failure_rate: if stats.total_runs > 0 {
                     stats.failed_runs as f64 / stats.total_runs as f64

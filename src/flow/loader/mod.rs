@@ -1,15 +1,15 @@
 //! Flow file loader for YAML and JSON formats
 
 mod json;
-mod yaml;
 mod validate;
+mod yaml;
 
 #[cfg(test)]
 mod tests;
 
 pub use json::JsonLoader;
-pub use yaml::YamlLoader;
 pub use validate::validate_flow_file;
+pub use yaml::YamlLoader;
 
 use anyhow::Result;
 use std::path::Path;

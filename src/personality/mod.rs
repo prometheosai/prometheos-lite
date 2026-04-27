@@ -1,11 +1,11 @@
 //! Personality mode system
 
-mod mode;
-mod selector;
 mod constitution;
+mod mode;
 mod prompt;
+mod selector;
 
-pub use mode::PersonalityMode;
-pub use selector::ModeSelector;
 pub use constitution::ConstitutionalFilter;
+pub use mode::PersonalityMode;
 pub use prompt::PromptContext;
+pub use selector::ModeSelector;

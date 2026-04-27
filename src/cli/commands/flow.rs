@@ -5,11 +5,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use prometheos_lite::{
-    logger::Logger,
-    flow::execution::{RunDb, ContinuationEngine, FlowRun},
-    flow::testing::{FlowTestRunner, TestFixture},
-    personality::{PersonalityMode, ModeSelector},
     config::AppConfig,
+    flow::execution::{ContinuationEngine, FlowRun, RunDb},
+    flow::testing::{FlowTestRunner, TestFixture},
+    logger::Logger,
+    personality::{ModeSelector, PersonalityMode},
 };
 
 use super::super::runner::FlowRunner;
@@ -98,9 +98,12 @@ impl RunFlowCommand {
         let mode_selector = ModeSelector::new(PersonalityMode::default());
         let input_text = self.input.as_deref().unwrap_or("");
         let selected_mode = mode_selector.select_from_text(input_text);
-        
+
         if self.verbose {
-            logger.info(&format!("Personality mode: {}", selected_mode.display_name()));
+            logger.info(&format!(
+                "Personality mode: {}",
+                selected_mode.display_name()
+            ));
             logger.info(&format!("  {}", selected_mode.description()));
         }
 
@@ -117,13 +120,19 @@ impl RunFlowCommand {
 
         let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
         let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
-        logger.info(&format!("ContinuationEngine initialized at: {}", checkpoint_dir.display()));
+        logger.info(&format!(
+            "ContinuationEngine initialized at: {}",
+            checkpoint_dir.display()
+        ));
 
-        let mut flow_runner = FlowRunner::from_json_file_with_runtime(self.path.clone(), Some(runtime))?;
+        let mut flow_runner =
+            FlowRunner::from_json_file_with_runtime(self.path.clone(), Some(runtime))?;
         logger.info("Flow loaded successfully");
 
         // Create FlowRun
-        let flow_id = self.path.file_stem()
+        let flow_id = self
+            .path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
@@ -145,9 +154,9 @@ impl RunFlowCommand {
         }
 
         logger.info("Executing flow...");
-        
+
         let execution_result = flow_runner.run_with_input(input_value).await;
-        
+
         match &execution_result {
             Ok(state) => {
                 flow_run.mark_completed(state.clone());
@@ -159,7 +168,7 @@ impl RunFlowCommand {
                 logger.error(&format!("Flow execution failed: {}", e));
             }
         }
-        
+
         run_db.save_run(&flow_run)?;
         logger.info(&format!("FlowRun saved with status: {:?}", flow_run.status));
 
@@ -176,10 +185,14 @@ impl RunFlowCommand {
             if let Some(timeline_path) = &self.export_timeline {
                 if let Some(tracer) = flow_runner.tracer() {
                     if let Ok(t) = tracer.lock() {
-                        let timeline_json = t.export_timeline().context("Failed to export timeline")?;
+                        let timeline_json =
+                            t.export_timeline().context("Failed to export timeline")?;
                         std::fs::write(timeline_path, timeline_json)
                             .context("Failed to write timeline file")?;
-                        logger.info(&format!("Timeline exported to: {}", timeline_path.display()));
+                        logger.info(&format!(
+                            "Timeline exported to: {}",
+                            timeline_path.display()
+                        ));
                     }
                 } else {
                     eprintln!("Warning: No tracer available for timeline export");
@@ -203,7 +216,10 @@ impl ReplayCommand {
 
         let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
         let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
-        logger.info(&format!("ContinuationEngine initialized at: {}", checkpoint_dir.display()));
+        logger.info(&format!(
+            "ContinuationEngine initialized at: {}",
+            checkpoint_dir.display()
+        ));
 
         // Check if checkpoint exists
         if !continuation_engine.has_checkpoint(&self.run_id) {
@@ -218,7 +234,10 @@ impl ReplayCommand {
         println!("\n[run_id] {}", self.run_id);
         println!("[status] completed");
         println!("\n[outputs]");
-        println!("{}", serde_json::to_string_pretty(&state.get_all_outputs())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&state.get_all_outputs())?
+        );
 
         logger.success("Replay completed");
         Ok(())
@@ -235,8 +254,7 @@ impl TestCommand {
         logger.info(&format!("Fixture loaded from: {}", self.fixture.display()));
 
         // Create test runner
-        let test_runner = FlowTestRunner::new(self.path.clone())
-            .with_tracing();
+        let test_runner = FlowTestRunner::new(self.path.clone()).with_tracing();
 
         // Run test
         logger.info("Running test...");

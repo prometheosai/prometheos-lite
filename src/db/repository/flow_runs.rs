@@ -4,8 +4,8 @@ use anyhow::Context;
 use chrono::Utc;
 use rusqlite::params;
 
-use crate::db::models::FlowRun;
 use super::AsDb;
+use crate::db::models::FlowRun;
 
 /// Flow run operations trait
 pub trait FlowRunOperations {
@@ -18,7 +18,7 @@ impl<T: AsDb> FlowRunOperations for T {
         let conn = self.as_db().conn();
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
-        
+
         conn.execute(
             "INSERT INTO flow_runs (id, conversation_id, status, started_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![&id, conversation_id, "running", &now.to_rfc3339(), None::<String>],
@@ -45,12 +45,14 @@ impl<T: AsDb> FlowRunOperations for T {
             conn.execute(
                 "UPDATE flow_runs SET status = ?1, completed_at = ?2 WHERE id = ?3",
                 params![status, at, id],
-            ).context("Failed to update flow run")?;
+            )
+            .context("Failed to update flow run")?;
         } else {
             conn.execute(
                 "UPDATE flow_runs SET status = ?1 WHERE id = ?2",
                 params![status, id],
-            ).context("Failed to update flow run")?;
+            )
+            .context("Failed to update flow run")?;
         }
 
         Ok(())

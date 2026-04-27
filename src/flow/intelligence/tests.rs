@@ -1,9 +1,9 @@
 //! Tests for intelligence module
 
-use super::*;
 use super::provider::{LlmProvider, StreamCallback};
 use super::router::ModelRouter;
 use super::tool::{Tool, ToolInput, ToolOutput, ToolRuntime, ToolSandboxProfile};
+use super::*;
 use std::sync::Arc;
 
 // Mock LLM provider for testing
@@ -32,7 +32,11 @@ impl LlmProvider for MockLlmProvider {
         Ok(format!("{}: {}", self.model, prompt))
     }
 
-    async fn generate_stream(&self, prompt: &str, callback: StreamCallback) -> anyhow::Result<String> {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        callback: StreamCallback,
+    ) -> anyhow::Result<String> {
         if self.should_fail {
             anyhow::bail!("Provider failed")
         }
@@ -99,8 +103,8 @@ async fn test_model_router_fallback_chain() {
         "claude".to_string(),
         false,
     ));
-    let router = ModelRouter::new(vec![provider1, provider2, provider3])
-        .with_fallback_chain(vec![0, 2, 1]);
+    let router =
+        ModelRouter::new(vec![provider1, provider2, provider3]).with_fallback_chain(vec![0, 2, 1]);
 
     let result = router.generate("test prompt").await.unwrap();
     assert!(result.contains("claude"));
@@ -211,8 +215,7 @@ fn test_tool_sandbox_profile_file_checking() {
 async fn test_tool_runtime_execute_command() {
     use crate::tools::{ToolPermission, ToolPolicy};
 
-    let tool_policy = ToolPolicy::new()
-        .with_permission(ToolPermission::Shell);
+    let tool_policy = ToolPolicy::new().with_permission(ToolPermission::Shell);
     let profile = ToolSandboxProfile::with_tool_policy(tool_policy);
 
     let runtime = ToolRuntime::new(profile);

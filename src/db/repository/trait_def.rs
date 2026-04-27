@@ -1,6 +1,9 @@
 //! Repository trait for database operations
 
-use crate::db::models::{Artifact, Conversation, CreateConversation, CreateMessage, CreateProject, FlowRun, Message, Project};
+use crate::db::models::{
+    Artifact, Conversation, CreateConversation, CreateMessage, CreateProject, FlowRun, Message,
+    Project,
+};
 
 /// Repository trait for database operations
 pub trait Repository {
@@ -23,5 +26,10 @@ pub trait Repository {
     fn update_flow_run_status(&self, id: &str, status: &str) -> anyhow::Result<()>;
 
     // Artifact operations
-    fn create_artifact(&self, run_id: &str, file_path: &str, content: &str) -> anyhow::Result<Artifact>;
+    fn create_artifact(
+        &self,
+        run_id: &str,
+        file_path: &str,
+        content: &str,
+    ) -> anyhow::Result<Artifact>;
 }

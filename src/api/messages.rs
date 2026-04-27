@@ -1,11 +1,14 @@
 //! Message endpoints
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use std::sync::Arc;
 
 use crate::api::AppState;
-use crate::db::{Db, Message, CreateMessage};
 use crate::db::repository::Repository;
+use crate::db::{CreateMessage, Db, Message};
 
 /// Get all messages for a conversation
 pub async fn get_messages(

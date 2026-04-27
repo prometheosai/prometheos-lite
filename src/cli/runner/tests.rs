@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use prometheos_lite::flow::{NodeFactory, DefaultNodeFactory, IdWrapper, PassthroughNode};
-    use prometheos_lite::flow::loader::{FlowFile, NodeDefinition};
     use crate::cli::runner::runner::FlowRunner;
+    use prometheos_lite::flow::loader::{FlowFile, NodeDefinition};
+    use prometheos_lite::flow::{DefaultNodeFactory, IdWrapper, NodeFactory, PassthroughNode};
 
     #[test]
     fn test_flow_file_serialization() {
@@ -33,7 +33,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_runner() {
-        let node = std::sync::Arc::new(PassthroughNode::new(prometheos_lite::flow::NodeConfig::default()));
+        let node = std::sync::Arc::new(PassthroughNode::new(
+            prometheos_lite::flow::NodeConfig::default(),
+        ));
         let wrapped = std::sync::Arc::new(IdWrapper::new("test".to_string(), node));
 
         let flow = prometheos_lite::flow::FlowBuilder::new()

@@ -6,5 +6,5 @@ mod flow_test_runner;
 #[cfg(test)]
 mod tests;
 
-pub use fixtures::{TestFixture, TestExpectation};
+pub use fixtures::{TestExpectation, TestFixture};
 pub use flow_test_runner::FlowTestRunner;

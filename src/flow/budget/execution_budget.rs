@@ -157,20 +157,56 @@ impl BudgetUsage {
     /// Get usage percentage for a specific resource
     pub fn usage_percentage(&self, budget: &ExecutionBudget) -> HashMap<String, f64> {
         let mut usage = HashMap::new();
-        
-        usage.insert("steps".to_string(), 
-            if budget.max_steps == 0 { 0.0 } else { (self.steps as f64 / budget.max_steps as f64) * 100.0 });
-        usage.insert("llm_calls".to_string(), 
-            if budget.max_llm_calls == 0 { 0.0 } else { (self.llm_calls as f64 / budget.max_llm_calls as f64) * 100.0 });
-        usage.insert("tool_calls".to_string(), 
-            if budget.max_tool_calls == 0 { 0.0 } else { (self.tool_calls as f64 / budget.max_tool_calls as f64) * 100.0 });
-        usage.insert("runtime".to_string(), 
-            if budget.max_runtime_ms == 0 { 0.0 } else { (self.runtime_ms as f64 / budget.max_runtime_ms as f64) * 100.0 });
-        usage.insert("memory_reads".to_string(), 
-            if budget.max_memory_reads == 0 { 0.0 } else { (self.memory_reads as f64 / budget.max_memory_reads as f64) * 100.0 });
-        usage.insert("memory_writes".to_string(), 
-            if budget.max_memory_writes == 0 { 0.0 } else { (self.memory_writes as f64 / budget.max_memory_writes as f64) * 100.0 });
-        
+
+        usage.insert(
+            "steps".to_string(),
+            if budget.max_steps == 0 {
+                0.0
+            } else {
+                (self.steps as f64 / budget.max_steps as f64) * 100.0
+            },
+        );
+        usage.insert(
+            "llm_calls".to_string(),
+            if budget.max_llm_calls == 0 {
+                0.0
+            } else {
+                (self.llm_calls as f64 / budget.max_llm_calls as f64) * 100.0
+            },
+        );
+        usage.insert(
+            "tool_calls".to_string(),
+            if budget.max_tool_calls == 0 {
+                0.0
+            } else {
+                (self.tool_calls as f64 / budget.max_tool_calls as f64) * 100.0
+            },
+        );
+        usage.insert(
+            "runtime".to_string(),
+            if budget.max_runtime_ms == 0 {
+                0.0
+            } else {
+                (self.runtime_ms as f64 / budget.max_runtime_ms as f64) * 100.0
+            },
+        );
+        usage.insert(
+            "memory_reads".to_string(),
+            if budget.max_memory_reads == 0 {
+                0.0
+            } else {
+                (self.memory_reads as f64 / budget.max_memory_reads as f64) * 100.0
+            },
+        );
+        usage.insert(
+            "memory_writes".to_string(),
+            if budget.max_memory_writes == 0 {
+                0.0
+            } else {
+                (self.memory_writes as f64 / budget.max_memory_writes as f64) * 100.0
+            },
+        );
+
         usage
     }
 
@@ -189,15 +225,30 @@ impl BudgetUsage {
         if self.steps > budget.max_steps {
             Some(format!("steps: {}/{}", self.steps, budget.max_steps))
         } else if self.llm_calls > budget.max_llm_calls {
-            Some(format!("llm_calls: {}/{}", self.llm_calls, budget.max_llm_calls))
+            Some(format!(
+                "llm_calls: {}/{}",
+                self.llm_calls, budget.max_llm_calls
+            ))
         } else if self.tool_calls > budget.max_tool_calls {
-            Some(format!("tool_calls: {}/{}", self.tool_calls, budget.max_tool_calls))
+            Some(format!(
+                "tool_calls: {}/{}",
+                self.tool_calls, budget.max_tool_calls
+            ))
         } else if self.runtime_ms > budget.max_runtime_ms {
-            Some(format!("runtime: {}ms/{}ms", self.runtime_ms, budget.max_runtime_ms))
+            Some(format!(
+                "runtime: {}ms/{}ms",
+                self.runtime_ms, budget.max_runtime_ms
+            ))
         } else if self.memory_reads > budget.max_memory_reads {
-            Some(format!("memory_reads: {}/{}", self.memory_reads, budget.max_memory_reads))
+            Some(format!(
+                "memory_reads: {}/{}",
+                self.memory_reads, budget.max_memory_reads
+            ))
         } else if self.memory_writes > budget.max_memory_writes {
-            Some(format!("memory_writes: {}/{}", self.memory_writes, budget.max_memory_writes))
+            Some(format!(
+                "memory_writes: {}/{}",
+                self.memory_writes, budget.max_memory_writes
+            ))
         } else {
             None
         }
@@ -247,22 +298,25 @@ mod tests {
     fn test_budget_usage_exceeded() {
         let budget = ExecutionBudget::new(5, 3, 2, 10_000, 10, 5);
         let mut usage = BudgetUsage::new();
-        
+
         assert!(!usage.is_exceeded(&budget));
-        
+
         usage.steps = 6;
         assert!(usage.is_exceeded(&budget));
-        assert_eq!(usage.get_exceeded_limit(&budget), Some("steps: 6/5".to_string()));
+        assert_eq!(
+            usage.get_exceeded_limit(&budget),
+            Some("steps: 6/5".to_string())
+        );
     }
 
     #[test]
     fn test_usage_percentage() {
         let budget = ExecutionBudget::new(100, 50, 20, 1000, 100, 50);
         let mut usage = BudgetUsage::new();
-        
+
         usage.steps = 50;
         usage.llm_calls = 25;
-        
+
         let percentages = usage.usage_percentage(&budget);
         assert_eq!(percentages.get("steps"), Some(&50.0));
         assert_eq!(percentages.get("llm_calls"), Some(&50.0));

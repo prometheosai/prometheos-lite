@@ -1,18 +1,18 @@
 //! Route registration for the API server
 
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 use crate::api::AppState;
-use crate::api::health::health_check;
-use crate::api::projects::{get_projects, create_project};
-use crate::api::conversations::{get_conversations, create_conversation};
-use crate::api::messages::{get_messages, create_message};
+use crate::api::conversations::{create_conversation, get_conversations};
 use crate::api::flow_runs::run_flow;
+use crate::api::health::health_check;
+use crate::api::messages::{create_message, get_messages};
+use crate::api::projects::{create_project, get_projects};
 use crate::api::websocket::websocket_handler;
 
 /// Create the API router with all routes

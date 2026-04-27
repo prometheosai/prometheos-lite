@@ -1,6 +1,6 @@
 //! Shared validation and guard functions
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// Validate that a string is not empty or only whitespace
 pub fn validate_non_blank(value: &str, field_name: &str) -> Result<()> {
@@ -34,7 +34,12 @@ pub fn validate_length_range(value: &str, min: usize, max: usize, field_name: &s
 }
 
 /// Validate that a number is within a range
-pub fn validate_range<T: PartialOrd + std::fmt::Debug>(value: T, min: T, max: T, field_name: &str) -> Result<()> {
+pub fn validate_range<T: PartialOrd + std::fmt::Debug>(
+    value: T,
+    min: T,
+    max: T,
+    field_name: &str,
+) -> Result<()> {
     if value < min || value > max {
         bail!("{} must be between {:?} and {:?}", field_name, min, max);
     }
@@ -60,7 +65,10 @@ pub fn validate_non_negative(value: i64, field_name: &str) -> Result<()> {
 /// Validate that a URL string looks like a valid URL
 pub fn validate_url(value: &str, field_name: &str) -> Result<()> {
     if !value.starts_with("http://") && !value.starts_with("https://") {
-        bail!("{} must be a valid URL starting with http:// or https://", field_name);
+        bail!(
+            "{} must be a valid URL starting with http:// or https://",
+            field_name
+        );
     }
     Ok(())
 }

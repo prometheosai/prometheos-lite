@@ -1,6 +1,6 @@
 //! Flow file validation
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use super::{FlowFile, NodeDefinition, TransitionDefinition};
 
@@ -82,8 +82,15 @@ fn validate_node_definition(node: &NodeDefinition) -> Result<()> {
 
     // Validate node_type is one of the known types (strict by default)
     let valid_types = [
-        "planner", "coder", "reviewer", "llm", "tool",
-        "file_writer", "context_loader", "memory_write", "conditional",
+        "planner",
+        "coder",
+        "reviewer",
+        "llm",
+        "tool",
+        "file_writer",
+        "context_loader",
+        "memory_write",
+        "conditional",
         "passthrough",
     ];
 

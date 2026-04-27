@@ -1,7 +1,7 @@
 //! Model router for selecting and routing to different LLM providers
 
-use anyhow::Result;
 use super::provider::LlmProvider;
+use anyhow::Result;
 
 /// Model router for selecting and routing to different LLM providers
 pub struct ModelRouter {
@@ -52,7 +52,11 @@ impl ModelRouter {
     }
 
     /// Generate a completion with streaming support
-    pub async fn generate_stream(&self, prompt: &str, callback: super::provider::StreamCallback) -> Result<String> {
+    pub async fn generate_stream(
+        &self,
+        prompt: &str,
+        callback: super::provider::StreamCallback,
+    ) -> Result<String> {
         let providers_to_try = if self.fallback_chain.is_empty() {
             (0..self.providers.len()).collect()
         } else {

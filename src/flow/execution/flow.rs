@@ -1,6 +1,8 @@
 //! Flow execution engine with validation and retry support.
 
-use crate::flow::{Action, Input, Node, NodeConfig, NodeId, Output, SharedState, BudgetGuard, ExecutionBudget};
+use crate::flow::{
+    Action, BudgetGuard, ExecutionBudget, Input, Node, NodeConfig, NodeId, Output, SharedState,
+};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -108,9 +110,11 @@ impl Flow {
         let mut current = self.start.clone();
 
         // Generate one run_id and trace_id for the entire execution, store in SharedState
-        let run_id = state.get_run_id()
+        let run_id = state
+            .get_run_id()
             .unwrap_or_else(|| crate::flow::tracing::Tracer::generate_run_id());
-        let trace_id = state.get_trace_id()
+        let trace_id = state
+            .get_trace_id()
             .unwrap_or_else(|| crate::flow::tracing::Tracer::generate_trace_id());
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
@@ -119,8 +123,11 @@ impl Flow {
         if let Some(tracer) = &self.tracer {
             if let Ok(mut t) = tracer.lock() {
                 t.log_run_event(
-                    crate::flow::tracing::TraceEvent::RunStarted { run_id: run_id.clone(), flow_name: "flow".to_string() },
-                    "Flow execution started".to_string()
+                    crate::flow::tracing::TraceEvent::RunStarted {
+                        run_id: run_id.clone(),
+                        flow_name: "flow".to_string(),
+                    },
+                    "Flow execution started".to_string(),
                 );
             }
         }
@@ -128,8 +135,12 @@ impl Flow {
         loop {
             // Check budget before each step and update state with budget report
             if let Some(guard) = &self.budget_guard {
-                guard.update_runtime().context("Budget check: runtime exceeded")?;
-                guard.record_step().context("Budget check: steps exceeded")?;
+                guard
+                    .update_runtime()
+                    .context("Budget check: runtime exceeded")?;
+                guard
+                    .record_step()
+                    .context("Budget check: steps exceeded")?;
 
                 // Update budget report in state so nodes can inspect it
                 state.set_budget_report(guard.get_report());
@@ -168,9 +179,13 @@ impl Flow {
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
                     t.log_flow_event(
-                        crate::flow::tracing::TraceEvent::NodeStarted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone() },
+                        crate::flow::tracing::TraceEvent::NodeStarted {
+                            run_id: run_id.clone(),
+                            trace_id: trace_id.clone(),
+                            node_id: current.clone(),
+                        },
                         Some(current.clone()),
-                        format!("Executing node: {}", current)
+                        format!("Executing node: {}", current),
                     );
                 }
             }
@@ -185,9 +200,14 @@ impl Flow {
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
                             t.log_flow_event(
-                                crate::flow::tracing::TraceEvent::NodeFailed { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), error: e.to_string() },
+                                crate::flow::tracing::TraceEvent::NodeFailed {
+                                    run_id: run_id.clone(),
+                                    trace_id: trace_id.clone(),
+                                    node_id: current.clone(),
+                                    error: e.to_string(),
+                                },
                                 Some(current.clone()),
-                                format!("Node failed: {}", current)
+                                format!("Node failed: {}", current),
                             );
                         }
                     }
@@ -205,12 +225,22 @@ impl Flow {
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
                     t.log_flow_event(
-                        crate::flow::tracing::TraceEvent::NodeCompleted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), duration_ms },
+                        crate::flow::tracing::TraceEvent::NodeCompleted {
+                            run_id: run_id.clone(),
+                            trace_id: trace_id.clone(),
+                            node_id: current.clone(),
+                            duration_ms,
+                        },
                         Some(current.clone()),
-                        format!("Node completed: {}", current)
+                        format!("Node completed: {}", current),
                     );
                     t.add_timeline_event(
-                        crate::flow::tracing::TraceEvent::NodeCompleted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: current.clone(), duration_ms },
+                        crate::flow::tracing::TraceEvent::NodeCompleted {
+                            run_id: run_id.clone(),
+                            trace_id: trace_id.clone(),
+                            node_id: current.clone(),
+                            duration_ms,
+                        },
                         Some(current.clone()),
                         Some(duration_ms),
                         serde_json::json!({ "output": &output }),
@@ -247,9 +277,14 @@ impl Flow {
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
                             t.log_flow_event(
-                                crate::flow::tracing::TraceEvent::TransitionTaken { run_id: run_id.clone(), from: current.clone(), action: action.clone(), to: next.clone() },
+                                crate::flow::tracing::TraceEvent::TransitionTaken {
+                                    run_id: run_id.clone(),
+                                    from: current.clone(),
+                                    action: action.clone(),
+                                    to: next.clone(),
+                                },
                                 Some(current.clone()),
-                                format!("Transition: {} -> {} via {}", current, next, action)
+                                format!("Transition: {} -> {} via {}", current, next, action),
                             );
                         }
                     }
@@ -263,10 +298,14 @@ impl Flow {
                     // Log flow completion (reuse same run_id)
                     if let Some(tracer) = &self.tracer {
                         if let Ok(mut t) = tracer.lock() {
-                            let total_duration = std::time::Instant::now().elapsed().as_millis() as u64;
+                            let total_duration =
+                                std::time::Instant::now().elapsed().as_millis() as u64;
                             t.log_run_event(
-                                crate::flow::tracing::TraceEvent::RunCompleted { run_id: run_id.clone(), duration_ms: total_duration },
-                                "Flow execution completed".to_string()
+                                crate::flow::tracing::TraceEvent::RunCompleted {
+                                    run_id: run_id.clone(),
+                                    duration_ms: total_duration,
+                                },
+                                "Flow execution completed".to_string(),
                             );
                         }
                     }
@@ -378,7 +417,9 @@ impl Flow {
 
         for node_id in self.nodes.keys() {
             if !visited.contains(node_id) {
-                if let Some(cycle) = self.dfs_cycle(node_id, &mut visited, &mut recursion_stack, &mut path) {
+                if let Some(cycle) =
+                    self.dfs_cycle(node_id, &mut visited, &mut recursion_stack, &mut path)
+                {
                     return Some(cycle);
                 }
             }
@@ -894,9 +935,21 @@ mod tests {
             .add_node("node1".to_string(), node1)
             .add_node("node2".to_string(), node2)
             .add_node("node3".to_string(), node3)
-            .add_transition("node1".to_string(), "continue".to_string(), "node2".to_string())
-            .add_transition("node2".to_string(), "continue".to_string(), "node3".to_string())
-            .add_transition("node3".to_string(), "continue".to_string(), "node1".to_string())
+            .add_transition(
+                "node1".to_string(),
+                "continue".to_string(),
+                "node2".to_string(),
+            )
+            .add_transition(
+                "node2".to_string(),
+                "continue".to_string(),
+                "node3".to_string(),
+            )
+            .add_transition(
+                "node3".to_string(),
+                "continue".to_string(),
+                "node1".to_string(),
+            )
             .build()
             .unwrap();
 

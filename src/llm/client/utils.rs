@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-use crate::config::AppConfig;
 use super::client::LlmClient;
+use crate::config::AppConfig;
 
 /// Generate a response using the configured LLM
 pub async fn generate(prompt: &str) -> Result<String> {

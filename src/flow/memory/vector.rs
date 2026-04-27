@@ -56,7 +56,11 @@ impl InMemoryVectorIndex {
 impl VectorSearchBackend for InMemoryVectorIndex {
     async fn add_vector(&mut self, id: String, vector: Vec<f32>) -> Result<()> {
         if vector.len() != self.dimension {
-            anyhow::bail!("Vector dimension mismatch: expected {}, got {}", self.dimension, vector.len());
+            anyhow::bail!(
+                "Vector dimension mismatch: expected {}, got {}",
+                self.dimension,
+                vector.len()
+            );
         }
         self.vectors.insert(id, vector);
         Ok(())
@@ -64,7 +68,11 @@ impl VectorSearchBackend for InMemoryVectorIndex {
 
     async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dimension {
-            anyhow::bail!("Query dimension mismatch: expected {}, got {}", self.dimension, query.len());
+            anyhow::bail!(
+                "Query dimension mismatch: expected {}, got {}",
+                self.dimension,
+                query.len()
+            );
         }
 
         let mut scored: Vec<(String, f32)> = self

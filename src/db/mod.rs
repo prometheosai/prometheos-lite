@@ -6,6 +6,9 @@
 pub mod models;
 pub mod repository;
 
-pub use models::{Project, Conversation, Message, FlowRun, Artifact, CreateProject, CreateConversation, CreateMessage, RunFlow};
+pub use models::{
+    Artifact, Conversation, CreateConversation, CreateMessage, CreateProject, FlowRun, Message,
+    Project, RunFlow,
+};
 pub use repository::Db;
 pub use repository::Repository;

@@ -3,8 +3,11 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use prometheos_lite::flow::{Flow, FlowBuilder, SharedState, NodeFactory, DefaultNodeFactory, IdWrapper, JsonLoader, YamlLoader, validate_flow_file, FlowLoader};
 use prometheos_lite::flow::loader::FlowFile;
+use prometheos_lite::flow::{
+    DefaultNodeFactory, Flow, FlowBuilder, FlowLoader, IdWrapper, JsonLoader, NodeFactory,
+    SharedState, YamlLoader, validate_flow_file,
+};
 
 /// CLI Runner for executing flows
 pub struct FlowRunner {

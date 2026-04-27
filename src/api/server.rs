@@ -6,8 +6,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::api::router::create_router;
 use crate::api::AppState;
+use crate::api::router::create_router;
 
 /// Run the API server
 ///

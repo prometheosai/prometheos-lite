@@ -118,13 +118,23 @@ impl NodeDefinition {
 
         // Validate node_type is one of the known types
         let valid_types = [
-            "planner", "coder", "reviewer", "llm", "tool",
-            "file_writer", "context_loader", "memory_write", "conditional"
+            "planner",
+            "coder",
+            "reviewer",
+            "llm",
+            "tool",
+            "file_writer",
+            "context_loader",
+            "memory_write",
+            "conditional",
         ];
 
         if !valid_types.contains(&self.node_type.as_str()) {
             // Warn but don't fail - will default to passthrough
-            eprintln!("Warning: Unknown node type '{}', will use passthrough", self.node_type);
+            eprintln!(
+                "Warning: Unknown node type '{}', will use passthrough",
+                self.node_type
+            );
         }
 
         // Validate config if present

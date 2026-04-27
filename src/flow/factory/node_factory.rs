@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::flow::{Node, NodeConfig, ModelRouter, ToolRuntime, MemoryService};
+use crate::flow::{MemoryService, ModelRouter, Node, NodeConfig, ToolRuntime};
 
 /// NodeFactory trait - creates concrete nodes based on node_type
 pub trait NodeFactory: Send + Sync {
@@ -73,16 +73,44 @@ impl NodeFactory for DefaultNodeFactory {
         let node_config = Self::parse_config(&config)?;
 
         match node_type {
-            "planner" => Ok(Arc::new(super::builtin_nodes::PlannerNode::new(node_config, self.model_router.clone()))),
-            "coder" => Ok(Arc::new(super::builtin_nodes::CoderNode::new(node_config, self.model_router.clone()))),
-            "reviewer" => Ok(Arc::new(super::builtin_nodes::ReviewerNode::new(node_config, self.model_router.clone()))),
-            "llm" => Ok(Arc::new(super::builtin_nodes::LlmNode::new(node_config, self.model_router.clone(), config))),
-            "tool" => Ok(Arc::new(super::builtin_nodes::ToolNode::new(node_config, self.tool_runtime.clone()))),
-            "file_writer" => Ok(Arc::new(super::builtin_nodes::FileWriterNode::new(node_config))),
-            "context_loader" => Ok(Arc::new(super::builtin_nodes::ContextLoaderNode::new(node_config, self.memory_service.clone()))),
-            "memory_write" => Ok(Arc::new(super::builtin_nodes::MemoryWriteNode::new(node_config, self.memory_service.clone()))),
-            "conditional" => Ok(Arc::new(super::builtin_nodes::ConditionalNode::new(node_config))),
-            "passthrough" => Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(node_config))),
+            "planner" => Ok(Arc::new(super::builtin_nodes::PlannerNode::new(
+                node_config,
+                self.model_router.clone(),
+            ))),
+            "coder" => Ok(Arc::new(super::builtin_nodes::CoderNode::new(
+                node_config,
+                self.model_router.clone(),
+            ))),
+            "reviewer" => Ok(Arc::new(super::builtin_nodes::ReviewerNode::new(
+                node_config,
+                self.model_router.clone(),
+            ))),
+            "llm" => Ok(Arc::new(super::builtin_nodes::LlmNode::new(
+                node_config,
+                self.model_router.clone(),
+                config,
+            ))),
+            "tool" => Ok(Arc::new(super::builtin_nodes::ToolNode::new(
+                node_config,
+                self.tool_runtime.clone(),
+            ))),
+            "file_writer" => Ok(Arc::new(super::builtin_nodes::FileWriterNode::new(
+                node_config,
+            ))),
+            "context_loader" => Ok(Arc::new(super::builtin_nodes::ContextLoaderNode::new(
+                node_config,
+                self.memory_service.clone(),
+            ))),
+            "memory_write" => Ok(Arc::new(super::builtin_nodes::MemoryWriteNode::new(
+                node_config,
+                self.memory_service.clone(),
+            ))),
+            "conditional" => Ok(Arc::new(super::builtin_nodes::ConditionalNode::new(
+                node_config,
+            ))),
+            "passthrough" => Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(
+                node_config,
+            ))),
             _ => {
                 anyhow::bail!(
                     "Unknown node type '{}'. Valid types: planner, coder, reviewer, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough",

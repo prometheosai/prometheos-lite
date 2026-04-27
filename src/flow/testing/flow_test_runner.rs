@@ -1,8 +1,8 @@
 //! Flow test runner for deterministic flow testing
 
-use crate::flow::{Flow, SharedState, FlowBuilder, NodeFactory, DefaultNodeFactory, Tracer};
-use crate::flow::loader::{FlowLoader, FlowFile, YamlLoader, JsonLoader};
-use super::fixtures::{TestFixture, TestExpectation};
+use super::fixtures::{TestExpectation, TestFixture};
+use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
+use crate::flow::{DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState, Tracer};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -40,7 +40,9 @@ impl FlowTestRunner {
 
     /// Load the flow file
     fn load_flow(&self) -> Result<FlowFile> {
-        let extension = self.flow_path.extension()
+        let extension = self
+            .flow_path
+            .extension()
             .and_then(|e| e.to_str())
             .ok_or_else(|| anyhow::anyhow!("No file extension"))?;
 
@@ -72,7 +74,8 @@ impl FlowTestRunner {
 
         // Add transitions
         for trans in &flow_file.transitions {
-            builder = builder.add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
+            builder =
+                builder.add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
         }
 
         // Set start node
@@ -91,7 +94,11 @@ impl FlowTestRunner {
 
         // Create input state
         let mut state = SharedState::new();
-        for (key, value) in fixture.input.as_object().ok_or_else(|| anyhow::anyhow!("Input must be an object"))? {
+        for (key, value) in fixture
+            .input
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("Input must be an object"))?
+        {
             state.set_input(key.clone(), value.clone());
         }
 
@@ -118,14 +125,23 @@ impl FlowTestRunner {
     }
 
     /// Run a test with expectations
-    pub async fn run_test_with_expectations(&self, fixture: &TestFixture, expectations: &TestExpectation) -> Result<TestResult> {
+    pub async fn run_test_with_expectations(
+        &self,
+        fixture: &TestFixture,
+        expectations: &TestExpectation,
+    ) -> Result<TestResult> {
         let result = self.run_test(fixture).await?;
 
         // Validate outputs
         for (key, expected_value) in &expectations.outputs {
             if let Some(actual_value) = result.outputs.get(key) {
                 if actual_value != expected_value {
-                    anyhow::bail!("Output mismatch for key '{}': expected {:?}, got {:?}", key, expected_value, actual_value);
+                    anyhow::bail!(
+                        "Output mismatch for key '{}': expected {:?}, got {:?}",
+                        key,
+                        expected_value,
+                        actual_value
+                    );
                 }
             } else {
                 anyhow::bail!("Missing output key: {}", key);
@@ -133,7 +149,9 @@ impl FlowTestRunner {
         }
 
         // Validate step bounds if specified
-        let event_count = if result.events.is_empty() { 0 } else { 
+        let event_count = if result.events.is_empty() {
+            0
+        } else {
             serde_json::from_str::<serde_json::Value>(&result.events)
                 .ok()
                 .and_then(|v| v.as_array().map(|arr| arr.len()))

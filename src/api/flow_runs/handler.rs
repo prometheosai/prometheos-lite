@@ -3,14 +3,17 @@
 //! Uses FlowExecutionService for all execution logic,
 //! keeping the handler thin: just HTTP framing + WS events.
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use std::sync::Arc;
 
 use crate::api::AppState;
 use crate::api::websocket::FlowEvent;
-use crate::db::{Db, FlowRun, RunFlow, Repository};
-use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
+use crate::db::{Db, FlowRun, Repository, RunFlow};
 use crate::flow::MemoryKind;
+use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::intent::Intent;
 use chrono::Utc;
 
@@ -34,7 +37,8 @@ pub async fn run_flow(
     });
 
     // Create FlowRun
-    let flow_run = db.create_flow_run(&conversation_id)
+    let flow_run = db
+        .create_flow_run(&conversation_id)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let run_id = flow_run.id.clone();
 
@@ -44,11 +48,16 @@ pub async fn run_flow(
         let exec_service = match FlowExecutionService::new(runtime.clone()) {
             Ok(svc) => svc,
             Err(e) => {
-                let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
-                    node: "system".to_string(),
-                    message: format!("Failed to create execution service: {}", e),
-                    timestamp: Utc::now(),
-                }).await;
+                let _ = ws_manager
+                    .send_event(
+                        &run_id,
+                        FlowEvent::Error {
+                            node: "system".to_string(),
+                            message: format!("Failed to create execution service: {}", e),
+                            timestamp: Utc::now(),
+                        },
+                    )
+                    .await;
                 if let Ok(db) = Db::new(&db_path) {
                     let _ = db.update_flow_run_status(&run_id, "failed");
                 }
@@ -74,7 +83,8 @@ pub async fn run_flow(
         let relevant_context = if let Some(memory_service) = runtime.memory_service.as_ref() {
             match memory_service.semantic_search(&message, 5).await {
                 Ok(memories) => {
-                    let context: Vec<String> = memories.iter()
+                    let context: Vec<String> = memories
+                        .iter()
                         .filter(|m| m.kind != MemoryKind::Episodic)
                         .map(|m| m.content.clone())
                         .collect();
@@ -84,7 +94,7 @@ pub async fn run_flow(
                         None
                     }
                 }
-                Err(_) => None
+                Err(_) => None,
             }
         } else {
             None
@@ -117,34 +127,55 @@ pub async fn run_flow(
         }
 
         // Emit that we're starting classification
-        let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
-            node: "system".to_string(),
-            data: "Classifying intent...".to_string(),
-            timestamp: Utc::now(),
-        }).await;
+        let _ = ws_manager
+            .send_event(
+                &run_id,
+                FlowEvent::Output {
+                    node: "system".to_string(),
+                    data: "Classifying intent...".to_string(),
+                    timestamp: Utc::now(),
+                },
+            )
+            .await;
 
         // Execute via the shared service
-        let final_output = exec_service.execute_message(&message_to_process, options).await;
+        let final_output = exec_service
+            .execute_message(&message_to_process, options)
+            .await;
 
         match final_output {
             Ok(output) => {
                 if output.success {
                     // Emit the output
-                    let _ = ws_manager.send_event(&run_id, FlowEvent::Output {
-                        node: "system".to_string(),
-                        data: serde_json::to_string_pretty(&output).unwrap_or_else(|_| "Failed to serialize output".to_string()),
-                        timestamp: Utc::now(),
-                    }).await;
+                    let _ = ws_manager
+                        .send_event(
+                            &run_id,
+                            FlowEvent::Output {
+                                node: "system".to_string(),
+                                data: serde_json::to_string_pretty(&output)
+                                    .unwrap_or_else(|_| "Failed to serialize output".to_string()),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await;
 
                     if let Ok(db) = Db::new(&db_path) {
                         let _ = db.update_flow_run_status(&run_id, "completed");
                     }
                 } else {
-                    let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
-                        node: "system".to_string(),
-                        message: format!("Flow execution failed: {}", output.error.unwrap_or_default()),
-                        timestamp: Utc::now(),
-                    }).await;
+                    let _ = ws_manager
+                        .send_event(
+                            &run_id,
+                            FlowEvent::Error {
+                                node: "system".to_string(),
+                                message: format!(
+                                    "Flow execution failed: {}",
+                                    output.error.unwrap_or_default()
+                                ),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await;
 
                     if let Ok(db) = Db::new(&db_path) {
                         let _ = db.update_flow_run_status(&run_id, "failed");
@@ -152,11 +183,16 @@ pub async fn run_flow(
                 }
             }
             Err(e) => {
-                let _ = ws_manager.send_event(&run_id, FlowEvent::Error {
-                    node: "system".to_string(),
-                    message: format!("Flow execution failed: {}", e),
-                    timestamp: Utc::now(),
-                }).await;
+                let _ = ws_manager
+                    .send_event(
+                        &run_id,
+                        FlowEvent::Error {
+                            node: "system".to_string(),
+                            message: format!("Flow execution failed: {}", e),
+                            timestamp: Utc::now(),
+                        },
+                    )
+                    .await;
                 if let Ok(db) = Db::new(&db_path) {
                     let _ = db.update_flow_run_status(&run_id, "failed");
                 }

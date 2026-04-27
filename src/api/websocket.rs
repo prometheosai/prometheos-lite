@@ -5,8 +5,8 @@
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 use crate::api::AppState;
 
@@ -23,13 +23,27 @@ use crate::api::AppState;
 #[serde(tag = "type", content = "data")]
 pub enum FlowEvent {
     #[serde(rename = "node_start")]
-    NodeStart { node: String, timestamp: DateTime<Utc> },
+    NodeStart {
+        node: String,
+        timestamp: DateTime<Utc>,
+    },
     #[serde(rename = "node_end")]
-    NodeEnd { node: String, timestamp: DateTime<Utc> },
+    NodeEnd {
+        node: String,
+        timestamp: DateTime<Utc>,
+    },
     #[serde(rename = "output")]
-    Output { node: String, data: String, timestamp: DateTime<Utc> },
+    Output {
+        node: String,
+        data: String,
+        timestamp: DateTime<Utc>,
+    },
     #[serde(rename = "error")]
-    Error { node: String, message: String, timestamp: DateTime<Utc> },
+    Error {
+        node: String,
+        message: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// WebSocket connection manager
@@ -50,7 +64,7 @@ impl ConnectionManager {
     /// Get or create a broadcast channel for a run
     pub async fn get_channel(&self, run_id: &str) -> broadcast::Sender<FlowEvent> {
         let mut channels = self.channels.write().await;
-        
+
         if let Some(sender) = channels.get(run_id) {
             sender.clone()
         } else {
@@ -90,11 +104,7 @@ pub async fn websocket_handler(
 }
 
 /// Handle a WebSocket connection
-async fn handle_socket(
-    mut socket: WebSocket,
-    state: Arc<AppState>,
-    run_id: String,
-) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, run_id: String) {
     // Get the broadcast channel for this run
     let channel = state.ws_manager.get_channel(&run_id).await;
     let mut receiver = channel.subscribe();
@@ -104,7 +114,9 @@ async fn handle_socket(
         node: "system".to_string(),
         timestamp: Utc::now(),
     };
-    let _ = socket.send(Message::Text(serde_json::to_string(&init_event).unwrap())).await;
+    let _ = socket
+        .send(Message::Text(serde_json::to_string(&init_event).unwrap()))
+        .await;
 
     // Forward events from the channel to the WebSocket
     loop {

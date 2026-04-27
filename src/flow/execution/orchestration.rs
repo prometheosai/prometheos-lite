@@ -3,7 +3,7 @@
 use crate::flow::{Flow, SharedState};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -164,8 +164,9 @@ impl RunDb {
 
     /// Initialize database schema
     fn init_schema(&self) -> Result<()> {
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS flow_runs (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS flow_runs (
                 id TEXT PRIMARY KEY,
                 flow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -173,12 +174,13 @@ impl RunDb {
                 completed_at TEXT,
                 state_snapshot TEXT
             )",
-            [],
-        )
-        .context("Failed to create flow_runs table")?;
+                [],
+            )
+            .context("Failed to create flow_runs table")?;
 
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS flow_events (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS flow_events (
                 id TEXT PRIMARY KEY,
                 run_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
@@ -187,21 +189,23 @@ impl RunDb {
                 data TEXT,
                 FOREIGN KEY (run_id) REFERENCES flow_runs(id)
             )",
-            [],
-        )
-        .context("Failed to create flow_events table")?;
+                [],
+            )
+            .context("Failed to create flow_events table")?;
 
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_flow_runs_flow_id ON flow_runs(flow_id)",
-            [],
-        )
-        .context("Failed to create flow_runs index")?;
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_flow_runs_flow_id ON flow_runs(flow_id)",
+                [],
+            )
+            .context("Failed to create flow_runs index")?;
 
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_flow_events_run_id ON flow_events(run_id)",
-            [],
-        )
-        .context("Failed to create flow_events index")?;
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_flow_events_run_id ON flow_events(run_id)",
+                [],
+            )
+            .context("Failed to create flow_events index")?;
 
         Ok(())
     }
@@ -216,11 +220,12 @@ impl RunDb {
             RunStatus::Paused => "paused",
         };
 
-        let state_json = run.state_snapshot.as_ref()
+        let state_json = run
+            .state_snapshot
+            .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
 
-        let completed_at_str = run.completed_at
-            .map(|t| t.to_rfc3339());
+        let completed_at_str = run.completed_at.map(|t| t.to_rfc3339());
 
         self.conn.execute(
             "INSERT OR REPLACE INTO flow_runs (id, flow_id, status, started_at, completed_at, state_snapshot)
@@ -241,43 +246,50 @@ impl RunDb {
 
     /// Load all flow runs from the database
     pub fn load_all_runs(&self) -> Result<Vec<FlowRun>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, flow_id, status, started_at, completed_at, state_snapshot
-             FROM flow_runs"
-        )
-        .context("Failed to prepare load_all_runs query")?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, flow_id, status, started_at, completed_at, state_snapshot
+             FROM flow_runs",
+            )
+            .context("Failed to prepare load_all_runs query")?;
 
-        let rows = stmt.query_map([], |row| {
-            let status_str: String = row.get(2)?;
-            let status = match status_str.as_str() {
-                "pending" => RunStatus::Pending,
-                "running" => RunStatus::Running,
-                "completed" => RunStatus::Completed,
-                "paused" => RunStatus::Paused,
-                "failed" => RunStatus::Failed("Unknown error".to_string()),
-                _ => RunStatus::Pending,
-            };
+        let rows = stmt
+            .query_map([], |row| {
+                let status_str: String = row.get(2)?;
+                let status = match status_str.as_str() {
+                    "pending" => RunStatus::Pending,
+                    "running" => RunStatus::Running,
+                    "completed" => RunStatus::Completed,
+                    "paused" => RunStatus::Paused,
+                    "failed" => RunStatus::Failed("Unknown error".to_string()),
+                    _ => RunStatus::Pending,
+                };
 
-            let started_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                .unwrap()
-                .with_timezone(&Utc);
+                let started_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                    .unwrap()
+                    .with_timezone(&Utc);
 
-            let completed_at = row.get::<_, Option<String>>(4)?
-                .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc));
+                let completed_at = row.get::<_, Option<String>>(4)?.map(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .unwrap()
+                        .with_timezone(&Utc)
+                });
 
-            let state_snapshot = row.get::<_, Option<String>>(5)?
-                .and_then(|s| serde_json::from_str(&s).ok());
+                let state_snapshot = row
+                    .get::<_, Option<String>>(5)?
+                    .and_then(|s| serde_json::from_str(&s).ok());
 
-            Ok(FlowRun {
-                id: row.get(0)?,
-                flow_id: row.get(1)?,
-                status,
-                started_at,
-                completed_at,
-                state_snapshot,
+                Ok(FlowRun {
+                    id: row.get(0)?,
+                    flow_id: row.get(1)?,
+                    status,
+                    started_at,
+                    completed_at,
+                    state_snapshot,
+                })
             })
-        })
-        .context("Failed to query flow runs")?;
+            .context("Failed to query flow runs")?;
 
         let mut runs = Vec::new();
         for row in rows {
@@ -288,53 +300,56 @@ impl RunDb {
 
     /// Save a flow event to the database
     pub fn save_event(&self, event: &FlowEvent) -> Result<()> {
-        let data_json = serde_json::to_string(&event.data)
-            .context("Failed to serialize event data")?;
+        let data_json =
+            serde_json::to_string(&event.data).context("Failed to serialize event data")?;
 
-        self.conn.execute(
-            "INSERT INTO flow_events (id, run_id, event_type, node_id, timestamp, data)
+        self.conn
+            .execute(
+                "INSERT INTO flow_events (id, run_id, event_type, node_id, timestamp, data)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event.id,
-                event.run_id,
-                event.event_type,
-                event.node_id,
-                event.timestamp.to_rfc3339(),
-                data_json,
-            ],
-        )
-        .context("Failed to save flow event")?;
+                params![
+                    event.id,
+                    event.run_id,
+                    event.event_type,
+                    event.node_id,
+                    event.timestamp.to_rfc3339(),
+                    data_json,
+                ],
+            )
+            .context("Failed to save flow event")?;
 
         Ok(())
     }
 
     /// Load events for a specific run
     pub fn load_events_for_run(&self, run_id: &str) -> Result<Vec<FlowEvent>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, run_id, event_type, node_id, timestamp, data
-             FROM flow_events WHERE run_id = ?1 ORDER BY timestamp"
-        )
-        .context("Failed to prepare load_events_for_run query")?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, run_id, event_type, node_id, timestamp, data
+             FROM flow_events WHERE run_id = ?1 ORDER BY timestamp",
+            )
+            .context("Failed to prepare load_events_for_run query")?;
 
-        let rows = stmt.query_map(params![run_id], |row| {
-            let timestamp = DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                .unwrap()
-                .with_timezone(&Utc);
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                let timestamp = DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&Utc);
 
-            let data_json: String = row.get(5)?;
-            let data = serde_json::from_str(&data_json)
-                .unwrap_or(serde_json::Value::Null);
+                let data_json: String = row.get(5)?;
+                let data = serde_json::from_str(&data_json).unwrap_or(serde_json::Value::Null);
 
-            Ok(FlowEvent {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                event_type: row.get(2)?,
-                node_id: row.get(3)?,
-                timestamp,
-                data,
+                Ok(FlowEvent {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    node_id: row.get(3)?,
+                    timestamp,
+                    data,
+                })
             })
-        })
-        .context("Failed to query flow events")?;
+            .context("Failed to query flow events")?;
 
         let mut events = Vec::new();
         for row in rows {
@@ -356,7 +371,12 @@ pub struct FlowEvent {
 }
 
 impl FlowEvent {
-    pub fn new(run_id: String, event_type: String, node_id: Option<String>, data: serde_json::Value) -> Self {
+    pub fn new(
+        run_id: String,
+        event_type: String,
+        node_id: Option<String>,
+        data: serde_json::Value,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             run_id,
@@ -569,16 +589,16 @@ mod tests {
     #[test]
     fn test_flow_run_status_transitions() {
         let mut flow_run = FlowRun::new("test_flow".to_string());
-        
+
         flow_run.mark_running();
         assert_eq!(flow_run.status, RunStatus::Running);
-        
+
         let state = SharedState::new();
         flow_run.mark_completed(state.clone());
         assert_eq!(flow_run.status, RunStatus::Completed);
         assert!(flow_run.completed_at.is_some());
         assert!(flow_run.state_snapshot.is_some());
-        
+
         flow_run.mark_failed("test error".to_string());
         assert!(matches!(flow_run.status, RunStatus::Failed(_)));
     }
@@ -587,17 +607,17 @@ mod tests {
     fn test_rundb_persistence() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        
+
         let run_db = RunDb::new(db_path.clone()).unwrap();
-        
+
         let mut flow_run = FlowRun::new("test_flow".to_string());
         flow_run.mark_running();
         run_db.save_run(&flow_run).unwrap();
-        
+
         let state = SharedState::new();
         flow_run.mark_completed(state.clone());
         run_db.save_run(&flow_run).unwrap();
-        
+
         // Verify we can save without errors
         assert!(run_db.save_run(&flow_run).is_ok());
     }
@@ -606,25 +626,25 @@ mod tests {
     fn test_continuation_engine_checkpoint() {
         let temp_dir = TempDir::new().unwrap();
         let checkpoint_dir = temp_dir.path().join("checkpoints");
-        
+
         let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
-        
+
         let run_id = "test_run_123";
         let mut state = SharedState::new();
         state.set_input("test_key".to_string(), serde_json::json!("test_value"));
-        
+
         // Save checkpoint
         let checkpoint_path = continuation_engine.save_checkpoint(run_id, &state).unwrap();
         assert!(checkpoint_path.exists());
-        
+
         // Check if checkpoint exists
         assert!(continuation_engine.has_checkpoint(run_id));
-        
+
         // Load checkpoint
         let loaded_state = continuation_engine.load_checkpoint(run_id).unwrap();
         let loaded_value = loaded_state.get_input("test_key");
         assert_eq!(loaded_value, Some(&serde_json::json!("test_value")));
-        
+
         // Delete checkpoint
         continuation_engine.delete_checkpoint(run_id).unwrap();
         assert!(!continuation_engine.has_checkpoint(run_id));
@@ -634,14 +654,14 @@ mod tests {
     fn test_continuation_engine_list_checkpoints() {
         let temp_dir = TempDir::new().unwrap();
         let checkpoint_dir = temp_dir.path().join("checkpoints");
-        
+
         let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
-        
+
         let state = SharedState::new();
         continuation_engine.save_checkpoint("run1", &state).unwrap();
         continuation_engine.save_checkpoint("run2", &state).unwrap();
         continuation_engine.save_checkpoint("run3", &state).unwrap();
-        
+
         let checkpoints = continuation_engine.list_checkpoints().unwrap();
         assert_eq!(checkpoints.len(), 3);
         assert!(checkpoints.contains(&"run1".to_string()));
@@ -653,9 +673,9 @@ mod tests {
     fn test_continuation_engine_load_nonexistent_checkpoint() {
         let temp_dir = TempDir::new().unwrap();
         let checkpoint_dir = temp_dir.path().join("checkpoints");
-        
+
         let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
-        
+
         let result = continuation_engine.load_checkpoint("nonexistent");
         assert!(result.is_err());
     }

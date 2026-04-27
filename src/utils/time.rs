@@ -1,6 +1,6 @@
 //! Time utility functions
 
-use chrono::{DateTime, Datelike, Utc, Duration};
+use chrono::{DateTime, Datelike, Duration, Utc};
 
 /// Get the current timestamp as ISO 8601 string
 pub fn now_iso8601() -> String {

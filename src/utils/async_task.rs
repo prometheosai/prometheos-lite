@@ -28,18 +28,11 @@ where
 }
 
 /// Spawn a task with a timeout
-pub async fn spawn_with_timeout<F, T>(
-    task: F,
-    timeout_ms: u64,
-    task_name: &str,
-) -> Result<T>
+pub async fn spawn_with_timeout<F, T>(task: F, timeout_ms: u64, task_name: &str) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        task,
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), task).await {
         Ok(result) => result,
         Err(_) => {
             anyhow::bail!("Task '{}' timed out after {}ms", task_name, timeout_ms)
@@ -59,17 +52,14 @@ where
 }
 
 /// Run tasks in parallel with a concurrency limit
-pub async fn run_parallel<T, E, F>(
-    tasks: Vec<F>,
-    max_concurrency: usize,
-) -> Vec<Result<T, E>>
+pub async fn run_parallel<T, E, F>(tasks: Vec<F>, max_concurrency: usize) -> Vec<Result<T, E>>
 where
     F: Future<Output = Result<T, E>> + Send,
     T: Send,
     E: Send,
 {
     use futures::stream::{self, StreamExt};
-    
+
     stream::iter(tasks)
         .map(|task| async move { task.await })
         .buffer_unordered(max_concurrency)
@@ -92,11 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_with_timeout_success() {
-        let result = spawn_with_timeout(
-            async { Ok::<(), anyhow::Error>(()) },
-            1000,
-            "test",
-        ).await;
+        let result = spawn_with_timeout(async { Ok::<(), anyhow::Error>(()) }, 1000, "test").await;
         assert!(result.is_ok());
     }
 
@@ -109,7 +95,8 @@ mod tests {
             },
             1,
             "test",
-        ).await;
+        )
+        .await;
         assert!(result.is_err());
     }
 

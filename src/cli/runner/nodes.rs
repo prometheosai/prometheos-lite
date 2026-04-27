@@ -416,18 +416,38 @@ impl Node for FileWriterNode {
             .unwrap_or("output.txt")
             .to_string();
         
+        // Reject absolute paths
+        if file_path.starts_with("/") || file_path.contains(":") {
+            anyhow::bail!("Absolute paths not allowed: {}", file_path);
+        }
+        
+        // Reject parent directory traversal
+        if file_path.contains("..") {
+            anyhow::bail!("Parent directory traversal (..) not allowed: {}", file_path);
+        }
+        
         // Ensure prometheos-output directory exists
         std::fs::create_dir_all("prometheos-output")
             .context("Failed to create prometheos-output directory")?;
         
-        // Prepend prometheos-output/ to the file path if not already absolute
-        let full_path = if file_path.starts_with("/") || file_path.contains(":") {
-            file_path
-        } else {
-            format!("prometheos-output/{}", file_path)
-        };
+        // Build full path inside prometheos-output
+        let full_path = format!("prometheos-output/{}", file_path);
         
-        Ok(serde_json::json!({ "content": content, "file_path": full_path }))
+        // Canonicalize the path to resolve any symlinks and normalize separators
+        let canonical_path = std::path::Path::new(&full_path)
+            .canonicalize()
+            .context("Failed to canonicalize path")?;
+        
+        // Ensure canonicalized path stays inside prometheos-output
+        let output_dir = std::path::Path::new("prometheos-output")
+            .canonicalize()
+            .context("Failed to canonicalize output directory")?;
+        
+        if !canonical_path.starts_with(&output_dir) {
+            anyhow::bail!("Path outside prometheos-output directory not allowed: {}", canonical_path.display());
+        }
+        
+        Ok(serde_json::json!({ "content": content, "file_path": canonical_path.display().to_string() }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {

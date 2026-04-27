@@ -11,7 +11,7 @@ use std::time::Instant;
 use crate::flow::budget::{BudgetGuard, ExecutionBudget};
 use crate::flow::execution::Flow;
 use crate::flow::factory::{DefaultNodeFactory, NodeFactory};
-use crate::flow::loader::{FlowFile, FlowLoader, YamlLoader, JsonLoader};
+use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::flow::output::{Evaluation, FinalOutput};
 use crate::flow::tracing::{RunId, SharedTracer, TraceEvent, Tracer};
 use crate::flow::{RuntimeContext, SharedState};
@@ -107,8 +107,13 @@ impl FlowExecutionService {
     }
 
     /// Classify a message's intent
-    pub async fn classify(&self, message: &str, override_intent: Option<Intent>) -> Result<ClassificationResult> {
-        let classification = self.intent_classifier
+    pub async fn classify(
+        &self,
+        message: &str,
+        override_intent: Option<Intent>,
+    ) -> Result<ClassificationResult> {
+        let classification = self
+            .intent_classifier
             .classify_with_override(message, override_intent)
             .await?;
         Ok(ClassificationResult {
@@ -119,7 +124,7 @@ impl FlowExecutionService {
     }
 
     /// Select and load a flow file for the given intent
-    pub fn load_flow(&self, intent: &Intent) -> Result<FlowFile> {
+    pub fn load_flow(&self, intent: &Intent, tracer: Option<&SharedTracer>) -> Result<FlowFile> {
         let flow_path = self.flow_selector.select_flow(intent)?;
 
         // Log flow loaded event
@@ -129,12 +134,30 @@ impl FlowExecutionService {
             .unwrap_or("unknown")
             .to_string();
 
+        if let Some(tracer) = tracer {
+            if let Ok(mut t) = tracer.lock() {
+                t.log_flow_event(
+                    TraceEvent::FlowLoaded {
+                        run_id: "".to_string(), // No run_id yet at load time
+                        flow_name: flow_name.clone(),
+                        path: flow_path.display().to_string(),
+                    },
+                    None,
+                    format!("Loaded flow: {}", flow_name),
+                );
+            }
+        }
+
         let flow_file = if flow_path.extension().and_then(|s| s.to_str()) == Some("yaml") {
             let loader = YamlLoader::new();
-            loader.load_from_path(&flow_path).context("Failed to load YAML flow")?
+            loader
+                .load_from_path(&flow_path)
+                .context("Failed to load YAML flow")?
         } else {
             let loader = JsonLoader::new();
-            loader.load_from_path(&flow_path).context("Failed to load JSON flow")?
+            loader
+                .load_from_path(&flow_path)
+                .context("Failed to load JSON flow")?
         };
 
         Ok(flow_file)
@@ -155,7 +178,8 @@ impl FlowExecutionService {
 
         // Add transitions
         for trans in &flow_file.transitions {
-            builder = builder.add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
+            builder =
+                builder.add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
         }
 
         // Set start node
@@ -189,11 +213,13 @@ impl FlowExecutionService {
         let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
 
         // 2. Classify intent
-        let classification = self.classify(message, options.override_intent.clone()).await?;
+        let classification = self
+            .classify(message, options.override_intent.clone())
+            .await?;
         let intent = classification.intent;
 
         // 3. Load flow
-        let flow_file = self.load_flow(&intent)?;
+        let flow_file = self.load_flow(&intent, options.tracer.as_ref())?;
         let flow_name = flow_file.name.clone();
 
         // 4. Build flow
@@ -228,12 +254,47 @@ impl FlowExecutionService {
         };
 
         // 9. Produce evaluation
-        let evaluation = Self::evaluate(&state, &flow_name, duration_ms);
+        let evaluation = Self::evaluate(
+            &state,
+            &flow_name,
+            duration_ms,
+            options.tracer.as_ref(),
+            &run_id,
+        );
 
-        // 10. Produce FinalOutput
+        // 10. Emit OutputGenerated and EvaluationCompleted events
+        if let Some(tracer) = &options.tracer {
+            if let Ok(mut t) = tracer.lock() {
+                t.log_flow_event(
+                    TraceEvent::OutputGenerated {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        output_key: "primary".to_string(),
+                    },
+                    None,
+                    format!("FinalOutput generated for {}", flow_name),
+                );
+
+                t.log_flow_event(
+                    TraceEvent::EvaluationCompleted {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        score: Some(evaluation.success_rate()),
+                    },
+                    None,
+                    format!(
+                        "Evaluation completed: {:.2} success rate",
+                        evaluation.success_rate()
+                    ),
+                );
+            }
+        }
+
+        // 11. Produce FinalOutput
         match result {
             Ok(()) => {
-                let primary = state.get_output("llm_response")
+                let primary = state
+                    .get_output("llm_response")
                     .or_else(|| state.get_output("generated"))
                     .or_else(|| state.get_output("review"))
                     .cloned()
@@ -258,9 +319,13 @@ impl FlowExecutionService {
                     duration_ms,
                 ))
             }
-            Err(e) => {
-                Ok(FinalOutput::failure(run_id, trace_id, flow_name, e.to_string(), duration_ms))
-            }
+            Err(e) => Ok(FinalOutput::failure(
+                run_id,
+                trace_id,
+                flow_name,
+                e.to_string(),
+                duration_ms,
+            )),
         }
     }
 
@@ -303,11 +368,46 @@ impl FlowExecutionService {
         } else {
             0
         };
-        let evaluation = Self::evaluate(&state, &flow_name, duration_ms);
+        let evaluation = Self::evaluate(
+            &state,
+            &flow_name,
+            duration_ms,
+            options.tracer.as_ref(),
+            &run_id,
+        );
+
+        // Emit OutputGenerated and EvaluationCompleted events
+        if let Some(tracer) = &options.tracer {
+            if let Ok(mut t) = tracer.lock() {
+                t.log_flow_event(
+                    TraceEvent::OutputGenerated {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        output_key: "primary".to_string(),
+                    },
+                    None,
+                    format!("FinalOutput generated for {}", flow_name),
+                );
+
+                t.log_flow_event(
+                    TraceEvent::EvaluationCompleted {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        score: Some(evaluation.success_rate()),
+                    },
+                    None,
+                    format!(
+                        "Evaluation completed: {:.2} success rate",
+                        evaluation.success_rate()
+                    ),
+                );
+            }
+        }
 
         match result {
             Ok(()) => {
-                let primary = state.get_output("llm_response")
+                let primary = state
+                    .get_output("llm_response")
                     .or_else(|| state.get_output("generated"))
                     .or_else(|| state.get_output("review"))
                     .cloned()
@@ -332,25 +432,64 @@ impl FlowExecutionService {
                     duration_ms,
                 ))
             }
-            Err(e) => {
-                Ok(FinalOutput::failure(run_id, trace_id, flow_name, e.to_string(), duration_ms))
-            }
+            Err(e) => Ok(FinalOutput::failure(
+                run_id,
+                trace_id,
+                flow_name,
+                e.to_string(),
+                duration_ms,
+            )),
         }
     }
 
     /// Produce an Evaluation from a completed execution's state
-    pub fn evaluate(state: &SharedState, flow_name: &str, duration_ms: u64) -> Evaluation {
-        let run_id = state.get_run_id().unwrap_or_default();
+    pub fn evaluate(
+        state: &SharedState,
+        flow_name: &str,
+        duration_ms: u64,
+        tracer: Option<&SharedTracer>,
+        run_id: &str,
+    ) -> Evaluation {
+        let run_id_str = state.get_run_id().unwrap_or_else(|| run_id.to_string());
 
-        // Count nodes from working/output keys as a rough proxy
-        let nodes_executed = state.working.len() as u32 + state.output.len() as u32;
+        // Derive metrics from trace events if available, otherwise fall back to state size
+        let (nodes_executed, nodes_failed, transitions_taken) = if let Some(tracer) = tracer {
+            if let Ok(t) = tracer.lock() {
+                let logs = t.get_logs();
+                let nodes_executed = logs
+                    .iter()
+                    .filter(|entry| matches!(entry.event_type, TraceEvent::NodeCompleted { .. }))
+                    .count() as u32;
+                let nodes_failed = logs
+                    .iter()
+                    .filter(|entry| matches!(entry.event_type, TraceEvent::NodeFailed { .. }))
+                    .count() as u32;
+                let transitions_taken = logs
+                    .iter()
+                    .filter(|entry| matches!(entry.event_type, TraceEvent::TransitionTaken { .. }))
+                    .count() as u32;
+                (nodes_executed, nodes_failed, transitions_taken)
+            } else {
+                // Fallback to state size
+                let nodes_executed = state.working.len() as u32 + state.output.len() as u32;
+                let nodes_failed = 0;
+                let transitions_taken = nodes_executed.saturating_sub(1);
+                (nodes_executed, nodes_failed, transitions_taken)
+            }
+        } else {
+            // Fallback to state size
+            let nodes_executed = state.working.len() as u32 + state.output.len() as u32;
+            let nodes_failed = 0;
+            let transitions_taken = nodes_executed.saturating_sub(1);
+            (nodes_executed, nodes_failed, transitions_taken)
+        };
 
         Evaluation::new(
-            run_id,
+            run_id_str,
             flow_name.to_string(),
             nodes_executed,
-            0, // nodes_failed - not tracked in state currently
-            0, // transitions_taken - not tracked in state currently
+            nodes_failed,
+            transitions_taken,
             duration_ms,
         )
     }

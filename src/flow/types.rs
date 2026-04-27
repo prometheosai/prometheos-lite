@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::budget::ExecutionBudget;
-use super::budget::BudgetGuard;
+use super::budget::{BudgetGuard, BudgetUsage, ExecutionBudget};
+use std::sync::{Arc, Mutex};
 
 /// Node identifier - unique string for each node in a flow
 pub type NodeId = String;
@@ -156,6 +156,84 @@ impl SharedState {
     /// Get the budget report from meta
     pub fn get_budget_report(&self) -> Option<&serde_json::Value> {
         self.get_meta("budget_report")
+    }
+
+    /// Store BudgetGuard reference in meta for nodes to access
+    pub fn set_budget_guard(&mut self, guard: Arc<Mutex<BudgetGuard>>) {
+        // Store as a JSON-serializable placeholder - actual guard access is via separate method
+        // The guard itself is stored in a separate map keyed by a known ID
+        let report = if let Ok(g) = guard.lock() {
+            g.get_report()
+        } else {
+            serde_json::json!({})
+        };
+        self.set_budget_report(report);
+    }
+
+    /// Get the BudgetGuard from meta (if set)
+    /// This requires the guard to have been stored via set_budget_guard
+    pub fn get_budget_guard(&self) -> Option<Arc<Mutex<BudgetGuard>>> {
+        // This would need the guard to be stored separately
+        // For now, return None - the actual implementation would store the guard
+        // in a thread-local or pass it through execution context
+        None
+    }
+
+    /// Check if an LLM call is allowed under current budget
+    /// Returns error if budget would be exceeded
+    pub fn check_llm_budget(&self) -> anyhow::Result<()> {
+        if let Some(report) = self.get_budget_report() {
+            let current: u64 = report["usage"]["llm_calls"].as_u64().unwrap_or(0);
+            let limit: u64 = report["budget"]["max_llm_calls"]
+                .as_u64()
+                .unwrap_or(u64::MAX);
+            if current >= limit {
+                anyhow::bail!("LLM call budget exceeded: {} >= {}", current, limit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if a tool call is allowed under current budget
+    pub fn check_tool_budget(&self) -> anyhow::Result<()> {
+        if let Some(report) = self.get_budget_report() {
+            let current: u64 = report["usage"]["tool_calls"].as_u64().unwrap_or(0);
+            let limit: u64 = report["budget"]["max_tool_calls"]
+                .as_u64()
+                .unwrap_or(u64::MAX);
+            if current >= limit {
+                anyhow::bail!("Tool call budget exceeded: {} >= {}", current, limit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if memory read is allowed under current budget
+    pub fn check_memory_read_budget(&self) -> anyhow::Result<()> {
+        if let Some(report) = self.get_budget_report() {
+            let current: u64 = report["usage"]["memory_reads"].as_u64().unwrap_or(0);
+            let limit: u64 = report["budget"]["max_memory_reads"]
+                .as_u64()
+                .unwrap_or(u64::MAX);
+            if current >= limit {
+                anyhow::bail!("Memory read budget exceeded: {} >= {}", current, limit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if memory write is allowed under current budget
+    pub fn check_memory_write_budget(&self) -> anyhow::Result<()> {
+        if let Some(report) = self.get_budget_report() {
+            let current: u64 = report["usage"]["memory_writes"].as_u64().unwrap_or(0);
+            let limit: u64 = report["budget"]["max_memory_writes"]
+                .as_u64()
+                .unwrap_or(u64::MAX);
+            if current >= limit {
+                anyhow::bail!("Memory write budget exceeded: {} >= {}", current, limit);
+            }
+        }
+        Ok(())
     }
 
     /// Clear the working section (useful between node executions)

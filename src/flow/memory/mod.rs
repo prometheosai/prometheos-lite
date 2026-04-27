@@ -1,15 +1,17 @@
 //! Memory layer - SQLite-based storage with semantic search and embedding support
 
-mod types;
 mod db;
-mod service;
 mod embedding;
-mod vector;
 mod nodes;
+mod service;
+mod types;
+mod vector;
 
-pub use types::{Memory, MemoryKind, MemoryType, ContextBundle, MemoryRelationship, MemoryWriteTask};
 pub use db::MemoryDb;
+pub use embedding::{EmbeddingProvider, FallbackEmbeddingProvider, LocalEmbeddingProvider};
+pub use nodes::{ContextLoaderNode, MemoryExtractorNode, MemoryWriteNode};
 pub use service::MemoryService;
-pub use embedding::{EmbeddingProvider, LocalEmbeddingProvider, FallbackEmbeddingProvider};
-pub use vector::{VectorSearchBackend, InMemoryVectorIndex, BruteForceBackend};
-pub use nodes::{MemoryExtractorNode, ContextLoaderNode, MemoryWriteNode};
+pub use types::{
+    ContextBundle, Memory, MemoryKind, MemoryRelationship, MemoryType, MemoryWriteTask,
+};
+pub use vector::{BruteForceBackend, InMemoryVectorIndex, VectorSearchBackend};

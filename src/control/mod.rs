@@ -1,7 +1,7 @@
 //! Control file loading and management
 
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 
 /// Control file loader
 pub struct ControlFiles {
@@ -17,20 +17,20 @@ impl ControlFiles {
     pub fn load() -> Result<Self> {
         let base_dir = PathBuf::from(".prometheos");
 
-        let soul = Self::read_file(&base_dir.join("SOUL.md"))
-            .unwrap_or_else(|_| Self::default_soul());
-        
-        let skills = Self::read_file(&base_dir.join("SKILLS.md"))
-            .unwrap_or_else(|_| Self::default_skills());
-        
-        let flows = Self::read_file(&base_dir.join("FLOWS.md"))
-            .unwrap_or_else(|_| Self::default_flows());
-        
-        let tools = Self::read_file(&base_dir.join("TOOLS.md"))
-            .unwrap_or_else(|_| Self::default_tools());
-        
-        let memory = Self::read_file(&base_dir.join("MEMORY.md"))
-            .unwrap_or_else(|_| Self::default_memory());
+        let soul =
+            Self::read_file(&base_dir.join("SOUL.md")).unwrap_or_else(|_| Self::default_soul());
+
+        let skills =
+            Self::read_file(&base_dir.join("SKILLS.md")).unwrap_or_else(|_| Self::default_skills());
+
+        let flows =
+            Self::read_file(&base_dir.join("FLOWS.md")).unwrap_or_else(|_| Self::default_flows());
+
+        let tools =
+            Self::read_file(&base_dir.join("TOOLS.md")).unwrap_or_else(|_| Self::default_tools());
+
+        let memory =
+            Self::read_file(&base_dir.join("MEMORY.md")).unwrap_or_else(|_| Self::default_memory());
 
         Ok(Self {
             soul,
@@ -42,9 +42,8 @@ impl ControlFiles {
     }
 
     fn read_file(path: &PathBuf) -> Result<String> {
-        std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!("Failed to read control file {:?}: {}", path, e)
-        })
+        std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read control file {:?}: {}", path, e))
     }
 
     fn default_soul() -> String {
@@ -60,7 +59,8 @@ impl ControlFiles {
     }
 
     fn default_tools() -> String {
-        "# PrometheOS Lite - Available Tools\n\n## cargo_check\n- Command: cargo check\n".to_string()
+        "# PrometheOS Lite - Available Tools\n\n## cargo_check\n- Command: cargo check\n"
+            .to_string()
     }
 
     fn default_memory() -> String {

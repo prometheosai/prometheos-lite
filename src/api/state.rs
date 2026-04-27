@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use crate::api::ConnectionManager;
-use crate::flow::RuntimeContext;
-use crate::flow::LocalEmbeddingProvider;
 use crate::flow::EmbeddingProvider;
+use crate::flow::LocalEmbeddingProvider;
 use crate::flow::MemoryService;
+use crate::flow::RuntimeContext;
 
 /// Global application state shared across all API routes
 ///

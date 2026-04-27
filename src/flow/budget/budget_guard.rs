@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{ExecutionBudget, BudgetUsage};
+use super::{BudgetUsage, ExecutionBudget};
 
 /// Budget guard for enforcing resource limits
 pub struct BudgetGuard {
@@ -172,7 +172,7 @@ impl BudgetGuard {
     pub fn get_report(&self) -> serde_json::Value {
         let usage = self.get_usage();
         let percentages = usage.usage_percentage(&self.budget);
-        
+
         serde_json::json!({
             "budget": {
                 "max_steps": self.budget.max_steps,

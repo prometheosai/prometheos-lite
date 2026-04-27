@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -288,26 +288,47 @@ impl MemoryDb {
                 });
 
                 let metadata_json: String = row.get(15)?;
-                let metadata = serde_json::from_str(&metadata_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                let metadata = serde_json::from_str(&metadata_json).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    )
+                })?;
 
                 let created_at_str: String = row.get(11)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let updated_at_str: String = row.get(12)?;
                 let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let last_accessed_at: Option<String> = row.get(13)?;
                 let last_accessed_at = last_accessed_at
-                    .map(|s| DateTime::parse_from_rfc3339(&s)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))
-                        .map(|dt| dt.with_timezone(&Utc)))
+                    .map(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .map_err(|e| {
+                                rusqlite::Error::ToSqlConversionFailure(
+                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                                )
+                            })
+                            .map(|dt| dt.with_timezone(&Utc))
+                    })
                     .transpose()
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?;
 
                 Ok(Memory {
                     id: row.get(0)?,
@@ -377,26 +398,47 @@ impl MemoryDb {
                 });
 
                 let metadata_json: String = row.get(15)?;
-                let metadata = serde_json::from_str(&metadata_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                let metadata = serde_json::from_str(&metadata_json).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    )
+                })?;
 
                 let created_at_str: String = row.get(11)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let updated_at_str: String = row.get(12)?;
                 let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let last_accessed_at: Option<String> = row.get(13)?;
                 let last_accessed_at = last_accessed_at
-                    .map(|s| DateTime::parse_from_rfc3339(&s)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))
-                        .map(|dt| dt.with_timezone(&Utc)))
+                    .map(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .map_err(|e| {
+                                rusqlite::Error::ToSqlConversionFailure(
+                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                                )
+                            })
+                            .map(|dt| dt.with_timezone(&Utc))
+                    })
                     .transpose()
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?;
 
                 Ok(Memory {
                     id: row.get(0)?,
@@ -466,26 +508,47 @@ impl MemoryDb {
                 });
 
                 let metadata_json: String = row.get(15)?;
-                let metadata = serde_json::from_str(&metadata_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                let metadata = serde_json::from_str(&metadata_json).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    )
+                })?;
 
                 let created_at_str: String = row.get(11)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let updated_at_str: String = row.get(12)?;
                 let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let last_accessed_at: Option<String> = row.get(13)?;
                 let last_accessed_at = last_accessed_at
-                    .map(|s| DateTime::parse_from_rfc3339(&s)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))
-                        .map(|dt| dt.with_timezone(&Utc)))
+                    .map(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .map_err(|e| {
+                                rusqlite::Error::ToSqlConversionFailure(
+                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                                )
+                            })
+                            .map(|dt| dt.with_timezone(&Utc))
+                    })
                     .transpose()
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?;
 
                 Ok(Memory {
                     id: row.get(0)?,
@@ -621,7 +684,11 @@ impl MemoryDb {
             .query_map(params![memory_id], |row| {
                 let created_at_str: String = row.get(5)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
                 Ok(MemoryRelationship {
                     id: row.get(0)?,
@@ -681,26 +748,47 @@ impl MemoryDb {
                 });
 
                 let metadata_json: String = row.get(15)?;
-                let metadata = serde_json::from_str(&metadata_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                let metadata = serde_json::from_str(&metadata_json).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    )
+                })?;
 
                 let created_at_str: String = row.get(11)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let updated_at_str: String = row.get(12)?;
                 let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?
                     .with_timezone(&Utc);
 
                 let last_accessed_at: Option<String> = row.get(13)?;
                 let last_accessed_at = last_accessed_at
-                    .map(|s| DateTime::parse_from_rfc3339(&s)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))
-                        .map(|dt| dt.with_timezone(&Utc)))
+                    .map(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .map_err(|e| {
+                                rusqlite::Error::ToSqlConversionFailure(
+                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                                )
+                            })
+                            .map(|dt| dt.with_timezone(&Utc))
+                    })
                     .transpose()
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))?;
+                    .map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })?;
 
                 Ok(Memory {
                     id: row.get(0)?,
@@ -770,12 +858,12 @@ impl MemoryDb {
             .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
         let mut stmt = conn
-            .prepare(
-                "SELECT value FROM user_model WHERE user_id = ?1 AND key = ?2",
-            )
+            .prepare("SELECT value FROM user_model WHERE user_id = ?1 AND key = ?2")
             .context("Failed to prepare get_user_model query")?;
 
-        let mut rows = stmt.query(params![user_id, key]).context("Failed to query user model")?;
+        let mut rows = stmt
+            .query(params![user_id, key])
+            .context("Failed to query user model")?;
 
         if let Some(row) = rows.next()? {
             let value_json: String = row.get(0)?;
@@ -827,7 +915,8 @@ impl MemoryDb {
         });
 
         let metadata_json: String = row.get(15)?;
-        let metadata = serde_json::from_str(&metadata_json).map_err(|e| anyhow::anyhow!("Failed to deserialize metadata: {}", e))?;
+        let metadata = serde_json::from_str(&metadata_json)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize metadata: {}", e))?;
 
         Ok(Memory {
             id: row.get(0)?,
@@ -847,8 +936,13 @@ impl MemoryDb {
             updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(12)?)
                 .map_err(|e| anyhow::anyhow!("Failed to parse updated_at: {}", e))?
                 .with_timezone(&Utc),
-            last_accessed_at: row.get::<_, Option<String>>(13)?
-                .map(|s| DateTime::parse_from_rfc3339(&s).map_err(|e| anyhow::anyhow!("Failed to parse last_accessed_at: {}", e)).map(|dt| dt.with_timezone(&Utc)))
+            last_accessed_at: row
+                .get::<_, Option<String>>(13)?
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse last_accessed_at: {}", e))
+                        .map(|dt| dt.with_timezone(&Utc))
+                })
                 .transpose()?,
             access_count: row.get(14)?,
             metadata,

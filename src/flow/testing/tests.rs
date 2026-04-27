@@ -1,15 +1,15 @@
 //! Tests for flow testing framework
 
 use super::*;
-use tempfile::TempDir;
 use std::path::PathBuf;
+use tempfile::TempDir;
 
 #[test]
 fn test_fixture_creation() {
     let input = serde_json::json!({
         "message": "test message"
     });
-    
+
     let fixture = TestFixture::new(input.clone());
     assert_eq!(fixture.input, input);
     assert!(fixture.expected_output.is_none());
@@ -20,10 +20,9 @@ fn test_fixture_creation() {
 fn test_fixture_with_expected_output() {
     let input = serde_json::json!({"message": "test"});
     let expected = serde_json::json!({"response": "test response"});
-    
-    let fixture = TestFixture::new(input)
-        .with_expected_output(expected.clone());
-    
+
+    let fixture = TestFixture::new(input).with_expected_output(expected.clone());
+
     assert_eq!(fixture.expected_output, Some(expected));
 }
 
@@ -31,10 +30,9 @@ fn test_fixture_with_expected_output() {
 fn test_fixture_with_expected_events() {
     let input = serde_json::json!({"message": "test"});
     let events = vec!["NodeStarted".to_string(), "NodeCompleted".to_string()];
-    
-    let fixture = TestFixture::new(input)
-        .with_expected_events(events.clone());
-    
+
+    let fixture = TestFixture::new(input).with_expected_events(events.clone());
+
     assert_eq!(fixture.expected_events, events);
 }
 
@@ -49,27 +47,28 @@ fn test_expectation_creation() {
 
 #[test]
 fn test_expectation_with_output() {
-    let expectation = TestExpectation::new()
-        .with_output("key".to_string(), serde_json::json!("value"));
-    
+    let expectation =
+        TestExpectation::new().with_output("key".to_string(), serde_json::json!("value"));
+
     assert_eq!(expectation.outputs.len(), 1);
-    assert_eq!(expectation.outputs.get("key"), Some(&serde_json::json!("value")));
+    assert_eq!(
+        expectation.outputs.get("key"),
+        Some(&serde_json::json!("value"))
+    );
 }
 
 #[test]
 fn test_expectation_with_node_order() {
     let order = vec!["node1".to_string(), "node2".to_string()];
-    let expectation = TestExpectation::new()
-        .with_node_order(order.clone());
-    
+    let expectation = TestExpectation::new().with_node_order(order.clone());
+
     assert_eq!(expectation.node_order, order);
 }
 
 #[test]
 fn test_expectation_with_step_bounds() {
-    let expectation = TestExpectation::new()
-        .with_step_bounds(Some(5), Some(10));
-    
+    let expectation = TestExpectation::new().with_step_bounds(Some(5), Some(10));
+
     assert_eq!(expectation.min_steps, Some(5));
     assert_eq!(expectation.max_steps, Some(10));
 }
@@ -78,7 +77,7 @@ fn test_expectation_with_step_bounds() {
 fn test_flow_test_runner_creation() {
     let flow_path = PathBuf::from("test.flow.yaml");
     let _runner = FlowTestRunner::new(flow_path);
-    
+
     // Runner created successfully
 }
 
@@ -87,16 +86,15 @@ fn test_flow_test_runner_with_mock_response() {
     let flow_path = PathBuf::from("test.flow.yaml");
     let _runner = FlowTestRunner::new(flow_path)
         .with_mock_response("node1".to_string(), "mock response".to_string());
-    
+
     // Runner with mock response created successfully
 }
 
 #[test]
 fn test_flow_test_runner_with_tracing() {
     let flow_path = PathBuf::from("test.flow.yaml");
-    let _runner = FlowTestRunner::new(flow_path)
-        .with_tracing();
-    
+    let _runner = FlowTestRunner::new(flow_path).with_tracing();
+
     // Runner with tracing created successfully
 }
 
@@ -104,19 +102,19 @@ fn test_flow_test_runner_with_tracing() {
 fn test_fixture_json_serialization() {
     let temp_dir = TempDir::new().unwrap();
     let fixture_path = temp_dir.path().join("fixture.json");
-    
+
     let input = serde_json::json!({"message": "test"});
     let expected = serde_json::json!({"response": "test response"});
     let events = vec!["NodeStarted".to_string()];
-    
+
     let fixture = TestFixture::new(input.clone())
         .with_expected_output(expected.clone())
         .with_expected_events(events.clone());
-    
+
     // Save to file
     fixture.to_json(&fixture_path).unwrap();
     assert!(fixture_path.exists());
-    
+
     // Load from file
     let loaded_fixture = TestFixture::from_json(&fixture_path).unwrap();
     assert_eq!(loaded_fixture.input, input);

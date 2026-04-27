@@ -18,11 +18,20 @@ impl ModeSelector {
         let text_lower = text.to_lowercase();
 
         // Simple heuristic-based selection
-        if text_lower.contains("help") || text_lower.contains("explain") || text_lower.contains("guide") {
+        if text_lower.contains("help")
+            || text_lower.contains("explain")
+            || text_lower.contains("guide")
+        {
             PersonalityMode::Navigator
-        } else if text_lower.contains("calm") || text_lower.contains("reassure") || text_lower.contains("gentle") {
+        } else if text_lower.contains("calm")
+            || text_lower.contains("reassure")
+            || text_lower.contains("gentle")
+        {
             PersonalityMode::Anchor
-        } else if text_lower.contains("direct") || text_lower.contains("honest") || text_lower.contains("reflect") {
+        } else if text_lower.contains("direct")
+            || text_lower.contains("honest")
+            || text_lower.contains("reflect")
+        {
             PersonalityMode::Mirror
         } else {
             self.default_mode
@@ -65,45 +74,87 @@ mod tests {
     #[test]
     fn test_select_from_text_navigator() {
         let selector = ModeSelector::new(PersonalityMode::Companion);
-        
-        assert_eq!(selector.select_from_text("help me"), PersonalityMode::Navigator);
-        assert_eq!(selector.select_from_text("explain this"), PersonalityMode::Navigator);
-        assert_eq!(selector.select_from_text("guide me"), PersonalityMode::Navigator);
+
+        assert_eq!(
+            selector.select_from_text("help me"),
+            PersonalityMode::Navigator
+        );
+        assert_eq!(
+            selector.select_from_text("explain this"),
+            PersonalityMode::Navigator
+        );
+        assert_eq!(
+            selector.select_from_text("guide me"),
+            PersonalityMode::Navigator
+        );
     }
 
     #[test]
     fn test_select_from_text_anchor() {
         let selector = ModeSelector::new(PersonalityMode::Companion);
-        
-        assert_eq!(selector.select_from_text("calm down"), PersonalityMode::Anchor);
-        assert_eq!(selector.select_from_text("reassure me"), PersonalityMode::Anchor);
-        assert_eq!(selector.select_from_text("be gentle"), PersonalityMode::Anchor);
+
+        assert_eq!(
+            selector.select_from_text("calm down"),
+            PersonalityMode::Anchor
+        );
+        assert_eq!(
+            selector.select_from_text("reassure me"),
+            PersonalityMode::Anchor
+        );
+        assert_eq!(
+            selector.select_from_text("be gentle"),
+            PersonalityMode::Anchor
+        );
     }
 
     #[test]
     fn test_select_from_text_mirror() {
         let selector = ModeSelector::new(PersonalityMode::Companion);
-        
-        assert_eq!(selector.select_from_text("be direct"), PersonalityMode::Mirror);
-        assert_eq!(selector.select_from_text("be honest"), PersonalityMode::Mirror);
-        assert_eq!(selector.select_from_text("reflect on this"), PersonalityMode::Mirror);
+
+        assert_eq!(
+            selector.select_from_text("be direct"),
+            PersonalityMode::Mirror
+        );
+        assert_eq!(
+            selector.select_from_text("be honest"),
+            PersonalityMode::Mirror
+        );
+        assert_eq!(
+            selector.select_from_text("reflect on this"),
+            PersonalityMode::Mirror
+        );
     }
 
     #[test]
     fn test_select_from_text_default() {
         let selector = ModeSelector::new(PersonalityMode::Companion);
-        
-        assert_eq!(selector.select_from_text("random text"), PersonalityMode::Companion);
+
+        assert_eq!(
+            selector.select_from_text("random text"),
+            PersonalityMode::Companion
+        );
     }
 
     #[test]
     fn test_select_by_name() {
         let selector = ModeSelector::new(PersonalityMode::Companion);
-        
-        assert_eq!(selector.select_by_name("companion"), Some(PersonalityMode::Companion));
-        assert_eq!(selector.select_by_name("navigator"), Some(PersonalityMode::Navigator));
-        assert_eq!(selector.select_by_name("anchor"), Some(PersonalityMode::Anchor));
-        assert_eq!(selector.select_by_name("mirror"), Some(PersonalityMode::Mirror));
+
+        assert_eq!(
+            selector.select_by_name("companion"),
+            Some(PersonalityMode::Companion)
+        );
+        assert_eq!(
+            selector.select_by_name("navigator"),
+            Some(PersonalityMode::Navigator)
+        );
+        assert_eq!(
+            selector.select_by_name("anchor"),
+            Some(PersonalityMode::Anchor)
+        );
+        assert_eq!(
+            selector.select_by_name("mirror"),
+            Some(PersonalityMode::Mirror)
+        );
         assert_eq!(selector.select_by_name("invalid"), None);
     }
 }

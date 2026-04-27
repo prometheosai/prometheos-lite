@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 
-use crate::config::AppConfig;
 use super::types::{ChatCompletionRequest, ChatCompletionResponse};
+use crate::config::AppConfig;
 
 #[derive(Debug, Clone)]
 pub struct LlmClient {

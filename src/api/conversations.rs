@@ -1,11 +1,14 @@
 //! Conversation endpoints
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use std::sync::Arc;
 
 use crate::api::AppState;
-use crate::db::{Db, Conversation, CreateConversation};
 use crate::db::repository::Repository;
+use crate::db::{Conversation, CreateConversation, Db};
 
 /// Get all conversations for a project
 pub async fn get_conversations(

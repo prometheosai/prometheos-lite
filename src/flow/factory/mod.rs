@@ -1,7 +1,7 @@
 //! Node factory for creating concrete nodes based on node_type
 
-mod node_factory;
 mod builtin_nodes;
+mod node_factory;
 
-pub use node_factory::{NodeFactory, DefaultNodeFactory};
 pub use builtin_nodes::*;
+pub use node_factory::{DefaultNodeFactory, NodeFactory};

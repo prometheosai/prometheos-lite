@@ -36,7 +36,7 @@ pub struct ToolSandboxProfile {
 impl ToolSandboxProfile {
     pub fn new() -> Self {
         let tool_policy = ToolPolicy::conservative();
-        
+
         Self {
             allowed_commands: vec![
                 "echo".to_string(),
@@ -100,7 +100,7 @@ impl ToolSandboxProfile {
         max_output_bytes: usize,
     ) -> Self {
         let tool_policy = ToolPolicy::conservative();
-        
+
         Self {
             allowed_commands,
             blocked_commands,

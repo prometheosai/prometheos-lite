@@ -4,8 +4,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::flow::{Node, NodeConfig, SharedState, ModelRouter, ToolRuntime, MemoryService, MemoryType};
-use crate::personality::{PromptContext, ConstitutionalFilter, PersonalityMode};
+use crate::flow::{
+    MemoryService, MemoryType, ModelRouter, Node, NodeConfig, SharedState, ToolRuntime,
+};
+use crate::personality::{ConstitutionalFilter, PersonalityMode, PromptContext};
 
 /// IdWrapper - wraps a node to override its id
 pub struct IdWrapper {
@@ -54,7 +56,10 @@ pub struct PlannerNode {
 
 impl PlannerNode {
     pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>) -> Self {
-        Self { config, model_router }
+        Self {
+            config,
+            model_router,
+        }
     }
 }
 
@@ -74,11 +79,11 @@ impl Node for PlannerNode {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        
+
         // Include personality mode in input for use in exec()
         let personality_mode = state.get_personality_mode();
-        
-        Ok(serde_json::json!({ 
+
+        Ok(serde_json::json!({
             "task": task,
             "personality_mode": personality_mode
         }))
@@ -95,7 +100,7 @@ impl Node for PlannerNode {
                 "You are a planning assistant. Create a structured plan for the following task:\n\nTask: {}\n\nProvide a step-by-step plan as a JSON array of strings.",
                 task
             );
-            
+
             // Inject personality context if mode is set
             let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
                 if let Some(mode) = PersonalityMode::from_str(mode_str) {
@@ -107,7 +112,7 @@ impl Node for PlannerNode {
             } else {
                 base_prompt
             };
-            
+
             let response = router.generate(&enhanced_prompt).await?;
             Ok(serde_json::json!({ "plan": response }))
         } else {
@@ -140,7 +145,10 @@ pub struct CoderNode {
 
 impl CoderNode {
     pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>) -> Self {
-        Self { config, model_router }
+        Self {
+            config,
+            model_router,
+        }
     }
 }
 
@@ -155,18 +163,21 @@ impl Node for CoderNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
-        let plan = state.get_working("plan").cloned().unwrap_or(serde_json::json!(null));
+        let plan = state
+            .get_working("plan")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
         let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        
+
         // Include personality mode in input for use in exec()
         let personality_mode = state.get_personality_mode();
-        
-        Ok(serde_json::json!({ 
-            "task": task, 
+
+        Ok(serde_json::json!({
+            "task": task,
             "plan": plan,
             "personality_mode": personality_mode
         }))
@@ -185,7 +196,7 @@ impl Node for CoderNode {
                 task,
                 serde_json::to_string(plan).unwrap_or_default()
             );
-            
+
             // Inject personality context if mode is set
             let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
                 if let Some(mode) = PersonalityMode::from_str(mode_str) {
@@ -197,7 +208,7 @@ impl Node for CoderNode {
             } else {
                 base_prompt
             };
-            
+
             let response = router.generate(&enhanced_prompt).await?;
             Ok(serde_json::json!({ "generated_code": response }))
         } else {
@@ -221,7 +232,7 @@ impl Node for CoderNode {
             } else {
                 code.to_string()
             };
-            
+
             state.set_output("generated".to_string(), serde_json::json!(filtered_code));
         }
         "continue".to_string()
@@ -240,7 +251,10 @@ pub struct ReviewerNode {
 
 impl ReviewerNode {
     pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>) -> Self {
-        Self { config, model_router }
+        Self {
+            config,
+            model_router,
+        }
     }
 }
 
@@ -255,12 +269,15 @@ impl Node for ReviewerNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
-        let generated = state.get_output("generated").cloned().unwrap_or(serde_json::json!(null));
-        
+        let generated = state
+            .get_output("generated")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
+
         // Include personality mode in input for use in exec()
         let personality_mode = state.get_personality_mode();
-        
-        Ok(serde_json::json!({ 
+
+        Ok(serde_json::json!({
             "generated": generated,
             "personality_mode": personality_mode
         }))
@@ -275,7 +292,7 @@ impl Node for ReviewerNode {
                 "You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.",
                 serde_json::to_string(generated).unwrap_or_default()
             );
-            
+
             // Inject personality context if mode is set
             let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
                 if let Some(mode) = PersonalityMode::from_str(mode_str) {
@@ -287,7 +304,7 @@ impl Node for ReviewerNode {
             } else {
                 base_prompt
             };
-            
+
             let response = router.generate(&enhanced_prompt).await?;
             Ok(serde_json::json!({ "review": response }))
         } else {
@@ -311,7 +328,7 @@ impl Node for ReviewerNode {
             } else {
                 review.to_string()
             };
-            
+
             state.set_output("review".to_string(), serde_json::json!(filtered_review));
         }
         "continue".to_string()
@@ -363,11 +380,11 @@ impl Node for LlmNode {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        
+
         // Include personality mode in input for use in exec()
         let personality_mode = state.get_personality_mode();
-        
-        Ok(serde_json::json!({ 
+
+        Ok(serde_json::json!({
             "prompt": prompt,
             "personality_mode": personality_mode
         }))
@@ -387,7 +404,7 @@ impl Node for LlmNode {
                 // Use prompt directly
                 prompt.to_string()
             };
-            
+
             // Inject personality context if mode is set
             let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
                 if let Some(mode) = PersonalityMode::from_str(mode_str) {
@@ -399,7 +416,7 @@ impl Node for LlmNode {
             } else {
                 final_prompt
             };
-            
+
             let response = router.generate(&enhanced_prompt).await?;
             Ok(serde_json::json!({ "response": response }))
         } else {
@@ -423,8 +440,11 @@ impl Node for LlmNode {
             } else {
                 response.to_string()
             };
-            
-            state.set_output("llm_response".to_string(), serde_json::json!(filtered_response));
+
+            state.set_output(
+                "llm_response".to_string(),
+                serde_json::json!(filtered_response),
+            );
         }
         "continue".to_string()
     }
@@ -442,7 +462,10 @@ pub struct ToolNode {
 
 impl ToolNode {
     pub fn new(config: NodeConfig, tool_runtime: Option<std::sync::Arc<ToolRuntime>>) -> Self {
-        Self { config, tool_runtime }
+        Self {
+            config,
+            tool_runtime,
+        }
     }
 }
 
@@ -462,7 +485,10 @@ impl Node for ToolNode {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let tool_args = state.get_input("tool_args").cloned().unwrap_or(serde_json::json!({}));
+        let tool_args = state
+            .get_input("tool_args")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         Ok(serde_json::json!({
             "tool_name": tool_name,
             "tool_args": tool_args
@@ -478,7 +504,10 @@ impl Node for ToolNode {
         if let Some(runtime) = &self.tool_runtime {
             // Parse tool_args as a command and arguments
             let args: Vec<String> = if let Some(arr) = tool_args.as_array() {
-                arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect()
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
             } else {
                 vec![]
             };
@@ -527,25 +556,53 @@ impl Node for FileWriterNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
-        let content = state.get_output("generated").cloned().unwrap_or(serde_json::json!(null));
+        let content = state
+            .get_output("generated")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
         let file_path = state
             .get_input("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or("output.txt")
             .to_string();
-        
+
+        // Reject absolute paths
+        if file_path.starts_with("/") || file_path.contains(":") {
+            anyhow::bail!("Absolute paths not allowed: {}", file_path);
+        }
+
+        // Reject parent directory traversal
+        if file_path.contains("..") {
+            anyhow::bail!("Parent directory traversal (..) not allowed: {}", file_path);
+        }
+
         // Ensure prometheos-output directory exists
         std::fs::create_dir_all("prometheos-output")
             .context("Failed to create prometheos-output directory")?;
-        
-        // Prepend prometheos-output/ to the file path if not already absolute
-        let full_path = if file_path.starts_with("/") || file_path.contains(":") {
-            file_path
-        } else {
-            format!("prometheos-output/{}", file_path)
-        };
-        
-        Ok(serde_json::json!({ "content": content, "file_path": full_path }))
+
+        // Build full path inside prometheos-output
+        let full_path = format!("prometheos-output/{}", file_path);
+
+        // Canonicalize the path to resolve any symlinks and normalize separators
+        let canonical_path = std::path::Path::new(&full_path)
+            .canonicalize()
+            .context("Failed to canonicalize path")?;
+
+        // Ensure canonicalized path stays inside prometheos-output
+        let output_dir = std::path::Path::new("prometheos-output")
+            .canonicalize()
+            .context("Failed to canonicalize output directory")?;
+
+        if !canonical_path.starts_with(&output_dir) {
+            anyhow::bail!(
+                "Path outside prometheos-output directory not allowed: {}",
+                canonical_path.display()
+            );
+        }
+
+        Ok(
+            serde_json::json!({ "content": content, "file_path": canonical_path.display().to_string() }),
+        )
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
@@ -587,7 +644,10 @@ pub struct ContextLoaderNode {
 
 impl ContextLoaderNode {
     pub fn new(config: NodeConfig, memory_service: Option<std::sync::Arc<MemoryService>>) -> Self {
-        Self { config, memory_service }
+        Self {
+            config,
+            memory_service,
+        }
     }
 }
 
@@ -647,7 +707,10 @@ pub struct MemoryWriteNode {
 
 impl MemoryWriteNode {
     pub fn new(config: NodeConfig, memory_service: Option<std::sync::Arc<MemoryService>>) -> Self {
-        Self { config, memory_service }
+        Self {
+            config,
+            memory_service,
+        }
     }
 }
 
@@ -677,13 +740,22 @@ impl Node for MemoryWriteNode {
 
         if let Some(service) = &self.memory_service {
             // Use MemoryService for actual write, but handle embedding server failures gracefully
-            match service.create_memory(content.to_string(), MemoryType::Semantic, serde_json::json!({})).await {
-                Ok(memory_id) => Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" })),
+            match service
+                .create_memory(
+                    content.to_string(),
+                    MemoryType::Semantic,
+                    serde_json::json!({}),
+                )
+                .await
+            {
+                Ok(memory_id) => {
+                    Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" }))
+                }
                 Err(e) => {
                     // Log the error but don't fail the flow - embedding server might be unavailable
                     eprintln!("Memory write failed (embedding server unavailable?): {}", e);
-                    Ok(serde_json::json!({ 
-                        "memory_id": "skipped", 
+                    Ok(serde_json::json!({
+                        "memory_id": "skipped",
                         "status": "skipped",
                         "reason": "embedding server unavailable"
                     }))

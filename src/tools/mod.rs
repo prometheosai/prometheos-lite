@@ -1,7 +1,7 @@
 //! Tool permissions and metadata system
 
-mod permissions;
 mod metadata;
+mod permissions;
 
-pub use permissions::{ToolPermission, ToolPolicy};
 pub use metadata::ToolMetadata;
+pub use permissions::{ToolPermission, ToolPolicy};

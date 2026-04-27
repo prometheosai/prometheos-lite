@@ -4,9 +4,9 @@
 //! Flow-based system, enabling gradual migration.
 
 #[cfg(feature = "legacy")]
-use crate::legacy::agents::Agent;
-#[cfg(feature = "legacy")]
 use crate::flow::{Action, Input, Node, NodeConfig, Output, SharedState};
+#[cfg(feature = "legacy")]
+use crate::legacy::agents::Agent;
 #[cfg(feature = "legacy")]
 use anyhow::Result;
 #[cfg(feature = "legacy")]

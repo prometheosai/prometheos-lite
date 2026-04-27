@@ -1,10 +1,10 @@
 //! JSON flow file loader
 
 use anyhow::{Context, Result};
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
-use super::{FlowLoader, FlowFile};
+use super::{FlowFile, FlowLoader};
 
 /// JSON flow file loader
 pub struct JsonLoader;

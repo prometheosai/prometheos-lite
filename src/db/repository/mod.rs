@@ -1,17 +1,17 @@
 //! Database repository for UI state
 
-mod db;
-mod trait_def;
-mod projects;
-mod conversations;
-mod messages;
-mod flow_runs;
 mod artifacts;
+mod conversations;
+mod db;
+mod flow_runs;
+mod messages;
+mod projects;
+mod trait_def;
 
-pub use db::Db;
-pub use trait_def::Repository;
-pub use projects::{ProjectOperations, AsDb};
-pub use conversations::*;
-pub use messages::*;
-pub use flow_runs::*;
 pub use artifacts::*;
+pub use conversations::*;
+pub use db::Db;
+pub use flow_runs::*;
+pub use messages::*;
+pub use projects::{AsDb, ProjectOperations};
+pub use trait_def::Repository;

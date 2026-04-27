@@ -100,36 +100,38 @@ mod tests {
 
     #[test]
     fn test_tool_policy_with_permission() {
-        let policy = ToolPolicy::new()
-            .with_permission(ToolPermission::Network);
-        
+        let policy = ToolPolicy::new().with_permission(ToolPermission::Network);
+
         assert!(policy.is_allowed(ToolPermission::Network));
         assert!(!policy.is_allowed(ToolPermission::Shell));
     }
 
     #[test]
     fn test_tool_policy_with_approval() {
-        let policy = ToolPolicy::new()
-            .with_approval(true);
-        
+        let policy = ToolPolicy::new().with_approval(true);
+
         assert!(policy.require_approval);
     }
 
     #[test]
     fn test_tool_policy_conservative() {
         let policy = ToolPolicy::conservative();
-        
+
         assert!(policy.is_allowed(ToolPermission::FileRead));
         assert!(!policy.is_allowed(ToolPermission::Network));
         assert!(!policy.is_allowed(ToolPermission::Shell));
         assert!(!policy.is_allowed(ToolPermission::FileWrite));
-        assert!(policy.restricted_write_paths.contains(&"prometheos-output/".to_string()));
+        assert!(
+            policy
+                .restricted_write_paths
+                .contains(&"prometheos-output/".to_string())
+        );
     }
 
     #[test]
     fn test_tool_policy_permissive() {
         let policy = ToolPolicy::permissive();
-        
+
         assert!(policy.is_allowed(ToolPermission::Network));
         assert!(policy.is_allowed(ToolPermission::FileRead));
         assert!(policy.is_allowed(ToolPermission::FileWrite));
@@ -140,7 +142,7 @@ mod tests {
     #[test]
     fn test_tool_policy_default() {
         let policy = ToolPolicy::default();
-        
+
         assert!(policy.is_allowed(ToolPermission::FileRead));
         assert!(!policy.is_allowed(ToolPermission::Network));
     }

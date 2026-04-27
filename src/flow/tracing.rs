@@ -18,35 +18,106 @@ pub type TraceId = String;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TraceEvent {
     // Run-level events (system-level)
-    RunStarted { run_id: RunId, flow_name: String },
-    RunCompleted { run_id: RunId, duration_ms: u64 },
-    RunFailed { run_id: RunId, error: String },
+    RunStarted {
+        run_id: RunId,
+        flow_name: String,
+    },
+    RunCompleted {
+        run_id: RunId,
+        duration_ms: u64,
+    },
+    RunFailed {
+        run_id: RunId,
+        error: String,
+    },
 
     // Flow-level events (node-level)
-    NodeStarted { run_id: RunId, trace_id: TraceId, node_id: NodeId },
-    NodeCompleted { run_id: RunId, trace_id: TraceId, node_id: NodeId, duration_ms: u64 },
-    NodeFailed { run_id: RunId, trace_id: TraceId, node_id: NodeId, error: String },
-    TransitionTaken { run_id: RunId, from: NodeId, action: String, to: NodeId },
+    NodeStarted {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+    },
+    NodeCompleted {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        duration_ms: u64,
+    },
+    NodeFailed {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        error: String,
+    },
+    TransitionTaken {
+        run_id: RunId,
+        from: NodeId,
+        action: String,
+        to: NodeId,
+    },
 
     // Flow lifecycle events
-    FlowLoaded { run_id: RunId, flow_name: String, path: String },
-    FlowValidationFailed { run_id: RunId, errors: Vec<String> },
+    FlowLoaded {
+        run_id: RunId,
+        flow_name: String,
+        path: String,
+    },
+    FlowValidationFailed {
+        run_id: RunId,
+        errors: Vec<String>,
+    },
 
     // Budget events
-    BudgetChecked { run_id: RunId, resource: String, current: u64, limit: u64 },
-    BudgetExceeded { run_id: RunId, resource: String, current: u64, limit: u64 },
+    BudgetChecked {
+        run_id: RunId,
+        resource: String,
+        current: u64,
+        limit: u64,
+    },
+    BudgetExceeded {
+        run_id: RunId,
+        resource: String,
+        current: u64,
+        limit: u64,
+    },
 
     // Tool events
-    ToolRequested { run_id: RunId, trace_id: TraceId, tool_name: String },
-    ToolCompleted { run_id: RunId, trace_id: TraceId, tool_name: String, duration_ms: u64 },
+    ToolRequested {
+        run_id: RunId,
+        trace_id: TraceId,
+        tool_name: String,
+    },
+    ToolCompleted {
+        run_id: RunId,
+        trace_id: TraceId,
+        tool_name: String,
+        duration_ms: u64,
+    },
 
     // Memory events
-    MemoryRead { run_id: RunId, trace_id: TraceId, query: String, results_count: u32 },
-    MemoryWrite { run_id: RunId, trace_id: TraceId, kind: String },
+    MemoryRead {
+        run_id: RunId,
+        trace_id: TraceId,
+        query: String,
+        results_count: u32,
+    },
+    MemoryWrite {
+        run_id: RunId,
+        trace_id: TraceId,
+        kind: String,
+    },
 
     // Output events
-    EvaluationCompleted { run_id: RunId, trace_id: TraceId, score: Option<f64> },
-    OutputGenerated { run_id: RunId, trace_id: TraceId, output_key: String },
+    EvaluationCompleted {
+        run_id: RunId,
+        trace_id: TraceId,
+        score: Option<f64>,
+    },
+    OutputGenerated {
+        run_id: RunId,
+        trace_id: TraceId,
+        output_key: String,
+    },
 }
 
 /// Log level
@@ -303,7 +374,10 @@ mod tests {
 
         tracer.log(
             LogLevel::Info,
-            TraceEvent::RunStarted { run_id: run_id.clone(), flow_name: "test".to_string() },
+            TraceEvent::RunStarted {
+                run_id: run_id.clone(),
+                flow_name: "test".to_string(),
+            },
             None,
             "Starting run".to_string(),
             serde_json::json!({}),
@@ -320,7 +394,11 @@ mod tests {
 
         tracer.log(
             LogLevel::Debug,
-            TraceEvent::NodeStarted { run_id: run_id.clone(), trace_id: Tracer::generate_trace_id(), node_id: "node1".to_string() },
+            TraceEvent::NodeStarted {
+                run_id: run_id.clone(),
+                trace_id: Tracer::generate_trace_id(),
+                node_id: "node1".to_string(),
+            },
             Some("node1".to_string()),
             "Debug message".to_string(),
             serde_json::json!({}),
@@ -328,7 +406,12 @@ mod tests {
 
         tracer.log(
             LogLevel::Warning,
-            TraceEvent::NodeFailed { run_id, trace_id: Tracer::generate_trace_id(), node_id: "node1".to_string(), error: "Test error".to_string() },
+            TraceEvent::NodeFailed {
+                run_id,
+                trace_id: Tracer::generate_trace_id(),
+                node_id: "node1".to_string(),
+                error: "Test error".to_string(),
+            },
             Some("node1".to_string()),
             "Warning message".to_string(),
             serde_json::json!({}),
@@ -344,7 +427,11 @@ mod tests {
         let run_id = Tracer::generate_run_id();
 
         tracer.add_timeline_event(
-            TraceEvent::NodeStarted { run_id: run_id.clone(), trace_id: Tracer::generate_trace_id(), node_id: "node1".to_string() },
+            TraceEvent::NodeStarted {
+                run_id: run_id.clone(),
+                trace_id: Tracer::generate_trace_id(),
+                node_id: "node1".to_string(),
+            },
             Some("node1".to_string()),
             Some(100),
             serde_json::json!({}),
@@ -361,7 +448,11 @@ mod tests {
 
         tracer.log(
             LogLevel::Info,
-            TraceEvent::NodeStarted { run_id: run_id.clone(), trace_id: Tracer::generate_trace_id(), node_id: "node1".to_string() },
+            TraceEvent::NodeStarted {
+                run_id: run_id.clone(),
+                trace_id: Tracer::generate_trace_id(),
+                node_id: "node1".to_string(),
+            },
             Some("node1".to_string()),
             "Message 1".to_string(),
             serde_json::json!({}),
@@ -369,7 +460,11 @@ mod tests {
 
         tracer.log(
             LogLevel::Info,
-            TraceEvent::NodeStarted { run_id, trace_id: Tracer::generate_trace_id(), node_id: "node2".to_string() },
+            TraceEvent::NodeStarted {
+                run_id,
+                trace_id: Tracer::generate_trace_id(),
+                node_id: "node2".to_string(),
+            },
             Some("node2".to_string()),
             "Message 2".to_string(),
             serde_json::json!({}),
@@ -385,7 +480,10 @@ mod tests {
         let entry = LogEntry {
             timestamp: Utc::now(),
             level: LogLevel::Info,
-            event_type: TraceEvent::RunStarted { run_id: run_id.clone(), flow_name: "test".to_string() },
+            event_type: TraceEvent::RunStarted {
+                run_id: run_id.clone(),
+                flow_name: "test".to_string(),
+            },
             node_id: None,
             message: "Test".to_string(),
             metadata: serde_json::json!({}),
@@ -404,7 +502,10 @@ mod tests {
 
         tracer.log(
             LogLevel::Info,
-            TraceEvent::RunStarted { run_id, flow_name: "test".to_string() },
+            TraceEvent::RunStarted {
+                run_id,
+                flow_name: "test".to_string(),
+            },
             None,
             "Test".to_string(),
             serde_json::json!({}),
@@ -421,22 +522,34 @@ mod tests {
 
         // Run-level event
         tracer.log_run_event(
-            TraceEvent::RunStarted { run_id: run_id.clone(), flow_name: "codegen".to_string() },
-            "Flow execution started".to_string()
+            TraceEvent::RunStarted {
+                run_id: run_id.clone(),
+                flow_name: "codegen".to_string(),
+            },
+            "Flow execution started".to_string(),
         );
 
         // Flow-level events
         let trace_id = Tracer::generate_trace_id();
         tracer.log_flow_event(
-            TraceEvent::NodeStarted { run_id: run_id.clone(), trace_id: trace_id.clone(), node_id: "planner".to_string() },
+            TraceEvent::NodeStarted {
+                run_id: run_id.clone(),
+                trace_id: trace_id.clone(),
+                node_id: "planner".to_string(),
+            },
             Some("planner".to_string()),
-            "Node execution started".to_string()
+            "Node execution started".to_string(),
         );
 
         tracer.log_flow_event(
-            TraceEvent::NodeCompleted { run_id, trace_id, node_id: "planner".to_string(), duration_ms: 150 },
+            TraceEvent::NodeCompleted {
+                run_id,
+                trace_id,
+                node_id: "planner".to_string(),
+                duration_ms: 150,
+            },
             Some("planner".to_string()),
-            "Node execution completed".to_string()
+            "Node execution completed".to_string(),
         );
 
         assert_eq!(tracer.get_logs().len(), 3);

@@ -1,11 +1,11 @@
 //! Project endpoints
 
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use std::sync::Arc;
 
 use crate::api::AppState;
-use crate::db::{Db, Project, CreateProject};
 use crate::db::repository::Repository;
+use crate::db::{CreateProject, Db, Project};
 
 /// Get all projects
 pub async fn get_projects(

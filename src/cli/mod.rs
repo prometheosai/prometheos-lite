@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 
+pub mod commands;
 pub mod runner;
 pub mod runtime_builder;
-pub mod commands;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -32,17 +32,9 @@ pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run(cmd) => {
-            cmd.execute().await
-        }
-        Commands::Flow(cmd) => {
-            cmd.execute().await
-        }
-        Commands::Serve(cmd) => {
-            cmd.execute().await
-        }
-        Commands::Bench(cmd) => {
-            cmd.execute().await
-        }
+        Commands::Run(cmd) => cmd.execute().await,
+        Commands::Flow(cmd) => cmd.execute().await,
+        Commands::Serve(cmd) => cmd.execute().await,
+        Commands::Bench(cmd) => cmd.execute().await,
     }
 }

@@ -9,7 +9,10 @@ pub fn error_to_string<E: std::fmt::Display>(err: &E) -> String {
 }
 
 /// Wrap an error with additional context using anyhow
-pub fn wrap_error<E: std::error::Error + Send + Sync + 'static>(err: E, context: String) -> anyhow::Error {
+pub fn wrap_error<E: std::error::Error + Send + Sync + 'static>(
+    err: E,
+    context: String,
+) -> anyhow::Error {
     anyhow::anyhow!(err).context(context)
 }
 
@@ -19,7 +22,10 @@ pub fn is_error_type<E: Error + Send + Sync + 'static>(err: &anyhow::Error) -> b
 }
 
 /// Convert a Result to an Option, logging errors
-pub fn result_to_option_log<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> Option<T> {
+pub fn result_to_option_log<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    context: &str,
+) -> Option<T> {
     match result {
         Ok(value) => Some(value),
         Err(e) => {
@@ -45,7 +51,12 @@ where
         match operation().await {
             Ok(value) => return Ok(value),
             Err(e) if attempt < max_retries => {
-                eprintln!("Attempt {} failed: {}. Retrying in {}ms...", attempt + 1, e, delay);
+                eprintln!(
+                    "Attempt {} failed: {}. Retrying in {}ms...",
+                    attempt + 1,
+                    e,
+                    delay
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 delay *= 2;
             }
@@ -91,7 +102,8 @@ mod tests {
             },
             5,
             10,
-        ).await;
+        )
+        .await;
         assert!(result.is_ok());
         assert_eq!(attempts, 3);
     }

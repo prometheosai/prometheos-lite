@@ -53,7 +53,9 @@ pub fn set_nested(value: &mut Value, path: &str, new_value: Value) -> Result<()>
         } else {
             // Navigate to the next level
             current = match current {
-                Value::Object(map) => map.entry(part.to_string()).or_insert_with(|| Value::Object(serde_json::Map::new())),
+                Value::Object(map) => map
+                    .entry(part.to_string())
+                    .or_insert_with(|| Value::Object(serde_json::Map::new())),
                 Value::Array(arr) => {
                     if let Ok(index) = part.parse::<usize>() {
                         if index < arr.len() {
@@ -106,7 +108,10 @@ mod tests {
             "arr": [1, 2, 3]
         });
 
-        assert_eq!(get_nested(&json, "foo.bar.baz"), Some(&Value::Number(42.into())));
+        assert_eq!(
+            get_nested(&json, "foo.bar.baz"),
+            Some(&Value::Number(42.into()))
+        );
         assert_eq!(get_nested(&json, "arr.1"), Some(&Value::Number(2.into())));
         assert_eq!(get_nested(&json, "foo.missing"), None);
     }

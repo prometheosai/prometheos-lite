@@ -3,9 +3,7 @@
 use anyhow::Context;
 use clap::Parser;
 
-use prometheos_lite::{
-    logger::Logger,
-};
+use prometheos_lite::logger::Logger;
 
 use super::super::runtime_builder::RuntimeBuilder;
 
@@ -22,12 +20,18 @@ pub struct ServeCommand {
 impl ServeCommand {
     pub async fn execute(&self) -> anyhow::Result<()> {
         let logger = Logger::new(true);
-        logger.info(&format!("Starting API server on {}:{}", self.host, self.port));
+        logger.info(&format!(
+            "Starting API server on {}:{}",
+            self.host, self.port
+        ));
 
         // Build runtime
         let runtime_builder = RuntimeBuilder::from_config()?;
         let runtime = runtime_builder.build_full()?;
-        logger.info(&format!("Loaded config for provider: {}", runtime_builder.config().provider));
+        logger.info(&format!(
+            "Loaded config for provider: {}",
+            runtime_builder.config().provider
+        ));
 
         // Create database
         let db_path = "prometheos.db".to_string();
@@ -43,11 +47,12 @@ impl ServeCommand {
             db_path,
             std::sync::Arc::new(runtime),
             api_embedding,
-            memory_service
+            memory_service,
         ));
 
         // Parse address
-        let addr: std::net::SocketAddr = format!("{}:{}", self.host, self.port).parse()
+        let addr: std::net::SocketAddr = format!("{}:{}", self.host, self.port)
+            .parse()
             .context("Invalid host or port")?;
 
         // Start server

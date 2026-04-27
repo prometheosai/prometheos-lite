@@ -45,7 +45,10 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
             .map_err(|e| anyhow::anyhow!("Failed to send embedding request: {}", e))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("Embedding request failed with status: {}", response.status());
+            anyhow::bail!(
+                "Embedding request failed with status: {}",
+                response.status()
+            );
         }
 
         let output: serde_json::Value = response
@@ -57,7 +60,11 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Missing embedding in response"))?
             .iter()
-            .map(|v| v.as_f64().ok_or_else(|| anyhow::anyhow!("Invalid embedding value")).map(|f| f as f32))
+            .map(|v| {
+                v.as_f64()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid embedding value"))
+                    .map(|f| f as f32)
+            })
             .collect::<Result<Vec<f32>>>()?;
 
         Ok(embedding)
@@ -93,9 +100,6 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
     }
 
     fn dimension(&self) -> usize {
-        self.providers
-            .first()
-            .map(|p| p.dimension())
-            .unwrap_or(0)
+        self.providers.first().map(|p| p.dimension()).unwrap_or(0)
     }
 }

@@ -34,7 +34,8 @@ pub fn to_snake_case(s: &str) -> String {
 /// Convert a string to camelCase
 pub fn to_camel_case(s: &str) -> String {
     let parts: Vec<&str> = s.split('_').collect();
-    parts.iter()
+    parts
+        .iter()
         .enumerate()
         .map(|(i, part)| {
             if i == 0 {

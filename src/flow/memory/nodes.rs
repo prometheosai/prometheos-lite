@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::flow::{Action, Input, Node, NodeConfig, Output, SharedState};
-use super::types::MemoryKind;
 use super::service::MemoryService;
+use super::types::MemoryKind;
+use crate::flow::{Action, Input, Node, NodeConfig, Output, SharedState};
 
 #[derive(Debug, Clone)]
 struct ExtractedMemory {
@@ -62,12 +62,12 @@ impl Node for MemoryExtractorNode {
             .get_input(&self.user_message_key)
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        
+
         let assistant_response = state
             .get_input(&self.assistant_response_key)
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        
+
         let conversation_id = state
             .get_input(&self.conversation_id_key)
             .and_then(|v| v.as_str())
@@ -81,8 +81,12 @@ impl Node for MemoryExtractorNode {
     }
 
     async fn exec(&self, input: Input) -> Result<Output> {
-        let user_message = input["user_message"].as_str().context("Missing user_message")?;
-        let assistant_response = input["assistant_response"].as_str().context("Missing assistant_response")?;
+        let user_message = input["user_message"]
+            .as_str()
+            .context("Missing user_message")?;
+        let assistant_response = input["assistant_response"]
+            .as_str()
+            .context("Missing assistant_response")?;
         let conversation_id = input["conversation_id"].as_str().map(|s| s.to_string());
 
         // Simple heuristic extraction (in production, use LLM for better extraction)
@@ -121,7 +125,11 @@ impl Node for MemoryExtractorNode {
 
 impl MemoryExtractorNode {
     /// Extract semantic memories from conversation (heuristic-based)
-    fn extract_semantic_memories(&self, user_message: &str, assistant_response: &str) -> Vec<ExtractedMemory> {
+    fn extract_semantic_memories(
+        &self,
+        user_message: &str,
+        assistant_response: &str,
+    ) -> Vec<ExtractedMemory> {
         let mut memories = Vec::new();
         let combined = format!("{}\n{}", user_message, assistant_response).to_lowercase();
 
@@ -141,7 +149,8 @@ impl MemoryExtractorNode {
         }
 
         // Extract decisions
-        if combined.contains("decided") || combined.contains("choose") || combined.contains("will") {
+        if combined.contains("decided") || combined.contains("choose") || combined.contains("will")
+        {
             memories.push(ExtractedMemory {
                 content: format!("Decision made in conversation"),
                 kind: MemoryKind::Decision,
@@ -156,7 +165,8 @@ impl MemoryExtractorNode {
         }
 
         // Extract constraints
-        if combined.contains("must") || combined.contains("should") || combined.contains("require") {
+        if combined.contains("must") || combined.contains("should") || combined.contains("require")
+        {
             memories.push(ExtractedMemory {
                 content: format!("Constraint identified in conversation"),
                 kind: MemoryKind::Constraint,
@@ -171,7 +181,8 @@ impl MemoryExtractorNode {
         }
 
         // Extract project facts (heuristic: technical terms, file names, etc.)
-        if combined.contains("file") || combined.contains("function") || combined.contains("class") {
+        if combined.contains("file") || combined.contains("function") || combined.contains("class")
+        {
             memories.push(ExtractedMemory {
                 content: format!("Project fact mentioned in conversation"),
                 kind: MemoryKind::ProjectFact,
@@ -329,7 +340,11 @@ impl Node for MemoryWriteNode {
 
         let memory_id = self
             .memory_service
-            .create_memory(content.to_string(), super::types::MemoryType::Semantic, metadata)
+            .create_memory(
+                content.to_string(),
+                super::types::MemoryType::Semantic,
+                metadata,
+            )
             .await?;
 
         Ok(serde_json::json!({ "memory_id": memory_id }))

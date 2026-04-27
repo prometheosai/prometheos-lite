@@ -1,7 +1,7 @@
 //! Flow output and evaluation structures
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::tracing::RunId;
@@ -78,7 +78,7 @@ impl FinalOutput {
     ) -> Self {
         Self {
             run_id: run_id.clone(),
-            trace_id,
+            trace_id: trace_id.clone(),
             flow_name: flow_name.clone(),
             primary: serde_json::Value::Null,
             additional: HashMap::new(),
@@ -212,18 +212,11 @@ mod tests {
         let mut additional = HashMap::new();
         additional.insert("review".to_string(), serde_json::json!("Good code"));
 
-        let evaluation = Evaluation::new(
-            run_id.clone(),
-            "codegen".to_string(),
-            3,
-            0,
-            2,
-            1000,
-        );
+        let evaluation = Evaluation::new(run_id.clone(), "codegen".to_string(), 3, 0, 2, 1000);
 
         let output = FinalOutput::success(
             run_id.clone(),
-            trace_id,
+            trace_id.clone(),
             "codegen".to_string(),
             serde_json::json!("generated code"),
             additional,
@@ -246,7 +239,7 @@ mod tests {
         let trace_id = "test-trace-def".to_string();
         let output = FinalOutput::failure(
             run_id.clone(),
-            trace_id,
+            trace_id.clone(),
             "codegen".to_string(),
             "LLM timeout".to_string(),
             500,
@@ -261,14 +254,7 @@ mod tests {
     #[test]
     fn test_evaluation() {
         let run_id = "test-run-789".to_string();
-        let eval = Evaluation::new(
-            run_id.clone(),
-            "codegen".to_string(),
-            5,
-            0,
-            4,
-            2000,
-        );
+        let eval = Evaluation::new(run_id.clone(), "codegen".to_string(), 5, 0, 4, 2000);
 
         assert_eq!(eval.run_id, run_id);
         assert_eq!(eval.nodes_executed, 5);
@@ -278,14 +264,7 @@ mod tests {
 
     #[test]
     fn test_evaluation_with_failures() {
-        let eval = Evaluation::new(
-            "test-run".to_string(),
-            "codegen".to_string(),
-            5,
-            2,
-            4,
-            2000,
-        );
+        let eval = Evaluation::new("test-run".to_string(), "codegen".to_string(), 5, 2, 4, 2000);
 
         assert_eq!(eval.success_rate(), 0.6);
         assert!(!eval.is_successful());
@@ -293,18 +272,14 @@ mod tests {
 
     #[test]
     fn test_evaluation_custom_metrics() {
-        let eval = Evaluation::new(
-            "test-run".to_string(),
-            "codegen".to_string(),
-            5,
-            0,
-            4,
-            2000,
-        )
-        .with_custom_metric("tokens_used".to_string(), serde_json::json!(1000))
-        .with_memory_usage(1024 * 1024);
+        let eval = Evaluation::new("test-run".to_string(), "codegen".to_string(), 5, 0, 4, 2000)
+            .with_custom_metric("tokens_used".to_string(), serde_json::json!(1000))
+            .with_memory_usage(1024 * 1024);
 
-        assert_eq!(eval.custom_metrics.get("tokens_used"), Some(&serde_json::json!(1000)));
+        assert_eq!(
+            eval.custom_metrics.get("tokens_used"),
+            Some(&serde_json::json!(1000))
+        );
         assert_eq!(eval.memory_usage_bytes, Some(1024 * 1024));
     }
 }

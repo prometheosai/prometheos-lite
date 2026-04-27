@@ -1,17 +1,17 @@
 //! Migration utilities for transitioning from agent-based to flow-based architecture
 
 #[cfg(feature = "legacy")]
-use crate::legacy::agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent};
-#[cfg(feature = "legacy")]
 use crate::flow::AgentNode;
 #[cfg(feature = "legacy")]
 use crate::flow::Flow;
 #[cfg(feature = "legacy")]
 use crate::flow::SharedState;
 #[cfg(feature = "legacy")]
-use anyhow::Result;
+use crate::legacy::agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent};
 #[cfg(feature = "legacy")]
 use crate::llm::LlmClient;
+#[cfg(feature = "legacy")]
+use anyhow::Result;
 #[cfg(feature = "legacy")]
 use std::sync::Arc;
 

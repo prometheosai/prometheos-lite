@@ -72,8 +72,7 @@ pub fn temp_file_path(prefix: &str) -> PathBuf {
 
 /// Get the current working directory as a PathBuf
 pub fn current_dir() -> Result<PathBuf> {
-    std::env::current_dir()
-        .context("Failed to get current directory")
+    std::env::current_dir().context("Failed to get current directory")
 }
 
 /// Resolve a path relative to the current working directory
@@ -89,8 +88,14 @@ mod tests {
     #[test]
     fn test_default_paths() {
         assert_eq!(default_db_path(), PathBuf::from("prometheos.db"));
-        assert_eq!(default_memory_db_path(), PathBuf::from("prometheos_memory.db"));
-        assert_eq!(default_config_path(), PathBuf::from("prometheos.config.json"));
+        assert_eq!(
+            default_memory_db_path(),
+            PathBuf::from("prometheos_memory.db")
+        );
+        assert_eq!(
+            default_config_path(),
+            PathBuf::from("prometheos.config.json")
+        );
     }
 
     #[test]
@@ -99,7 +104,7 @@ mod tests {
         let relative = PathBuf::from("subdir/file.txt");
         let joined = join_paths(&base, &relative);
         assert_eq!(joined, PathBuf::from("/base/subdir/file.txt"));
-        
+
         let absolute = PathBuf::from("/absolute/path");
         let joined_abs = join_paths(&base, &absolute);
         assert_eq!(joined_abs, PathBuf::from("/absolute/path"));
@@ -109,7 +114,7 @@ mod tests {
     fn test_get_extension() {
         let path = PathBuf::from("file.txt");
         assert_eq!(get_extension(&path), Some("txt".to_string()));
-        
+
         let no_ext = PathBuf::from("file");
         assert_eq!(get_extension(&no_ext), None);
     }

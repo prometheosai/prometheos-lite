@@ -3,11 +3,7 @@
 use anyhow::Context;
 use clap::Parser;
 
-use prometheos_lite::{
-    logger::Logger,
-    llm::LlmClient,
-    config::AppConfig,
-};
+use prometheos_lite::{config::AppConfig, llm::LlmClient, logger::Logger};
 
 #[derive(Debug, Parser)]
 #[deprecated(since = "0.2.0", note = "Use 'flow' command instead")]
@@ -39,8 +35,10 @@ impl RunCommand {
         #[cfg(feature = "legacy")]
         {
             #[allow(deprecated)]
-            let orchestrator =
-                prometheos_lite::legacy::core::SequentialOrchestrator::with_logger(llm, logger.clone());
+            let orchestrator = prometheos_lite::legacy::core::SequentialOrchestrator::with_logger(
+                llm,
+                logger.clone(),
+            );
 
             logger.info("Initializing orchestrator...");
             let result = orchestrator.run(self.task.clone()).await?;
@@ -50,6 +48,8 @@ impl RunCommand {
         }
 
         #[cfg(not(feature = "legacy"))]
-        Err(anyhow::anyhow!("Legacy 'run' command requires the 'legacy' feature flag. Use 'flow' command instead."))
+        Err(anyhow::anyhow!(
+            "Legacy 'run' command requires the 'legacy' feature flag. Use 'flow' command instead."
+        ))
     }
 }

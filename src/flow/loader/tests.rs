@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::flow::{YamlLoader, JsonLoader, validate_flow_file, FlowFile, FlowInputs, FlowOutputs, NodeDefinition, FlowLoader};
+    use crate::flow::{
+        FlowFile, FlowInputs, FlowLoader, FlowOutputs, JsonLoader, NodeDefinition, YamlLoader,
+        validate_flow_file,
+    };
     use std::fs;
     use tempfile::TempDir;
 
@@ -33,7 +36,9 @@ transitions: []
         fs::write(&yaml_path, yaml_content).expect("Failed to write YAML file");
 
         let loader = YamlLoader::new();
-        let flow_file = loader.load_from_path(&yaml_path).expect("Failed to load YAML");
+        let flow_file = loader
+            .load_from_path(&yaml_path)
+            .expect("Failed to load YAML");
 
         assert_eq!(flow_file.version, "1.0");
         assert_eq!(flow_file.name, "Test Flow");
@@ -75,7 +80,9 @@ transitions: []
         fs::write(&json_path, json_content).expect("Failed to write JSON file");
 
         let loader = JsonLoader::new();
-        let flow_file = loader.load_from_path(&json_path).expect("Failed to load JSON");
+        let flow_file = loader
+            .load_from_path(&json_path)
+            .expect("Failed to load JSON");
 
         assert_eq!(flow_file.version, "1.0");
         assert_eq!(flow_file.name, "Test Flow");

@@ -1,6 +1,6 @@
 //! Intent routing to appropriate handlers
 
-use crate::intent::types::{Intent, Handler};
+use crate::intent::types::{Handler, Intent};
 
 /// Intent router for routing intents to handlers
 pub struct IntentRouter;
@@ -13,7 +13,10 @@ impl IntentRouter {
 
     /// Check if intent requires direct LLM response
     pub fn is_direct_llm(intent: Intent) -> bool {
-        matches!(intent, Intent::Conversation | Intent::Question | Intent::Ambiguous)
+        matches!(
+            intent,
+            Intent::Conversation | Intent::Question | Intent::Ambiguous
+        )
     }
 
     /// Check if intent requires code generation flow
@@ -28,7 +31,10 @@ mod tests {
 
     #[test]
     fn test_conversation_routing() {
-        assert_eq!(IntentRouter::route(Intent::Conversation), Handler::DirectLlm);
+        assert_eq!(
+            IntentRouter::route(Intent::Conversation),
+            Handler::DirectLlm
+        );
         assert!(IntentRouter::is_direct_llm(Intent::Conversation));
     }
 
@@ -40,7 +46,10 @@ mod tests {
 
     #[test]
     fn test_coding_task_routing() {
-        assert_eq!(IntentRouter::route(Intent::CodingTask), Handler::CodeGenFlow);
+        assert_eq!(
+            IntentRouter::route(Intent::CodingTask),
+            Handler::CodeGenFlow
+        );
         assert!(IntentRouter::is_codegen_flow(Intent::CodingTask));
     }
 

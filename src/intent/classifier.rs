@@ -1,10 +1,10 @@
 //! Hybrid intent classifier (rule-based + LLM fallback)
 
-use crate::intent::types::{Intent, IntentClassificationResult};
-use crate::intent::rules::RuleClassifier;
-use crate::llm::LlmClient;
 use crate::config::AppConfig;
-use anyhow::{Result, Context};
+use crate::intent::rules::RuleClassifier;
+use crate::intent::types::{Intent, IntentClassificationResult};
+use crate::llm::LlmClient;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 
 /// Hybrid intent classifier
@@ -27,30 +27,42 @@ impl IntentClassifier {
 
         // Initialize with common cached intents
         let mut cache = HashMap::new();
-        cache.insert("hi".to_string(), IntentClassificationResult {
-            intent: Intent::Conversation,
-            confidence: 1.0,
-            reason: "Cached common intent".to_string(),
-            override_: false,
-        });
-        cache.insert("hello".to_string(), IntentClassificationResult {
-            intent: Intent::Conversation,
-            confidence: 1.0,
-            reason: "Cached common intent".to_string(),
-            override_: false,
-        });
-        cache.insert("thanks".to_string(), IntentClassificationResult {
-            intent: Intent::Conversation,
-            confidence: 1.0,
-            reason: "Cached common intent".to_string(),
-            override_: false,
-        });
-        cache.insert("thank you".to_string(), IntentClassificationResult {
-            intent: Intent::Conversation,
-            confidence: 1.0,
-            reason: "Cached common intent".to_string(),
-            override_: false,
-        });
+        cache.insert(
+            "hi".to_string(),
+            IntentClassificationResult {
+                intent: Intent::Conversation,
+                confidence: 1.0,
+                reason: "Cached common intent".to_string(),
+                override_: false,
+            },
+        );
+        cache.insert(
+            "hello".to_string(),
+            IntentClassificationResult {
+                intent: Intent::Conversation,
+                confidence: 1.0,
+                reason: "Cached common intent".to_string(),
+                override_: false,
+            },
+        );
+        cache.insert(
+            "thanks".to_string(),
+            IntentClassificationResult {
+                intent: Intent::Conversation,
+                confidence: 1.0,
+                reason: "Cached common intent".to_string(),
+                override_: false,
+            },
+        );
+        cache.insert(
+            "thank you".to_string(),
+            IntentClassificationResult {
+                intent: Intent::Conversation,
+                confidence: 1.0,
+                reason: "Cached common intent".to_string(),
+                override_: false,
+            },
+        );
 
         Ok(Self {
             llm_client,
@@ -71,7 +83,11 @@ impl IntentClassifier {
     }
 
     /// Classify intent with optional override
-    pub async fn classify_with_override(&self, message: &str, override_intent: Option<Intent>) -> Result<IntentClassificationResult> {
+    pub async fn classify_with_override(
+        &self,
+        message: &str,
+        override_intent: Option<Intent>,
+    ) -> Result<IntentClassificationResult> {
         // If override is provided, use it
         if let Some(intent) = override_intent {
             let result = IntentClassificationResult {
@@ -80,7 +96,11 @@ impl IntentClassifier {
                 reason: "User override command".to_string(),
                 override_: true,
             };
-            println!("[INTENT] {} (confidence: {:.2}, routing: override)", result.intent.display_name(), result.confidence);
+            println!(
+                "[INTENT] {} (confidence: {:.2}, routing: override)",
+                result.intent.display_name(),
+                result.confidence
+            );
             return Ok(result);
         }
 
@@ -90,7 +110,11 @@ impl IntentClassifier {
         if let Some(cached) = self.cache.get(&normalized) {
             let mut result = cached.clone();
             result.override_ = false;
-            println!("[INTENT] {} (confidence: {:.2}, routing: cached)", result.intent.display_name(), result.confidence);
+            println!(
+                "[INTENT] {} (confidence: {:.2}, routing: cached)",
+                result.intent.display_name(),
+                result.confidence
+            );
             return Ok(result);
         }
 
@@ -102,14 +126,22 @@ impl IntentClassifier {
                 reason: "Rule-based classification matched".to_string(),
                 override_: false,
             };
-            println!("[INTENT] {} (confidence: {:.2}, routing: rule_based)", result.intent.display_name(), result.confidence);
+            println!(
+                "[INTENT] {} (confidence: {:.2}, routing: rule_based)",
+                result.intent.display_name(),
+                result.confidence
+            );
             return Ok(result);
         }
 
         // Rule-based didn't match, try LLM fallback
         if let Some(ref llm_client) = self.llm_client {
             let result = self.llm_classify(llm_client, message).await?;
-            println!("[INTENT] {} (confidence: {:.2}, routing: llm_fallback)", result.intent.display_name(), result.confidence);
+            println!(
+                "[INTENT] {} (confidence: {:.2}, routing: llm_fallback)",
+                result.intent.display_name(),
+                result.confidence
+            );
             Ok(result)
         } else {
             // No LLM client available, return ambiguous
@@ -119,13 +151,21 @@ impl IntentClassifier {
                 reason: "No LLM client available for classification".to_string(),
                 override_: false,
             };
-            println!("[INTENT] {} (confidence: {:.2}, routing: fallback)", result.intent.display_name(), result.confidence);
+            println!(
+                "[INTENT] {} (confidence: {:.2}, routing: fallback)",
+                result.intent.display_name(),
+                result.confidence
+            );
             Ok(result)
         }
     }
 
     /// Classify intent using LLM
-    async fn llm_classify(&self, llm_client: &LlmClient, message: &str) -> Result<IntentClassificationResult> {
+    async fn llm_classify(
+        &self,
+        llm_client: &LlmClient,
+        message: &str,
+    ) -> Result<IntentClassificationResult> {
         let classifier_prompt = format!(
             r#"Classify the user message into one intent:
 CONVERSATION, QUESTION, CODING_TASK, FILE_EDIT, TOOL_ACTION, PROJECT_ACTION, AMBIGUOUS.
@@ -143,8 +183,8 @@ Return only JSON in this exact format:
             .context("LLM classification call failed")?;
 
         // Parse JSON response
-        let parsed: serde_json::Value = serde_json::from_str(&response)
-            .context("Failed to parse LLM classification JSON")?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response).context("Failed to parse LLM classification JSON")?;
 
         let intent_str = parsed["intent"]
             .as_str()
@@ -152,8 +192,7 @@ Return only JSON in this exact format:
 
         let confidence = parsed["confidence"]
             .as_f64()
-            .context("Missing 'confidence' field in LLM response")?
-            as f32;
+            .context("Missing 'confidence' field in LLM response")? as f32;
 
         let reason = parsed["reason"]
             .as_str()

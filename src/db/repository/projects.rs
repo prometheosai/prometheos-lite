@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use crate::db::models::{CreateProject, Project};
 
@@ -18,11 +18,12 @@ impl<T: AsDb> ProjectOperations for T {
         let conn = self.as_db().conn();
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
-        
+
         conn.execute(
             "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
             params![&id, &input.name, &now.to_rfc3339(), &now.to_rfc3339()],
-        ).context("Failed to insert project")?;
+        )
+        .context("Failed to insert project")?;
 
         Ok(Project {
             id,
@@ -34,50 +35,57 @@ impl<T: AsDb> ProjectOperations for T {
 
     fn get_projects(&self) -> anyhow::Result<Vec<Project>> {
         let conn = self.as_db().conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, created_at, updated_at FROM projects ORDER BY created_at DESC"
-        ).context("Failed to prepare projects query")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, created_at, updated_at FROM projects ORDER BY created_at DESC",
+            )
+            .context("Failed to prepare projects query")?;
 
-        let projects = stmt.query_map([], |row| {
-            let created_str: String = row.get(2)?;
-            let updated_str: String = row.get(3)?;
-            Ok(Project {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: DateTime::parse_from_rfc3339(&created_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                updated_at: DateTime::parse_from_rfc3339(&updated_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
+        let projects = stmt
+            .query_map([], |row| {
+                let created_str: String = row.get(2)?;
+                let updated_str: String = row.get(3)?;
+                Ok(Project {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    updated_at: DateTime::parse_from_rfc3339(&updated_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
             })
-        }).context("Failed to query projects")?
-        .collect::<Result<Vec<_>, _>>()
-        .context("Failed to collect projects")?;
+            .context("Failed to query projects")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect projects")?;
 
         Ok(projects)
     }
 
     fn get_project(&self, id: &str) -> anyhow::Result<Option<Project>> {
         let conn = self.as_db().conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, created_at, updated_at FROM projects WHERE id = ?1"
-        ).context("Failed to prepare project query")?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, created_at, updated_at FROM projects WHERE id = ?1")
+            .context("Failed to prepare project query")?;
 
-        let project = stmt.query_row(params![id], |row| {
-            let created_str: String = row.get(2)?;
-            let updated_str: String = row.get(3)?;
-            Ok(Project {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: DateTime::parse_from_rfc3339(&created_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                updated_at: DateTime::parse_from_rfc3339(&updated_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
+        let project = stmt
+            .query_row(params![id], |row| {
+                let created_str: String = row.get(2)?;
+                let updated_str: String = row.get(3)?;
+                Ok(Project {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    updated_at: DateTime::parse_from_rfc3339(&updated_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
             })
-        }).optional().context("Failed to query project")?;
+            .optional()
+            .context("Failed to query project")?;
 
         Ok(project)
     }

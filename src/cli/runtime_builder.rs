@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use prometheos_lite::{
     config::AppConfig,
-    flow::{RuntimeContext, ModelRouter, ToolRuntime, MemoryService, MemoryDb, EmbeddingProvider, OpenAiProvider, ToolSandboxProfile, LocalEmbeddingProvider},
+    flow::{
+        EmbeddingProvider, LocalEmbeddingProvider, MemoryDb, MemoryService, ModelRouter,
+        OpenAiProvider, RuntimeContext, ToolRuntime, ToolSandboxProfile,
+    },
     llm::LlmClient,
 };
 
@@ -30,30 +33,21 @@ impl RuntimeBuilder {
     pub fn build_full(&self) -> anyhow::Result<RuntimeContext> {
         // Create LlmClient and wrap in OpenAiProvider for ModelRouter
         let llm_client = LlmClient::from_config(&self.config)?;
-        let openai_provider = OpenAiProvider::new(llm_client)
-            .with_name(self.config.provider.clone());
-        let model_router = Arc::new(ModelRouter::new(vec![
-            Box::new(openai_provider)
-        ]));
-        
-        let tool_runtime = Arc::new(ToolRuntime::new(
-            ToolSandboxProfile::new()
-        ));
-        
+        let openai_provider =
+            OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
+        let model_router = Arc::new(ModelRouter::new(vec![Box::new(openai_provider)]));
+
+        let tool_runtime = Arc::new(ToolRuntime::new(ToolSandboxProfile::new()));
+
         // Create persistent memory service with local embedding provider from config
-        let embedding: Box<dyn EmbeddingProvider> = Box::new(
-            LocalEmbeddingProvider::new(
-                self.config.embedding_url.clone(),
-                self.config.embedding_dimension,
-            )
-        );
-        let persistent_db = MemoryDb::new(
-            std::path::PathBuf::from(self.config.memory_db_path.clone())
-        ).context("Failed to create memory database")?;
-        let memory_service = Arc::new(MemoryService::new(
-            persistent_db,
-            embedding,
+        let embedding: Box<dyn EmbeddingProvider> = Box::new(LocalEmbeddingProvider::new(
+            self.config.embedding_url.clone(),
+            self.config.embedding_dimension,
         ));
+        let persistent_db =
+            MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
+                .context("Failed to create memory database")?;
+        let memory_service = Arc::new(MemoryService::new(persistent_db, embedding));
 
         Ok(RuntimeContext::full(
             model_router,
@@ -65,15 +59,11 @@ impl RuntimeBuilder {
     /// Build RuntimeContext with minimal services (no memory)
     pub fn build_minimal(&self) -> anyhow::Result<RuntimeContext> {
         let llm_client = LlmClient::from_config(&self.config)?;
-        let openai_provider = OpenAiProvider::new(llm_client)
-            .with_name(self.config.provider.clone());
-        let model_router = Arc::new(ModelRouter::new(vec![
-            Box::new(openai_provider)
-        ]));
-        
-        let tool_runtime = Arc::new(ToolRuntime::new(
-            ToolSandboxProfile::new()
-        ));
+        let openai_provider =
+            OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
+        let model_router = Arc::new(ModelRouter::new(vec![Box::new(openai_provider)]));
+
+        let tool_runtime = Arc::new(ToolRuntime::new(ToolSandboxProfile::new()));
 
         Ok(RuntimeContext::new()
             .with_model_router(model_router)
@@ -83,11 +73,9 @@ impl RuntimeBuilder {
     /// Build only the model router
     pub fn build_model_router(&self) -> anyhow::Result<Arc<ModelRouter>> {
         let llm_client = LlmClient::from_config(&self.config)?;
-        let openai_provider = OpenAiProvider::new(llm_client)
-            .with_name(self.config.provider.clone());
-        Ok(Arc::new(ModelRouter::new(vec![
-            Box::new(openai_provider)
-        ])))
+        let openai_provider =
+            OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
+        Ok(Arc::new(ModelRouter::new(vec![Box::new(openai_provider)])))
     }
 
     /// Build only the tool runtime
@@ -97,19 +85,14 @@ impl RuntimeBuilder {
 
     /// Build the memory service
     pub fn build_memory_service(&self) -> anyhow::Result<Arc<MemoryService>> {
-        let embedding: Box<dyn EmbeddingProvider> = Box::new(
-            LocalEmbeddingProvider::new(
-                self.config.embedding_url.clone(),
-                self.config.embedding_dimension,
-            )
-        );
-        let persistent_db = MemoryDb::new(
-            std::path::PathBuf::from(self.config.memory_db_path.clone())
-        ).context("Failed to create memory database")?;
-        Ok(Arc::new(MemoryService::new(
-            persistent_db,
-            embedding,
-        )))
+        let embedding: Box<dyn EmbeddingProvider> = Box::new(LocalEmbeddingProvider::new(
+            self.config.embedding_url.clone(),
+            self.config.embedding_dimension,
+        ));
+        let persistent_db =
+            MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
+                .context("Failed to create memory database")?;
+        Ok(Arc::new(MemoryService::new(persistent_db, embedding)))
     }
 
     /// Build the embedding provider

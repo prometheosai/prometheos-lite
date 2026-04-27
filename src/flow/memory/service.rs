@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::db::MemoryDb;
 use super::embedding::EmbeddingProvider;
-use super::types::{Memory, MemoryKind, MemoryType, MemoryWriteTask, ContextBundle};
+use super::types::{ContextBundle, Memory, MemoryKind, MemoryType, MemoryWriteTask};
 use super::vector::{BruteForceBackend, VectorSearchBackend};
 
 /// Memory service for high-level memory operations
@@ -22,33 +22,33 @@ pub struct MemoryService {
 
 impl MemoryService {
     /// Create a new memory service
-    pub fn new(
-        db: MemoryDb,
-        embedding_provider: Box<dyn EmbeddingProvider>,
-    ) -> Self {
+    pub fn new(db: MemoryDb, embedding_provider: Box<dyn EmbeddingProvider>) -> Self {
         let vector_backend = BruteForceBackend::new();
-        
+
         let (write_tx, write_rx) = mpsc::unbounded_channel();
-        
+
         let db_arc = Arc::new(tokio::sync::Mutex::new(db));
-        
+
         let service = Self {
             db: db_arc.clone(),
             embedding_provider,
             vector_backend: Arc::new(tokio::sync::Mutex::new(vector_backend)),
             write_tx,
         };
-        
+
         // Spawn background task processor
         tokio::spawn(async move {
             Self::process_write_tasks(db_arc, write_rx).await;
         });
-        
+
         service
     }
 
     /// Background task processor for memory writes
-    async fn process_write_tasks(db: Arc<tokio::sync::Mutex<MemoryDb>>, mut rx: mpsc::UnboundedReceiver<MemoryWriteTask>) {
+    async fn process_write_tasks(
+        db: Arc<tokio::sync::Mutex<MemoryDb>>,
+        mut rx: mpsc::UnboundedReceiver<MemoryWriteTask>,
+    ) {
         while let Some(task) = rx.recv().await {
             match task {
                 MemoryWriteTask::LogEpisode {
@@ -124,13 +124,15 @@ impl MemoryService {
         conversation_id: Option<String>,
         metadata: serde_json::Value,
     ) -> Result<()> {
-        self.write_tx.send(MemoryWriteTask::LogEpisode {
-            content,
-            user_id,
-            project_id,
-            conversation_id,
-            metadata,
-        }).context("Failed to queue episode write")?;
+        self.write_tx
+            .send(MemoryWriteTask::LogEpisode {
+                content,
+                user_id,
+                project_id,
+                conversation_id,
+                metadata,
+            })
+            .context("Failed to queue episode write")?;
         Ok(())
     }
 
@@ -155,18 +157,20 @@ impl MemoryService {
                 return Ok(());
             }
         }
-        
-        self.write_tx.send(MemoryWriteTask::CreateSemantic {
-            content,
-            kind,
-            user_id,
-            project_id,
-            conversation_id,
-            summary,
-            importance_score,
-            confidence_score,
-            metadata,
-        }).context("Failed to queue semantic write")?;
+
+        self.write_tx
+            .send(MemoryWriteTask::CreateSemantic {
+                content,
+                kind,
+                user_id,
+                project_id,
+                conversation_id,
+                summary,
+                importance_score,
+                confidence_score,
+                metadata,
+            })
+            .context("Failed to queue semantic write")?;
         Ok(())
     }
 
@@ -181,7 +185,8 @@ impl MemoryService {
 
         if let Some(pid) = project_id {
             let results = db_guard.get_memories_by_project(pid)?;
-            let recent: Vec<Memory> = results.into_iter()
+            let recent: Vec<Memory> = results
+                .into_iter()
                 .filter(|m| m.kind == *kind)
                 .take(5)
                 .collect();
@@ -207,17 +212,17 @@ impl MemoryService {
     fn content_similarity(&self, a: &str, b: &str) -> f32 {
         let a_lower = a.to_lowercase();
         let b_lower = b.to_lowercase();
-        
+
         let a_words: std::collections::HashSet<&str> = a_lower.split_whitespace().collect();
         let b_words: std::collections::HashSet<&str> = b_lower.split_whitespace().collect();
-        
+
         if a_words.is_empty() || b_words.is_empty() {
             return 0.0;
         }
-        
+
         let intersection = a_words.intersection(&b_words).count();
         let union = a_words.union(&b_words).count();
-        
+
         if union == 0 {
             0.0
         } else {
@@ -339,13 +344,19 @@ impl MemoryService {
     }
 
     /// Create a relationship between memories
-    pub fn create_relationship(&self, relationship: &super::types::MemoryRelationship) -> Result<()> {
+    pub fn create_relationship(
+        &self,
+        relationship: &super::types::MemoryRelationship,
+    ) -> Result<()> {
         let db_guard = self.db.blocking_lock();
         db_guard.create_relationship(relationship)
     }
 
     /// Get relationships for a memory
-    pub fn get_relationships(&self, memory_id: &str) -> Result<Vec<super::types::MemoryRelationship>> {
+    pub fn get_relationships(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<super::types::MemoryRelationship>> {
         let db_guard = self.db.blocking_lock();
         db_guard.get_relationships(memory_id)
     }

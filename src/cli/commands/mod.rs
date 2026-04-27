@@ -1,11 +1,11 @@
 //! CLI command handlers
 
-pub mod flow;
-pub mod serve;
-pub mod run;
 pub mod bench;
+pub mod flow;
+pub mod run;
+pub mod serve;
 
-pub use flow::*;
-pub use serve::*;
-pub use run::*;
 pub use bench::*;
+pub use flow::*;
+pub use run::*;
+pub use serve::*;
