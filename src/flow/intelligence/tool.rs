@@ -261,6 +261,14 @@ impl ToolRuntime {
             anyhow::bail!("Shell execution is not allowed by tool policy");
         }
 
+        // Check trust policy for untrusted tools
+        use crate::tools::TrustRegistry;
+        let registry = TrustRegistry::new();
+        let trust_level = registry.get_trust_level(&context.tool_name);
+        if registry.requires_approval(&context.tool_name) && context.requires_approval() {
+            anyhow::bail!("Tool '{}' requires approval (trust level: {:?})", context.tool_name, trust_level);
+        }
+
         // Check if command is allowed by sandbox profile
         if !self.profile.is_command_allowed(command) {
             anyhow::bail!("Command '{}' is not allowed by sandbox profile", command);

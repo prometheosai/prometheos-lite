@@ -66,6 +66,11 @@ impl LoopDetector {
         Ok(())
     }
 
+    /// Get the count for a specific node
+    pub fn get_node_count(&self, node_id: &str) -> usize {
+        *self.node_counts.get(node_id).unwrap_or(&0)
+    }
+
     /// Record a transition
     pub fn record_transition(&mut self, from: &str, to: &str) -> Result<(), String> {
         let transition_key = format!("{}->{}", from, to);

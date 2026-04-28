@@ -1,11 +1,18 @@
-//! Built-in node implementations for flow execution
+//! Built-in node implementations
 
+use crate::flow::node::{Node, NodeConfig};
+use crate::flow::SharedState;
+use crate::tools::PathGuard;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde_json::json;
 use std::sync::Arc;
 
+// Import guardrail database operations
+use crate::db::repository::{InterruptOperations, OutboxOperations};
+
 use crate::flow::{
-    MemoryService, MemoryType, ModelRouter, Node, NodeConfig, SharedState, ToolRuntime,
+    MemoryService, MemoryType, ModelRouter, ToolRuntime,
 };
 use crate::personality::{ConstitutionalFilter, PersonalityMode, PromptContext};
 
@@ -670,14 +677,93 @@ impl Node for FileWriterNode {
             .as_str()
             .context("Missing file_path in file writer node input")?;
 
-        // Write the file to disk
+        // Extract ToolContext for idempotency
+        let context: crate::tools::ToolContext = serde_json::from_value(
+            input["tool_context"].clone()
+        ).context("Missing or invalid tool_context in file writer node input")?;
+
+        // Generate idempotency key for this operation
+        let operation_hash = crate::flow::IdempotencyKey::compute_operation_hash(
+            "file_writer",
+            &serde_json::json!({"path": file_path, "content": content}),
+        );
+        let idempotency_key = crate::flow::IdempotencyKey::new(
+            context.run_id.clone(),
+            context.node_id.clone(),
+            operation_hash,
+        );
+
+        // Check outbox for duplicate operation
+        let db_path = ".prometheos/runs.db";
+        if std::path::Path::new(db_path).exists() {
+            if let Ok(db) = crate::db::repository::Db::new(db_path) {
+                if let Ok(existing) = OutboxOperations::get_outbox_entry_by_hash(
+                    &db,
+                    &context.run_id,
+                    &context.node_id,
+                    &idempotency_key.key,
+                ) {
+                    if let Some(entry) = existing {
+                        if entry.status == "completed" {
+                            // Return cached result instead of re-executing
+                            return Ok(serde_json::json!({
+                                "success": true,
+                                "file_path": file_path,
+                                "bytes_written": content.len(),
+                                "idempotency_key": idempotency_key.key,
+                                "from_cache": true,
+                                "cached_output": entry.output
+                            }));
+                        }
+                    }
+                }
+
+                // Create outbox entry for this operation
+                let _ = OutboxOperations::create_outbox_entry(
+                    &db,
+                    &context.run_id,
+                    &context.trace_id,
+                    &context.node_id,
+                    "file_writer",
+                    &idempotency_key.key,
+                );
+            }
+        }
+
+        // Proceed with write
         std::fs::write(file_path, content)
             .with_context(|| format!("Failed to write file: {}", file_path))?;
+
+        // Mark outbox entry as completed
+        if std::path::Path::new(db_path).exists() {
+            if let Ok(db) = crate::db::repository::Db::new(db_path) {
+                if let Ok(entry) = OutboxOperations::get_outbox_entry_by_hash(
+                    &db,
+                    &context.run_id,
+                    &context.node_id,
+                    &idempotency_key.key,
+                ) {
+                    if let Some(ref entry) = entry {
+                        let _ = OutboxOperations::mark_outbox_completed(
+                            &db,
+                            &entry.id,
+                            &serde_json::json!({
+                                "success": true,
+                                "file_path": file_path,
+                                "bytes_written": content.len()
+                            }).to_string()
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(serde_json::json!({
             "success": true,
             "file_path": file_path,
-            "bytes_written": content.len()
+            "bytes_written": content.len(),
+            "idempotency_key": idempotency_key.key,
+            "from_cache": false
         }))
     }
 

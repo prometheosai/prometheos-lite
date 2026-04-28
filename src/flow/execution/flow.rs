@@ -51,6 +51,8 @@ pub struct Flow {
     tracer: Option<crate::flow::tracing::SharedTracer>,
     /// Optional budget guard for enforcing resource limits
     budget_guard: Option<BudgetGuard>,
+    /// Optional loop detector for preventing runaway flows
+    loop_detector: Option<crate::flow::LoopDetector>,
 }
 
 impl Flow {
@@ -96,6 +98,17 @@ impl Flow {
         self.budget_guard.as_ref()
     }
 
+    /// Set the loop detector for this flow
+    pub fn with_loop_detector(mut self, loop_detector: crate::flow::LoopDetector) -> Self {
+        self.loop_detector = Some(loop_detector);
+        self
+    }
+
+    /// Get the loop detector if set
+    pub fn loop_detector(&self) -> Option<&crate::flow::LoopDetector> {
+        self.loop_detector.as_ref()
+    }
+
     /// Execute the flow with the given state
     pub async fn run(&mut self, state: &mut SharedState) -> Result<()> {
         self.run_with_hooks(state, &NoOpHooks).await
@@ -119,6 +132,26 @@ impl Flow {
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
 
+        // Store flow snapshot for this run (if flow source is available in state)
+        if let Some(flow_source) = state.get_input("flow_source").and_then(|v| v.as_str()) {
+            if let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str()) {
+                let source_hash = crate::flow::FlowSnapshot::compute_hash(flow_source);
+                let db_path = ".prometheos/runs.db";
+                if std::path::Path::new(db_path).exists() {
+                    if let Ok(db) = crate::db::repository::Db::new(db_path) {
+                        use crate::db::repository::FlowSnapshotOperations;
+                        let _ = FlowSnapshotOperations::create_flow_snapshot(
+                            &db,
+                            flow_name,
+                            "1.0",
+                            &source_hash,
+                            flow_source,
+                        );
+                    }
+                }
+            }
+        }
+
         // Log flow start
         if let Some(tracer) = &self.tracer {
             if let Ok(mut t) = tracer.lock() {
@@ -133,6 +166,29 @@ impl Flow {
         }
 
         loop {
+            // Check loop detection before each step
+            if let Some(detector) = &mut self.loop_detector {
+                if let Err(e) = detector.record_node(&current.clone()) {
+                    anyhow::bail!("Loop detection: {}", e);
+                }
+
+                // Emit loop detection trace event
+                if let Some(tracer) = &self.tracer {
+                    if let Ok(mut t) = tracer.lock() {
+                        t.log_flow_event(
+                            crate::flow::tracing::TraceEvent::LoopDetected {
+                                run_id: run_id.clone(),
+                                trace_id: trace_id.clone(),
+                                node_id: current.clone(),
+                                loop_type: "node_repetition".to_string(),
+                            },
+                            Some(current.clone()),
+                            format!("Loop check: node {} count {}", current, detector.get_node_count(&current)),
+                        );
+                    }
+                }
+            }
+
             // Check budget before each step and update state with budget report
             if let Some(guard) = &self.budget_guard {
                 guard
@@ -272,6 +328,13 @@ impl Flow {
                 Some(next) => {
                     // Hook: before transition
                     hooks.on_transition(&current, &action, next);
+
+                    // Check loop detection for transitions
+                    if let Some(detector) = &mut self.loop_detector {
+                        if let Err(e) = detector.record_transition(&current, next) {
+                            anyhow::bail!("Loop detection: {}", e);
+                        }
+                    }
 
                     // Log transition (reuse same run_id)
                     if let Some(tracer) = &self.tracer {
@@ -566,6 +629,7 @@ impl FlowBuilder {
             transitions: self.transitions,
             tracer: self.tracer,
             budget_guard: self.budget_guard,
+            loop_detector: None, // Can be set via with_loop_detector after build
         };
 
         flow.validate()?;
