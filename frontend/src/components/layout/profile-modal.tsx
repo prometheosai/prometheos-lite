@@ -390,7 +390,7 @@ export function ProfileModal({ open, onOpenChange }: ProfileModalProps) {
                   <div className="p-4 border rounded-lg bg-muted/50">
                     <div className="font-semibold mb-2">PrometheOS Lite</div>
                     <div className="text-sm text-muted-foreground mb-4">
-                      You're currently on the free Lite plan. Upgrade to Pro for advanced features.
+                      You&apos;re currently on the free Lite plan. Upgrade to Pro for advanced features.
                     </div>
                     <Button className="w-full" disabled>
                       Upgrade to Pro

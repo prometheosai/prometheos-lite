@@ -56,7 +56,7 @@ const projectIconOptions = [
 export function LeftSidebar() {
   const [collapsed, setCollapsed] = useState(false)
   const [selectedProjectIcon, setSelectedProjectIcon] = useState("folder")
-  const [selectedChatIcon, setSelectedChatIcon] = useState(chatIconOptions[0].key)
+  const [selectedChatIcon, setSelectedChatIcon] = useState<string>(chatIconOptions[0].key)
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null)
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null)
   const [collapsedTimeGroups, setCollapsedTimeGroups] = useState<Record<string, Record<string, boolean>>>({})
