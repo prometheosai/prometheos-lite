@@ -73,6 +73,8 @@ pub enum Handler {
     DirectLlm,
     /// Full code generation flow
     CodeGenFlow,
+    /// WorkOrchestrator for persistent work contexts
+    WorkOrchestrator,
     /// File editing handler
     FileEdit,
     /// Tool execution handler
@@ -90,12 +92,12 @@ impl Handler {
     pub fn from_intent(intent: Intent) -> Self {
         match intent {
             Intent::Conversation | Intent::Question => Handler::DirectLlm,
-            Intent::CodingTask => Handler::CodeGenFlow,
+            Intent::CodingTask => Handler::WorkOrchestrator, // Route to WorkOrchestrator for persistent work
             Intent::FileEdit => Handler::FileEdit,
             Intent::ToolAction => Handler::ToolExecution,
             Intent::ProjectAction => Handler::ProjectAction,
             Intent::Planning => Handler::Planning,
-            Intent::Approval => Handler::CodeGenFlow, // Approval continues with full implementation
+            Intent::Approval => Handler::WorkOrchestrator, // Approval continues with WorkOrchestrator
             Intent::Ambiguous => Handler::DirectLlm,  // Default to direct LLM for ambiguous
         }
     }

@@ -26,6 +26,28 @@ pub struct CreateWorkContextRequest {
     pub user_id: String,
 }
 
+/// Request to submit a user intent
+#[derive(Debug, Deserialize)]
+pub struct SubmitIntentRequest {
+    pub user_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+/// Request to run a WorkContext until blocked or complete
+#[derive(Debug, Deserialize)]
+pub struct RunContextRequest {
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
+    #[serde(default)]
+    pub max_runtime_ms: Option<u64>,
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    #[serde(default)]
+    pub max_cost: Option<f64>,
+}
+
 /// Response with WorkContext details
 #[derive(Debug, Serialize)]
 pub struct WorkContextResponse {
@@ -237,7 +259,7 @@ pub async fn get_work_context_artifacts(
 }
 
 /// Continue a WorkContext
-/// 
+///
 /// This endpoint validates a WorkContext for continuation and returns its current state.
 /// For V1.2, actual flow execution is handled via CLI. The API provides validation and state retrieval.
 /// Future versions will support async execution via background task queue.
@@ -247,24 +269,75 @@ pub async fn continue_work_context(
 ) -> Result<Json<WorkContextResponse>, StatusCode> {
     let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
-
-    // Verify context exists
     let context = work_context_service
         .get_context(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Check if context is blocked
-    if context.is_blocked() {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let response = WorkContextResponse {
+        id: context.id,
+        title: context.title,
+        domain: format!("{:?}", context.domain),
+        goal: context.goal,
+        status: format!("{:?}", context.status),
+        phase: format!("{:?}", context.current_phase),
+        created_at: context.created_at.to_rfc3339(),
+        updated_at: context.updated_at.to_rfc3339(),
+    };
 
-    // Check if context is complete
-    if context.is_complete() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    Ok(Json(response))
+}
 
-    // Return current context state
+/// Submit a user intent to create or attach to a WorkContext
+pub async fn submit_intent(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubmitIntentRequest>,
+) -> Result<Json<WorkContextResponse>, StatusCode> {
+    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let work_context_service = WorkContextService::new(Arc::new(db));
+
+    let domain = match req.message.to_lowercase().as_str() {
+        msg if msg.contains("code") || msg.contains("implement") => WorkDomain::Software,
+        _ => WorkDomain::General,
+    };
+
+    let context = work_context_service
+        .create_context(req.user_id, req.message.clone(), domain, req.message)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let response = WorkContextResponse {
+        id: context.id,
+        title: context.title,
+        domain: format!("{:?}", context.domain),
+        goal: context.goal,
+        status: format!("{:?}", context.status),
+        phase: format!("{:?}", context.current_phase),
+        created_at: context.created_at.to_rfc3339(),
+        updated_at: context.updated_at.to_rfc3339(),
+    };
+
+    Ok(Json(response))
+}
+
+/// Run a WorkContext until blocked or complete
+pub async fn run_until_complete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RunContextRequest>,
+) -> Result<Json<WorkContextResponse>, StatusCode> {
+    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let work_context_service = WorkContextService::new(Arc::new(db));
+
+    let mut context = work_context_service
+        .get_context(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Update status to in_progress
+    work_context_service
+        .update_status(&mut context, WorkStatus::InProgress)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let response = WorkContextResponse {
         id: context.id,
         title: context.title,

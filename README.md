@@ -21,6 +21,14 @@ PrometheOS Lite v1.2 is a Rust-based, local-first system for orchestrating AI ag
 - **Domain Profiles**: Pre-configured templates for different work domains (Software, Business, Marketing, etc.)
 - **Guardrails**: Built-in safety checks for blocked contexts and approval requirements
 
+### Harness Spine (V1.2.5)
+- **WorkOrchestrator**: Central execution loop with hard stop contracts (max iterations, runtime, tool calls, cost)
+- **PlaybookResolver**: Intelligent playbook selection based on domain matching and usage history
+- **Persistent Work Execution**: WorkContext as default execution path for all operations
+- **Intent Routing**: CODING_TASK and APPROVAL intents route to WorkOrchestrator
+- **CLI Commands**: `work submit`, `work continue`, `work run` for orchestration
+- **API Endpoints**: REST endpoints for intent submission, context continuation, and bounded execution
+
 ### Advanced Execution
 - **Parallel Flows**: Execute multiple flows concurrently with configurable concurrency limits
 - **Self-Reflection Loops**: Loop nodes with reflection functions for iterative improvement

@@ -48,7 +48,7 @@ mod tests {
     fn test_coding_task_routing() {
         assert_eq!(
             IntentRouter::route(Intent::CodingTask),
-            Handler::CodeGenFlow
+            Handler::WorkOrchestrator
         );
         assert!(IntentRouter::is_codegen_flow(Intent::CodingTask));
     }

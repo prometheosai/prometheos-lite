@@ -326,6 +326,23 @@ impl Db {
             )
             .context("Failed to create work_context_playbooks table")?;
 
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS playbook_usage_log (
+                id TEXT PRIMARY KEY,
+                playbook_id TEXT NOT NULL,
+                work_context_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                used_at TEXT NOT NULL,
+                FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create playbook_usage_log table")?;
+
         Ok(())
     }
 

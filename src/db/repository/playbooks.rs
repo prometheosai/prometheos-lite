@@ -13,6 +13,8 @@ pub trait PlaybookOperations: Repository {
     fn get_playbooks_for_user(&self, user_id: &str) -> anyhow::Result<Vec<WorkContextPlaybook>>;
     fn update_playbook(&self, playbook: &WorkContextPlaybook) -> anyhow::Result<WorkContextPlaybook>;
     fn delete_playbook(&self, id: &str) -> anyhow::Result<()>;
+    fn increment_usage_count(&self, id: &str) -> anyhow::Result<()>;
+    fn update_confidence(&self, id: &str, confidence: f32) -> anyhow::Result<()>;
 }
 
 impl PlaybookOperations for crate::db::Db {
@@ -198,6 +200,30 @@ impl PlaybookOperations for crate::db::Db {
 
         conn.execute("DELETE FROM work_context_playbooks WHERE id = ?1", params![id])
             .context("Failed to delete playbook")?;
+
+        Ok(())
+    }
+
+    fn increment_usage_count(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.conn();
+
+        conn.execute(
+            "UPDATE work_context_playbooks SET usage_count = usage_count + 1, updated_at = ?1 WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), id],
+        )
+        .context("Failed to increment playbook usage count")?;
+
+        Ok(())
+    }
+
+    fn update_confidence(&self, id: &str, confidence: f32) -> anyhow::Result<()> {
+        let conn = self.conn();
+
+        conn.execute(
+            "UPDATE work_context_playbooks SET confidence = ?1, updated_at = ?2 WHERE id = ?3",
+            params![confidence.clamp(0.0, 1.0), chrono::Utc::now().to_rfc3339(), id],
+        )
+        .context("Failed to update playbook confidence")?;
 
         Ok(())
     }

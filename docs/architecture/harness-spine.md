@@ -1,0 +1,190 @@
+# Harness Spine Architecture
+
+## Overview
+
+The Harness Spine is the central execution layer for persistent work in PrometheOS Lite. It provides the foundational infrastructure for autonomous, persistent work execution through three core components:
+
+- **WorkOrchestrator**: Central execution loop managing persistent work contexts with hard stop contracts
+- **PlaybookResolver**: Scores and selects playbooks based on domain, usage, and confidence
+- **WorkContext**: Default execution path for all work operations
+
+## Components
+
+### WorkOrchestrator
+
+The `WorkOrchestrator` is the central service that owns the high-level execution loop for persistent work contexts. It provides:
+
+- **Intent Submission**: `submit_user_intent()` - Classifies user intent and routes to appropriate context
+- **Context Continuation**: `continue_context()` - Resumes blocked contexts
+- **Bounded Execution**: `run_until_blocked_or_complete()` - Executes with hard stop contracts
+- **Context Routing**: `route_to_context()` - Routes requests to appropriate work contexts
+
+#### Execution Limits (Hard Stop Contracts)
+
+The `ExecutionLimits` struct defines hard stop contracts for autonomous execution:
+
+```rust
+pub struct ExecutionLimits {
+    pub max_iterations: u32,           // Default: 10
+    pub max_runtime_ms: u64,            // Default: 300,000 (5 minutes)
+    pub max_tool_calls: u32,            // Default: 50
+    pub max_cost: f64,                  // Default: $1.00
+    pub approval_required_for_side_effects: bool,  // Default: true
+    pub completion_criteria: Vec<String>,
+    pub failure_threshold: f32,         // Default: 0.3
+}
+```
+
+### PlaybookResolver
+
+The `PlaybookResolver` selects appropriate playbooks for a given `WorkContext` based on:
+
+- **Domain Matching**: Bonus for matching domain profiles
+- **Usage History**: Diminishing returns boost based on usage count
+- **Confidence Score**: Base confidence from playbook metadata
+
+#### Scoring Algorithm
+
+```
+score = base_confidence + domain_bonus + usage_boost
+
+where:
+- base_confidence: 0.0 to 1.0
+- domain_bonus: +0.3 if domain matches
+- usage_boost: 0.1 * ln(usage_count + 1)
+```
+
+### WorkContext Execution Path
+
+The `WorkContext` is now the default execution path for all work operations. Key changes:
+
+- **Intent Routing**: `CODING_TASK` and `APPROVAL` intents route to `WorkOrchestrator`
+- **Execution Options**: `FlowExecutionService` accepts optional `work_context_id`
+- **State Tracking**: Context state is updated on each execution step
+
+## Data Flow
+
+### Intent Submission Flow
+
+```
+User Message
+    ↓
+IntentClassifier
+    ↓
+WorkOrchestrator::submit_user_intent()
+    ↓
+Route to Context (create or attach)
+    ↓
+PlaybookResolver::resolve_playbook()
+    ↓
+Apply playbook settings
+    ↓
+FlowExecutionService::execute_message()
+    ↓
+Update WorkContext state
+```
+
+### Bounded Execution Flow
+
+```
+WorkContext ID + ExecutionLimits
+    ↓
+WorkOrchestrator::run_until_blocked_or_complete()
+    ↓
+Loop:
+  - Check limits (iterations, runtime, tool calls, cost)
+  - Check completion criteria
+  - Check blocked status
+  - Execute next step
+  - Update context state
+    ↓
+Return final context state
+```
+
+## Database Schema
+
+### New Table: playbook_usage_log
+
+Tracks playbook usage for analytics and confidence adjustment:
+
+```sql
+CREATE TABLE playbook_usage_log (
+    id TEXT PRIMARY KEY,
+    playbook_id TEXT NOT NULL,
+    work_context_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    used_at TEXT NOT NULL,
+    FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE,
+    FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+);
+```
+
+### Enhanced Playbook Operations
+
+- `increment_usage_count()`: Increments playbook usage counter
+- `update_confidence()`: Updates playbook confidence score
+
+## CLI Integration
+
+### New Commands
+
+```bash
+# Submit a user intent
+prometheos work submit "Build a REST API" --conversation-id <id>
+
+# Continue a blocked context
+prometheos work continue <context-id>
+
+# Run context until blocked or complete
+prometheos work run <context-id> --max-iterations 20 --max-runtime-ms 600000
+```
+
+## API Integration
+
+### New Endpoints
+
+- `POST /work-contexts/submit-intent` - Submit user intent
+- `POST /work-contexts/:id/continue` - Continue blocked context
+- `POST /work-contexts/:id/run-until-complete` - Run with limits
+- `GET /playbooks` - List playbooks
+- `POST /playbooks` - Create playbook
+- `PUT /playbooks/:id` - Update playbook
+
+## Critical Bug Fix
+
+### ContextLoaderNode Input Mismatch
+
+**Bug**: `ContextLoaderNode::prep()` emitted `{"task": task}` but `exec()` expected `input["query"]`
+
+**Fix**: Changed `prep()` to emit `{"query": task}` to match `exec()` expectations
+
+**Location**: `src/flow/factory/builtin_nodes.rs`
+
+## Testing
+
+### Unit Tests
+
+- `test_execution_limits_default()` - Validates default limits
+- `test_execution_limits_builder()` - Validates builder pattern
+- `test_playbook_resolver_resolve_playbook()` - Tests playbook resolution
+- `test_work_orchestrator_route_to_context()` - Tests context routing
+- `test_work_context_service_create_and_get()` - Tests context CRUD
+- `test_work_context_service_update_status()` - Tests status updates
+- `test_playbook_repository_increment_usage()` - Tests usage tracking
+- `test_playbook_repository_update_confidence()` - Tests confidence updates
+
+### Test Coverage
+
+All new code paths have unit tests with >80% coverage target.
+
+## Future Enhancements (Not in MVP)
+
+- SkillKernel for skill extraction and management
+- EvolutionEngine for playbook evolution
+- Coding harness nodes for specialized operations
+- Job queue for async execution
+- Metadata tracking on all LLM/tool outputs
+- Control panel endpoints
+- WebSocket events for real-time updates

@@ -31,6 +31,8 @@ pub struct ExecutionOptions {
     pub override_intent: Option<Intent>,
     /// Optional flows directory override
     pub flows_dir: Option<std::path::PathBuf>,
+    /// Optional work context ID for context tracking
+    pub work_context_id: Option<String>,
 }
 
 impl Default for ExecutionOptions {
@@ -41,6 +43,7 @@ impl Default for ExecutionOptions {
             tracer: None,
             override_intent: None,
             flows_dir: None,
+            work_context_id: None,
         }
     }
 }
@@ -63,6 +66,11 @@ impl ExecutionOptions {
 
     pub fn with_override_intent(mut self, intent: Intent) -> Self {
         self.override_intent = Some(intent);
+        self
+    }
+
+    pub fn with_work_context_id(mut self, id: String) -> Self {
+        self.work_context_id = Some(id);
         self
     }
 }

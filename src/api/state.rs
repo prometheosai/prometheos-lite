@@ -9,6 +9,9 @@ use crate::flow::EmbeddingProvider;
 use crate::flow::LocalEmbeddingProvider;
 use crate::flow::MemoryService;
 use crate::flow::RuntimeContext;
+use crate::flow::execution_service::FlowExecutionService;
+use crate::intent::IntentClassifier;
+use crate::work::{PlaybookResolver, WorkContextService, WorkOrchestrator};
 
 /// Global application state shared across all API routes
 ///

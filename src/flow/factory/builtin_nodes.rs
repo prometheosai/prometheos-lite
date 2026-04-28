@@ -816,7 +816,7 @@ impl Node for ContextLoaderNode {
             .unwrap_or("")
             .to_string();
 
-        Ok(serde_json::json!({ "task": task }))
+        Ok(serde_json::json!({ "query": task }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
@@ -999,7 +999,7 @@ impl Node for ConditionalNode {
     }
 }
 
-/// Passthrough Node - passes through state without modification
+/// Passthrough Node - does nothing, passes through
 pub struct PassthroughNode {
     config: NodeConfig,
 }
@@ -1034,5 +1034,23 @@ impl Node for PassthroughNode {
 
     fn config(&self) -> NodeConfig {
         self.config.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::SharedState;
+
+    #[test]
+    fn test_context_loader_prep_exec_match() {
+        let node = ContextLoaderNode::new(NodeConfig::default(), None);
+        let mut state = SharedState::new();
+        state.set_input("task".to_string(), serde_json::json!("test query"));
+
+        let prep_output = node.prep(&state).unwrap();
+        assert!(prep_output.get("query").is_some());
+        assert_eq!(prep_output["query"], "test query");
+        assert!(prep_output.get("task").is_none());
     }
 }

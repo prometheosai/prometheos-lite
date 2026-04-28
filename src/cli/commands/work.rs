@@ -7,10 +7,11 @@ use std::sync::Arc;
 use prometheos_lite::db::Db;
 use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
+use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::{
     template_loader::TemplateLoader,
     types::{WorkDomain, WorkStatus},
-    WorkContextService, WorkExecutionService,
+    ExecutionLimits, PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator,
 };
 
 #[derive(Debug, Parser)]
@@ -43,10 +44,29 @@ enum WorkSubcommand {
         /// WorkContext ID
         id: String,
     },
-    /// Continue a WorkContext
+    /// Submit a user intent to create or attach to a WorkContext
+    Submit {
+        /// User message/intent
+        message: String,
+        /// Optional conversation ID
+        #[arg(short, long)]
+        conversation_id: Option<String>,
+    },
+    /// Continue a blocked WorkContext
     Continue {
         /// WorkContext ID
         id: String,
+    },
+    /// Run a WorkContext until blocked or complete
+    Run {
+        /// WorkContext ID
+        id: String,
+        /// Max iterations
+        #[arg(short, long)]
+        max_iterations: Option<u32>,
+        /// Max runtime in milliseconds
+        #[arg(short, long)]
+        max_runtime_ms: Option<u64>,
     },
     /// Set status of a WorkContext
     SetStatus {
@@ -69,6 +89,15 @@ impl WorkCommand {
 
         let runtime = Arc::new(RuntimeContext::default());
         let flow_execution_service = Arc::new(FlowExecutionService::new(runtime)?);
+        let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
+        let intent_classifier = IntentClassifier::new()?;
+        let work_orchestrator = Arc::new(WorkOrchestrator::new(
+            work_context_service.clone(),
+            playbook_resolver,
+            flow_execution_service.clone(),
+            intent_classifier,
+        ));
+
         let work_execution_service = Arc::new(WorkExecutionService::new(
             work_context_service.clone(),
             flow_execution_service,
@@ -150,13 +179,45 @@ impl WorkCommand {
                     }
                 }
             }
+            WorkSubcommand::Submit { message, conversation_id } => {
+                let context = work_orchestrator
+                    .submit_user_intent("cli-user".to_string(), message, conversation_id)
+                    .await?;
+
+                println!("Submitted intent to WorkContext:");
+                println!("  ID: {}", context.id);
+                println!("  Title: {}", context.title);
+                println!("  Status: {:?}", context.status);
+                println!("  Phase: {:?}", context.current_phase);
+            }
             WorkSubcommand::Continue { id } => {
-                let context = work_execution_service.continue_context(&id).await?;
-                
+                let context = work_orchestrator.continue_context(id).await?;
+
                 println!("Continued WorkContext:");
                 println!("  ID: {}", context.id);
                 println!("  Status: {:?}", context.status);
                 println!("  Phase: {:?}", context.current_phase);
+            }
+            WorkSubcommand::Run {
+                id,
+                max_iterations,
+                max_runtime_ms,
+            } => {
+                let limits = ExecutionLimits::default()
+                    .with_max_iterations(max_iterations.unwrap_or(10))
+                    .with_max_runtime_ms(max_runtime_ms.unwrap_or(300_000));
+
+                let context = work_orchestrator
+                    .run_until_blocked_or_complete(id, limits)
+                    .await?;
+
+                println!("Ran WorkContext:");
+                println!("  ID: {}", context.id);
+                println!("  Status: {:?}", context.status);
+                println!("  Phase: {:?}", context.current_phase);
+                if let Some(blocked) = &context.blocked_reason {
+                    println!("  Blocked: {}", blocked);
+                }
             }
             WorkSubcommand::SetStatus { id, status } => {
                 let mut context = work_context_service
