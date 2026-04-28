@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use super::ApprovalPolicy;
+
 /// Permission types for tools
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolPermission {
@@ -25,6 +27,8 @@ pub struct ToolPolicy {
     pub allowed_permissions: HashSet<ToolPermission>,
     /// Whether approval is required for tool execution
     pub require_approval: bool,
+    /// Approval policy for this tool
+    pub approval_policy: ApprovalPolicy,
     /// Restricted file write paths (if FileWrite is allowed)
     pub restricted_write_paths: Vec<String>,
 }
@@ -35,6 +39,7 @@ impl ToolPolicy {
         Self {
             allowed_permissions: HashSet::new(),
             require_approval: false,
+            approval_policy: ApprovalPolicy::Auto,
             restricted_write_paths: Vec::new(),
         }
     }
@@ -48,6 +53,12 @@ impl ToolPolicy {
     /// Set whether approval is required
     pub fn with_approval(mut self, require: bool) -> Self {
         self.require_approval = require;
+        self
+    }
+
+    /// Set the approval policy
+    pub fn with_approval_policy(mut self, policy: ApprovalPolicy) -> Self {
+        self.approval_policy = policy;
         self
     }
 
