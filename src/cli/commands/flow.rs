@@ -25,6 +25,10 @@ pub struct FlowCommand {
 pub enum FlowAction {
     /// Run a flow from a JSON or YAML file
     Run(RunFlowCommand),
+    /// Resume a paused flow run
+    Resume(ResumeCommand),
+    /// View events for a flow run
+    Events(EventsCommand),
     /// Replay a previous flow run (observational only)
     Replay(ReplayCommand),
     /// Test a flow with fixtures
@@ -68,6 +72,24 @@ pub struct ReplayCommand {
 }
 
 #[derive(Debug, Parser)]
+pub struct ResumeCommand {
+    /// Run ID to resume
+    pub run_id: String,
+    /// Verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct EventsCommand {
+    /// Run ID to view events for
+    pub run_id: String,
+    /// Verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
+}
+
+#[derive(Debug, Parser)]
 pub struct TestCommand {
     /// Path to the flow file
     pub path: PathBuf,
@@ -83,6 +105,8 @@ impl FlowCommand {
     pub async fn execute(&self) -> anyhow::Result<()> {
         match &self.action {
             FlowAction::Run(cmd) => cmd.execute().await,
+            FlowAction::Resume(cmd) => cmd.execute().await,
+            FlowAction::Events(cmd) => cmd.execute().await,
             FlowAction::Replay(cmd) => cmd.execute().await,
             FlowAction::Test(cmd) => cmd.execute().await,
         }
@@ -240,6 +264,85 @@ impl ReplayCommand {
         );
 
         logger.success("Replay completed");
+        Ok(())
+    }
+}
+
+impl ResumeCommand {
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        let logger = Logger::new(self.verbose);
+        logger.info(&format!("Resuming run: {}", self.run_id));
+
+        // Initialize RunDb and ContinuationEngine
+        let db_path = PathBuf::from(".prometheos/runs.db");
+        let run_db = RunDb::new(db_path.clone())?;
+        logger.info(&format!("RunDb initialized at: {}", db_path.display()));
+
+        let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
+        let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
+        logger.info(&format!(
+            "ContinuationEngine initialized at: {}",
+            checkpoint_dir.display()
+        ));
+
+        // Check if checkpoint exists
+        if !continuation_engine.has_checkpoint(&self.run_id) {
+            anyhow::bail!("Checkpoint not found for run: {}", self.run_id);
+        }
+
+        // Load checkpoint
+        let state = continuation_engine.load_checkpoint(&self.run_id)?;
+        logger.info("Checkpoint loaded successfully");
+
+        // TODO: Resume execution from checkpoint
+        // This requires integration with FlowExecutionService
+        let result = serde_json::json!({
+            "run_id": self.run_id,
+            "status": "resumed",
+            "message": "Flow resume not yet fully implemented - requires FlowExecutionService integration"
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+
+        logger.success("Resume command completed");
+        Ok(())
+    }
+}
+
+impl EventsCommand {
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        let logger = Logger::new(self.verbose);
+        logger.info(&format!("Viewing events for run: {}", self.run_id));
+
+        // Initialize RunDb and ContinuationEngine
+        let db_path = PathBuf::from(".prometheos/runs.db");
+        let _run_db = RunDb::new(db_path.clone())?;
+        logger.info(&format!("RunDb initialized at: {}", db_path.display()));
+
+        let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
+        let continuation_engine = ContinuationEngine::new(checkpoint_dir.clone());
+        logger.info(&format!(
+            "ContinuationEngine initialized at: {}",
+            checkpoint_dir.display()
+        ));
+
+        // Check if checkpoint exists
+        if !continuation_engine.has_checkpoint(&self.run_id) {
+            anyhow::bail!("Checkpoint not found for run: {}", self.run_id);
+        }
+
+        // Load checkpoint
+        let state = continuation_engine.load_checkpoint(&self.run_id)?;
+        logger.info("Checkpoint loaded successfully");
+
+        // TODO: Extract and display trace events from state
+        let result = serde_json::json!({
+            "run_id": self.run_id,
+            "events": [],
+            "message": "Events command not yet fully implemented - requires tracer integration"
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+
+        logger.success("Events command completed");
         Ok(())
     }
 }
