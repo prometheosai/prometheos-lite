@@ -30,46 +30,6 @@ impl WorkExecutionService {
         }
     }
 
-    /// Map flow reference to intent based on domain and flow type
-    /// DEPRECATED: Use direct flow file loading instead
-    #[deprecated(note = "Use resolve_flow_path and load_flow_file instead")]
-    fn map_flow_ref_to_intent(&self, flow_ref: &str, domain: &super::WorkDomain) -> crate::intent::Intent {
-        use crate::intent::Intent;
-        use super::WorkDomain;
-
-        // Determine intent based on flow type and domain
-        if flow_ref.contains("planning") {
-            match domain {
-                WorkDomain::Software => Intent::CodingTask,
-                WorkDomain::Business => Intent::Planning,
-                WorkDomain::Marketing => Intent::Planning,
-                WorkDomain::Personal => Intent::Planning,
-                WorkDomain::Research => Intent::Planning,
-                WorkDomain::Creative => Intent::Planning,
-                WorkDomain::Operations => Intent::Planning,
-                WorkDomain::General => Intent::Planning,
-                WorkDomain::Custom(_) => Intent::Planning,
-            }
-        } else if flow_ref.contains("execute") || flow_ref.contains("codegen") {
-            match domain {
-                WorkDomain::Software => Intent::CodingTask,
-                WorkDomain::Business => Intent::ProjectAction,
-                WorkDomain::Marketing => Intent::ProjectAction,
-                WorkDomain::Personal => Intent::ProjectAction,
-                WorkDomain::Research => Intent::ProjectAction,
-                WorkDomain::Creative => Intent::ProjectAction,
-                WorkDomain::Operations => Intent::ProjectAction,
-                WorkDomain::General => Intent::ProjectAction,
-                WorkDomain::Custom(_) => Intent::ProjectAction,
-            }
-        } else if flow_ref.contains("review") {
-            Intent::Question
-        } else {
-            // Default to planning for unknown flows
-            Intent::Planning
-        }
-    }
-
     /// Resolve flow reference to absolute path
     /// Checks domain-specific flows directory first, then falls back to generic flows
     fn resolve_flow_path(&self, flow_ref: &str, domain: &super::WorkDomain) -> Result<PathBuf> {
