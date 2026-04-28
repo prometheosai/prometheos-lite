@@ -26,6 +26,10 @@ enum Commands {
     Serve(commands::serve::ServeCommand),
     /// Run benchmark tasks
     Bench(commands::bench::BenchCommand),
+    /// Manage WorkContexts
+    Work(commands::work::WorkCommand),
+    /// Manage domain templates
+    Templates(commands::templates::TemplatesCommand),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -36,5 +40,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Flow(cmd) => cmd.execute().await,
         Commands::Serve(cmd) => cmd.execute().await,
         Commands::Bench(cmd) => cmd.execute().await,
+        Commands::Work(cmd) => cmd.execute().await,
+        Commands::Templates(cmd) => cmd.execute().await,
     }
 }
