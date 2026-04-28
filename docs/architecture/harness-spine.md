@@ -14,11 +14,18 @@
 - Deterministic no-API flow test added (deterministic_test.flow.yaml)
 - TODO removed from WorkExecutionService - domain profile now loaded and applied
 - Submit semantics defined: Chat = create + AwaitingApproval, Review/Autonomous = execute immediately
+- MemoryWriteNode task/content mismatch fixed in builtin_nodes.rs (prep now emits "content")
+- GenerateResult struct added with provider/model/latency/fallback metadata
+- ModelRouter::generate_with_metadata() and generate_stream_with_metadata() added
+- LlmUtilities::call_with_metadata() and call_stream_with_metadata() added
 
 ### Deferred to V1.3
 - API integration with WorkOrchestrator (Axum Handler trait compatibility issues - async functions with complex setup don't satisfy Handler trait)
 - run-until-complete loop implementation (blocked by above API integration issue)
-- Repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests)
+- Deterministic tests proving API → WorkOrchestrator → WorkExecutionService
+
+### Deferred to V1.4
+- Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests)
 
 ### Production Readiness
 - V1.2.1 direction: correct
@@ -28,7 +35,8 @@
 - API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues)
 - Playbook integration: 4/10
 - Execution completeness standard: 5/10
-- Overall production readiness: ~6/10
+- Model metadata: 7/10 (GenerateResult added, not yet integrated everywhere)
+- Overall production readiness: ~6.5/10
 - Claim of "fully complete": no
 
 ## Overview

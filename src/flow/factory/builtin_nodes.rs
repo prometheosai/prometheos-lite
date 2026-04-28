@@ -879,13 +879,13 @@ impl Node for MemoryWriteNode {
             .check_memory_write_budget()
             .context("Memory write budget exceeded")?;
 
-        let task = state
+        let content = state
             .get_input("task")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        Ok(serde_json::json!({ "task": task }))
+        Ok(serde_json::json!({ "content": content }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {

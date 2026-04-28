@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use super::router::ModelRouter;
+use super::router::{GenerateResult, ModelRouter};
 
 /// LLM Utilities - unified interface for LLM operations
 pub struct LlmUtilities {
@@ -82,5 +82,19 @@ impl LlmUtilities {
     {
         let callback = Arc::new(callback);
         self.router.generate_stream(prompt, callback).await
+    }
+
+    /// Call with metadata (provider, model, latency, fallback info)
+    pub async fn call_with_metadata(&self, prompt: &str) -> Result<GenerateResult> {
+        self.router.generate_with_metadata(prompt).await
+    }
+
+    /// Streaming call with metadata
+    pub async fn call_stream_with_metadata<F>(&self, prompt: &str, callback: F) -> Result<GenerateResult>
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        let callback = Arc::new(callback);
+        self.router.generate_stream_with_metadata(prompt, callback).await
     }
 }
