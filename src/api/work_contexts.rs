@@ -331,7 +331,6 @@ pub async fn run_until_complete(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Update status to in_progress
     work_context_service
         .update_status(&mut context, WorkStatus::InProgress)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

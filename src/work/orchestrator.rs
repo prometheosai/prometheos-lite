@@ -154,12 +154,10 @@ impl WorkOrchestrator {
             .get_context(&context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
 
-        if !context.is_blocked() {
-            return Err(anyhow::anyhow!("Context is not blocked: {}", context_id));
+        // Clear blocked reason if set, then execute
+        if context.is_blocked() {
+            self.work_context_service.clear_blocked_reason(&mut context)?;
         }
-
-        // Clear blocked reason and resume using WorkExecutionService
-        self.work_context_service.clear_blocked_reason(&mut context)?;
 
         let context = self
             .work_execution_service

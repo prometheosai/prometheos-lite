@@ -36,7 +36,7 @@ impl<T: AsDb> WorkContextOperations for T {
                 plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
                 tool_trace, open_questions, autonomy_level, approval_policy, summary,
                 completion_criteria, last_activity_at, metadata, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
             params![
                 &context.id,
                 &context.user_id,

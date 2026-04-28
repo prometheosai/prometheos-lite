@@ -113,7 +113,7 @@ impl WorkContext {
             flow_runs: Vec::new(),
             tool_trace: Vec::new(),
             open_questions: Vec::new(),
-            autonomy_level: AutonomyLevel::Chat,
+            autonomy_level: AutonomyLevel::Review,
             approval_policy: ApprovalPolicy::Auto,
             summary: None,
             completion_criteria: Vec::new(),
