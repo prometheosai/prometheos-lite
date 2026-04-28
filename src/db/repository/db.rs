@@ -103,6 +103,56 @@ impl Db {
             )
             .context("Failed to create artifacts table")?;
 
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS interrupts (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                expected_schema TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision TEXT,
+                expires_at TEXT,
+                created_at TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create interrupts table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS flow_snapshots (
+                id TEXT PRIMARY KEY,
+                flow_name TEXT NOT NULL,
+                flow_version TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                source_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create flow_snapshots table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS tool_outbox (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                result_json TEXT
+            )",
+                [],
+            )
+            .context("Failed to create tool_outbox table")?;
+
         Ok(())
     }
 
