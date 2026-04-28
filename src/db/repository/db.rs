@@ -6,8 +6,12 @@ use rusqlite::Connection;
 use super::artifacts::ArtifactOperations;
 use super::conversations::ConversationOperations;
 use super::flow_runs::FlowRunOperations;
+use super::interrupts::InterruptOperations;
 use super::messages::MessageOperations;
+use super::outbox::OutboxOperations;
 use super::projects::ProjectOperations;
+use super::snapshots::FlowSnapshotOperations;
+use super::trust_policies::TrustPolicyOperations;
 use super::trait_def::Repository;
 
 /// Database connection wrapper
@@ -153,6 +157,20 @@ impl Db {
             )
             .context("Failed to create tool_outbox table")?;
 
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS trust_policies (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL UNIQUE,
+                trust_level TEXT NOT NULL,
+                require_approval INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create trust_policies table")?;
+
         Ok(())
     }
 
@@ -231,3 +249,6 @@ impl Repository for Db {
         ArtifactOperations::create_artifact(self, run_id, file_path, content)
     }
 }
+
+// Outbox and interrupt operations are available via trait implementations
+// on Db (which implements AsDb)
