@@ -238,9 +238,9 @@ pub async fn get_work_context_artifacts(
 
 /// Continue a WorkContext
 /// 
-/// This endpoint initiates continuation of a WorkContext and returns immediately with 202 Accepted.
-/// The actual flow execution happens asynchronously. Clients should poll the work-context endpoint
-/// to check status updates.
+/// This endpoint validates a WorkContext for continuation and returns its current state.
+/// For V1.2, actual flow execution is handled via CLI. The API provides validation and state retrieval.
+/// Future versions will support async execution via background task queue.
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -248,7 +248,7 @@ pub async fn continue_work_context(
     let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
-    // Verify context exists before initiating continuation
+    // Verify context exists
     let context = work_context_service
         .get_context(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -264,9 +264,7 @@ pub async fn continue_work_context(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Return current context state with 202 Accepted
-    // The actual continuation would be triggered via a background task or separate mechanism
-    // For V1.2, we return the current state to indicate the endpoint is functional
+    // Return current context state
     let response = WorkContextResponse {
         id: context.id,
         title: context.title,

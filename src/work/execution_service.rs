@@ -141,16 +141,11 @@ impl WorkExecutionService {
             self.work_context_service.add_artifact(context, artifact)?;
         }
 
-        // Update phase based on flow type
-        if flow_ref.contains("planning") {
-            self.work_context_service
-                .update_phase(context, WorkPhase::Planning)?;
-        } else if flow_ref.contains("execute") {
-            self.work_context_service
-                .update_phase(context, WorkPhase::Execution)?;
-        } else if flow_ref.contains("review") {
-            self.work_context_service
-                .update_phase(context, WorkPhase::Review)?;
+        // Update phase based on flow type using PhaseController
+        // Derive phase from current context state and flow metadata
+        let next_phase = PhaseController::next_phase(context);
+        if let Some(phase) = next_phase {
+            self.work_context_service.update_phase(context, phase)?;
         }
 
         // Review mode requires approval after execution
