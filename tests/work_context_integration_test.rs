@@ -545,6 +545,39 @@ fn test_golden_integration_work_context_lifecycle() {
     assert_eq!(retrieved.title, "Build REST API");
 }
 
+/// Deterministic no-API flow test: validates end-to-end flow execution without external dependencies
+/// This test uses a simple echo flow that requires no API keys or external services.
+#[tokio::test]
+async fn test_deterministic_no_api_flow_execution() {
+    use prometheos_lite::flow::RuntimeContext;
+    use prometheos_lite::flow::execution_service::FlowExecutionService;
+
+    let db = Db::in_memory().expect("Failed to create in-memory database");
+    let db_arc = Arc::new(db);
+    let work_context_service = Arc::new(WorkContextService::new(db_arc.clone()));
+
+    let runtime = Arc::new(RuntimeContext::default());
+    let flow_execution_service = Arc::new(
+        FlowExecutionService::new(runtime)
+            .expect("Failed to create FlowExecutionService")
+    );
+
+    // Execute the deterministic test flow
+    let execution_result = flow_execution_service
+        .execute_message(
+            "deterministic_test.flow.yaml",
+            "test message",
+            Default::default()
+        )
+        .await;
+
+    // This should succeed without any external dependencies
+    assert!(execution_result.is_ok(), "Deterministic flow should execute without API keys");
+    
+    let output = execution_result.unwrap();
+    assert!(!output.primary.is_null(), "Flow should produce output");
+}
+
 /// Guardrail integration test: blocked context cannot continue
 #[test]
 fn test_guardrail_blocked_context_cannot_continue() {

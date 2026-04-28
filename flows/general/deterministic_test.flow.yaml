@@ -1,0 +1,16 @@
+version: "1.0"
+name: "Deterministic Test Flow"
+description: "A simple flow that executes deterministically without external dependencies"
+nodes:
+  - id: "input"
+    type: "input"
+    config:
+      key: "message"
+  - id: "echo"
+    type: "echo"
+    config:
+      message: "{{input.message}}"
+transitions:
+  - from: "input"
+    to: "echo"
+    action: "proceed"

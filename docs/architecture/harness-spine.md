@@ -1,5 +1,29 @@
 # Harness Spine Architecture
 
+## V1.2.1 Status
+
+### Completed
+- WorkExecutionService no longer forces Intent::CodingTask
+- ContextLoaderNode fixed (prep emits "query", exec reads "query")
+- CLI work artifacts command exists
+- TemplateLoader::install_defaults() called in WorkCommand::execute()
+- API routes registered for work-contexts, artifacts, continue, submit-intent, run-until-complete
+- PhaseController checks approved_plan.is_none() for Planning → Execution
+- PhaseController supports domain-profile flow selection
+- String-based phase detection replaced with PhaseController::flow_for_phase
+- Deterministic no-API flow test added (deterministic_test.flow.yaml)
+
+### Deferred to V1.3
+- API continuation with WorkExecutionService (Axum Handler trait compatibility issues)
+- run-until-complete loop implementation (Axum Handler trait compatibility issues)
+- Repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests)
+
+### Production Readiness
+- V1.2.1 direction: correct
+- Implementation: improved
+- Production readiness: ~8/10
+- Claim of "fully complete": no
+
 ## Overview
 
 The Harness Spine is the central execution layer for persistent work in PrometheOS Lite. It provides the foundational infrastructure for autonomous, persistent work execution through three core components:

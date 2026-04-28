@@ -175,18 +175,18 @@ impl WorkExecutionService {
             anyhow::bail!("Context is already complete");
         }
 
-        // Determine next action based on phase
-        let next_flow = match context.current_phase {
-            WorkPhase::Intake => "planning.flow.yaml",
-            WorkPhase::Planning => "execution.flow.yaml",
-            WorkPhase::Execution => "review.flow.yaml",
-            WorkPhase::Review => "finalization.flow.yaml",
-            WorkPhase::Iteration => "planning.flow.yaml",
-            WorkPhase::Finalization => return Ok(context),
-        };
+        // Determine next action based on phase using PhaseController
+        let next_flow = PhaseController::flow_for_phase(
+            context.current_phase,
+            None // TODO: Load domain profile if available
+        );
+        
+        if context.current_phase == WorkPhase::Finalization {
+            return Ok(context);
+        }
 
         // Execute flow
-        self.execute_flow_in_context(&mut context, next_flow).await?;
+        self.execute_flow_in_context(&mut context, &next_flow).await?;
 
         // Update status
         if context.current_phase == WorkPhase::Finalization {
