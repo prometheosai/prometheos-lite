@@ -144,14 +144,81 @@ fn test_work_context_status_update() {
 
 #[test]
 fn test_work_context_add_artifact() {
-    // Skip artifact tests due to schema mismatch in in-memory DB
-    // TODO: Fix schema migration or use file-based DB for artifact tests
+    let db = Db::in_memory().expect("Failed to create in-memory database");
+    let work_context_service = WorkContextService::new(Arc::new(db));
+
+    let mut context = work_context_service
+        .create_context(
+            "test-user".to_string(),
+            "Test Context".to_string(),
+            WorkDomain::Software,
+            "Test goal".to_string(),
+        )
+        .expect("Failed to create WorkContext");
+
+    use prometheos_lite::work::artifact::{Artifact, ArtifactKind};
+    use serde_json::json;
+
+    let artifact = Artifact::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        ArtifactKind::Plan,
+        "Test Plan".to_string(),
+        json!({"content": "test plan content"}),
+        "test-user".to_string(),
+    );
+
+    work_context_service
+        .add_artifact(&mut context, artifact)
+        .expect("Failed to add artifact");
+
+    assert_eq!(context.artifacts.len(), 1);
+    assert_eq!(context.artifacts[0].name, "Test Plan");
 }
 
 #[test]
 fn test_work_context_artifact_persistence() {
-    // Skip artifact tests due to schema mismatch in in-memory DB
-    // TODO: Fix schema migration or use file-based DB for artifact tests
+    let db = Db::in_memory().expect("Failed to create in-memory database");
+    let work_context_service = WorkContextService::new(Arc::new(db));
+
+    let mut context = work_context_service
+        .create_context(
+            "test-user".to_string(),
+            "Test Context".to_string(),
+            WorkDomain::Software,
+            "Test goal".to_string(),
+        )
+        .expect("Failed to create WorkContext");
+
+    use prometheos_lite::work::artifact::{Artifact, ArtifactKind};
+    use serde_json::json;
+
+    let artifact = Artifact::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        ArtifactKind::Plan,
+        "Test Plan".to_string(),
+        json!({"content": "test plan content"}),
+        "test-user".to_string(),
+    );
+
+    work_context_service
+        .add_artifact(&mut context, artifact)
+        .expect("Failed to add artifact");
+
+    // Persist the context
+    work_context_service
+        .update_context(&context)
+        .expect("Failed to update context");
+
+    // Retrieve and verify artifact persistence
+    let retrieved = work_context_service
+        .get_context(&context.id)
+        .expect("Failed to retrieve WorkContext")
+        .expect("WorkContext not found");
+
+    assert_eq!(retrieved.artifacts.len(), 1);
+    assert_eq!(retrieved.artifacts[0].name, "Test Plan");
 }
 
 #[test]

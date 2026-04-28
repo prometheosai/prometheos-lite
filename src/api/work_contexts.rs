@@ -11,6 +11,8 @@ use std::sync::Arc;
 use crate::api::state::AppState;
 use crate::db::Db;
 use crate::work::{
+    artifact::Artifact,
+    execution_service::WorkExecutionService,
     types::{WorkDomain, WorkStatus},
     WorkContextService,
 };
@@ -36,6 +38,18 @@ pub struct WorkContextResponse {
     pub phase: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Response with Artifact details
+#[derive(Debug, Serialize)]
+pub struct ArtifactResponse {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub created_by: String,
+    pub storage_type: String,
+    pub file_path: Option<String>,
+    pub created_at: String,
 }
 
 /// List WorkContexts
@@ -181,4 +195,58 @@ pub async fn update_work_context_status(
     };
 
     Ok(Json(response))
+}
+
+/// Get artifacts for a WorkContext
+pub async fn get_work_context_artifacts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ArtifactResponse>>, StatusCode> {
+    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let work_context_service = WorkContextService::new(Arc::new(db));
+
+    let context = work_context_service
+        .get_context(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let response: Vec<ArtifactResponse> = context
+        .artifacts
+        .into_iter()
+        .map(|artifact| {
+            let storage_type = match &artifact.storage {
+                crate::work::artifact::ArtifactStorage::Inline => "inline".to_string(),
+                crate::work::artifact::ArtifactStorage::FilePath(path) => format!("file:{}", path),
+            };
+            let file_path = match &artifact.storage {
+                crate::work::artifact::ArtifactStorage::FilePath(path) => Some(path.clone()),
+                _ => None,
+            };
+            ArtifactResponse {
+                id: artifact.id,
+                kind: format!("{:?}", artifact.kind),
+                name: artifact.name,
+                created_by: artifact.created_by,
+                storage_type,
+                file_path,
+                created_at: artifact.created_at.to_rfc3339(),
+            }
+        })
+        .collect();
+
+    Ok(Json(response))
+}
+
+/// Continue a WorkContext
+pub async fn continue_work_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkContextResponse>, StatusCode> {
+    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let work_context_service = Arc::new(WorkContextService::new(Arc::new(db)));
+    
+    // Note: This would require FlowExecutionService and RuntimeContext
+    // For now, return an error indicating this needs async execution
+    // In a full implementation, this would call WorkExecutionService::continue_context
+    Err(StatusCode::NOT_IMPLEMENTED)
 }

@@ -29,7 +29,7 @@ impl<T: AsDb> WorkArtifactOperations for T {
         };
 
         conn.execute(
-            "INSERT INTO artifacts (id, work_context_id, kind, name, content, created_by, storage_type, file_path, created_at)
+            "INSERT INTO work_artifacts (id, work_context_id, kind, name, content, created_by, storage_type, file_path, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &artifact.id,
@@ -53,7 +53,7 @@ impl<T: AsDb> WorkArtifactOperations for T {
 
         let mut stmt = conn.prepare(
             "SELECT id, work_context_id, kind, name, content, created_by, storage_type, file_path, created_at
-             FROM artifacts
+             FROM work_artifacts
              WHERE work_context_id = ?1
              ORDER BY created_at ASC",
         )
@@ -96,7 +96,7 @@ impl<T: AsDb> WorkArtifactOperations for T {
 
         let mut stmt = conn.prepare(
             "SELECT id, work_context_id, kind, name, content, created_by, storage_type, file_path, created_at
-             FROM artifacts
+             FROM work_artifacts
              WHERE id = ?1",
         )
         .context("Failed to prepare artifact query")?;

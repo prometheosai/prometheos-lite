@@ -37,6 +37,11 @@ enum WorkSubcommand {
         /// WorkContext ID
         id: String,
     },
+    /// List artifacts for a WorkContext
+    Artifacts {
+        /// WorkContext ID
+        id: String,
+    },
     /// Continue a WorkContext
     Continue {
         /// WorkContext ID
@@ -121,6 +126,23 @@ impl WorkCommand {
                 }
                 if let Some(blocked) = &context.blocked_reason {
                     println!("  Blocked: {}", blocked);
+                }
+            }
+            WorkSubcommand::Artifacts { id } => {
+                let context = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+
+                println!("Artifacts for WorkContext {} ({}):", context.id, context.title);
+                if context.artifacts.is_empty() {
+                    println!("  No artifacts");
+                } else {
+                    for artifact in &context.artifacts {
+                        println!("  {} - {} ({:?})", artifact.id, artifact.name, artifact.kind);
+                        println!("    Created by: {}", artifact.created_by);
+                        println!("    Storage: {:?}", artifact.storage);
+                        println!("    Created at: {}", artifact.created_at);
+                    }
                 }
             }
             WorkSubcommand::Continue { id } => {

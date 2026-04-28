@@ -32,6 +32,44 @@ impl WorkExecutionService {
         }
     }
 
+    /// Map flow reference to intent based on domain and flow type
+    fn map_flow_ref_to_intent(&self, flow_ref: &str, domain: &super::WorkDomain) -> crate::intent::Intent {
+        use crate::intent::Intent;
+        use super::WorkDomain;
+
+        // Determine intent based on flow type and domain
+        if flow_ref.contains("planning") {
+            match domain {
+                WorkDomain::Software => Intent::CodingTask,
+                WorkDomain::Business => Intent::Planning,
+                WorkDomain::Marketing => Intent::Planning,
+                WorkDomain::Personal => Intent::Planning,
+                WorkDomain::Research => Intent::Planning,
+                WorkDomain::Creative => Intent::Planning,
+                WorkDomain::Operations => Intent::Planning,
+                WorkDomain::General => Intent::Planning,
+                WorkDomain::Custom(_) => Intent::Planning,
+            }
+        } else if flow_ref.contains("execute") || flow_ref.contains("codegen") {
+            match domain {
+                WorkDomain::Software => Intent::CodingTask,
+                WorkDomain::Business => Intent::ProjectAction,
+                WorkDomain::Marketing => Intent::ProjectAction,
+                WorkDomain::Personal => Intent::ProjectAction,
+                WorkDomain::Research => Intent::ProjectAction,
+                WorkDomain::Creative => Intent::ProjectAction,
+                WorkDomain::Operations => Intent::ProjectAction,
+                WorkDomain::General => Intent::ProjectAction,
+                WorkDomain::Custom(_) => Intent::ProjectAction,
+            }
+        } else if flow_ref.contains("review") {
+            Intent::Question
+        } else {
+            // Default to planning for unknown flows
+            Intent::Planning
+        }
+    }
+
     /// Execute a flow within a WorkContext
     pub async fn execute_flow_in_context(
         &self,
@@ -60,8 +98,10 @@ impl WorkExecutionService {
         }
 
         // Build execution options with context-aware settings
+        // Map flow_ref to intent based on domain and flow type
+        let intent = self.map_flow_ref_to_intent(flow_ref, &context.domain);
         let options = ExecutionOptions::default()
-            .with_override_intent(crate::intent::Intent::CodingTask); // TODO: Map flow_ref to intent
+            .with_override_intent(intent);
 
         // Execute the flow
         let final_output = self
@@ -157,10 +197,13 @@ impl WorkExecutionService {
         domain: super::WorkDomain,
         goal: String,
     ) -> Result<WorkContext> {
-        // Create context
+        // Create context with Review mode to allow initial planning
         let mut context = self
             .work_context_service
             .create_context(user_id, title, domain, goal)?;
+
+        // Override autonomy to Review for initial planning to avoid Chat mode block
+        context.autonomy_level = AutonomyLevel::Review;
 
         // Execute initial planning flow
         self.execute_flow_in_context(&mut context, "planning.flow.yaml")

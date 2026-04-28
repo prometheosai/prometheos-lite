@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use super::types::{WorkContext, WorkPhase, WorkStatus};
+use super::domain::WorkDomainProfile;
 
 /// PhaseController - manages lifecycle phase transitions
 pub struct PhaseController;
@@ -54,14 +55,35 @@ impl PhaseController {
     }
 
     /// Get the recommended flow for a given phase
-    pub fn flow_for_phase(phase: WorkPhase) -> &'static str {
+    /// If domain profile is provided, use its default flows; otherwise use generic flows
+    pub fn flow_for_phase(phase: WorkPhase, domain_profile: Option<&WorkDomainProfile>) -> String {
+        if let Some(profile) = domain_profile {
+            // Try to get flow from domain profile's default_flows
+            let phase_key = match phase {
+                WorkPhase::Intake => "intake",
+                WorkPhase::Planning => "planning",
+                WorkPhase::Execution => "execution",
+                WorkPhase::Review => "review",
+                WorkPhase::Iteration => "planning",
+                WorkPhase::Finalization => "finalization",
+            };
+
+            // Look for a flow matching the phase in the domain profile
+            for flow in &profile.default_flows {
+                if flow.contains(phase_key) {
+                    return flow.clone();
+                }
+            }
+        }
+
+        // Fallback to generic flows
         match phase {
-            WorkPhase::Intake => "intake.flow.yaml",
-            WorkPhase::Planning => "planning.flow.yaml",
-            WorkPhase::Execution => "execution.flow.yaml",
-            WorkPhase::Review => "review.flow.yaml",
-            WorkPhase::Iteration => "planning.flow.yaml",
-            WorkPhase::Finalization => "finalization.flow.yaml",
+            WorkPhase::Intake => "intake.flow.yaml".to_string(),
+            WorkPhase::Planning => "planning.flow.yaml".to_string(),
+            WorkPhase::Execution => "execution.flow.yaml".to_string(),
+            WorkPhase::Review => "review.flow.yaml".to_string(),
+            WorkPhase::Iteration => "planning.flow.yaml".to_string(),
+            WorkPhase::Finalization => "finalization.flow.yaml".to_string(),
         }
     }
 
@@ -121,8 +143,8 @@ mod tests {
 
     #[test]
     fn test_flow_for_phase() {
-        assert_eq!(PhaseController::flow_for_phase(WorkPhase::Planning), "planning.flow.yaml");
-        assert_eq!(PhaseController::flow_for_phase(WorkPhase::Execution), "execution.flow.yaml");
+        assert_eq!(PhaseController::flow_for_phase(WorkPhase::Planning, None), "planning.flow.yaml");
+        assert_eq!(PhaseController::flow_for_phase(WorkPhase::Execution, None), "execution.flow.yaml");
     }
 
     #[test]

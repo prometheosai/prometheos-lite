@@ -245,7 +245,7 @@ impl Db {
 
         self.conn
             .execute(
-                "CREATE TABLE IF NOT EXISTS artifacts (
+                "CREATE TABLE IF NOT EXISTS work_artifacts (
                 id TEXT PRIMARY KEY,
                 work_context_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -259,7 +259,7 @@ impl Db {
             )",
                 [],
             )
-            .context("Failed to create artifacts table")?;
+            .context("Failed to create work_artifacts table")?;
 
         self.conn
             .execute(
