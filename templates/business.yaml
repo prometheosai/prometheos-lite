@@ -1,0 +1,34 @@
+name: Business Operations
+parent_domain: General
+default_flows:
+  - planning.flow.yaml
+  - analysis.flow.yaml
+  - review.flow.yaml
+artifact_kinds:
+  - Document
+  - Report
+  - Analysis
+  - TaskList
+approval_defaults:
+  autonomy_level: Review
+  approval_policy: ManualAll
+lifecycle_template:
+  phases:
+    - name: Intake
+      required_fields:
+        - goal
+        - requirements
+    - name: Planning
+      auto_transition: true
+      required_flows:
+        - planning.flow.yaml
+    - name: Execution
+      auto_transition: true
+      required_flows:
+        - analysis.flow.yaml
+    - name: Review
+      auto_transition: true
+      required_flows:
+        - review.flow.yaml
+    - name: Finalization
+      auto_transition: true
