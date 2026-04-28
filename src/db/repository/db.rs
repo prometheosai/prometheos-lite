@@ -119,6 +119,7 @@ impl Db {
                 status TEXT NOT NULL,
                 decision TEXT,
                 expires_at TEXT,
+                work_context_id TEXT,
                 created_at TEXT NOT NULL
             )",
                 [],
@@ -170,6 +171,160 @@ impl Db {
                 [],
             )
             .context("Failed to create trust_policies table")?;
+
+        // V1.2 WorkContext tables
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS work_contexts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                domain_profile_id TEXT,
+                context_type TEXT NOT NULL,
+                project_id TEXT,
+                conversation_id TEXT,
+                parent_context_id TEXT,
+                priority TEXT NOT NULL,
+                due_at TEXT,
+                goal TEXT NOT NULL,
+                requirements TEXT,
+                constraints TEXT,
+                status TEXT NOT NULL,
+                current_phase TEXT NOT NULL,
+                blocked_reason TEXT,
+                plan TEXT,
+                approved_plan TEXT,
+                artifacts TEXT,
+                memory_refs TEXT,
+                decisions TEXT,
+                flow_runs TEXT,
+                tool_trace TEXT,
+                open_questions TEXT,
+                autonomy_level TEXT NOT NULL,
+                approval_policy TEXT NOT NULL,
+                summary TEXT,
+                completion_criteria TEXT,
+                last_activity_at TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create work_contexts table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS work_context_events (
+                id TEXT PRIMARY KEY,
+                work_context_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create work_context_events table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS conversation_work_contexts (
+                conversation_id TEXT NOT NULL,
+                work_context_id TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE,
+                PRIMARY KEY (conversation_id, work_context_id)
+            )",
+                [],
+            )
+            .context("Failed to create conversation_work_contexts table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY,
+                work_context_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                storage_type TEXT NOT NULL,
+                file_path TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create artifacts table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS decisions (
+                id TEXT PRIMARY KEY,
+                work_context_id TEXT,
+                description TEXT NOT NULL,
+                chosen_option TEXT NOT NULL,
+                alternatives TEXT NOT NULL,
+                approved INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create decisions table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS execution_plans (
+                work_context_id TEXT PRIMARY KEY,
+                steps_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create execution_plans table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS work_domain_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                parent_domain TEXT,
+                default_flows TEXT NOT NULL,
+                artifact_kinds TEXT NOT NULL,
+                approval_defaults TEXT NOT NULL,
+                lifecycle_template_json TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create work_domain_profiles table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS work_context_playbooks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                domain_profile_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                preferred_flows TEXT NOT NULL,
+                default_approval_policy TEXT NOT NULL,
+                default_research_depth TEXT NOT NULL,
+                default_creativity_level TEXT NOT NULL,
+                evaluation_rules TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                usage_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create work_context_playbooks table")?;
 
         Ok(())
     }

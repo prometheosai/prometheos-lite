@@ -18,6 +18,7 @@ pub struct InterruptEntry {
     pub status: String,
     pub decision: Option<String>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub work_context_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -30,6 +31,7 @@ pub trait InterruptOperations {
         node_id: &str,
         reason: &str,
         expected_schema: &str,
+        work_context_id: Option<&str>,
     ) -> anyhow::Result<InterruptEntry>;
 
     fn get_interrupt(&self, id: &str) -> anyhow::Result<Option<InterruptEntry>>;
@@ -53,6 +55,7 @@ impl<T: AsDb> InterruptOperations for T {
         node_id: &str,
         reason: &str,
         expected_schema: &str,
+        work_context_id: Option<&str>,
     ) -> anyhow::Result<InterruptEntry> {
         let conn = self.as_db().conn();
         let id = uuid::Uuid::new_v4().to_string();
@@ -61,8 +64,8 @@ impl<T: AsDb> InterruptOperations for T {
         let expires_at = now + chrono::Duration::hours(1);
 
         conn.execute(
-            "INSERT INTO interrupts (id, run_id, trace_id, node_id, reason, expected_schema, status, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![&id, run_id, trace_id, node_id, reason, expected_schema, "pending", &expires_at.to_rfc3339(), &now.to_rfc3339()],
+            "INSERT INTO interrupts (id, run_id, trace_id, node_id, reason, expected_schema, status, expires_at, work_context_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![&id, run_id, trace_id, node_id, reason, expected_schema, "pending", &expires_at.to_rfc3339(), work_context_id, &now.to_rfc3339()],
         ).context("Failed to insert interrupt")?;
 
         Ok(InterruptEntry {
@@ -75,6 +78,7 @@ impl<T: AsDb> InterruptOperations for T {
             status: "pending".to_string(),
             decision: None,
             expires_at: Some(expires_at),
+            work_context_id: work_context_id.map(|s| s.to_string()),
             created_at: now,
         })
     }
@@ -83,12 +87,12 @@ impl<T: AsDb> InterruptOperations for T {
         let conn = self.as_db().conn();
 
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, trace_id, node_id, reason, expected_schema, status, decision, expires_at, created_at
+            "SELECT id, run_id, trace_id, node_id, reason, expected_schema, status, decision, expires_at, work_context_id, created_at
              FROM interrupts
              WHERE id = ?1"
         ).context("Failed to prepare interrupt query")?;
 
-        let result = stmt.query_row(params![id], |row| {
+        let mut rows = stmt.query_map(params![id], |row| {
             Ok(InterruptEntry {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
@@ -99,14 +103,14 @@ impl<T: AsDb> InterruptOperations for T {
                 status: row.get(6)?,
                 decision: row.get(7)?,
                 expires_at: row.get::<_, Option<String>>(8)?.map(|s| chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc)),
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?).unwrap().with_timezone(&chrono::Utc),
+                work_context_id: row.get(9)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?).unwrap().with_timezone(&chrono::Utc),
             })
-        });
+        }).context("Failed to query interrupt")?;
 
-        match result {
-            Ok(entry) => Ok(Some(entry)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
+        match rows.next() {
+            Some(result) => Ok(Some(result.context("Failed to parse interrupt")?)),
+            None => Ok(None),
         }
     }
 
@@ -114,7 +118,7 @@ impl<T: AsDb> InterruptOperations for T {
         let conn = self.as_db().conn();
 
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, trace_id, node_id, reason, expected_schema, status, decision, expires_at, created_at
+            "SELECT id, run_id, trace_id, node_id, reason, expected_schema, status, decision, expires_at, work_context_id, created_at
              FROM interrupts
              WHERE run_id = ?1 AND status = 'pending'
              ORDER BY created_at"
@@ -131,7 +135,8 @@ impl<T: AsDb> InterruptOperations for T {
                 status: row.get(6)?,
                 decision: row.get(7)?,
                 expires_at: row.get::<_, Option<String>>(8)?.map(|s| chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc)),
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?).unwrap().with_timezone(&chrono::Utc),
+                work_context_id: row.get(9)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?).unwrap().with_timezone(&chrono::Utc),
             })
         }).context("Failed to query pending interrupts")?;
 
