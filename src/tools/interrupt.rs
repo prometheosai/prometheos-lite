@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Interrupt context for pausing execution and requiring human approval
+/// InterruptContext - represents a point where human approval is needed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterruptContext {
     /// Unique interrupt identifier
@@ -25,6 +25,8 @@ pub struct InterruptContext {
     pub status: InterruptStatus,
     /// Decision data (if approved/denied)
     pub decision: Option<serde_json::Value>,
+    /// WorkContext identifier (V1.2: for WorkContext integration)
+    pub work_context_id: Option<String>,
     /// Timestamp when interrupt was created
     pub created_at: DateTime<Utc>,
 }
@@ -61,6 +63,31 @@ impl InterruptContext {
             expires_at: None,
             status: InterruptStatus::Pending,
             decision: None,
+            work_context_id: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a new interrupt context with WorkContext association
+    pub fn new_with_work_context(
+        run_id: String,
+        trace_id: String,
+        node_id: String,
+        reason: String,
+        expected_schema: serde_json::Value,
+        work_context_id: String,
+    ) -> Self {
+        Self {
+            interrupt_id: Uuid::new_v4().to_string(),
+            run_id,
+            trace_id,
+            node_id,
+            reason,
+            expected_schema,
+            expires_at: None,
+            status: InterruptStatus::Pending,
+            decision: None,
+            work_context_id: Some(work_context_id),
             created_at: Utc::now(),
         }
     }
@@ -141,6 +168,7 @@ impl InterruptContext {
             &self.node_id,
             &self.reason,
             &self.expected_schema.to_string(),
+            self.work_context_id.as_deref(),
         ).map_err(|e| format!("Failed to persist interrupt: {}", e))?;
 
         Ok(())
@@ -181,6 +209,7 @@ impl InterruptContext {
                     _ => InterruptStatus::Pending,
                 },
                 decision,
+                work_context_id: e.work_context_id,
                 created_at: e.created_at,
             })
         }).transpose()
