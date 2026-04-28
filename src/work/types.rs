@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 
 use super::{artifact::Artifact, decision::DecisionRecord, plan::ExecutionPlan};
 
+/// ExecutionRecord - metadata for individual execution steps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionRecord {
+    pub node_id: String,
+    pub model: String,
+    pub provider: String,
+    pub latency_ms: u64,
+    pub tokens: Option<u32>,
+    pub cost: Option<f64>,
+    pub timestamp: DateTime<Utc>,
+}
+
 /// WorkContext - the primary object for managing persistent work across time
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkContext {
@@ -54,6 +66,7 @@ pub struct WorkContext {
     // Execution tracking
     pub flow_runs: Vec<String>,
     pub tool_trace: Vec<String>,
+    pub execution_metadata: Vec<ExecutionRecord>,
 
     // Questions / blockers
     pub open_questions: Vec<String>,
@@ -112,13 +125,14 @@ impl WorkContext {
             decisions: Vec::new(),
             flow_runs: Vec::new(),
             tool_trace: Vec::new(),
+            execution_metadata: Vec::new(),
             open_questions: Vec::new(),
-            autonomy_level: AutonomyLevel::Review,
+            autonomy_level: AutonomyLevel::Chat,
             approval_policy: ApprovalPolicy::Auto,
             summary: None,
             completion_criteria: Vec::new(),
             last_activity_at: now,
-            metadata: serde_json::Value::Object(serde_json::Map::new()),
+            metadata: serde_json::json!({}),
             created_at: now,
             updated_at: now,
         }

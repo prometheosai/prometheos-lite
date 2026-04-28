@@ -106,12 +106,24 @@ impl WorkOrchestrator {
             None => {
                 // Create new context
                 let domain = self.infer_domain_from_intent(&classification.intent);
-                self.work_context_service.create_context(
+                let mut context = self.work_context_service.create_context(
                     user_id.clone(),
                     self.generate_title(&message),
                     domain,
                     message.clone(),
-                )?
+                )?;
+
+                // Set autonomy level based on intent type
+                match classification.intent {
+                    crate::intent::Intent::CodingTask | crate::intent::Intent::ProjectAction => {
+                        context.autonomy_level = AutonomyLevel::Review;
+                    }
+                    _ => {
+                        context.autonomy_level = AutonomyLevel::Chat;
+                    }
+                }
+
+                context
             }
         };
 
@@ -135,13 +147,25 @@ impl WorkOrchestrator {
 
         // 5. Execute flow based on autonomy level
         // Chat mode: create + set AwaitingApproval (no execution)
-        // Review/Autonomous mode: execute immediately
+        // Review mode: execute planning → Await approval
+        // Autonomous mode: execute immediately
         if context.autonomy_level == AutonomyLevel::Chat {
             self.work_context_service
                 .update_status(&mut context, WorkStatus::AwaitingApproval)?;
             self.work_context_service.update_context(&context)?;
+        } else if context.autonomy_level == AutonomyLevel::Review {
+            // Review mode: execute planning flow
+            self.work_execution_service
+                .continue_context(&context.id)
+                .await?;
+
+            // Reload context to get updated state
+            context = self
+                .work_context_service
+                .get_context(&context.id)?
+                .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
         } else {
-            // Review or Autonomous mode: execute immediately
+            // Autonomous mode: execute immediately
             self.work_execution_service
                 .continue_context(&context.id)
                 .await?;

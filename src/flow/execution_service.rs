@@ -361,7 +361,7 @@ impl FlowExecutionService {
         let mut flow = self.build_flow(flow_file, &options)?;
 
         let mut state = SharedState::new();
-        state.set_input("message".to_string(), serde_json::json!(message));
+        state.set_input("task".to_string(), serde_json::json!(message));
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
 

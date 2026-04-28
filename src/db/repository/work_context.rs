@@ -34,7 +34,7 @@ impl<T: AsDb> WorkContextOperations for T {
                 project_id, conversation_id, parent_context_id, priority, due_at,
                 goal, requirements, constraints, status, current_phase, blocked_reason,
                 plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
-                tool_trace, open_questions, autonomy_level, approval_policy, summary,
+                tool_trace, execution_metadata, open_questions, autonomy_level, approval_policy, summary,
                 completion_criteria, last_activity_at, metadata, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
             params![
@@ -62,6 +62,7 @@ impl<T: AsDb> WorkContextOperations for T {
                 serde_json::to_string(&context.decisions)?,
                 serde_json::to_string(&context.flow_runs)?,
                 serde_json::to_string(&context.tool_trace)?,
+                serde_json::to_string(&context.execution_metadata)?,
                 serde_json::to_string(&context.open_questions)?,
                 serde_json::to_string(&context.autonomy_level)?,
                 serde_json::to_string(&context.approval_policy)?,
@@ -85,7 +86,7 @@ impl<T: AsDb> WorkContextOperations for T {
                     project_id, conversation_id, parent_context_id, priority, due_at,
                     goal, requirements, constraints, status, current_phase, blocked_reason,
                     plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
-                    tool_trace, open_questions, autonomy_level, approval_policy, summary,
+                    tool_trace, execution_metadata, open_questions, autonomy_level, approval_policy, summary,
                     completion_criteria, last_activity_at, metadata, created_at, updated_at
              FROM work_contexts WHERE id = ?1"
         ).context("Failed to prepare work context query")?;
@@ -116,15 +117,16 @@ impl<T: AsDb> WorkContextOperations for T {
                 decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
                 flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
                 tool_trace: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
-                open_questions: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
-                autonomy_level: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
-                approval_policy: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
-                summary: row.get(27)?,
-                completion_criteria: serde_json::from_str(&row.get::<_, String>(28)?).unwrap_or_default(),
-                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(29)?).unwrap().with_timezone(&Utc),
-                metadata: serde_json::from_str(&row.get::<_, String>(30)?).unwrap_or_default(),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(31)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
+                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
+                open_questions: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
+                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
+                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
+                summary: row.get(28)?,
+                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
+                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
+                metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(33)?).unwrap().with_timezone(&Utc),
             })
         });
 
@@ -144,10 +146,10 @@ impl<T: AsDb> WorkContextOperations for T {
                 project_id = ?5, conversation_id = ?6, parent_context_id = ?7, priority = ?8, due_at = ?9,
                 goal = ?10, requirements = ?11, constraints = ?12, status = ?13, current_phase = ?14,
                 blocked_reason = ?15, plan = ?16, approved_plan = ?17, artifacts = ?18, memory_refs = ?19,
-                decisions = ?20, flow_runs = ?21, tool_trace = ?22, open_questions = ?23,
-                autonomy_level = ?24, approval_policy = ?25, summary = ?26, completion_criteria = ?27,
-                last_activity_at = ?28, metadata = ?29, updated_at = ?30
-             WHERE id = ?31",
+                decisions = ?20, flow_runs = ?21, tool_trace = ?22, execution_metadata = ?23, open_questions = ?24,
+                autonomy_level = ?25, approval_policy = ?26, summary = ?27, completion_criteria = ?28,
+                last_activity_at = ?29, metadata = ?30, updated_at = ?31
+             WHERE id = ?32",
             params![
                 &context.title,
                 serde_json::to_string(&context.domain)?,
@@ -171,6 +173,7 @@ impl<T: AsDb> WorkContextOperations for T {
                 serde_json::to_string(&context.decisions)?,
                 serde_json::to_string(&context.flow_runs)?,
                 serde_json::to_string(&context.tool_trace)?,
+                serde_json::to_string(&context.execution_metadata)?,
                 serde_json::to_string(&context.open_questions)?,
                 serde_json::to_string(&context.autonomy_level)?,
                 serde_json::to_string(&context.approval_policy)?,
@@ -194,7 +197,7 @@ impl<T: AsDb> WorkContextOperations for T {
                     project_id, conversation_id, parent_context_id, priority, due_at,
                     goal, requirements, constraints, status, current_phase, blocked_reason,
                     plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
-                    tool_trace, open_questions, autonomy_level, approval_policy, summary,
+                    tool_trace, execution_metadata, open_questions, autonomy_level, approval_policy, summary,
                     completion_criteria, last_activity_at, metadata, created_at, updated_at
              FROM work_contexts WHERE user_id = ?1 ORDER BY created_at DESC"
         ).context("Failed to prepare work contexts list query")?;
@@ -225,15 +228,16 @@ impl<T: AsDb> WorkContextOperations for T {
                 decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
                 flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
                 tool_trace: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
-                open_questions: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
-                autonomy_level: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
-                approval_policy: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
-                summary: row.get(27)?,
-                completion_criteria: serde_json::from_str(&row.get::<_, String>(28)?).unwrap_or_default(),
-                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(29)?).unwrap().with_timezone(&Utc),
-                metadata: serde_json::from_str(&row.get::<_, String>(30)?).unwrap_or_default(),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(31)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
+                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
+                open_questions: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
+                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
+                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
+                summary: row.get(28)?,
+                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
+                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
+                metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(33)?).unwrap().with_timezone(&Utc),
             })
         }).context("Failed to query work contexts")?;
 
@@ -256,7 +260,7 @@ impl<T: AsDb> WorkContextOperations for T {
                     wc.project_id, wc.conversation_id, wc.parent_context_id, wc.priority, wc.due_at,
                     wc.goal, wc.requirements, wc.constraints, wc.status, wc.current_phase, wc.blocked_reason,
                     wc.plan, wc.approved_plan, wc.artifacts, wc.memory_refs, wc.decisions, wc.flow_runs,
-                    wc.tool_trace, wc.open_questions, wc.autonomy_level, wc.approval_policy, wc.summary,
+                    wc.tool_trace, wc.execution_metadata, wc.open_questions, wc.autonomy_level, wc.approval_policy, wc.summary,
                     wc.completion_criteria, wc.last_activity_at, wc.metadata, wc.created_at, wc.updated_at
              FROM work_contexts wc
              INNER JOIN conversation_work_contexts cwc ON wc.id = cwc.work_context_id
@@ -289,15 +293,16 @@ impl<T: AsDb> WorkContextOperations for T {
                 decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
                 flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
                 tool_trace: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
-                open_questions: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
-                autonomy_level: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
-                approval_policy: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
-                summary: row.get(27)?,
-                completion_criteria: serde_json::from_str(&row.get::<_, String>(28)?).unwrap_or_default(),
-                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(29)?).unwrap().with_timezone(&Utc),
-                metadata: serde_json::from_str(&row.get::<_, String>(30)?).unwrap_or_default(),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(31)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
+                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
+                open_questions: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
+                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
+                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
+                summary: row.get(28)?,
+                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
+                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
+                metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(33)?).unwrap().with_timezone(&Utc),
             })
         });
 
