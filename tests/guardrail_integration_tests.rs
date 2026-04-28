@@ -567,6 +567,7 @@ fn test_interrupt_persistence() {
         "node_789",
         "Test interrupt",
         &schema.to_string(),
+        None,
     ).unwrap();
     
     assert_eq!(interrupt.run_id, "run_123");
