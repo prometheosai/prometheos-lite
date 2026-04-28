@@ -10,6 +10,7 @@ pub mod logger;
 pub mod personality;
 pub mod tools;
 pub mod utils;
+pub mod work;
 
 // Legacy modules - deprecated in favor of flow-centric architecture
 // Use the "legacy" feature flag to enable these for backward compatibility
