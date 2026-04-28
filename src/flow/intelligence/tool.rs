@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
 
-use crate::tools::{ToolPermission, ToolPolicy};
+use crate::tools::{ToolContext, ToolPermission, ToolPolicy};
 
 /// Tool input and output types
 pub type ToolInput = serde_json::Value;
@@ -249,16 +249,21 @@ impl ToolRuntime {
         Self::new(ToolSandboxProfile::new())
     }
 
-    /// Execute a command as a tool
-    pub async fn execute_command(&self, command: &str, args: Vec<String>) -> Result<String> {
+    /// Execute a command as a tool with context
+    pub async fn execute_command(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        context: &ToolContext,
+    ) -> Result<String> {
+        // Check tool policy permissions
+        if !context.policy.is_allowed(ToolPermission::Shell) {
+            anyhow::bail!("Shell execution is not allowed by tool policy");
+        }
+
         // Check if command is allowed by sandbox profile
         if !self.profile.is_command_allowed(command) {
             anyhow::bail!("Command '{}' is not allowed by sandbox profile", command);
-        }
-
-        // Check if command requires Shell permission
-        if !self.profile.tool_policy.is_allowed(ToolPermission::Shell) {
-            anyhow::bail!("Shell execution is not allowed by tool policy");
         }
 
         let timeout = Duration::from_millis(self.profile.timeout_ms);
@@ -282,8 +287,13 @@ impl ToolRuntime {
         Ok(stdout.to_string())
     }
 
-    /// Execute a tool with the given input
-    pub async fn execute_tool(&self, tool: &dyn Tool, input: ToolInput) -> Result<ToolOutput> {
+    /// Execute a tool with the given input and context
+    pub async fn execute_tool(
+        &self,
+        tool: &dyn Tool,
+        input: ToolInput,
+        context: &ToolContext,
+    ) -> Result<ToolOutput> {
         tool.call(input).await
     }
 }

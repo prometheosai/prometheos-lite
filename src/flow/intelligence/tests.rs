@@ -213,16 +213,24 @@ fn test_tool_sandbox_profile_file_checking() {
 
 #[tokio::test]
 async fn test_tool_runtime_execute_command() {
-    use crate::tools::{ToolPermission, ToolPolicy};
+    use crate::tools::{ToolContext, ToolPermission, ToolPolicy};
 
     let tool_policy = ToolPolicy::new().with_permission(ToolPermission::Shell);
     let profile = ToolSandboxProfile::with_tool_policy(tool_policy);
 
     let runtime = ToolRuntime::new(profile);
 
+    let context = ToolContext::new(
+        "test_run".to_string(),
+        "test_trace".to_string(),
+        "test_node".to_string(),
+        "echo".to_string(),
+        ToolPolicy::new().with_permission(ToolPermission::Shell),
+    );
+
     #[cfg(unix)]
     let result = runtime
-        .execute_command("echo", vec!["hello".to_string()])
+        .execute_command("echo", vec!["hello".to_string()], &context)
         .await;
 
     #[cfg(windows)]
@@ -230,6 +238,7 @@ async fn test_tool_runtime_execute_command() {
         .execute_command(
             "cmd",
             vec!["/C".to_string(), "echo".to_string(), "hello".to_string()],
+            &context,
         )
         .await;
 
@@ -238,12 +247,22 @@ async fn test_tool_runtime_execute_command() {
 
 #[tokio::test]
 async fn test_tool_runtime_command_blocked() {
+    use crate::tools::{ToolContext, ToolPolicy};
+
     let profile =
         ToolSandboxProfile::custom(vec!["echo".to_string()], vec![], 30000, 10 * 1024 * 1024);
     let runtime = ToolRuntime::new(profile);
 
+    let context = ToolContext::new(
+        "test_run".to_string(),
+        "test_trace".to_string(),
+        "test_node".to_string(),
+        "rm".to_string(),
+        ToolPolicy::new(),
+    );
+
     let result = runtime
-        .execute_command("rm", vec!["-rf".to_string(), "/".to_string()])
+        .execute_command("rm", vec!["-rf".to_string(), "/".to_string()], &context)
         .await;
     assert!(result.is_err());
 }
