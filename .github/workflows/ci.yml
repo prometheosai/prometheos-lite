@@ -38,6 +38,9 @@ jobs:
       - name: Tests
         run: cargo test --all-targets --all-features
 
+      - name: Guardrail Tests
+        run: cargo test --test guardrail_tests --test guardrail_integration_tests
+
       - name: Anti-regression check (no direct LLM calls in API)
         run: |
           # Fail if API handlers contain direct LlmClient::generate() calls
