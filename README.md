@@ -2,7 +2,7 @@
 
 **Flow-centric AI agent orchestration system.**
 
-PrometheOS Lite v1.1 is a Rust-based, local-first system for orchestrating AI agents through a flow-centric architecture. It provides powerful execution capabilities including parallel flows, self-reflection loops, batch processing, debugging, policy enforcement, and rate limiting.
+PrometheOS Lite v1.2 is a Rust-based, local-first system for orchestrating AI agents through a flow-centric architecture. It provides powerful execution capabilities including parallel flows, self-reflection loops, batch processing, debugging, policy enforcement, rate limiting, and WorkContext lifecycle management.
 
 ---
 
@@ -13,6 +13,14 @@ PrometheOS Lite v1.1 is a Rust-based, local-first system for orchestrating AI ag
 - **Flow Builder DSL**: Simplified API for constructing flows with builder pattern
 - **Nested Flows**: Compose flows within flows for hierarchical orchestration
 
+### WorkContext Management (V1.2)
+- **Lifecycle Management**: Track work through phases (Intake, Planning, Execution, Review, Finalization)
+- **Autonomy Levels**: Configure Chat, Autonomous, or Review modes for different work styles
+- **Approval Policies**: Auto, ManualAll, or RequireForSideEffects for control over execution
+- **Artifact Tracking**: Automatically capture and manage outputs from flow execution
+- **Domain Profiles**: Pre-configured templates for different work domains (Software, Business, Marketing, etc.)
+- **Guardrails**: Built-in safety checks for blocked contexts and approval requirements
+
 ### Advanced Execution
 - **Parallel Flows**: Execute multiple flows concurrently with configurable concurrency limits
 - **Self-Reflection Loops**: Loop nodes with reflection functions for iterative improvement
@@ -20,6 +28,8 @@ PrometheOS Lite v1.1 is a Rust-based, local-first system for orchestrating AI ag
 
 ### Developer Experience
 - **CLI Runner**: Execute flows from JSON files with input data
+- **WorkContext CLI**: Create, list, show, and continue WorkContexts from the command line
+- **Template Management**: Install and manage domain profile templates
 - **Debug Mode**: Step-by-step execution with state snapshots and breakpoints
 - **Logging & Tracing**: Structured logs and event timeline for observability
 
@@ -91,6 +101,71 @@ Create a simple flow file `my_flow.json`:
   ],
   "transitions": []
 }
+```
+
+### 6. WorkContext Examples (V1.2)
+
+#### Create a WorkContext
+
+```bash
+prometheos work create --title "Build REST API" --domain software --goal "Create a REST API for user management"
+```
+
+#### List WorkContexts
+
+```bash
+prometheos work list
+```
+
+#### Show WorkContext Details
+
+```bash
+prometheos work show <context-id>
+```
+
+#### Continue a WorkContext
+
+```bash
+prometheos work continue <context-id>
+```
+
+#### Manage Templates
+
+```bash
+# Install default domain profiles
+prometheos templates install
+
+# List available templates
+prometheos templates list
+
+# Show template details
+prometheos templates show "Software Development"
+```
+
+#### Programmatic Usage
+
+```rust
+use prometheos_lite::work::{WorkContextService, types::WorkDomain};
+use std::sync::Arc;
+
+let db = Db::new("prometheos.db")?;
+let work_context_service = WorkContextService::new(Arc::new(db));
+
+// Create a software development context
+let context = work_context_service.create_context(
+    "user-123".to_string(),
+    "Build REST API".to_string(),
+    WorkDomain::Software,
+    "Create a REST API for user management".to_string(),
+)?;
+
+// Update phase
+work_context_service.update_phase(&mut context, WorkPhase::Planning)?;
+
+// Execute a flow in context
+let artifact = execution_service
+    .execute_flow_in_context(&mut context, "planning.flow.yaml")
+    .await?;
 ```
 
 ---
@@ -173,23 +248,27 @@ cargo test
 
 ---
 
-## 📌 Migration from v1.0
+## 📌 Migration from v1.1
 
-The v1.1 release introduces a flow-centric architecture. The old agent-based system is deprecated but still functional.
+The v1.2 release introduces WorkContext lifecycle management. The v1.1 flow-centric architecture remains fully functional.
 
-### Key Changes
+### New Features in V1.2
 
-- **Agent trait** → **Node trait**
-- **SequentialOrchestrator** → **FlowBuilder**
-- **Agent execution** → **Flow execution**
+- **WorkContext**: Track work through phases with lifecycle management
+- **Autonomy Levels**: Configure Chat, Autonomous, or Review modes
+- **Approval Policies**: Control execution with approval requirements
+- **Artifact Tracking**: Automatically capture flow outputs
+- **Domain Profiles**: Pre-configured templates for different work domains
+- **Guardrails**: Built-in safety checks for blocked contexts
 
 ### Migration Steps
 
-1. Wrap existing agents with `AgentNode::new(agent)`
-2. Build flows using `FlowBuilder`
-3. Use `Flow::run()` for execution
+No breaking changes. V1.2 is fully additive:
+1. Existing flows continue to work without modification
+2. Optionally integrate WorkContext for lifecycle tracking
+3. Use new CLI commands for WorkContext management
 
-See `docs/guides/migration.md` for detailed migration guide.
+See `docs/v1.2-operation.md` for detailed V1.2 documentation.
 
 ---
 
