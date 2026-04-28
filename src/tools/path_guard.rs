@@ -53,24 +53,29 @@ impl PathGuard {
         // Build full path inside base directory
         let full_path = format!("{}/{}", self.base_dir, file_path);
 
-        // Canonicalize the path to resolve any symlinks and normalize separators
-        let canonical_path = Path::new(&full_path)
-            .canonicalize()
-            .context("Failed to canonicalize path")?;
+        // For file creation, canonicalize the parent directory first
+        let parent_path = Path::new(&full_path)
+            .parent()
+            .unwrap_or(Path::new(&self.base_dir));
 
-        // Ensure canonicalized path stays inside base directory
+        let canonical_parent = parent_path
+            .canonicalize()
+            .context("Failed to canonicalize parent directory")?;
+
+        // Ensure canonicalized parent stays inside base directory
         let base_canonical = Path::new(&self.base_dir)
             .canonicalize()
             .context("Failed to canonicalize base directory")?;
 
-        if !canonical_path.starts_with(&base_canonical) {
+        if !canonical_parent.starts_with(&base_canonical) {
             anyhow::bail!(
                 "Path outside base directory not allowed: {}",
-                canonical_path.display()
+                canonical_parent.display()
             );
         }
 
-        Ok(canonical_path.display().to_string())
+        // Return the full path (not canonicalized since file may not exist yet)
+        Ok(full_path)
     }
 
     /// Check if a path is safe without canonicalizing (for pre-validation)

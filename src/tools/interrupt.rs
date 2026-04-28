@@ -122,6 +122,69 @@ impl InterruptContext {
             _ => false,
         }
     }
+
+    /// Persist this interrupt to the database
+    pub fn persist(&self) -> Result<(), String> {
+        let db_path = ".prometheos/runs.db";
+        if !std::path::Path::new(db_path).exists() {
+            return Err("Database not found".to_string());
+        }
+
+        let db = crate::db::repository::Db::new(db_path)
+            .map_err(|e| format!("Failed to open database: {}", e))?;
+
+        use crate::db::repository::InterruptOperations;
+        let _ = InterruptOperations::create_interrupt(
+            &db,
+            &self.run_id,
+            &self.trace_id,
+            &self.node_id,
+            &self.reason,
+            &self.expected_schema.to_string(),
+        ).map_err(|e| format!("Failed to persist interrupt: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Load an interrupt from the database by ID
+    pub fn load(interrupt_id: &str) -> Result<Option<Self>, String> {
+        let db_path = ".prometheos/runs.db";
+        if !std::path::Path::new(db_path).exists() {
+            return Err("Database not found".to_string());
+        }
+
+        let db = crate::db::repository::Db::new(db_path)
+            .map_err(|e| format!("Failed to open database: {}", e))?;
+
+        use crate::db::repository::InterruptOperations;
+        let entry = InterruptOperations::get_interrupt(&db, interrupt_id)
+            .map_err(|e| format!("Failed to load interrupt: {}", e))?;
+
+        entry.map(|e| {
+            let expected_schema: serde_json::Value = serde_json::from_str(&e.expected_schema)
+                .unwrap_or(serde_json::Value::Null);
+            let decision: Option<serde_json::Value> = e.decision.and_then(|d| serde_json::from_str(&d).ok());
+
+            Ok(Self {
+                interrupt_id: e.id,
+                run_id: e.run_id,
+                trace_id: e.trace_id,
+                node_id: e.node_id,
+                reason: e.reason,
+                expected_schema,
+                expires_at: e.expires_at,
+                status: match e.status.as_str() {
+                    "pending" => InterruptStatus::Pending,
+                    "approved" => InterruptStatus::Approved,
+                    "denied" => InterruptStatus::Denied,
+                    "expired" => InterruptStatus::Expired,
+                    _ => InterruptStatus::Pending,
+                },
+                decision,
+                created_at: e.created_at,
+            })
+        }).transpose()
+    }
 }
 
 #[cfg(test)]
