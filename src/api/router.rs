@@ -14,6 +14,9 @@ use crate::api::health::health_check;
 use crate::api::messages::{create_message, get_messages};
 use crate::api::projects::{create_project, get_projects};
 use crate::api::websocket::websocket_handler;
+use crate::api::work_contexts::{
+    create_work_context, get_work_context, list_work_contexts, update_work_context_status,
+};
 
 /// Create the API router with all routes
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -31,6 +34,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/messages", post(create_message))
         .route("/conversations/:id/run", post(run_flow))
         .route("/ws/runs/:id", get(websocket_handler))
+        .route("/work-contexts", get(list_work_contexts).post(create_work_context))
+        .route("/work-contexts/:id", get(get_work_context))
+        .route("/work-contexts/:id/status", post(update_work_context_status))
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
