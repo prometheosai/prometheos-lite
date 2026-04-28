@@ -7,9 +7,11 @@ use std::sync::Arc;
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::work::{
+    domain::WorkDomainProfile,
     types::{AutonomyLevel, ApprovalPolicy, WorkPhase, WorkStatus},
     ArtifactMapper, PhaseController, WorkContext, WorkContextService,
 };
+use crate::db::repository::DomainProfileOperations;
 
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
@@ -176,9 +178,17 @@ impl WorkExecutionService {
         }
 
         // Determine next action based on phase using PhaseController
+        // Load domain profile if available to use playbook flow preferences
+        let domain_profile = if let Some(profile_id) = &context.domain_profile_id {
+            let db = self.work_context_service.get_db();
+            DomainProfileOperations::get_domain_profile(&**db, profile_id)?
+        } else {
+            None
+        };
+        
         let next_flow = PhaseController::flow_for_phase(
             context.current_phase,
-            None // TODO: Load domain profile if available
+            domain_profile.as_ref()
         );
         
         if context.current_phase == WorkPhase::Finalization {

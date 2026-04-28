@@ -12,16 +12,23 @@
 - PhaseController supports domain-profile flow selection
 - String-based phase detection replaced with PhaseController::flow_for_phase
 - Deterministic no-API flow test added (deterministic_test.flow.yaml)
+- TODO removed from WorkExecutionService - domain profile now loaded and applied
+- Submit semantics defined: Chat = create + AwaitingApproval, Review/Autonomous = execute immediately
 
 ### Deferred to V1.3
-- API continuation with WorkExecutionService (Axum Handler trait compatibility issues)
-- run-until-complete loop implementation (Axum Handler trait compatibility issues)
+- API integration with WorkOrchestrator (Axum Handler trait compatibility issues - async functions with complex setup don't satisfy Handler trait)
+- run-until-complete loop implementation (blocked by above API integration issue)
 - Repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests)
 
 ### Production Readiness
 - V1.2.1 direction: correct
 - Implementation: improved
-- Production readiness: ~8/10
+- CLI path: 7.5/10
+- Core orchestrator: 7/10
+- API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues)
+- Playbook integration: 4/10
+- Execution completeness standard: 5/10
+- Overall production readiness: ~6/10
 - Claim of "fully complete": no
 
 ## Overview

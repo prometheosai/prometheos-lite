@@ -25,6 +25,11 @@ impl WorkContextService {
         Self { db }
     }
 
+    /// Get the database instance
+    pub fn get_db(&self) -> &Arc<Db> {
+        &self.db
+    }
+
     /// Create a new WorkContext
     pub fn create_context(
         &self,

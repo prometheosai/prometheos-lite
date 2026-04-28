@@ -3,7 +3,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,7 +11,6 @@ use std::sync::Arc;
 use crate::api::state::AppState;
 use crate::db::Db;
 use crate::work::{
-    artifact::Artifact,
     types::{WorkDomain, WorkStatus},
     WorkContextService,
 };
@@ -39,13 +38,19 @@ pub struct SubmitIntentRequest {
 #[derive(Debug, Deserialize)]
 pub struct RunContextRequest {
     #[serde(default)]
-    pub max_iterations: Option<u32>,
+    pub max_iterations: Option<usize>,
     #[serde(default)]
     pub max_runtime_ms: Option<u64>,
     #[serde(default)]
-    pub max_tool_calls: Option<u32>,
+    pub max_tool_calls: Option<usize>,
     #[serde(default)]
     pub max_cost: Option<f64>,
+}
+
+/// Request to update WorkContext status
+#[derive(Debug, Deserialize)]
+pub struct UpdateStatusRequest {
+    pub status: String,
 }
 
 /// Response with WorkContext details
@@ -71,6 +76,31 @@ pub struct ArtifactResponse {
     pub storage_type: String,
     pub file_path: Option<String>,
     pub created_at: String,
+}
+
+/// Custom API error type that implements IntoResponse
+#[derive(Debug)]
+pub enum ApiError {
+    Internal(String),
+    NotFound(String),
+    BadRequest(String),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = match self {
+            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+        };
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::Internal(err.to_string())
+    }
 }
 
 /// List WorkContexts
@@ -171,12 +201,6 @@ pub async fn create_work_context(
     Ok(Json(response))
 }
 
-/// Request to update WorkContext status
-#[derive(Debug, Deserialize)]
-pub struct UpdateStatusRequest {
-    pub status: String,
-}
-
 /// Update WorkContext status
 pub async fn update_work_context_status(
     State(state): State<Arc<AppState>>,
@@ -260,7 +284,7 @@ pub async fn get_work_context_artifacts(
 
 /// Continue a WorkContext
 ///
-/// This endpoint continues a blocked WorkContext using the WorkOrchestrator.
+/// This endpoint continues a WorkContext using the WorkOrchestrator.
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

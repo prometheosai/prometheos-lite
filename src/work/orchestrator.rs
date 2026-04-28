@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
-use super::types::{WorkContext, WorkPhase, WorkStatus};
+use super::types::{AutonomyLevel, WorkContext, WorkPhase, WorkStatus};
 use crate::flow::execution_service::FlowExecutionService;
 use crate::intent::{Intent, IntentClassifier};
 
@@ -133,16 +133,25 @@ impl WorkOrchestrator {
             self.playbook_resolver.update_playbook_usage(&playbook.id)?;
         }
 
-        // 5. Execute flow using WorkExecutionService for proper context-aware execution
-        self.work_execution_service
-            .continue_context(&context.id)
-            .await?;
+        // 5. Execute flow based on autonomy level
+        // Chat mode: create + set AwaitingApproval (no execution)
+        // Review/Autonomous mode: execute immediately
+        if context.autonomy_level == AutonomyLevel::Chat {
+            self.work_context_service
+                .update_status(&mut context, WorkStatus::AwaitingApproval)?;
+            self.work_context_service.update_context(&context)?;
+        } else {
+            // Review or Autonomous mode: execute immediately
+            self.work_execution_service
+                .continue_context(&context.id)
+                .await?;
 
-        // 6. Reload context to get updated state
-        context = self
-            .work_context_service
-            .get_context(&context.id)?
-            .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
+            // Reload context to get updated state
+            context = self
+                .work_context_service
+                .get_context(&context.id)?
+                .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
+        }
 
         Ok(context)
     }
