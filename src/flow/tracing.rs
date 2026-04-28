@@ -118,6 +118,97 @@ pub enum TraceEvent {
         trace_id: TraceId,
         output_key: String,
     },
+
+    // Guardrail events - V1.1
+    PermissionChecked {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        permission: String,
+        allowed: bool,
+    },
+    PermissionDenied {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        permission: String,
+        reason: String,
+    },
+    ApprovalRequested {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        interrupt_id: String,
+    },
+    ApprovalGranted {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        interrupt_id: String,
+    },
+    ApprovalDenied {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        interrupt_id: String,
+    },
+    InterruptCreated {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        interrupt_id: String,
+        reason: String,
+    },
+    InterruptResumed {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        interrupt_id: String,
+    },
+    FlowSnapshotStored {
+        run_id: RunId,
+        flow_name: String,
+        source_hash: String,
+    },
+    SchemaHashChecked {
+        run_id: RunId,
+        flow_name: String,
+        hash_match: bool,
+    },
+    IdempotencyChecked {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        idempotency_key: String,
+        is_duplicate: bool,
+    },
+    OutboxPending {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        tool_name: String,
+        outbox_id: String,
+    },
+    OutboxCompleted {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        tool_name: String,
+        outbox_id: String,
+    },
+    TrustPolicyApplied {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        source: String,
+        trust_level: String,
+    },
+    LoopDetected {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        loop_type: String,
+    },
 }
 
 /// Log level
