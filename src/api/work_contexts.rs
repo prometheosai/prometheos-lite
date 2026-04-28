@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::api::state::AppState;
 use crate::db::Db;
 use crate::work::{
-    types::{WorkDomain, WorkStatus},
+    types::{WorkDomain, WorkStatus, WorkContext},
     WorkContextService,
 };
 

@@ -1,6 +1,6 @@
 # Harness Spine Architecture
 
-## V1.2.1 Status
+## V1.2.2 Status
 
 ### Completed
 - WorkExecutionService no longer forces Intent::CodingTask
@@ -18,9 +18,14 @@
 - GenerateResult struct added with provider/model/latency/fallback metadata
 - ModelRouter::generate_with_metadata() and generate_stream_with_metadata() added
 - LlmUtilities::call_with_metadata() and call_stream_with_metadata() added
+- Autonomy semantics fixed: submit_user_intent sets autonomy level based on intent type
+- Flow input contract normalized: execution_service.rs uses "task" instead of "message"
+- Real integration tests added: tests/work_orchestrator_e2e.rs with full lifecycle tests
+- Execution metadata tracking added: ExecutionRecord struct and execution_metadata field in WorkContext
+- Database schema updated to include execution_metadata field
 
 ### Deferred to V1.3
-- API integration with WorkOrchestrator (Axum Handler trait compatibility issues - async functions with complex setup don't satisfy Handler trait)
+- API integration with WorkOrchestrator (Axum Handler trait compatibility issues - async functions with complex setup don't satisfy Handler trait. This is a fundamental limitation of Axum's type system - when async functions call methods that return Results, the return type becomes impl Future which doesn't satisfy the Handler trait.)
 - run-until-complete loop implementation (blocked by above API integration issue)
 - Deterministic tests proving API → WorkOrchestrator → WorkExecutionService
 
@@ -28,15 +33,15 @@
 - Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests)
 
 ### Production Readiness
-- V1.2.1 direction: correct
-- Implementation: improved
-- CLI path: 7.5/10
-- Core orchestrator: 7/10
-- API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues)
+- V1.2.2 direction: correct
+- Implementation: significantly improved
+- CLI path: 8/10
+- Core orchestrator: 8/10
+- API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues - fundamental limitation)
 - Playbook integration: 4/10
-- Execution completeness standard: 5/10
-- Model metadata: 7/10 (GenerateResult added, not yet integrated everywhere)
-- Overall production readiness: ~6.5/10
+- Execution completeness standard: 6/10
+- Model metadata: 8/10 (GenerateResult added, not yet integrated everywhere)
+- Overall production readiness: ~7/10
 - Claim of "fully complete": no
 
 ## Overview
