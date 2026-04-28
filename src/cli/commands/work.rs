@@ -8,6 +8,7 @@ use prometheos_lite::db::Db;
 use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::work::{
+    template_loader::TemplateLoader,
     types::{WorkDomain, WorkStatus},
     WorkContextService, WorkExecutionService,
 };
@@ -61,6 +62,10 @@ impl WorkCommand {
         let db_path = "prometheos.db";
         let db = Arc::new(Db::new(db_path)?);
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+
+        // Ensure domain templates are installed
+        let template_loader = TemplateLoader::default()?;
+        template_loader.install_defaults()?;
 
         let runtime = Arc::new(RuntimeContext::default());
         let flow_execution_service = Arc::new(FlowExecutionService::new(runtime)?);

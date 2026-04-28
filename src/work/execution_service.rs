@@ -1,22 +1,21 @@
 //! WorkExecutionService - orchestrates flow execution with WorkContext
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::{
-    artifact_mapper::ArtifactMapper,
-    phase_controller::PhaseController,
-    service::WorkContextService,
-    types::{ApprovalPolicy, AutonomyLevel, WorkContext, WorkPhase, WorkStatus},
-};
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
+use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
+use crate::work::{
+    types::{AutonomyLevel, ApprovalPolicy, WorkPhase, WorkStatus},
+    ArtifactMapper, PhaseController, WorkContext, WorkContextService,
+};
 
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
 pub struct WorkExecutionService {
     work_context_service: Arc<WorkContextService>,
     flow_execution_service: Arc<FlowExecutionService>,
-    phase_controller: Arc<PhaseController>,
 }
 
 impl WorkExecutionService {
@@ -28,11 +27,12 @@ impl WorkExecutionService {
         Self {
             work_context_service,
             flow_execution_service,
-            phase_controller: Arc::new(PhaseController),
         }
     }
 
     /// Map flow reference to intent based on domain and flow type
+    /// DEPRECATED: Use direct flow file loading instead
+    #[deprecated(note = "Use resolve_flow_path and load_flow_file instead")]
     fn map_flow_ref_to_intent(&self, flow_ref: &str, domain: &super::WorkDomain) -> crate::intent::Intent {
         use crate::intent::Intent;
         use super::WorkDomain;
@@ -70,7 +70,67 @@ impl WorkExecutionService {
         }
     }
 
-    /// Execute a flow within a WorkContext
+    /// Resolve flow reference to absolute path
+    /// Checks domain-specific flows directory first, then falls back to generic flows
+    fn resolve_flow_path(&self, flow_ref: &str, domain: &super::WorkDomain) -> Result<PathBuf> {
+        use super::WorkDomain;
+
+        // Determine flows directory based on domain
+        let domain_dir = match domain {
+            WorkDomain::Software => "software",
+            WorkDomain::Business => "business",
+            WorkDomain::Marketing => "marketing",
+            WorkDomain::Personal => "personal",
+            WorkDomain::Research => "research",
+            WorkDomain::Creative => "creative",
+            WorkDomain::Operations => "operations",
+            WorkDomain::General => "general",
+            WorkDomain::Custom(name) => name.as_str(),
+        };
+
+        // Try domain-specific flows first
+        let domain_path = PathBuf::from("flows").join(domain_dir).join(flow_ref);
+        if domain_path.exists() {
+            return Ok(domain_path);
+        }
+
+        // Fall back to generic flows directory
+        let generic_path = PathBuf::from("flows").join(flow_ref);
+        if generic_path.exists() {
+            return Ok(generic_path);
+        }
+
+        // Try templates directory
+        let template_path = PathBuf::from("templates").join(domain_dir).join(flow_ref);
+        if template_path.exists() {
+            return Ok(template_path);
+        }
+
+        Err(anyhow::anyhow!(
+            "Flow file not found: {} (tried flows/{}, flows/{}, templates/{}/{})",
+            flow_ref,
+            domain_dir,
+            flow_ref,
+            domain_dir,
+            flow_ref
+        ))
+    }
+
+    /// Load a flow file from path
+    fn load_flow_file(&self, path: &PathBuf) -> Result<FlowFile> {
+        if path.extension().and_then(|s| s.to_str()) == Some("yaml") || path.extension().and_then(|s| s.to_str()) == Some("yml") {
+            let loader = YamlLoader::new();
+            loader.load_from_path(path).context("Failed to load YAML flow")
+        } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let loader = JsonLoader::new();
+            loader.load_from_path(path).context("Failed to load JSON flow")
+        } else {
+            Err(anyhow::anyhow!("Unsupported flow file extension: {:?}", path.extension()))
+        }
+    }
+
+    /// Execute a flow within a WorkContext using direct flow file loading
+    /// This bypasses intent classification and loads the flow directly from flow_ref
     pub async fn execute_flow_in_context(
         &self,
         context: &mut WorkContext,
@@ -97,16 +157,15 @@ impl WorkExecutionService {
             }
         }
 
-        // Build execution options with context-aware settings
-        // Map flow_ref to intent based on domain and flow type
-        let intent = self.map_flow_ref_to_intent(flow_ref, &context.domain);
-        let options = ExecutionOptions::default()
-            .with_override_intent(intent);
+        // Load flow file directly from flow_ref (bypass intent classification)
+        let flow_path = self.resolve_flow_path(flow_ref, &context.domain)?;
+        let flow_file = self.load_flow_file(&flow_path)?;
 
-        // Execute the flow
+        // Execute flow directly without intent override
+        let options = ExecutionOptions::default();
         let final_output = self
             .flow_execution_service
-            .execute_message(&context.goal, options)
+            .execute_flow_file(&flow_file, &context.goal, options)
             .await?;
 
         // Map outputs to artifacts

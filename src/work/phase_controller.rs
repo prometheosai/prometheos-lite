@@ -91,7 +91,14 @@ impl PhaseController {
     pub fn requires_approval(context: &WorkContext, next_phase: WorkPhase) -> bool {
         // Require approval before moving from Planning to Execution
         if context.current_phase == WorkPhase::Planning && next_phase == WorkPhase::Execution {
-            return true;
+            // Check if plan has been approved
+            if context.approved_plan.is_none() {
+                return true; // Require approval if no approved plan exists
+            }
+            // Even with approved plan, respect approval policy
+            if context.approval_policy == super::types::ApprovalPolicy::ManualAll {
+                return true;
+            }
         }
         // Require approval before Finalization
         if next_phase == WorkPhase::Finalization {
