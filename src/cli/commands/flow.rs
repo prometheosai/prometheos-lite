@@ -263,6 +263,12 @@ impl ReplayCommand {
             serde_json::to_string_pretty(&state.get_all_outputs())?
         );
 
+        // Display trace events if available
+        if let Some(trace_events) = state.get_input("trace_events") {
+            println!("\n[trace_events]");
+            println!("{}", serde_json::to_string_pretty(trace_events)?);
+        }
+
         logger.success("Replay completed");
         Ok(())
     }
@@ -294,12 +300,34 @@ impl ResumeCommand {
         let state = continuation_engine.load_checkpoint(&self.run_id)?;
         logger.info("Checkpoint loaded successfully");
 
+        // Validate flow snapshot if available
+        if let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str()) {
+            let db = prometheos_lite::db::repository::Db::new(&db_path.to_string_lossy())?;
+            if let Ok(snapshot) = prometheos_lite::db::repository::FlowSnapshotOperations::get_latest_flow_snapshot(&db, flow_name) {
+                if let Some(stored_snapshot) = snapshot {
+                    // Get current flow source from state
+                    if let Some(current_source) = state.get_input("flow_source").and_then(|v| v.as_str()) {
+                        let current_hash = prometheos_lite::flow::FlowSnapshot::compute_hash(current_source);
+                        
+                        if current_hash != stored_snapshot.source_hash {
+                            logger.error("Flow source hash mismatch!");
+                            logger.error(&format!("Stored hash: {}", stored_snapshot.source_hash));
+                            logger.error(&format!("Current hash: {}", current_hash));
+                            anyhow::bail!("Cannot resume: flow definition has changed since run started");
+                        }
+                        logger.info("Flow snapshot validation passed");
+                    }
+                }
+            }
+        }
+
         // TODO: Resume execution from checkpoint
-        // This requires integration with FlowExecutionService
+        // This requires integration with FlowExecutionService to continue from the exact node
         let result = serde_json::json!({
             "run_id": self.run_id,
             "status": "resumed",
-            "message": "Flow resume not yet fully implemented - requires FlowExecutionService integration"
+            "message": "Resume loaded checkpoint successfully. Full execution resume requires FlowExecutionService integration.",
+            "state_outputs": state.get_all_outputs()
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
 
@@ -334,11 +362,17 @@ impl EventsCommand {
         let state = continuation_engine.load_checkpoint(&self.run_id)?;
         logger.info("Checkpoint loaded successfully");
 
-        // TODO: Extract and display trace events from state
+        // Extract trace events from state if available
+        let events = if let Some(trace_events) = state.get_input("trace_events") {
+            trace_events.clone()
+        } else {
+            serde_json::json!([])
+        };
+
         let result = serde_json::json!({
             "run_id": self.run_id,
-            "events": [],
-            "message": "Events command not yet fully implemented - requires tracer integration"
+            "events": events,
+            "count": if events.is_array() { events.as_array().map(|a| a.len()).unwrap_or(0) } else { 0 }
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
 
