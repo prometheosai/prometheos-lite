@@ -514,9 +514,34 @@ impl Node for ToolNode {
             .get_input("tool_args")
             .cloned()
             .unwrap_or(serde_json::json!({}));
+
+        // Build ToolContext from state
+        let run_id = state.get_run_id().unwrap_or("unknown".to_string());
+        let trace_id = state.get_trace_id().unwrap_or("unknown".to_string());
+        let node_id = self.id();
+
+        // Get tool policy from state or use conservative default
+        let policy = state
+            .get_budget_report()
+            .and_then(|report| {
+                report.get("tool_policy").and_then(|p| {
+                    serde_json::from_value::<crate::tools::ToolPolicy>(p.clone()).ok()
+                })
+            })
+            .unwrap_or_else(crate::tools::ToolPolicy::conservative);
+
+        let context = crate::tools::ToolContext::new(
+            run_id,
+            trace_id,
+            node_id,
+            tool_name.clone(),
+            policy,
+        );
+
         Ok(serde_json::json!({
             "tool_name": tool_name,
-            "tool_args": tool_args
+            "tool_args": tool_args,
+            "tool_context": context
         }))
     }
 
@@ -525,6 +550,11 @@ impl Node for ToolNode {
             .as_str()
             .context("Missing tool_name in tool node input")?;
         let tool_args = &input["tool_args"];
+
+        // Extract ToolContext from input
+        let context: crate::tools::ToolContext = serde_json::from_value(
+            input["tool_context"].clone()
+        ).context("Missing or invalid tool_context in tool node input")?;
 
         if let Some(runtime) = &self.tool_runtime {
             // Parse tool_args as a command and arguments
@@ -537,7 +567,7 @@ impl Node for ToolNode {
                 vec![]
             };
 
-            let result = runtime.execute_command(tool_name, args).await?;
+            let result = runtime.execute_command(tool_name, args, &context).await?;
             Ok(serde_json::json!({ "result": result }))
         } else {
             // Fallback to placeholder if no ToolRuntime
@@ -581,6 +611,11 @@ impl Node for FileWriterNode {
     }
 
     fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        // Check budget before file write
+        state
+            .check_memory_write_budget()
+            .context("Memory write budget exceeded")?;
+
         let content = state
             .get_output("generated")
             .cloned()
@@ -591,42 +626,39 @@ impl Node for FileWriterNode {
             .unwrap_or("output.txt")
             .to_string();
 
-        // Reject absolute paths
-        if file_path.starts_with("/") || file_path.contains(":") {
-            anyhow::bail!("Absolute paths not allowed: {}", file_path);
-        }
+        // Build ToolContext from state
+        let run_id = state.get_run_id().unwrap_or("unknown".to_string());
+        let trace_id = state.get_trace_id().unwrap_or("unknown".to_string());
+        let node_id = self.id();
 
-        // Reject parent directory traversal
-        if file_path.contains("..") {
-            anyhow::bail!("Parent directory traversal (..) not allowed: {}", file_path);
-        }
+        // Get tool policy from state or use conservative default
+        let policy = state
+            .get_budget_report()
+            .and_then(|report| {
+                report.get("tool_policy").and_then(|p| {
+                    serde_json::from_value::<crate::tools::ToolPolicy>(p.clone()).ok()
+                })
+            })
+            .unwrap_or_else(crate::tools::ToolPolicy::conservative);
 
-        // Ensure prometheos-output directory exists
-        std::fs::create_dir_all("prometheos-output")
-            .context("Failed to create prometheos-output directory")?;
+        let context = crate::tools::ToolContext::new(
+            run_id,
+            trace_id,
+            node_id,
+            "file_writer".to_string(),
+            policy,
+        );
 
-        // Build full path inside prometheos-output
-        let full_path = format!("prometheos-output/{}", file_path);
-
-        // Canonicalize the path to resolve any symlinks and normalize separators
-        let canonical_path = std::path::Path::new(&full_path)
-            .canonicalize()
-            .context("Failed to canonicalize path")?;
-
-        // Ensure canonicalized path stays inside prometheos-output
-        let output_dir = std::path::Path::new("prometheos-output")
-            .canonicalize()
-            .context("Failed to canonicalize output directory")?;
-
-        if !canonical_path.starts_with(&output_dir) {
-            anyhow::bail!(
-                "Path outside prometheos-output directory not allowed: {}",
-                canonical_path.display()
-            );
-        }
+        // Use PathGuard to validate the path
+        let path_guard = crate::tools::PathGuard::default();
+        let canonical_path = path_guard.validate_path(&file_path)?;
 
         Ok(
-            serde_json::json!({ "content": content, "file_path": canonical_path.display().to_string() }),
+            serde_json::json!({
+                "content": content,
+                "file_path": canonical_path,
+                "tool_context": context
+            }),
         )
     }
 
