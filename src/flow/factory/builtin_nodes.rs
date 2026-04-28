@@ -879,19 +879,19 @@ impl Node for MemoryWriteNode {
             .check_memory_write_budget()
             .context("Memory write budget exceeded")?;
 
-        let content = state
+        let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        Ok(serde_json::json!({ "content": content }))
+        Ok(serde_json::json!({ "task": task }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let content = input["content"]
+        let content = input["task"]
             .as_str()
-            .context("Missing content in memory write node input")?;
+            .context("Missing task in memory write node input")?;
 
         if let Some(service) = &self.memory_service {
             // Use MemoryService for actual write, but handle embedding server failures gracefully

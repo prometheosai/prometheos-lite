@@ -284,7 +284,8 @@ pub async fn get_work_context_artifacts(
 
 /// Continue a WorkContext
 ///
-/// This endpoint continues a WorkContext using the WorkOrchestrator.
+/// NOTE: This endpoint uses WorkContextService directly due to Axum Handler trait limitations.
+/// Full WorkOrchestrator integration deferred to V1.3.
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -342,6 +343,9 @@ pub async fn submit_intent(
 }
 
 /// Run a WorkContext until blocked or complete
+///
+/// NOTE: This endpoint uses WorkContextService directly due to Axum Handler trait limitations.
+/// Full WorkOrchestrator integration deferred to V1.3.
 pub async fn run_until_complete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

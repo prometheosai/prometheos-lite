@@ -42,27 +42,8 @@ impl ModelRouter {
 
     /// Generate a completion using the current provider with fallback
     pub async fn generate(&self, prompt: &str) -> Result<String> {
-        let providers_to_try = if self.fallback_chain.is_empty() {
-            (0..self.providers.len()).collect()
-        } else {
-            self.fallback_chain.clone()
-        };
-
-        let mut last_error = None;
-
-        for provider_idx in providers_to_try {
-            if let Some(provider) = self.providers.get(provider_idx) {
-                match provider.generate(prompt).await {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        last_error = Some(e);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No providers available")))
+        let result = self.generate_with_metadata(prompt).await?;
+        Ok(result.content)
     }
 
     /// Generate a completion with metadata (provider, model, latency, fallback info)

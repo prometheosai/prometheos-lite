@@ -1,6 +1,6 @@
 # Harness Spine Architecture
 
-## V1.2.2 Status
+## V1.2.3 Status
 
 ### Completed
 - WorkExecutionService no longer forces Intent::CodingTask
@@ -14,8 +14,9 @@
 - Deterministic no-API flow test added (deterministic_test.flow.yaml)
 - TODO removed from WorkExecutionService - domain profile now loaded and applied
 - Submit semantics defined: Chat = create + AwaitingApproval, Review/Autonomous = execute immediately
-- MemoryWriteNode task/content mismatch fixed in builtin_nodes.rs (prep now emits "content")
+- MemoryWriteNode task/content mismatch fixed in builtin_nodes.rs (prep emits "task", exec reads "task")
 - GenerateResult struct added with provider/model/latency/fallback metadata
+- ModelRouter::generate() now calls generate_with_metadata() internally
 - ModelRouter::generate_with_metadata() and generate_stream_with_metadata() added
 - LlmUtilities::call_with_metadata() and call_stream_with_metadata() added
 - Autonomy semantics fixed: submit_user_intent sets autonomy level based on intent type
@@ -23,24 +24,25 @@
 - Real integration tests added: tests/work_orchestrator_e2e.rs with full lifecycle tests
 - Execution metadata tracking added: ExecutionRecord struct and execution_metadata field in WorkContext
 - Database schema updated to include execution_metadata field
+- API endpoints documented with NOTE about Axum Handler trait limitations
 
 ### Deferred to V1.3
 - API integration with WorkOrchestrator (Axum Handler trait compatibility issues - async functions with complex setup don't satisfy Handler trait. This is a fundamental limitation of Axum's type system - when async functions call methods that return Results, the return type becomes impl Future which doesn't satisfy the Handler trait.)
 - run-until-complete loop implementation (blocked by above API integration issue)
-- Deterministic tests proving API → WorkOrchestrator → WorkExecutionService
+- Deterministic tests proving API → WorkOrchestrator → WorkExecutionService (blocked by API integration issue)
 
 ### Deferred to V1.4
-- Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests)
+- Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests) - formally deferred to V1.4
 
 ### Production Readiness
-- V1.2.2 direction: correct
+- V1.2.3 direction: correct
 - Implementation: significantly improved
 - CLI path: 8/10
 - Core orchestrator: 8/10
-- API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues - fundamental limitation)
+- API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues - fundamental limitation, documented in code)
 - Playbook integration: 4/10
 - Execution completeness standard: 6/10
-- Model metadata: 8/10 (GenerateResult added, not yet integrated everywhere)
+- Model metadata: 8/10 (GenerateResult integrated into ModelRouter::generate())
 - Overall production readiness: ~7/10
 - Claim of "fully complete": no
 
