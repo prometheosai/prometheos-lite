@@ -6,6 +6,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
 use super::types::{WorkContext, WorkPhase, WorkStatus};
 use crate::flow::execution_service::FlowExecutionService;
@@ -63,7 +64,7 @@ impl ExecutionLimits {
 pub struct WorkOrchestrator {
     work_context_service: Arc<WorkContextService>,
     playbook_resolver: Arc<super::playbook_resolver::PlaybookResolver>,
-    flow_execution_service: Arc<FlowExecutionService>,
+    work_execution_service: Arc<WorkExecutionService>,
     intent_classifier: IntentClassifier,
 }
 
@@ -71,13 +72,13 @@ impl WorkOrchestrator {
     pub fn new(
         work_context_service: Arc<WorkContextService>,
         playbook_resolver: Arc<super::playbook_resolver::PlaybookResolver>,
-        flow_execution_service: Arc<FlowExecutionService>,
+        work_execution_service: Arc<WorkExecutionService>,
         intent_classifier: IntentClassifier,
     ) -> Self {
         Self {
             work_context_service,
             playbook_resolver,
-            flow_execution_service,
+            work_execution_service,
             intent_classifier,
         }
     }
@@ -127,19 +128,21 @@ impl WorkOrchestrator {
             context.domain_profile_id = Some(playbook.domain_profile_id.clone());
             context.approval_policy = playbook.default_approval_policy;
             self.work_context_service.update_context(&context)?;
+
+            // Update playbook usage
+            self.playbook_resolver.update_playbook_usage(&playbook.id)?;
         }
 
-        // 5. Execute flow
-        let _output = self
-            .flow_execution_service
-            .execute_message(&message, Default::default())
+        // 5. Execute flow using WorkExecutionService for proper context-aware execution
+        self.work_execution_service
+            .continue_context(&context.id)
             .await?;
 
-        // 6. Update context with execution results
-        context.last_activity_at = chrono::Utc::now();
-        context.status = WorkStatus::InProgress;
-        context.current_phase = WorkPhase::Execution;
-        self.work_context_service.update_context(&context)?;
+        // 6. Reload context to get updated state
+        context = self
+            .work_context_service
+            .get_context(&context.id)?
+            .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
 
         Ok(context)
     }
@@ -155,18 +158,13 @@ impl WorkOrchestrator {
             return Err(anyhow::anyhow!("Context is not blocked: {}", context_id));
         }
 
-        // Clear blocked reason and resume
+        // Clear blocked reason and resume using WorkExecutionService
         self.work_context_service.clear_blocked_reason(&mut context)?;
 
-        // Execute next step (simplified for MVP - in future would execute specific blocked action)
-        let _output = self
-            .flow_execution_service
-            .execute_message(&context.goal, Default::default())
+        let context = self
+            .work_execution_service
+            .continue_context(&context_id)
             .await?;
-
-        context.last_activity_at = chrono::Utc::now();
-        context.status = WorkStatus::InProgress;
-        self.work_context_service.update_context(&context)?;
 
         Ok(context)
     }
@@ -203,8 +201,8 @@ impl WorkOrchestrator {
                 break;
             }
 
-            // Check completion
-            if context.is_complete() || context.is_completion_satisfied() {
+            // Check completion - empty criteria should NOT mean complete
+            if context.is_complete() || (!context.completion_criteria.is_empty() && context.is_completion_satisfied()) {
                 context.status = WorkStatus::Completed;
                 self.work_context_service.update_context(&context)?;
                 break;
@@ -215,15 +213,10 @@ impl WorkOrchestrator {
                 break;
             }
 
-            // Execute next step
-            let _output = self
-                .flow_execution_service
-                .execute_message(&context.goal, Default::default())
-                .await?;
+            // Execute next step using WorkExecutionService
+            context = self.work_execution_service.continue_context(&context.id).await?;
 
             iterations += 1;
-            context.last_activity_at = chrono::Utc::now();
-            self.work_context_service.update_context(&context)?;
         }
 
         Ok(context)

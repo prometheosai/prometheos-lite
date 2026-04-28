@@ -5,13 +5,14 @@
 use std::sync::Arc;
 
 use crate::api::ConnectionManager;
+use crate::db::Db;
 use crate::flow::EmbeddingProvider;
 use crate::flow::LocalEmbeddingProvider;
 use crate::flow::MemoryService;
 use crate::flow::RuntimeContext;
 use crate::flow::execution_service::FlowExecutionService;
 use crate::intent::IntentClassifier;
-use crate::work::{PlaybookResolver, WorkContextService, WorkOrchestrator};
+use crate::work::{PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator};
 
 /// Global application state shared across all API routes
 ///
@@ -46,5 +47,25 @@ impl AppState {
             embedding_provider,
             memory_service,
         }
+    }
+
+    /// Create a WorkOrchestrator instance for this request
+    /// Database connections are created per-request for thread safety
+    pub fn create_work_orchestrator(&self) -> anyhow::Result<WorkOrchestrator> {
+        let db = Arc::new(Db::new(&self.db_path)?);
+        let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+        let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
+        let flow_execution_service = Arc::new(FlowExecutionService::new(self.runtime.clone())?);
+        let work_execution_service = Arc::new(WorkExecutionService::new(
+            work_context_service.clone(),
+            flow_execution_service,
+        ));
+        let intent_classifier = IntentClassifier::new()?;
+        Ok(WorkOrchestrator::new(
+            work_context_service,
+            playbook_resolver,
+            work_execution_service,
+            intent_classifier,
+        ))
     }
 }

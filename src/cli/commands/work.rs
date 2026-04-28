@@ -5,13 +5,15 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 
 use prometheos_lite::db::Db;
-use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
+use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::{
+    artifact::Artifact,
+    execution_service::WorkExecutionService,
     template_loader::TemplateLoader,
     types::{WorkDomain, WorkStatus},
-    ExecutionLimits, PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator,
+    ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
 };
 
 #[derive(Debug, Parser)]
@@ -91,16 +93,15 @@ impl WorkCommand {
         let flow_execution_service = Arc::new(FlowExecutionService::new(runtime)?);
         let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
         let intent_classifier = IntentClassifier::new()?;
+        let work_execution_service = Arc::new(WorkExecutionService::new(
+            work_context_service.clone(),
+            flow_execution_service.clone(),
+        ));
         let work_orchestrator = Arc::new(WorkOrchestrator::new(
             work_context_service.clone(),
             playbook_resolver,
-            flow_execution_service.clone(),
+            work_execution_service,
             intent_classifier,
-        ));
-
-        let work_execution_service = Arc::new(WorkExecutionService::new(
-            work_context_service.clone(),
-            flow_execution_service,
         ));
 
         match self.command {

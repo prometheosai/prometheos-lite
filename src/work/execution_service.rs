@@ -238,10 +238,10 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::flow::RuntimeContext;
-    use crate::work::types::WorkDomain;
+    use crate::work::types::{WorkDomain, WorkPhase, WorkStatus};
 
     #[tokio::test]
-    async fn test_execute_flow_in_context() {
+    async fn test_work_execution_service_creation() {
         let db = Arc::new(Db::in_memory().unwrap());
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
         let runtime = Arc::new(RuntimeContext::default());
@@ -253,46 +253,8 @@ mod tests {
             flow_execution_service,
         );
 
-        let mut context = work_context_service
-            .create_context(
-                "user-1".to_string(),
-                "Build API".to_string(),
-                WorkDomain::Software,
-                "Create a REST API".to_string(),
-            )
-            .unwrap();
-
-        // This test requires actual flow files, so we'll skip for now
-        // In a real scenario, we'd mock the FlowExecutionService
-        // For now, we'll just verify the structure compiles
-        assert_eq!(context.status, WorkStatus::Draft);
-    }
-
-    #[tokio::test]
-    async fn test_continue_context() {
-        let db = Arc::new(Db::in_memory().unwrap());
-        let work_context_service = Arc::new(WorkContextService::new(db.clone()));
-        let runtime = Arc::new(RuntimeContext::default());
-        let flow_execution_service = Arc::new(
-            FlowExecutionService::new(runtime.clone()).unwrap()
-        );
-        let execution_service = WorkExecutionService::new(
-            work_context_service.clone(),
-            flow_execution_service,
-        );
-
-        let context = work_context_service
-            .create_context(
-                "user-1".to_string(),
-                "Build API".to_string(),
-                WorkDomain::Software,
-                "Create a REST API".to_string(),
-            )
-            .unwrap();
-
-        // This test requires actual flow execution
-        // For now, we'll skip and just verify structure
-        assert_eq!(context.status, WorkStatus::Draft);
+        // Verify service creation
+        assert_eq!(execution_service.work_context_service, work_context_service);
     }
 
     #[tokio::test]
@@ -327,7 +289,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_and_execute() {
+    async fn test_continue_complete_context() {
         let db = Arc::new(Db::in_memory().unwrap());
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
         let runtime = Arc::new(RuntimeContext::default());
@@ -339,9 +301,7 @@ mod tests {
             flow_execution_service,
         );
 
-        // This test requires actual flow execution
-        // For now, we'll skip and just verify structure
-        let context = work_context_service
+        let mut context = work_context_service
             .create_context(
                 "user-1".to_string(),
                 "Build API".to_string(),
@@ -350,6 +310,49 @@ mod tests {
             )
             .unwrap();
 
+        work_context_service
+            .update_status(&mut context, WorkStatus::Completed)
+            .unwrap();
+
+        let result = execution_service.continue_context(&context.id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("complete"));
+    }
+
+    #[tokio::test]
+    async fn test_work_context_lifecycle() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+
+        let mut context = work_context_service
+            .create_context(
+                "user-1".to_string(),
+                "Build API".to_string(),
+                WorkDomain::Software,
+                "Create a REST API".to_string(),
+            )
+            .unwrap();
+
+        // Test initial state
         assert_eq!(context.status, WorkStatus::Draft);
+        assert_eq!(context.current_phase, WorkPhase::Intake);
+
+        // Test phase transition
+        work_context_service
+            .update_phase(&mut context, WorkPhase::Planning)
+            .unwrap();
+        assert_eq!(context.current_phase, WorkPhase::Planning);
+
+        // Test status transition
+        work_context_service
+            .update_status(&mut context, WorkStatus::InProgress)
+            .unwrap();
+        assert_eq!(context.status, WorkStatus::InProgress);
+
+        // Test completion
+        work_context_service
+            .update_status(&mut context, WorkStatus::Completed)
+            .unwrap();
+        assert_eq!(context.status, WorkStatus::Completed);
     }
 }

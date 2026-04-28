@@ -260,9 +260,7 @@ pub async fn get_work_context_artifacts(
 
 /// Continue a WorkContext
 ///
-/// This endpoint validates a WorkContext for continuation and returns its current state.
-/// For V1.2, actual flow execution is handled via CLI. The API provides validation and state retrieval.
-/// Future versions will support async execution via background task queue.
+/// This endpoint continues a blocked WorkContext using the WorkOrchestrator.
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

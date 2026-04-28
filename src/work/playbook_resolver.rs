@@ -22,19 +22,21 @@ impl PlaybookResolver {
     }
 
     /// Resolve the best playbook for a given WorkContext
-    pub fn resolve_playbook(
-        &self,
-        context: &WorkContext,
-    ) -> Result<Option<WorkContextPlaybook>> {
-        let scored = self.score_playbooks(context)?;
+    pub fn resolve_playbook(&self, context: &WorkContext) -> Result<Option<WorkContextPlaybook>> {
+        let playbooks = self.db.get_playbooks_for_user(&context.user_id)?;
 
-        if scored.is_empty() {
+        if playbooks.is_empty() {
             return Ok(None);
         }
 
-        // Return highest-scoring playbook
-        let (playbook, _score) = scored.into_iter().next().unwrap();
-        Ok(Some(playbook))
+        let mut scored_playbooks: Vec<(f32, WorkContextPlaybook)> = playbooks
+            .into_iter()
+            .map(|pb| (self.calculate_score(&pb, context), pb))
+            .collect();
+
+        scored_playbooks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(scored_playbooks.first().map(|(_, pb)| pb.clone()))
     }
 
     /// Score all playbooks for a given WorkContext
