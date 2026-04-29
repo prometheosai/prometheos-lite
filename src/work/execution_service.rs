@@ -130,6 +130,19 @@ impl WorkExecutionService {
             .execute_flow_file(&flow_file, &context.goal, options)
             .await?;
 
+        // Convert execution metadata to ExecutionRecords and add to WorkContext
+        for (node_id, metadata_json) in &final_output.execution_metadata {
+            if let Ok(generate_result) = serde_json::from_value::<crate::flow::intelligence::GenerateResult>(
+                metadata_json.clone()
+            ) {
+                let execution_record = super::types::ExecutionRecord::from_generate_result(
+                    node_id.clone(),
+                    &generate_result,
+                );
+                context.execution_metadata.push(execution_record);
+            }
+        }
+
         // Map outputs to artifacts
         let artifacts = ArtifactMapper::map_flow_output(
             context.id.clone(),
