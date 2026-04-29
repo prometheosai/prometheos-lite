@@ -619,6 +619,63 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ---
 
+## v1.3 PRD - WorkContext Playbooks & Evolution Engine
+
+**Codename:** "V1.3 — WorkContext Playbooks & Evolution Engine"
+
+**Objective:** Make PrometheOS improve — add persistent strategy layer (Playbooks), learning from execution (Evolution Engine), performance tracking, evaluation, strict mode, and observability.
+
+### Phase 1 — Playbook Schema & Storage (EPIC 1)
+- [x] Issue #1: Add `PatternRecord` (pattern_type, signal, weight), `FlowPreference` (flow_id, weight, confidence), `NodePreference` (node_type, params) types to playbook module
+- [x] Issue #2: Extend `WorkContextPlaybook` with `preferred_nodes: Vec<NodePreference>`, `success_patterns: Vec<PatternRecord>`, `failure_patterns: Vec<PatternRecord>`, upgrade `preferred_flows` from `Vec<String>` to `Vec<FlowPreference>`
+- [x] Issue #3: Add `get_playbook_by_user_and_domain()` to PlaybookOperations
+- [x] Issue #4: Add pattern storage (success/failure patterns) to playbook repository
+- [x] Issue #5: Implement 3-tier fallback in PlaybookResolver (user+domain → domain default → global default)
+
+### Phase 2 — Playbook-Aware Orchestration (EPIC 2)
+- [x] Issue #6: Inject `playbook_id` and playbook metadata into WorkContext on `submit_user_intent`
+- [x] Issue #7: Replace static flow selection with weighted selection from `playbook.preferred_flows` (weighted_random + exploration factor to avoid always picking first flow)
+- [x] Issue #8: Add `state.get_playbook()` to SharedState and condition node behavior (PlannerNode → deeper plans if research_depth high, CoderNode → stricter output if approval required, ReviewerNode → more aggressive critique if evaluation strict)
+
+### Phase 3 — Pattern Extraction & Evolution (EPIC 3)
+- [x] Issue #9: Add `PatternRecord` extraction from completed WorkContext (revision_count, failure_reason, success signals, execution_metadata)
+- [x] Issue #10: Add `evolve_playbook()` method to EvolutionEngine (increase successful flow weights, penalize failures, adjust research_depth/autonomy)
+- [x] Issue #11: Hook evolution into WorkOrchestrator — add `complete_context()` method with triggers for: completion, partial failure, user correction, retry
+
+### Phase 4 — Flow Performance Tracking (EPIC 4)
+- [x] Issue #12: Define `FlowPerformanceRecord` struct (flow_id, work_context_id, success_score, duration_ms, token_cost, revision_count)
+- [x] Issue #13: Store `FlowPerformanceRecord` after execution in WorkExecutionService
+- [x] Issue #14: Feed FlowPerformanceRecords into EvolutionEngine for pattern generation
+
+### Phase 5 — WorkContext Evaluation (EPIC 5)
+- [x] Issue #15: Implement `evaluate_context(context: &WorkContext) -> EvaluationResult` with signals: artifact completeness, retries, latency, semantic correctness (LLM-based scoring), structural correctness (schema validation), tool success/failure consistency
+- [x] Issue #16: Store evaluation result in WorkContext and expose via API/CLI
+
+### Phase 6 — Strict Mode (EPIC 6)
+- [ ] Issue #17: Add `StrictMode` config flag — missing inputs → error, missing services → error, empty outputs → error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
+- [ ] Issue #18: Enforce strict mode in FlowExecutionService and WorkExecutionService
+
+### Phase 7 — Observability (EPIC 7)
+- [ ] Issue #19: Add structured node execution logs (input/output summaries, duration, status)
+- [ ] Issue #20: Add tool call logging to trace events (tool_name, args_hash, result_hash, duration)
+- [ ] Issue #21: Add LLM latency as first-class trace field (provider, model, prompt_tokens, completion_tokens, latency_ms)
+- [ ] Issue #22: Add hierarchical trace structure: trace_id → WorkContext → FlowRun → NodeRun
+- [ ] Issue #23: (Optional) OpenTelemetry integration for trace export
+
+### Phase 8 — Testing
+- [ ] Issue #24: Test playbook creation with patterns and preferences (FlowPreference weights, PatternRecord storage)
+- [ ] Issue #25: Test playbook-aware flow selection (weighted selection with exploration factor)
+- [ ] Issue #26: Test evolution engine pattern extraction and playbook update (success/failure patterns, partial failure trigger)
+- [ ] Issue #27: Test FlowPerformanceRecord storage and retrieval
+- [ ] Issue #28: Test WorkContext evaluation scoring (semantic, structural, tool consistency)
+- [ ] Issue #29: Test strict mode enforcement (missing inputs, empty outputs, unwrap guard, Option::None guard, idempotency)
+- [ ] Issue #30: Test observability (node logs, tool calls, LLM latency, hierarchical trace structure)
+
+**Status:** v1.3 - In Progress (16/30 implemented)
+**See:** `docs/prd/prometheos-lite-V1.3.md` for full specification
+
+---
+
 ## Unfinished / Deferred / Deprecated Tasks
 
 ### v0.0.1 - Optional Post-Launch (Deprecated)
