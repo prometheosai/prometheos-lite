@@ -208,6 +208,24 @@ impl SharedState {
         self.budget_guard.as_ref().cloned()
     }
 
+    /// Add execution metadata (from GenerateResult)
+    pub fn add_execution_metadata(&mut self, node_id: String, metadata: serde_json::Value) {
+        let key = format!("exec_meta_{}", node_id);
+        self.set_meta(key, metadata);
+    }
+
+    /// Get all execution metadata
+    pub fn get_execution_metadata(&self) -> Vec<(String, serde_json::Value)> {
+        let mut metadata = Vec::new();
+        for (key, value) in &self.meta {
+            if key.starts_with("exec_meta_") {
+                let node_id = key.strip_prefix("exec_meta_").unwrap_or(key).to_string();
+                metadata.push((node_id, value.clone()));
+            }
+        }
+        metadata
+    }
+
     /// Check if an LLM call is allowed under current budget
     /// Returns error if budget would be exceeded
     pub fn check_llm_budget(&self) -> anyhow::Result<()> {
