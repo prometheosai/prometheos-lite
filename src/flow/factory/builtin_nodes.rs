@@ -125,8 +125,11 @@ impl Node for PlannerNode {
                 base_prompt
             };
 
-            let response = router.generate(&enhanced_prompt).await?;
-            Ok(serde_json::json!({ "plan": response }))
+            let result = router.generate_with_metadata(&enhanced_prompt).await?;
+            Ok(serde_json::json!({
+                "plan": result.content,
+                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+            }))
         } else {
             // Fallback to placeholder if no ModelRouter
             Ok(serde_json::json!({
@@ -141,6 +144,12 @@ impl Node for PlannerNode {
         } else if let Some(plan) = output["plan"].as_array() {
             state.set_working("plan".to_string(), serde_json::json!(plan));
         }
+
+        // Store execution metadata if available
+        if let Some(metadata) = output.get("_metadata") {
+            state.add_execution_metadata(self.id(), metadata.clone());
+        }
+
         "continue".to_string()
     }
 
@@ -226,8 +235,11 @@ impl Node for CoderNode {
                 base_prompt
             };
 
-            let response = router.generate(&enhanced_prompt).await?;
-            Ok(serde_json::json!({ "generated_code": response }))
+            let result = router.generate_with_metadata(&enhanced_prompt).await?;
+            Ok(serde_json::json!({
+                "generated_code": result.content,
+                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+            }))
         } else {
             // Fallback to placeholder if no ModelRouter
             Ok(serde_json::json!({
@@ -252,6 +264,12 @@ impl Node for CoderNode {
 
             state.set_output("generated".to_string(), serde_json::json!(filtered_code));
         }
+
+        // Store execution metadata if available
+        if let Some(metadata) = output.get("_metadata") {
+            state.add_execution_metadata(self.id(), metadata.clone());
+        }
+
         "continue".to_string()
     }
 
@@ -327,8 +345,11 @@ impl Node for ReviewerNode {
                 base_prompt
             };
 
-            let response = router.generate(&enhanced_prompt).await?;
-            Ok(serde_json::json!({ "review": response }))
+            let result = router.generate_with_metadata(&enhanced_prompt).await?;
+            Ok(serde_json::json!({
+                "review": result.content,
+                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+            }))
         } else {
             // Fallback to placeholder if no ModelRouter
             Ok(serde_json::json!({
@@ -353,6 +374,12 @@ impl Node for ReviewerNode {
 
             state.set_output("review".to_string(), serde_json::json!(filtered_review));
         }
+
+        // Store execution metadata if available
+        if let Some(metadata) = output.get("_metadata") {
+            state.add_execution_metadata(self.id(), metadata.clone());
+        }
+
         "continue".to_string()
     }
 
@@ -444,8 +471,11 @@ impl Node for LlmNode {
                 final_prompt
             };
 
-            let response = router.generate(&enhanced_prompt).await?;
-            Ok(serde_json::json!({ "response": response }))
+            let result = router.generate_with_metadata(&enhanced_prompt).await?;
+            Ok(serde_json::json!({
+                "response": result.content,
+                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+            }))
         } else {
             // Fallback to placeholder if no ModelRouter
             Ok(serde_json::json!({
@@ -473,6 +503,12 @@ impl Node for LlmNode {
                 serde_json::json!(filtered_response),
             );
         }
+
+        // Store execution metadata if available
+        if let Some(metadata) = output.get("_metadata") {
+            state.add_execution_metadata(self.id(), metadata.clone());
+        }
+
         "continue".to_string()
     }
 
