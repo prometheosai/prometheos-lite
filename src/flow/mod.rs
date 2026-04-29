@@ -16,6 +16,7 @@ pub mod loop_detection;
 pub mod memory;
 pub mod migration;
 pub mod node;
+pub mod opentelemetry;
 pub mod output;
 pub mod runtime;
 pub mod snapshot;
@@ -41,6 +42,7 @@ pub use memory::*;
 #[cfg(feature = "legacy")]
 pub use migration::*;
 pub use node::*;
+pub use opentelemetry::*;
 pub use output::*;
 pub use runtime::*;
 pub use snapshot::*;

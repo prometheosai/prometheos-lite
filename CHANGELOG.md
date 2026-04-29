@@ -660,7 +660,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #20: Add tool call logging to trace events (tool_name, args_hash, result_hash, duration)
 - [x] Issue #21: Add LLM latency as first-class trace field (provider, model, prompt_tokens, completion_tokens, latency_ms)
 - [x] Issue #22: Add hierarchical trace structure: trace_id → WorkContext → FlowRun → NodeRun
-- [ ] Issue #23: (Optional) OpenTelemetry integration for trace export
+- [x] Issue #23: (Optional) OpenTelemetry integration for trace export
 
 ### Phase 8 — Testing
 - [ ] Issue #24: Test playbook creation with patterns and preferences (FlowPreference weights, PatternRecord storage)
@@ -671,7 +671,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [ ] Issue #29: Test strict mode enforcement (missing inputs, empty outputs, unwrap guard, Option::None guard, idempotency)
 - [ ] Issue #30: Test observability (node logs, tool calls, LLM latency, hierarchical trace structure)
 
-**Status:** v1.3 - In Progress (22/30 implemented)
+**Status:** v1.3 - In Progress (23/30 implemented)
 **See:** `docs/prd/prometheos-lite-V1.3.md` for full specification
 
 ---

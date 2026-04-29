@@ -991,8 +991,8 @@ mod tests {
         let long_value = serde_json::json!({"key": "a".repeat(200)});
         let long_summary = Tracer::summarize_value(&long_value, 50);
         assert!(long_summary.is_some());
-        assert!(long_summary.unwrap().ends_with("..."));
-        assert!(long_summary.unwrap().len() <= 53); // 50 + "..."
+        assert!(long_summary.as_ref().unwrap().ends_with("..."));
+        assert!(long_summary.as_ref().unwrap().len() <= 53); // 50 + "..."
     }
 
     #[test]
