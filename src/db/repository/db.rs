@@ -320,10 +320,13 @@ impl Db {
                 name TEXT NOT NULL,
                 description TEXT NOT NULL,
                 preferred_flows TEXT NOT NULL,
+                preferred_nodes TEXT NOT NULL,
                 default_approval_policy TEXT NOT NULL,
                 default_research_depth TEXT NOT NULL,
                 default_creativity_level TEXT NOT NULL,
                 evaluation_rules TEXT NOT NULL,
+                success_patterns TEXT NOT NULL,
+                failure_patterns TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 usage_count INTEGER NOT NULL,
                 updated_at TEXT NOT NULL
@@ -331,6 +334,28 @@ impl Db {
                 [],
             )
             .context("Failed to create work_context_playbooks table")?;
+
+        // Migration: Add new columns if they don't exist (for existing databases)
+        self.conn
+            .execute(
+                "ALTER TABLE work_context_playbooks ADD COLUMN preferred_nodes TEXT",
+                [],
+            )
+            .ok(); // Ignore error if column already exists
+
+        self.conn
+            .execute(
+                "ALTER TABLE work_context_playbooks ADD COLUMN success_patterns TEXT",
+                [],
+            )
+            .ok(); // Ignore error if column already exists
+
+        self.conn
+            .execute(
+                "ALTER TABLE work_context_playbooks ADD COLUMN failure_patterns TEXT",
+                [],
+            )
+            .ok(); // Ignore error if column already exists
 
         self.conn
             .execute(
