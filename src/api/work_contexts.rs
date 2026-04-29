@@ -118,12 +118,6 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-impl From<std::io::Error> for ApiError {
-    fn from(err: std::io::Error) -> Self {
-        ApiError::Internal(err.to_string())
-    }
-}
-
 /// List WorkContexts
 pub async fn list_work_contexts(
     State(state): State<Arc<AppState>>,
@@ -146,35 +140,23 @@ pub async fn list_work_contexts(
 pub async fn get_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<WorkContextResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let context = work_context_service
-        .get_context(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .get_context(&id)?
+        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
 
-    let response = WorkContextResponse {
-        id: context.id,
-        title: context.title,
-        domain: format!("{:?}", context.domain),
-        goal: context.goal,
-        status: format!("{:?}", context.status),
-        phase: format!("{:?}", context.current_phase),
-        created_at: context.created_at.to_rfc3339(),
-        updated_at: context.updated_at.to_rfc3339(),
-    };
-
-    Ok(Json(response))
+    Ok(Json(WorkContextResponse::from(context)))
 }
 
 /// Create a new WorkContext
 pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWorkContextRequest>,
-) -> Result<Json<WorkContextResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let domain = match req.domain.to_lowercase().as_str() {
@@ -195,21 +177,9 @@ pub async fn create_work_context(
     };
 
     let context = work_context_service
-        .create_context(user_id, req.title, domain, req.goal)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .create_context(user_id, req.title, domain, req.goal)?;
 
-    let response = WorkContextResponse {
-        id: context.id,
-        title: context.title,
-        domain: format!("{:?}", context.domain),
-        goal: context.goal,
-        status: format!("{:?}", context.status),
-        phase: format!("{:?}", context.current_phase),
-        created_at: context.created_at.to_rfc3339(),
-        updated_at: context.updated_at.to_rfc3339(),
-    };
-
-    Ok(Json(response))
+    Ok(Json(WorkContextResponse::from(context)))
 }
 
 /// Update WorkContext status
@@ -217,14 +187,13 @@ pub async fn update_work_context_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateStatusRequest>,
-) -> Result<Json<WorkContextResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let mut context = work_context_service
-        .get_context(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .get_context(&id)?
+        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
 
     let new_status = match req.status.to_lowercase().as_str() {
         "draft" => WorkStatus::Draft,
@@ -232,39 +201,26 @@ pub async fn update_work_context_status(
         "awaiting_approval" => WorkStatus::AwaitingApproval,
         "completed" => WorkStatus::Completed,
         "blocked" => WorkStatus::Blocked,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        _ => return Err(ApiError::BadRequest(format!("Invalid status: {}", req.status))),
     };
 
     work_context_service
-        .update_status(&mut context, new_status)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .update_status(&mut context, new_status)?;
 
-    let response = WorkContextResponse {
-        id: context.id,
-        title: context.title,
-        domain: format!("{:?}", context.domain),
-        goal: context.goal,
-        status: format!("{:?}", context.status),
-        phase: format!("{:?}", context.current_phase),
-        created_at: context.created_at.to_rfc3339(),
-        updated_at: context.updated_at.to_rfc3339(),
-    };
-
-    Ok(Json(response))
+    Ok(Json(WorkContextResponse::from(context)))
 }
 
 /// Get artifacts for a WorkContext
 pub async fn get_work_context_artifacts(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ArtifactResponse>>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let context = work_context_service
-        .get_context(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .get_context(&id)?
+        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
 
     let response: Vec<ArtifactResponse> = context
         .artifacts

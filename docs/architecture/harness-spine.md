@@ -1,6 +1,6 @@
 # Harness Spine Architecture
 
-## V1.2.4 Status
+## V1.2.5 Status
 
 ### Completed
 - WorkExecutionService no longer forces Intent::CodingTask
@@ -25,22 +25,26 @@
 - Execution metadata tracking added: ExecutionRecord struct and execution_metadata field in WorkContext
 - Database schema updated to include execution_metadata field
 - From<WorkContext> for WorkContextResponse added to reduce boilerplate
+- ApiError enum with IntoResponse implementation added
+- Partial error handling consistency: list_work_contexts, get_work_context, create_work_context, update_work_context_status, get_work_context_artifacts now use ApiError
 
 ### Partially Implemented
 - Model metadata: GenerateResult exists at router level, but metadata is not propagated to WorkContext execution_metadata. Existing nodes still call router.generate() which discards metadata.
+- Error handling consistency: Handlers that need WorkOrchestrator (submit_intent, continue_work_context, run_until_complete) still use StatusCode due to Axum Handler trait compatibility issues.
 
-### Not Implemented / Deferred
-- API integration with WorkOrchestrator: API handlers (submit_intent, continue_work_context, run_until_complete) still use WorkContextService directly. This is an implementation issue, not a fundamental Axum framework limitation. Requires investigation into handler return type compatibility.
+### Not Implemented / Blocked
+- API integration with WorkOrchestrator: submit_intent, continue_work_context, and run_until_complete still use WorkContextService directly. Attempted to wire to WorkOrchestrator using ApiError, but these handlers fail Axum's Handler trait bound. This is a real type compatibility issue requiring investigation into handler return type constraints.
 - run-until-complete loop implementation: blocked by API integration issue above
 - Deterministic tests proving API → WorkOrchestrator → WorkExecutionService: blocked by API integration issue
 - Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests): explicitly deferred to V1.4
 
 ### Production Readiness
-- V1.2.4 direction: correct
+- V1.2.5 direction: correct
 - Implementation: improved but incomplete
 - CLI path: 8/10
 - Core orchestrator: 8/10
-- API path: 2/10 (bypasses WorkOrchestrator - implementation issue, not framework limitation)
+- API path: 2/10 (bypasses WorkOrchestrator - Handler trait compatibility issue, not framework limitation)
+- Error handling consistency: 4/10 (split between ApiError and StatusCode)
 - Playbook integration: 4/10
 - Execution completeness standard: 6/10
 - Model metadata: 5.5/10 (router-level only, not propagated to WorkContext)
