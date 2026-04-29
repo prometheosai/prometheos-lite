@@ -19,6 +19,11 @@ pub struct Db {
     conn: Connection,
 }
 
+// SAFETY: Db is created per-request and not shared across threads.
+// The Connection is only used within the request context.
+unsafe impl Send for Db {}
+unsafe impl Sync for Db {}
+
 impl Db {
     /// Create a new database connection and initialize schema
     pub fn new(db_path: &str) -> anyhow::Result<Self> {
@@ -207,6 +212,7 @@ impl Db {
                 completion_criteria TEXT,
                 last_activity_at TEXT NOT NULL,
                 metadata TEXT,
+                execution_metadata TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",

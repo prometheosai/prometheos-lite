@@ -34,9 +34,9 @@ impl<T: AsDb> WorkContextOperations for T {
                 project_id, conversation_id, parent_context_id, priority, due_at,
                 goal, requirements, constraints, status, current_phase, blocked_reason,
                 plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
-                tool_trace, execution_metadata, open_questions, autonomy_level, approval_policy, summary,
-                completion_criteria, last_activity_at, metadata, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
+                tool_trace, open_questions, autonomy_level, approval_policy, summary,
+                completion_criteria, last_activity_at, metadata, execution_metadata, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
             params![
                 &context.id,
                 &context.user_id,
@@ -62,7 +62,6 @@ impl<T: AsDb> WorkContextOperations for T {
                 serde_json::to_string(&context.decisions)?,
                 serde_json::to_string(&context.flow_runs)?,
                 serde_json::to_string(&context.tool_trace)?,
-                serde_json::to_string(&context.execution_metadata)?,
                 serde_json::to_string(&context.open_questions)?,
                 serde_json::to_string(&context.autonomy_level)?,
                 serde_json::to_string(&context.approval_policy)?,
@@ -70,6 +69,7 @@ impl<T: AsDb> WorkContextOperations for T {
                 serde_json::to_string(&context.completion_criteria)?,
                 &context.last_activity_at.to_rfc3339(),
                 serde_json::to_string(&context.metadata)?,
+                serde_json::to_string(&context.execution_metadata)?,
                 &context.created_at.to_rfc3339(),
                 &context.updated_at.to_rfc3339(),
             ],
