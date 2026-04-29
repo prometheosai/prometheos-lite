@@ -77,4 +77,11 @@ impl AppState {
             self.intent_classifier.clone(),
         ))
     }
+
+    /// Create a WorkContextService instance for this request
+    /// Database connections are created per-request for thread safety
+    pub fn create_work_context_service(&self) -> Result<Arc<WorkContextService>, String> {
+        let db = Arc::new(Db::new(&self.db_path).map_err(|e| e.to_string())?);
+        Ok(Arc::new(WorkContextService::new(db)))
+    }
 }

@@ -125,9 +125,8 @@ impl From<anyhow::Error> for ApiError {
 pub async fn list_work_contexts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<WorkContextResponse>>, ApiError> {
-    let db = Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
+    let work_context_service = state.create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let contexts = work_context_service
         .list_contexts("api-user")
@@ -146,9 +145,8 @@ pub async fn get_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
+    let work_context_service = state.create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let context = work_context_service
         .get_context(&id)
@@ -163,9 +161,8 @@ pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWorkContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
+    let work_context_service = state.create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let domain = match req.domain.to_lowercase().as_str() {
         "software" => WorkDomain::Software,
@@ -197,9 +194,8 @@ pub async fn update_work_context_status(
     Path(id): Path<String>,
     Json(req): Json<UpdateStatusRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
+    let work_context_service = state.create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let mut context = work_context_service
         .get_context(&id)
@@ -227,9 +223,8 @@ pub async fn get_work_context_artifacts(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
-    let db = Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
+    let work_context_service = state.create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let context = work_context_service
         .get_context(&id)
