@@ -13,11 +13,14 @@ pub struct WorkContextPlaybook {
     pub domain_profile_id: String,
     pub name: String,
     pub description: String,
-    pub preferred_flows: Vec<String>,
+    pub preferred_flows: Vec<FlowPreference>,
+    pub preferred_nodes: Vec<NodePreference>,
     pub default_approval_policy: ApprovalPolicy,
     pub default_research_depth: ResearchDepth,
     pub default_creativity_level: CreativityLevel,
     pub evaluation_rules: Vec<String>,
+    pub success_patterns: Vec<PatternRecord>,
+    pub failure_patterns: Vec<PatternRecord>,
     pub confidence: f32,
     pub usage_count: u32,
     pub updated_at: DateTime<Utc>,
@@ -39,10 +42,13 @@ impl WorkContextPlaybook {
             name,
             description,
             preferred_flows: Vec::new(),
+            preferred_nodes: Vec::new(),
             default_approval_policy: ApprovalPolicy::Auto,
             default_research_depth: ResearchDepth::Standard,
             default_creativity_level: CreativityLevel::Balanced,
             evaluation_rules: Vec::new(),
+            success_patterns: Vec::new(),
+            failure_patterns: Vec::new(),
             confidence: 0.5,
             usage_count: 0,
             updated_at: Utc::now(),
@@ -77,6 +83,37 @@ pub enum CreativityLevel {
     Conservative,
     Balanced,
     Creative,
+}
+
+/// PatternRecord - extracted success/failure patterns for learning
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternRecord {
+    pub pattern_type: PatternType,
+    pub signal: String,
+    pub weight: f32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// PatternType - classification of pattern
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PatternType {
+    Success,
+    Failure,
+}
+
+/// FlowPreference - weighted flow selection preference
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowPreference {
+    pub flow_id: String,
+    pub weight: f32,
+    pub confidence: f32,
+}
+
+/// NodePreference - node-specific parameter preferences
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodePreference {
+    pub node_type: String,
+    pub params: serde_json::Value,
 }
 
 #[cfg(test)]
