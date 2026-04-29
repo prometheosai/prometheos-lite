@@ -65,7 +65,7 @@ pub struct WorkOrchestrator {
     work_context_service: Arc<WorkContextService>,
     playbook_resolver: Arc<super::playbook_resolver::PlaybookResolver>,
     work_execution_service: Arc<WorkExecutionService>,
-    intent_classifier: IntentClassifier,
+    intent_classifier: Arc<IntentClassifier>,
 }
 
 // Ensure WorkOrchestrator is Send + Sync for use in async handlers
@@ -77,7 +77,7 @@ impl WorkOrchestrator {
         work_context_service: Arc<WorkContextService>,
         playbook_resolver: Arc<super::playbook_resolver::PlaybookResolver>,
         work_execution_service: Arc<WorkExecutionService>,
-        intent_classifier: IntentClassifier,
+        intent_classifier: Arc<IntentClassifier>,
     ) -> Self {
         Self {
             work_context_service,
