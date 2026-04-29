@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::api::state::AppState;
 use crate::db::Db;
 use crate::db::repository::PlaybookOperations;
-use crate::work::playbook::{CreativityLevel, ResearchDepth, WorkContextPlaybook};
+use crate::work::playbook::{CreativityLevel, FlowPreference, NodePreference, PatternRecord, PatternType, ResearchDepth, WorkContextPlaybook};
 
 /// Request to create a new Playbook
 #[derive(Debug, Deserialize)]
@@ -21,7 +21,9 @@ pub struct CreatePlaybookRequest {
     pub name: String,
     pub description: String,
     #[serde(default)]
-    pub preferred_flows: Vec<String>,
+    pub preferred_flows: Vec<FlowPreference>,
+    #[serde(default)]
+    pub preferred_nodes: Vec<NodePreference>,
     #[serde(default)]
     pub default_research_depth: String,
     #[serde(default)]
@@ -36,7 +38,9 @@ pub struct UpdatePlaybookRequest {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub preferred_flows: Option<Vec<String>>,
+    pub preferred_flows: Option<Vec<FlowPreference>>,
+    #[serde(default)]
+    pub preferred_nodes: Option<Vec<NodePreference>>,
     #[serde(default)]
     pub default_research_depth: Option<String>,
     #[serde(default)]
@@ -51,9 +55,12 @@ pub struct PlaybookResponse {
     pub domain_profile_id: String,
     pub name: String,
     pub description: String,
-    pub preferred_flows: Vec<String>,
+    pub preferred_flows: Vec<FlowPreference>,
+    pub preferred_nodes: Vec<NodePreference>,
     pub default_research_depth: String,
     pub default_creativity_level: String,
+    pub success_patterns: Vec<PatternRecord>,
+    pub failure_patterns: Vec<PatternRecord>,
     pub confidence: f32,
     pub usage_count: u32,
     pub updated_at: String,
@@ -77,8 +84,11 @@ pub async fn list_playbooks(
             name: pb.name,
             description: pb.description,
             preferred_flows: pb.preferred_flows,
+            preferred_nodes: pb.preferred_nodes,
             default_research_depth: format!("{:?}", pb.default_research_depth),
             default_creativity_level: format!("{:?}", pb.default_creativity_level),
+            success_patterns: pb.success_patterns,
+            failure_patterns: pb.failure_patterns,
             confidence: pb.confidence,
             usage_count: pb.usage_count,
             updated_at: pb.updated_at.to_rfc3339(),
@@ -106,8 +116,11 @@ pub async fn get_playbook(
         name: playbook.name,
         description: playbook.description,
         preferred_flows: playbook.preferred_flows,
+        preferred_nodes: playbook.preferred_nodes,
         default_research_depth: format!("{:?}", playbook.default_research_depth),
         default_creativity_level: format!("{:?}", playbook.default_creativity_level),
+        success_patterns: playbook.success_patterns,
+        failure_patterns: playbook.failure_patterns,
         confidence: playbook.confidence,
         usage_count: playbook.usage_count,
         updated_at: playbook.updated_at.to_rfc3339(),
@@ -148,6 +161,7 @@ pub async fn create_playbook(
 
     let mut playbook = WorkContextPlaybook {
         preferred_flows: req.preferred_flows,
+        preferred_nodes: req.preferred_nodes,
         default_research_depth: research_depth,
         default_creativity_level: creativity_level,
         ..playbook
@@ -163,8 +177,11 @@ pub async fn create_playbook(
         name: playbook.name,
         description: playbook.description,
         preferred_flows: playbook.preferred_flows,
+        preferred_nodes: playbook.preferred_nodes,
         default_research_depth: format!("{:?}", playbook.default_research_depth),
         default_creativity_level: format!("{:?}", playbook.default_creativity_level),
+        success_patterns: playbook.success_patterns,
+        failure_patterns: playbook.failure_patterns,
         confidence: playbook.confidence,
         usage_count: playbook.usage_count,
         updated_at: playbook.updated_at.to_rfc3339(),
@@ -194,6 +211,9 @@ pub async fn update_playbook(
     if let Some(preferred_flows) = req.preferred_flows {
         playbook.preferred_flows = preferred_flows;
     }
+    if let Some(preferred_nodes) = req.preferred_nodes {
+        playbook.preferred_nodes = preferred_nodes;
+    }
     if let Some(research_depth) = req.default_research_depth {
         playbook.default_research_depth = match research_depth.to_lowercase().as_str() {
             "minimal" => ResearchDepth::Minimal,
@@ -222,8 +242,11 @@ pub async fn update_playbook(
         name: playbook.name,
         description: playbook.description,
         preferred_flows: playbook.preferred_flows,
+        preferred_nodes: playbook.preferred_nodes,
         default_research_depth: format!("{:?}", playbook.default_research_depth),
         default_creativity_level: format!("{:?}", playbook.default_creativity_level),
+        success_patterns: playbook.success_patterns,
+        failure_patterns: playbook.failure_patterns,
         confidence: playbook.confidence,
         usage_count: playbook.usage_count,
         updated_at: playbook.updated_at.to_rfc3339(),
