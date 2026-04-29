@@ -94,12 +94,16 @@ pub struct ArtifactResponse {
 }
 
 /// Custom API error type that implements IntoResponse
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ApiError {
     Internal(String),
     NotFound(String),
     BadRequest(String),
 }
+
+// Ensure ApiError satisfies Send and Sync bounds required by axum Handler
+unsafe impl Send for ApiError {}
+unsafe impl Sync for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
@@ -253,13 +257,16 @@ pub async fn get_work_context_artifacts(
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<WorkContextResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
+
     let context = work_context_service
-        .get_context(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .get_context(&id)?
+        .ok_or_else(|| ApiError::NotFound(format!("Context not found: {}", id)))?;
+
+    // TODO: Wire to WorkOrchestrator::continue_context once Handler trait issue is resolved
+    // For now, just return the context to verify the endpoint works
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -267,8 +274,8 @@ pub async fn continue_work_context(
 pub async fn submit_intent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitIntentRequest>,
-) -> Result<Json<WorkContextResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let domain = match req.message.to_lowercase().as_str() {
@@ -278,8 +285,9 @@ pub async fn submit_intent(
 
     let context = work_context_service
         .create_context(req.user_id, req.message.clone(), domain, req.message)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    // TODO: Wire to WorkOrchestrator::submit_user_intent once Handler trait issue is resolved
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -288,18 +296,18 @@ pub async fn run_until_complete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<RunContextRequest>,
-) -> Result<Json<WorkContextResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let mut context = work_context_service
-        .get_context(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .get_context(&id)?
+        .ok_or_else(|| ApiError::NotFound(format!("Context not found: {}", id)))?;
 
-    work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // TODO: Wire to WorkOrchestrator::run_until_blocked_or_complete once Handler trait issue is resolved
+    // For now, just update status to InProgress and return the context
+    work_context_service.update_status(&mut context, crate::work::types::WorkStatus::InProgress)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(WorkContextResponse::from(context)))
 }
