@@ -4,6 +4,8 @@ use anyhow::Result;
 
 use super::types::{WorkContext, WorkPhase, WorkStatus};
 use super::domain::WorkDomainProfile;
+use super::playbook::FlowPreference;
+use rand::Rng;
 
 /// PhaseController - manages lifecycle phase transitions
 pub struct PhaseController;
@@ -85,6 +87,56 @@ impl PhaseController {
             WorkPhase::Iteration => "planning.flow.yaml".to_string(),
             WorkPhase::Finalization => "finalization.flow.yaml".to_string(),
         }
+    }
+
+    /// Select flow from playbook preferred_flows using weighted random selection with exploration factor
+    /// exploration_factor: 0.0 = always pick highest weight, 1.0 = pure random
+    pub fn weighted_flow_selection(
+        phase: WorkPhase,
+        preferred_flows: &[FlowPreference],
+        exploration_factor: f32,
+    ) -> String {
+        if preferred_flows.is_empty() {
+            // Fallback to default flow for phase
+            return Self::flow_for_phase(phase, None);
+        }
+
+        // Filter flows that match the current phase
+        let phase_key = match phase {
+            WorkPhase::Intake => "intake",
+            WorkPhase::Planning => "planning",
+            WorkPhase::Execution => "execution",
+            WorkPhase::Review => "review",
+            WorkPhase::Iteration => "planning",
+            WorkPhase::Finalization => "finalization",
+        };
+
+        let matching_flows: Vec<&FlowPreference> = preferred_flows
+            .iter()
+            .filter(|fp| fp.flow_id.contains(phase_key))
+            .collect();
+
+        if matching_flows.is_empty() {
+            // No matching flows, fallback to default
+            return Self::flow_for_phase(phase, None);
+        }
+
+        // Weighted random selection with exploration
+        let mut rng = rand::thread_rng();
+        let random_val: f32 = rng.gen();
+
+        if random_val < exploration_factor {
+            // Exploration: pick random flow
+            let idx = rng.gen_range(0..matching_flows.len());
+            return matching_flows[idx].flow_id.clone();
+        }
+
+        // Exploitation: pick highest weight
+        let best_flow = matching_flows
+            .iter()
+            .max_by(|a, b| a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+        best_flow.flow_id.clone()
     }
 
     /// Check if context should require approval before phase transition
