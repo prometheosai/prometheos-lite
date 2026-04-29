@@ -224,7 +224,7 @@ impl WorkExecutionService {
                 .update_status(&mut context, WorkStatus::InProgress)?;
         }
 
-        // Save updated context
+        // Save updated context with execution metadata
         self.work_context_service.update_context(&context)?;
 
         Ok(context)
@@ -255,6 +255,9 @@ impl WorkExecutionService {
             .update_phase(&mut context, WorkPhase::Planning)?;
         self.work_context_service
             .update_status(&mut context, WorkStatus::AwaitingApproval)?;
+
+        // Save context with execution metadata
+        self.work_context_service.update_context(&context)?;
 
         Ok(context)
     }
