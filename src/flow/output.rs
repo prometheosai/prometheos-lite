@@ -37,6 +37,8 @@ pub struct FinalOutput {
     pub success: bool,
     /// Error message if the flow execution failed
     pub error: Option<String>,
+    /// Execution metadata from LLM calls (node_id -> GenerateResult)
+    pub execution_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl FinalOutput {
@@ -65,6 +67,7 @@ impl FinalOutput {
             duration_ms,
             success: true,
             error: None,
+            execution_metadata: HashMap::new(),
         }
     }
 
@@ -89,6 +92,7 @@ impl FinalOutput {
             duration_ms,
             success: false,
             error: Some(error),
+            execution_metadata: HashMap::new(),
         }
     }
 
