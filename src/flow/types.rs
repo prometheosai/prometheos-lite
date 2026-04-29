@@ -35,6 +35,10 @@ pub struct SharedState {
     #[serde(skip)]
     #[serde(default)]
     pub budget_guard: Option<Arc<Mutex<BudgetGuard>>>,
+    /// Playbook ID for playbook-aware node behavior (not serialized)
+    #[serde(skip)]
+    #[serde(default)]
+    pub playbook_id: Option<String>,
 }
 
 impl Clone for SharedState {
@@ -46,6 +50,7 @@ impl Clone for SharedState {
             context: self.context.clone(),
             meta: self.meta.clone(),
             budget_guard: self.budget_guard.clone(),
+            playbook_id: self.playbook_id.clone(),
         }
     }
 }
@@ -59,6 +64,7 @@ impl Default for SharedState {
             context: HashMap::new(),
             meta: HashMap::new(),
             budget_guard: None,
+            playbook_id: None,
         }
     }
 }
@@ -73,6 +79,7 @@ impl SharedState {
             context: HashMap::new(),
             meta: HashMap::new(),
             budget_guard: None,
+            playbook_id: None,
         }
     }
 
@@ -206,6 +213,16 @@ impl SharedState {
     /// Get the budget guard
     pub fn get_budget_guard(&self) -> Option<Arc<Mutex<BudgetGuard>>> {
         self.budget_guard.as_ref().cloned()
+    }
+
+    /// Set the playbook ID for playbook-aware node behavior
+    pub fn set_playbook(&mut self, playbook_id: String) {
+        self.playbook_id = Some(playbook_id);
+    }
+
+    /// Get the playbook ID
+    pub fn get_playbook(&self) -> Option<&String> {
+        self.playbook_id.as_ref()
     }
 
     /// Add execution metadata (from GenerateResult)
