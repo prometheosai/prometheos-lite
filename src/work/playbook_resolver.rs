@@ -22,7 +22,28 @@ impl PlaybookResolver {
     }
 
     /// Resolve the best playbook for a given WorkContext
+    /// 3-tier fallback: user+domain → domain default → global default
     pub fn resolve_playbook(&self, context: &WorkContext) -> Result<Option<WorkContextPlaybook>> {
+        // Tier 1: Try user+domain specific playbook
+        if let Some(ref domain_profile_id) = context.domain_profile_id {
+            if let Some(playbook) = self.db.get_playbook_by_user_and_domain(&context.user_id, domain_profile_id)? {
+                return Ok(Some(playbook));
+            }
+        }
+
+        // Tier 2: Try domain default playbook (user_id = "domain-default")
+        if let Some(ref domain_profile_id) = context.domain_profile_id {
+            if let Some(playbook) = self.db.get_playbook_by_user_and_domain("domain-default", domain_profile_id)? {
+                return Ok(Some(playbook));
+            }
+        }
+
+        // Tier 3: Try global default playbook (user_id = "global", domain_profile_id = "global")
+        if let Some(playbook) = self.db.get_playbook_by_user_and_domain("global", "global")? {
+            return Ok(Some(playbook));
+        }
+
+        // Fallback: Score all user playbooks and return best match
         let playbooks = self.db.get_playbooks_for_user(&context.user_id)?;
 
         if playbooks.is_empty() {
