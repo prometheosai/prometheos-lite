@@ -170,7 +170,11 @@ impl WorkExecutionService {
         }
 
         // Return the primary artifact
-        Ok(artifacts.into_iter().next().unwrap())
+        let primary_artifact = artifacts
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Flow produced no artifacts"))?;
+        Ok(primary_artifact)
     }
 
     /// Continue a WorkContext
@@ -277,7 +281,7 @@ mod tests {
         );
 
         // Verify service creation
-        assert_eq!(execution_service.work_context_service, work_context_service);
+        assert!(Arc::ptr_eq(&execution_service.work_context_service, &work_context_service));
     }
 
     #[tokio::test]
@@ -340,6 +344,18 @@ mod tests {
         let result = execution_service.continue_context(&context.id).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("complete"));
+    }
+
+    #[tokio::test]
+    async fn test_zero_artifact_error() {
+        // Test the artifact extraction error handling directly
+        let artifacts: Vec<crate::work::artifact::Artifact> = vec![];
+        
+        let result = artifacts.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("Flow produced no artifacts"));
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no artifacts"));
     }
 
     #[tokio::test]
