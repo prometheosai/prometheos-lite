@@ -106,36 +106,32 @@ impl Node for PlannerNode {
             .as_str()
             .context("Missing task in planner node input")?;
 
-        if let Some(router) = &self.model_router {
-            // Use ModelRouter for actual LLM call
-            let base_prompt = format!(
-                "You are a planning assistant. Create a structured plan for the following task:\n\nTask: {}\n\nProvide a step-by-step plan as a JSON array of strings.",
-                task
-            );
+        let router = self.model_router.as_ref()
+            .context("PlannerNode requires ModelRouter to be configured")?;
 
-            // Inject personality context if mode is set
-            let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-                if let Some(mode) = PersonalityMode::from_str(mode_str) {
-                    let prompt_context = PromptContext::new(mode);
-                    prompt_context.inject_into_prompt(&base_prompt)
-                } else {
-                    base_prompt
-                }
+        // Use ModelRouter for actual LLM call
+        let base_prompt = format!(
+            "You are a planning assistant. Create a structured plan for the following task:\n\nTask: {}\n\nProvide a step-by-step plan as a JSON array of strings.",
+            task
+        );
+
+        // Inject personality context if mode is set
+        let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
+            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+                let prompt_context = PromptContext::new(mode);
+                prompt_context.inject_into_prompt(&base_prompt)
             } else {
                 base_prompt
-            };
-
-            let result = router.generate_with_metadata(&enhanced_prompt).await?;
-            Ok(serde_json::json!({
-                "plan": result.content,
-                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
-            }))
+            }
         } else {
-            // Fallback to placeholder if no ModelRouter
-            Ok(serde_json::json!({
-                "plan": ["Step 1: Analyze requirements", "Step 2: Design solution", "Step 3: Implement"]
-            }))
-        }
+            base_prompt
+        };
+
+        let result = router.generate_with_metadata(&enhanced_prompt).await?;
+        Ok(serde_json::json!({
+            "plan": result.content,
+            "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+        }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
@@ -215,37 +211,33 @@ impl Node for CoderNode {
             .context("Missing task in coder node input")?;
         let plan = &input["plan"];
 
-        if let Some(router) = &self.model_router {
-            // Use ModelRouter for actual LLM call
-            let base_prompt = format!(
-                "You are a coding assistant. Generate code for the following task based on the provided plan:\n\nTask: {}\n\nPlan: {}\n\nProvide the generated code only, without explanations.",
-                task,
-                serde_json::to_string(plan).unwrap_or_default()
-            );
+        let router = self.model_router.as_ref()
+            .context("CoderNode requires ModelRouter to be configured")?;
 
-            // Inject personality context if mode is set
-            let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-                if let Some(mode) = PersonalityMode::from_str(mode_str) {
-                    let prompt_context = PromptContext::new(mode);
-                    prompt_context.inject_into_prompt(&base_prompt)
-                } else {
-                    base_prompt
-                }
+        // Use ModelRouter for actual LLM call
+        let base_prompt = format!(
+            "You are a coding assistant. Generate code for the following task based on the provided plan:\n\nTask: {}\n\nPlan: {}\n\nProvide the generated code only, without explanations.",
+            task,
+            serde_json::to_string(plan).unwrap_or_default()
+        );
+
+        // Inject personality context if mode is set
+        let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
+            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+                let prompt_context = PromptContext::new(mode);
+                prompt_context.inject_into_prompt(&base_prompt)
             } else {
                 base_prompt
-            };
-
-            let result = router.generate_with_metadata(&enhanced_prompt).await?;
-            Ok(serde_json::json!({
-                "generated_code": result.content,
-                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
-            }))
+            }
         } else {
-            // Fallback to placeholder if no ModelRouter
-            Ok(serde_json::json!({
-                "generated_code": "// Generated code placeholder"
-            }))
-        }
+            base_prompt
+        };
+
+        let result = router.generate_with_metadata(&enhanced_prompt).await?;
+        Ok(serde_json::json!({
+            "generated_code": result.content,
+            "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+        }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
@@ -326,36 +318,32 @@ impl Node for ReviewerNode {
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
         let generated = &input["generated"];
 
-        if let Some(router) = &self.model_router {
-            // Use ModelRouter for actual LLM call
-            let base_prompt = format!(
-                "You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.",
-                serde_json::to_string(generated).unwrap_or_default()
-            );
+        let router = self.model_router.as_ref()
+            .context("ReviewerNode requires ModelRouter to be configured")?;
 
-            // Inject personality context if mode is set
-            let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-                if let Some(mode) = PersonalityMode::from_str(mode_str) {
-                    let prompt_context = PromptContext::new(mode);
-                    prompt_context.inject_into_prompt(&base_prompt)
-                } else {
-                    base_prompt
-                }
+        // Use ModelRouter for actual LLM call
+        let base_prompt = format!(
+            "You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.",
+            serde_json::to_string(generated).unwrap_or_default()
+        );
+
+        // Inject personality context if mode is set
+        let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
+            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+                let prompt_context = PromptContext::new(mode);
+                prompt_context.inject_into_prompt(&base_prompt)
             } else {
                 base_prompt
-            };
-
-            let result = router.generate_with_metadata(&enhanced_prompt).await?;
-            Ok(serde_json::json!({
-                "review": result.content,
-                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
-            }))
+            }
         } else {
-            // Fallback to placeholder if no ModelRouter
-            Ok(serde_json::json!({
-                "review": "Code looks good - placeholder review"
-            }))
-        }
+            base_prompt
+        };
+
+        let result = router.generate_with_metadata(&enhanced_prompt).await?;
+        Ok(serde_json::json!({
+            "review": result.content,
+            "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+        }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
@@ -449,39 +437,35 @@ impl Node for LlmNode {
             .as_str()
             .context("Missing prompt in LLM node input")?;
 
-        if let Some(router) = &self.model_router {
-            // Use ModelRouter for actual LLM call
-            let final_prompt = if let Some(template) = &self.prompt_template {
-                // Use configured prompt template
-                template.replace("{{prompt}}", prompt)
-            } else {
-                // Use prompt directly
-                prompt.to_string()
-            };
+        let router = self.model_router.as_ref()
+            .context("LlmNode requires ModelRouter to be configured")?;
 
-            // Inject personality context if mode is set
-            let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-                if let Some(mode) = PersonalityMode::from_str(mode_str) {
-                    let prompt_context = PromptContext::new(mode);
-                    prompt_context.inject_into_prompt(&final_prompt)
-                } else {
-                    final_prompt
-                }
+        // Use ModelRouter for actual LLM call
+        let final_prompt = if let Some(template) = &self.prompt_template {
+            // Use configured prompt template
+            template.replace("{{prompt}}", prompt)
+        } else {
+            // Use prompt directly
+            prompt.to_string()
+        };
+
+        // Inject personality context if mode is set
+        let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
+            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+                let prompt_context = PromptContext::new(mode);
+                prompt_context.inject_into_prompt(&final_prompt)
             } else {
                 final_prompt
-            };
-
-            let result = router.generate_with_metadata(&enhanced_prompt).await?;
-            Ok(serde_json::json!({
-                "response": result.content,
-                "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
-            }))
+            }
         } else {
-            // Fallback to placeholder if no ModelRouter
-            Ok(serde_json::json!({
-                "response": "LLM response placeholder - integrate with ModelRouter"
-            }))
-        }
+            final_prompt
+        };
+
+        let result = router.generate_with_metadata(&enhanced_prompt).await?;
+        Ok(serde_json::json!({
+            "response": result.content,
+            "_metadata": serde_json::to_value(&result).unwrap_or(serde_json::json!({}))
+        }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
@@ -599,25 +583,21 @@ impl Node for ToolNode {
             input["tool_context"].clone()
         ).context("Missing or invalid tool_context in tool node input")?;
 
-        if let Some(runtime) = &self.tool_runtime {
-            // Parse tool_args as a command and arguments
-            let args: Vec<String> = if let Some(arr) = tool_args.as_array() {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect()
-            } else {
-                vec![]
-            };
+        let runtime = self.tool_runtime.as_ref()
+            .context("ToolNode requires ToolRuntime to be configured")?;
 
-            let result = runtime.execute_command(tool_name, args, &context).await?;
-            Ok(serde_json::json!({ "result": result }))
+        // Parse tool_args as a command and arguments
+        let args: Vec<String> = if let Some(arr) = tool_args.as_array() {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
         } else {
-            // Fallback to placeholder if no ToolRuntime
-            Ok(serde_json::json!({
-                "result": "Tool execution placeholder - integrate with ToolRuntime"
-            }))
-        }
+            vec![]
+        };
+
+        let result = runtime.execute_command(tool_name, args, &context).await?;
+        Ok(serde_json::json!({ "result": result }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
@@ -860,16 +840,12 @@ impl Node for ContextLoaderNode {
             .as_str()
             .context("Missing query in context loader node input")?;
 
-        if let Some(service) = &self.memory_service {
-            // Use MemoryService for actual retrieval
-            let memories = service.semantic_search(query, 5).await?;
-            Ok(serde_json::json!({ "context": memories }))
-        } else {
-            // Fallback to placeholder if no MemoryService
-            Ok(serde_json::json!({
-                "context": {}
-            }))
-        }
+        let service = self.memory_service.as_ref()
+            .context("ContextLoaderNode requires MemoryService to be configured")?;
+
+        // Use MemoryService for actual retrieval
+        let memories = service.semantic_search(query, 5).await?;
+        Ok(serde_json::json!({ "context": memories }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
@@ -929,36 +905,20 @@ impl Node for MemoryWriteNode {
             .as_str()
             .context("Missing task in memory write node input")?;
 
-        if let Some(service) = &self.memory_service {
-            // Use MemoryService for actual write, but handle embedding server failures gracefully
-            match service
-                .create_memory(
-                    content.to_string(),
-                    MemoryType::Semantic,
-                    serde_json::json!({}),
-                )
-                .await
-            {
-                Ok(memory_id) => {
-                    Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" }))
-                }
-                Err(e) => {
-                    // Log the error but don't fail the flow - embedding server might be unavailable
-                    eprintln!("Memory write failed (embedding server unavailable?): {}", e);
-                    Ok(serde_json::json!({
-                        "memory_id": "skipped",
-                        "status": "skipped",
-                        "reason": "embedding server unavailable"
-                    }))
-                }
-            }
-        } else {
-            // Fallback to placeholder if no MemoryService
-            Ok(serde_json::json!({
-                "memory_id": "placeholder_id",
-                "status": "placeholder"
-            }))
-        }
+        let service = self.memory_service.as_ref()
+            .context("MemoryWriteNode requires MemoryService to be configured")?;
+
+        // Use MemoryService for actual write - fail on embedding server errors
+        let memory_id = service
+            .create_memory(
+                content.to_string(),
+                MemoryType::Semantic,
+                serde_json::json!({}),
+            )
+            .await
+            .context("Memory write failed - embedding server may be unavailable")?;
+        
+        Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" }))
     }
 
     fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {

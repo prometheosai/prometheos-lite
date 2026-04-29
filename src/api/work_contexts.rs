@@ -104,10 +104,6 @@ pub enum ApiError {
     BadRequest(String),
 }
 
-// Ensure ApiError satisfies Send and Sync bounds required by axum Handler
-unsafe impl Send for ApiError {}
-unsafe impl Sync for ApiError {}
-
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
@@ -272,21 +268,8 @@ pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    // Create WorkOrchestrator with per-request database connection
-    let db = Arc::new(Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?);
-    let work_context_service = Arc::new(WorkContextService::new(db.clone()));
-    let playbook_resolver = Arc::new(PlaybookResolver::new(db));
-    let work_execution_service = Arc::new(WorkExecutionService::new(
-        work_context_service.clone(),
-        state.flow_execution_service.clone(),
-    ));
-    let orchestrator = WorkOrchestrator::new(
-        work_context_service,
-        playbook_resolver,
-        work_execution_service,
-        state.intent_classifier.clone(),
-    );
+    let orchestrator = state.create_work_orchestrator()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let context = orchestrator.continue_context(id).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
@@ -297,27 +280,14 @@ pub async fn submit_intent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitIntentRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    // Create WorkOrchestrator with per-request database connection
-    let db = Arc::new(Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?);
-    let work_context_service = Arc::new(WorkContextService::new(db.clone()));
-    let playbook_resolver = Arc::new(PlaybookResolver::new(db));
-    let work_execution_service = Arc::new(WorkExecutionService::new(
-        work_context_service.clone(),
-        state.flow_execution_service.clone(),
-    ));
-    let orchestrator = WorkOrchestrator::new(
-        work_context_service,
-        playbook_resolver,
-        work_execution_service,
-        state.intent_classifier.clone(),
-    );
+    let orchestrator = state.create_work_orchestrator()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let context = orchestrator.submit_user_intent(
         req.user_id,
         req.message,
         req.conversation_id,
     ).await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -327,21 +297,8 @@ pub async fn run_until_complete(
     Path(id): Path<String>,
     Json(req): Json<RunContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    // Create WorkOrchestrator with per-request database connection
-    let db = Arc::new(Db::new(&state.db_path)
-        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?);
-    let work_context_service = Arc::new(WorkContextService::new(db.clone()));
-    let playbook_resolver = Arc::new(PlaybookResolver::new(db));
-    let work_execution_service = Arc::new(WorkExecutionService::new(
-        work_context_service.clone(),
-        state.flow_execution_service.clone(),
-    ));
-    let orchestrator = WorkOrchestrator::new(
-        work_context_service,
-        playbook_resolver,
-        work_execution_service,
-        state.intent_classifier.clone(),
-    );
+    let orchestrator = state.create_work_orchestrator()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let limits = crate::work::orchestrator::ExecutionLimits {
         max_iterations: req.max_iterations.unwrap_or(10) as u32,
         max_runtime_ms: req.max_runtime_ms.unwrap_or(300_000),
