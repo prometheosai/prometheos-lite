@@ -36,18 +36,22 @@ pub enum TraceEvent {
         run_id: RunId,
         trace_id: TraceId,
         node_id: NodeId,
+        input_summary: Option<String>,
     },
     NodeCompleted {
         run_id: RunId,
         trace_id: TraceId,
         node_id: NodeId,
         duration_ms: u64,
+        output_summary: Option<String>,
+        status: String,
     },
     NodeFailed {
         run_id: RunId,
         trace_id: TraceId,
         node_id: NodeId,
         error: String,
+        input_summary: Option<String>,
     },
     TransitionTaken {
         run_id: RunId,
@@ -86,12 +90,16 @@ pub enum TraceEvent {
         run_id: RunId,
         trace_id: TraceId,
         tool_name: String,
+        args_hash: String,
     },
     ToolCompleted {
         run_id: RunId,
         trace_id: TraceId,
         tool_name: String,
+        args_hash: String,
+        result_hash: String,
         duration_ms: u64,
+        success: bool,
     },
 
     // Memory events
@@ -117,6 +125,33 @@ pub enum TraceEvent {
         run_id: RunId,
         trace_id: TraceId,
         output_key: String,
+    },
+
+    // LLM events
+    LlmRequestStarted {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        provider: String,
+        model: String,
+    },
+    LlmRequestCompleted {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        provider: String,
+        model: String,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        latency_ms: u64,
+    },
+    LlmRequestFailed {
+        run_id: RunId,
+        trace_id: TraceId,
+        node_id: NodeId,
+        provider: String,
+        model: String,
+        error: String,
     },
 
     // Guardrail events - V1.1
@@ -220,6 +255,94 @@ pub enum LogLevel {
     Error,
 }
 
+/// Hierarchical trace structure for tracking execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalTrace {
+    /// Top-level trace ID
+    pub trace_id: TraceId,
+    /// WorkContext ID (if applicable)
+    pub work_context_id: Option<String>,
+    /// Flow run ID
+    pub flow_run_id: RunId,
+    /// Node executions within this trace
+    pub node_runs: Vec<NodeRun>,
+    /// Tool calls within this trace
+    pub tool_calls: Vec<ToolCall>,
+    /// LLM calls within this trace
+    pub llm_calls: Vec<LlmCall>,
+    /// Timestamp when trace started
+    pub started_at: DateTime<Utc>,
+    /// Timestamp when trace completed
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Node execution record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRun {
+    /// Node ID
+    pub node_id: NodeId,
+    /// Trace ID for this node execution
+    pub trace_id: TraceId,
+    /// Input summary
+    pub input_summary: Option<String>,
+    /// Output summary
+    pub output_summary: Option<String>,
+    /// Execution status
+    pub status: String,
+    /// Duration in milliseconds
+    pub duration_ms: u64,
+    /// Error if failed
+    pub error: Option<String>,
+    /// Timestamp when node started
+    pub started_at: DateTime<Utc>,
+    /// Timestamp when node completed
+    pub completed_at: DateTime<Utc>,
+}
+
+/// Tool call record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Tool name
+    pub tool_name: String,
+    /// Trace ID for this tool call
+    pub trace_id: TraceId,
+    /// Arguments hash
+    pub args_hash: String,
+    /// Result hash
+    pub result_hash: String,
+    /// Whether the call succeeded
+    pub success: bool,
+    /// Duration in milliseconds
+    pub duration_ms: u64,
+    /// Timestamp when tool was called
+    pub called_at: DateTime<Utc>,
+}
+
+/// LLM call record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmCall {
+    /// Node ID that made the LLM call
+    pub node_id: NodeId,
+    /// Trace ID for this LLM call
+    pub trace_id: TraceId,
+    /// Provider (e.g., "openai", "anthropic")
+    pub provider: String,
+    /// Model name
+    pub model: String,
+    /// Number of prompt tokens
+    pub prompt_tokens: u32,
+    /// Number of completion tokens
+    pub completion_tokens: u32,
+    /// Latency in milliseconds
+    pub latency_ms: u64,
+    /// Error if failed
+    pub error: Option<String>,
+    /// Timestamp when LLM request started
+    pub started_at: DateTime<Utc>,
+    /// Timestamp when LLM request completed
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 /// Structured log entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -246,6 +369,7 @@ pub struct TimelineEvent {
 pub struct Tracer {
     logs: Vec<LogEntry>,
     timeline: Vec<TimelineEvent>,
+    hierarchical_trace: Option<HierarchicalTrace>,
     enabled: bool,
     min_level: LogLevel,
 }
@@ -255,6 +379,7 @@ impl Tracer {
         Self {
             logs: Vec::new(),
             timeline: Vec::new(),
+            hierarchical_trace: None,
             enabled: true,
             min_level: LogLevel::Info,
         }
@@ -264,8 +389,28 @@ impl Tracer {
         Self {
             logs: Vec::new(),
             timeline: Vec::new(),
+            hierarchical_trace: None,
             enabled: true,
             min_level,
+        }
+    }
+
+    pub fn with_hierarchical_trace(trace_id: TraceId, flow_run_id: RunId, work_context_id: Option<String>) -> Self {
+        Self {
+            logs: Vec::new(),
+            timeline: Vec::new(),
+            hierarchical_trace: Some(HierarchicalTrace {
+                trace_id,
+                work_context_id,
+                flow_run_id,
+                node_runs: Vec::new(),
+                tool_calls: Vec::new(),
+                llm_calls: Vec::new(),
+                started_at: Utc::now(),
+                completed_at: None,
+            }),
+            enabled: true,
+            min_level: LogLevel::Info,
         }
     }
 
@@ -383,6 +528,40 @@ impl Tracer {
     pub fn clear(&mut self) {
         self.logs.clear();
         self.timeline.clear();
+        self.hierarchical_trace = None;
+    }
+
+    /// Get hierarchical trace
+    pub fn get_hierarchical_trace(&self) -> Option<&HierarchicalTrace> {
+        self.hierarchical_trace.as_ref()
+    }
+
+    /// Complete the hierarchical trace
+    pub fn complete_hierarchical_trace(&mut self) {
+        if let Some(ref mut trace) = self.hierarchical_trace {
+            trace.completed_at = Some(Utc::now());
+        }
+    }
+
+    /// Add a node run to hierarchical trace
+    pub fn add_node_run(&mut self, node_run: NodeRun) {
+        if let Some(ref mut trace) = self.hierarchical_trace {
+            trace.node_runs.push(node_run);
+        }
+    }
+
+    /// Add a tool call to hierarchical trace
+    pub fn add_tool_call(&mut self, tool_call: ToolCall) {
+        if let Some(ref mut trace) = self.hierarchical_trace {
+            trace.tool_calls.push(tool_call);
+        }
+    }
+
+    /// Add an LLM call to hierarchical trace
+    pub fn add_llm_call(&mut self, llm_call: LlmCall) {
+        if let Some(ref mut trace) = self.hierarchical_trace {
+            trace.llm_calls.push(llm_call);
+        }
     }
 
     /// Export logs as JSON
@@ -395,6 +574,30 @@ impl Tracer {
     pub fn export_timeline(&self) -> Result<String> {
         serde_json::to_string_pretty(&self.timeline)
             .map_err(|e| anyhow::anyhow!("Failed to export timeline: {}", e))
+    }
+
+    /// Export hierarchical trace as JSON
+    pub fn export_hierarchical_trace(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.hierarchical_trace)
+            .map_err(|e| anyhow::anyhow!("Failed to export hierarchical trace: {}", e))
+    }
+
+    /// Create a summary from a JSON value (truncated if too long)
+    pub fn summarize_value(value: &serde_json::Value, max_length: usize) -> Option<String> {
+        let json_str = value.to_string();
+        if json_str.is_empty() {
+            return None;
+        }
+        if json_str.len() <= max_length {
+            Some(json_str)
+        } else {
+            Some(format!("{}...", &json_str[..max_length]))
+        }
+    }
+
+    /// Compute hash of a JSON value for idempotency tracking
+    pub fn compute_hash(value: &serde_json::Value) -> String {
+        format!("{:x}", md5::compute(value.to_string().as_bytes()))
     }
 }
 
@@ -489,6 +692,7 @@ mod tests {
                 run_id: run_id.clone(),
                 trace_id: Tracer::generate_trace_id(),
                 node_id: "node1".to_string(),
+                input_summary: None,
             },
             Some("node1".to_string()),
             "Debug message".to_string(),
@@ -502,6 +706,7 @@ mod tests {
                 trace_id: Tracer::generate_trace_id(),
                 node_id: "node1".to_string(),
                 error: "Test error".to_string(),
+                input_summary: None,
             },
             Some("node1".to_string()),
             "Warning message".to_string(),
@@ -522,6 +727,7 @@ mod tests {
                 run_id: run_id.clone(),
                 trace_id: Tracer::generate_trace_id(),
                 node_id: "node1".to_string(),
+                input_summary: None,
             },
             Some("node1".to_string()),
             Some(100),
@@ -543,6 +749,7 @@ mod tests {
                 run_id: run_id.clone(),
                 trace_id: Tracer::generate_trace_id(),
                 node_id: "node1".to_string(),
+                input_summary: None,
             },
             Some("node1".to_string()),
             "Message 1".to_string(),
@@ -555,6 +762,7 @@ mod tests {
                 run_id,
                 trace_id: Tracer::generate_trace_id(),
                 node_id: "node2".to_string(),
+                input_summary: None,
             },
             Some("node2".to_string()),
             "Message 2".to_string(),
@@ -627,6 +835,7 @@ mod tests {
                 run_id: run_id.clone(),
                 trace_id: trace_id.clone(),
                 node_id: "planner".to_string(),
+                input_summary: None,
             },
             Some("planner".to_string()),
             "Node execution started".to_string(),
@@ -638,6 +847,8 @@ mod tests {
                 trace_id,
                 node_id: "planner".to_string(),
                 duration_ms: 150,
+                output_summary: None,
+                status: "success".to_string(),
             },
             Some("planner".to_string()),
             "Node execution completed".to_string(),
@@ -654,5 +865,147 @@ mod tests {
         assert!(!run_id.is_empty());
         assert!(!trace_id.is_empty());
         assert_ne!(run_id, trace_id);
+    }
+
+    #[test]
+    fn test_hierarchical_trace() {
+        let trace_id = Tracer::generate_trace_id();
+        let run_id = Tracer::generate_run_id();
+        let work_context_id = Some("ctx-123".to_string());
+
+        let mut tracer = Tracer::with_hierarchical_trace(trace_id.clone(), run_id.clone(), work_context_id);
+
+        let hierarchical = tracer.get_hierarchical_trace();
+        assert!(hierarchical.is_some());
+        let trace = hierarchical.unwrap();
+        assert_eq!(trace.trace_id, trace_id);
+        assert_eq!(trace.flow_run_id, run_id);
+        assert_eq!(trace.work_context_id, Some("ctx-123".to_string()));
+        assert!(trace.node_runs.is_empty());
+        assert!(trace.tool_calls.is_empty());
+        assert!(trace.llm_calls.is_empty());
+    }
+
+    #[test]
+    fn test_add_node_run() {
+        let mut tracer = Tracer::with_hierarchical_trace(
+            Tracer::generate_trace_id(),
+            Tracer::generate_run_id(),
+            None,
+        );
+
+        let node_run = NodeRun {
+            node_id: "planner".to_string(),
+            trace_id: Tracer::generate_trace_id(),
+            input_summary: Some("plan request".to_string()),
+            output_summary: Some("plan generated".to_string()),
+            status: "success".to_string(),
+            duration_ms: 100,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+        };
+
+        tracer.add_node_run(node_run);
+
+        let hierarchical = tracer.get_hierarchical_trace().unwrap();
+        assert_eq!(hierarchical.node_runs.len(), 1);
+        assert_eq!(hierarchical.node_runs[0].node_id, "planner");
+    }
+
+    #[test]
+    fn test_add_tool_call() {
+        let mut tracer = Tracer::with_hierarchical_trace(
+            Tracer::generate_trace_id(),
+            Tracer::generate_run_id(),
+            None,
+        );
+
+        let tool_call = ToolCall {
+            tool_name: "file_writer".to_string(),
+            trace_id: Tracer::generate_trace_id(),
+            args_hash: "hash123".to_string(),
+            result_hash: "hash456".to_string(),
+            success: true,
+            duration_ms: 50,
+            called_at: Utc::now(),
+        };
+
+        tracer.add_tool_call(tool_call);
+
+        let hierarchical = tracer.get_hierarchical_trace().unwrap();
+        assert_eq!(hierarchical.tool_calls.len(), 1);
+        assert_eq!(hierarchical.tool_calls[0].tool_name, "file_writer");
+    }
+
+    #[test]
+    fn test_add_llm_call() {
+        let mut tracer = Tracer::with_hierarchical_trace(
+            Tracer::generate_trace_id(),
+            Tracer::generate_run_id(),
+            None,
+        );
+
+        let llm_call = LlmCall {
+            node_id: "planner".to_string(),
+            trace_id: Tracer::generate_trace_id(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            prompt_tokens: 100,
+            completion_tokens: 200,
+            latency_ms: 1500,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+
+        tracer.add_llm_call(llm_call);
+
+        let hierarchical = tracer.get_hierarchical_trace().unwrap();
+        assert_eq!(hierarchical.llm_calls.len(), 1);
+        assert_eq!(hierarchical.llm_calls[0].provider, "openai");
+    }
+
+    #[test]
+    fn test_complete_hierarchical_trace() {
+        let mut tracer = Tracer::with_hierarchical_trace(
+            Tracer::generate_trace_id(),
+            Tracer::generate_run_id(),
+            None,
+        );
+
+        assert!(tracer.get_hierarchical_trace().unwrap().completed_at.is_none());
+
+        tracer.complete_hierarchical_trace();
+
+        assert!(tracer.get_hierarchical_trace().unwrap().completed_at.is_some());
+    }
+
+    #[test]
+    fn test_summarize_value() {
+        let short_value = serde_json::json!({"key": "value"});
+        let short_summary = Tracer::summarize_value(&short_value, 100);
+        assert!(short_summary.is_some());
+        assert!(short_summary.unwrap().len() <= 100);
+
+        let long_value = serde_json::json!({"key": "a".repeat(200)});
+        let long_summary = Tracer::summarize_value(&long_value, 50);
+        assert!(long_summary.is_some());
+        assert!(long_summary.unwrap().ends_with("..."));
+        assert!(long_summary.unwrap().len() <= 53); // 50 + "..."
+    }
+
+    #[test]
+    fn test_compute_hash() {
+        let value1 = serde_json::json!({"key": "value"});
+        let value2 = serde_json::json!({"key": "value"});
+        let value3 = serde_json::json!({"key": "different"});
+
+        let hash1 = Tracer::compute_hash(&value1);
+        let hash2 = Tracer::compute_hash(&value2);
+        let hash3 = Tracer::compute_hash(&value3);
+
+        assert_eq!(hash1, hash2);
+        assert_ne!(hash1, hash3);
     }
 }

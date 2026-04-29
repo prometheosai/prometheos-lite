@@ -227,6 +227,7 @@ impl Flow {
 
             // Prepare input from state
             let input = node.prep(state)?;
+            let input_summary = crate::flow::tracing::Tracer::summarize_value(&input, 200);
 
             // Hook: before node execution
             hooks.on_node_start(&current, state, &input);
@@ -239,6 +240,7 @@ impl Flow {
                             run_id: run_id.clone(),
                             trace_id: trace_id.clone(),
                             node_id: current.clone(),
+                            input_summary: input_summary.clone(),
                         },
                         Some(current.clone()),
                         format!("Executing node: {}", current),
@@ -261,6 +263,7 @@ impl Flow {
                                     trace_id: trace_id.clone(),
                                     node_id: current.clone(),
                                     error: e.to_string(),
+                                    input_summary,
                                 },
                                 Some(current.clone()),
                                 format!("Node failed: {}", current),
@@ -280,12 +283,15 @@ impl Flow {
             // Log node completion (reuse same run_id and trace_id)
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
+                    let output_summary = crate::flow::tracing::Tracer::summarize_value(&output, 200);
                     t.log_flow_event(
                         crate::flow::tracing::TraceEvent::NodeCompleted {
                             run_id: run_id.clone(),
                             trace_id: trace_id.clone(),
                             node_id: current.clone(),
                             duration_ms,
+                            output_summary,
+                            status: "success".to_string(),
                         },
                         Some(current.clone()),
                         format!("Node completed: {}", current),
@@ -296,6 +302,8 @@ impl Flow {
                             trace_id: trace_id.clone(),
                             node_id: current.clone(),
                             duration_ms,
+                            output_summary: None,
+                            status: "success".to_string(),
                         },
                         Some(current.clone()),
                         Some(duration_ms),
