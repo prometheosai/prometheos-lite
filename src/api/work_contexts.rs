@@ -66,6 +66,21 @@ pub struct WorkContextResponse {
     pub updated_at: String,
 }
 
+impl From<crate::work::types::WorkContext> for WorkContextResponse {
+    fn from(context: crate::work::types::WorkContext) -> Self {
+        Self {
+            id: context.id,
+            title: context.title,
+            domain: format!("{:?}", context.domain),
+            goal: context.goal,
+            status: format!("{:?}", context.status),
+            phase: format!("{:?}", context.current_phase),
+            created_at: context.created_at.to_rfc3339(),
+            updated_at: context.updated_at.to_rfc3339(),
+        }
+    }
+}
+
 /// Response with Artifact details
 #[derive(Debug, Serialize)]
 pub struct ArtifactResponse {
@@ -103,29 +118,25 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<std::io::Error> for ApiError {
+    fn from(err: std::io::Error) -> Self {
+        ApiError::Internal(err.to_string())
+    }
+}
+
 /// List WorkContexts
 pub async fn list_work_contexts(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<WorkContextResponse>>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<Vec<WorkContextResponse>>, ApiError> {
+    let db = Db::new(&state.db_path)?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let contexts = work_context_service
-        .list_contexts("api-user")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .list_contexts("api-user")?;
 
-    let response: Vec<WorkContextResponse> = contexts
+    let response = contexts
         .into_iter()
-        .map(|ctx| WorkContextResponse {
-            id: ctx.id,
-            title: ctx.title,
-            domain: format!("{:?}", ctx.domain),
-            goal: ctx.goal,
-            status: format!("{:?}", ctx.status),
-            phase: format!("{:?}", ctx.current_phase),
-            created_at: ctx.created_at.to_rfc3339(),
-            updated_at: ctx.updated_at.to_rfc3339(),
-        })
+        .map(WorkContextResponse::from)
         .collect();
 
     Ok(Json(response))
@@ -283,9 +294,6 @@ pub async fn get_work_context_artifacts(
 }
 
 /// Continue a WorkContext
-///
-/// NOTE: This endpoint uses WorkContextService directly due to Axum Handler trait limitations.
-/// Full WorkOrchestrator integration deferred to V1.3.
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -296,19 +304,7 @@ pub async fn continue_work_context(
         .get_context(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-
-    let response = WorkContextResponse {
-        id: context.id,
-        title: context.title,
-        domain: format!("{:?}", context.domain),
-        goal: context.goal,
-        status: format!("{:?}", context.status),
-        phase: format!("{:?}", context.current_phase),
-        created_at: context.created_at.to_rfc3339(),
-        updated_at: context.updated_at.to_rfc3339(),
-    };
-
-    Ok(Json(response))
+    Ok(Json(WorkContextResponse::from(context)))
 }
 
 /// Submit a user intent to create or attach to a WorkContext
@@ -328,24 +324,10 @@ pub async fn submit_intent(
         .create_context(req.user_id, req.message.clone(), domain, req.message)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let response = WorkContextResponse {
-        id: context.id,
-        title: context.title,
-        domain: format!("{:?}", context.domain),
-        goal: context.goal,
-        status: format!("{:?}", context.status),
-        phase: format!("{:?}", context.current_phase),
-        created_at: context.created_at.to_rfc3339(),
-        updated_at: context.updated_at.to_rfc3339(),
-    };
-
-    Ok(Json(response))
+    Ok(Json(WorkContextResponse::from(context)))
 }
 
 /// Run a WorkContext until blocked or complete
-///
-/// NOTE: This endpoint uses WorkContextService directly due to Axum Handler trait limitations.
-/// Full WorkOrchestrator integration deferred to V1.3.
 pub async fn run_until_complete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -363,16 +345,5 @@ pub async fn run_until_complete(
         .update_status(&mut context, WorkStatus::InProgress)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let response = WorkContextResponse {
-        id: context.id,
-        title: context.title,
-        domain: format!("{:?}", context.domain),
-        goal: context.goal,
-        status: format!("{:?}", context.status),
-        phase: format!("{:?}", context.current_phase),
-        created_at: context.created_at.to_rfc3339(),
-        updated_at: context.updated_at.to_rfc3339(),
-    };
-
-    Ok(Json(response))
+    Ok(Json(WorkContextResponse::from(context)))
 }

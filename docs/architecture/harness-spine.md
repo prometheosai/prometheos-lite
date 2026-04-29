@@ -1,6 +1,6 @@
 # Harness Spine Architecture
 
-## V1.2.3 Status
+## V1.2.4 Status
 
 ### Completed
 - WorkExecutionService no longer forces Intent::CodingTask
@@ -24,26 +24,27 @@
 - Real integration tests added: tests/work_orchestrator_e2e.rs with full lifecycle tests
 - Execution metadata tracking added: ExecutionRecord struct and execution_metadata field in WorkContext
 - Database schema updated to include execution_metadata field
-- API endpoints documented with NOTE about Axum Handler trait limitations
+- From<WorkContext> for WorkContextResponse added to reduce boilerplate
 
-### Deferred to V1.3
-- API integration with WorkOrchestrator (Axum Handler trait compatibility issues - async functions with complex setup don't satisfy Handler trait. This is a fundamental limitation of Axum's type system - when async functions call methods that return Results, the return type becomes impl Future which doesn't satisfy the Handler trait.)
-- run-until-complete loop implementation (blocked by above API integration issue)
-- Deterministic tests proving API → WorkOrchestrator → WorkExecutionService (blocked by API integration issue)
+### Partially Implemented
+- Model metadata: GenerateResult exists at router level, but metadata is not propagated to WorkContext execution_metadata. Existing nodes still call router.generate() which discards metadata.
 
-### Deferred to V1.4
-- Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests) - formally deferred to V1.4
+### Not Implemented / Deferred
+- API integration with WorkOrchestrator: API handlers (submit_intent, continue_work_context, run_until_complete) still use WorkContextService directly. This is an implementation issue, not a fundamental Axum framework limitation. Requires investigation into handler return type compatibility.
+- run-until-complete loop implementation: blocked by API integration issue above
+- Deterministic tests proving API → WorkOrchestrator → WorkExecutionService: blocked by API integration issue
+- Structured repo-aware coding tools (list_tree, read_file, search_files, patch_file, git_diff, run_tests): explicitly deferred to V1.4
 
 ### Production Readiness
-- V1.2.3 direction: correct
-- Implementation: significantly improved
+- V1.2.4 direction: correct
+- Implementation: improved but incomplete
 - CLI path: 8/10
 - Core orchestrator: 8/10
-- API path: 2/10 (still bypasses WorkOrchestrator due to Axum Handler trait issues - fundamental limitation, documented in code)
+- API path: 2/10 (bypasses WorkOrchestrator - implementation issue, not framework limitation)
 - Playbook integration: 4/10
 - Execution completeness standard: 6/10
-- Model metadata: 8/10 (GenerateResult integrated into ModelRouter::generate())
-- Overall production readiness: ~7/10
+- Model metadata: 5.5/10 (router-level only, not propagated to WorkContext)
+- Overall production readiness: ~5.8/10
 - Claim of "fully complete": no
 
 ## Overview
