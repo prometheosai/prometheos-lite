@@ -68,6 +68,10 @@ pub struct WorkOrchestrator {
     intent_classifier: IntentClassifier,
 }
 
+// Ensure WorkOrchestrator is Send + Sync for use in async handlers
+unsafe impl Send for WorkOrchestrator {}
+unsafe impl Sync for WorkOrchestrator {}
+
 impl WorkOrchestrator {
     pub fn new(
         work_context_service: Arc<WorkContextService>,
