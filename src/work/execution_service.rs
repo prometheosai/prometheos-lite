@@ -8,10 +8,11 @@ use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::work::{
     domain::WorkDomainProfile,
-    types::{AutonomyLevel, ApprovalPolicy, WorkPhase, WorkStatus},
+    playbook::WorkContextPlaybook,
+    types::{AutonomyLevel, ApprovalPolicy, WorkPhase, WorkStatus, FlowPerformanceRecord},
     ArtifactMapper, PhaseController, WorkContext, WorkContextService,
 };
-use crate::db::repository::DomainProfileOperations;
+use crate::db::repository::{DomainProfileOperations, PlaybookOperations};
 
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
@@ -202,18 +203,57 @@ impl WorkExecutionService {
         } else {
             None
         };
-        
-        let next_flow = PhaseController::flow_for_phase(
-            context.current_phase,
-            domain_profile.as_ref()
-        );
+
+        // Load playbook if available for weighted flow selection
+        let playbook = if let Some(ref playbook_id) = context.playbook_id {
+            let db = self.work_context_service.get_db();
+            PlaybookOperations::get_playbook(&**db, playbook_id)?
+        } else {
+            None
+        };
+
+        let next_flow = if let Some(ref playbook) = playbook {
+            // Use weighted selection from playbook with 10% exploration factor
+            PhaseController::weighted_flow_selection(
+                context.current_phase,
+                &playbook.preferred_flows,
+                0.1, // 10% exploration factor
+            )
+        } else {
+            // Fallback to static flow selection
+            PhaseController::flow_for_phase(
+                context.current_phase,
+                domain_profile.as_ref()
+            )
+        };
         
         if context.current_phase == WorkPhase::Finalization {
             return Ok(context);
         }
 
         // Execute flow
+        let start_time = std::time::Instant::now();
         self.execute_flow_in_context(&mut context, &next_flow).await?;
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        // Create and store FlowPerformanceRecord
+        let performance_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: next_flow.clone(),
+            work_context_id: context.id.clone(),
+            success_score: if context.status == WorkStatus::Completed { 1.0 } else { 0.5 },
+            duration_ms,
+            token_cost: context.execution_metadata.iter()
+                .filter_map(|r| r.cost)
+                .sum(),
+            revision_count: context.decisions.len() as u32,
+            executed_at: chrono::Utc::now(),
+        };
+
+        // Store performance record in context metadata for now
+        // TODO: Add dedicated database table for FlowPerformanceRecord
+        let performance_key = format!("flow_perf_{}", next_flow);
+        context.metadata[performance_key] = serde_json::to_value(&performance_record).unwrap_or(serde_json::Value::Null);
 
         // Update status
         if context.current_phase == WorkPhase::Finalization {
