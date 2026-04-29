@@ -9,8 +9,22 @@ use std::sync::Arc;
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
 use super::types::{AutonomyLevel, WorkContext, WorkPhase, WorkStatus};
+use super::evolution_engine::EvolutionEngine;
 use crate::flow::execution_service::FlowExecutionService;
 use crate::intent::{Intent, IntentClassifier};
+
+/// EvolutionTrigger - when to trigger playbook evolution
+#[derive(Debug, Clone, Copy)]
+pub enum EvolutionTrigger {
+    /// Context completed successfully
+    Completion,
+    /// Context partially failed
+    PartialFailure,
+    /// User provided a correction
+    UserCorrection,
+    /// Retry was triggered
+    Retry,
+}
 
 /// ExecutionLimits - hard stop contracts for autonomous execution
 #[derive(Debug, Clone)]
@@ -66,6 +80,7 @@ pub struct WorkOrchestrator {
     playbook_resolver: Arc<super::playbook_resolver::PlaybookResolver>,
     work_execution_service: Arc<WorkExecutionService>,
     intent_classifier: Arc<IntentClassifier>,
+    evolution_engine: Arc<EvolutionEngine>,
 }
 
 // Ensure WorkOrchestrator is Send + Sync for use in async handlers
@@ -78,12 +93,14 @@ impl WorkOrchestrator {
         playbook_resolver: Arc<super::playbook_resolver::PlaybookResolver>,
         work_execution_service: Arc<WorkExecutionService>,
         intent_classifier: Arc<IntentClassifier>,
+        evolution_engine: Arc<EvolutionEngine>,
     ) -> Self {
         Self {
             work_context_service,
             playbook_resolver,
             work_execution_service,
             intent_classifier,
+            evolution_engine,
         }
     }
 
@@ -143,6 +160,7 @@ impl WorkOrchestrator {
             // Apply playbook settings
             context.domain_profile_id = Some(playbook.domain_profile_id.clone());
             context.approval_policy = playbook.default_approval_policy;
+            context.playbook_id = Some(playbook.id.clone());
             self.work_context_service.update_context(&context)?;
 
             // Update playbook usage
@@ -181,6 +199,53 @@ impl WorkOrchestrator {
                 .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
         }
 
+        Ok(context)
+    }
+
+    /// Complete a context and trigger evolution if applicable
+    /// Triggers: completion, partial failure, user correction, retry
+    pub async fn complete_context(&self, context_id: String, trigger: EvolutionTrigger) -> Result<WorkContext> {
+        let context = self
+            .work_context_service
+            .get_context(&context_id)?
+            .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
+
+        // Evaluate context and store result
+        let evaluation_result = EvolutionEngine::evaluate_context(&context);
+        let evaluation_json = serde_json::to_value(&evaluation_result)
+            .context("Failed to serialize evaluation result")?;
+
+        // Only trigger evolution if playbook is associated
+        if let Some(ref playbook_id) = context.playbook_id {
+            // Extract patterns from completed context
+            let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+
+            // Evolve playbook based on patterns
+            self.evolution_engine.evolve_playbook(playbook_id, success_patterns, failure_patterns)?;
+        }
+
+        // Update context status based on trigger
+        let mut context = context;
+        context.set_evaluation_result(evaluation_json);
+
+        match trigger {
+            EvolutionTrigger::Completion => {
+                self.work_context_service.update_status(&mut context, WorkStatus::Completed)?;
+            }
+            EvolutionTrigger::PartialFailure => {
+                self.work_context_service.update_status(&mut context, WorkStatus::Blocked)?;
+            }
+            EvolutionTrigger::UserCorrection => {
+                // User corrected the context, continue execution
+                self.work_context_service.clear_blocked_reason(&mut context)?;
+            }
+            EvolutionTrigger::Retry => {
+                // Retry triggered, reset to InProgress
+                self.work_context_service.update_status(&mut context, WorkStatus::InProgress)?;
+            }
+        }
+
+        self.work_context_service.update_context(&context)?;
         Ok(context)
     }
 
