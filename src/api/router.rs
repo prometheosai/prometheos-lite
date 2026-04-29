@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::api::AppState;
 use crate::api::conversations::{create_conversation, get_conversations};
+use crate::api::control_panel::create_control_panel_router;
 use crate::api::flow_runs::run_flow;
 use crate::api::health::health_check;
 use crate::api::messages::{create_message, get_messages};
@@ -42,6 +43,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/work-contexts/:id/artifacts", get(get_work_context_artifacts))
         .route("/work-contexts/:id/continue", post(continue_work_context))
         .route("/work-contexts/:id/run-until-complete", post(run_until_complete))
+        .nest("/control-panel", create_control_panel_router())
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
