@@ -8,6 +8,7 @@ pub mod intent;
 pub mod llm;
 pub mod logger;
 pub mod personality;
+pub mod queue;
 pub mod tools;
 pub mod utils;
 pub mod work;
