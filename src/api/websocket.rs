@@ -44,6 +44,55 @@ pub enum FlowEvent {
         message: String,
         timestamp: DateTime<Utc>,
     },
+    #[serde(rename = "job_queued")]
+    JobQueued {
+        job_id: String,
+        job_type: String,
+        priority: String,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "job_started")]
+    JobStarted {
+        job_id: String,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "job_completed")]
+    JobCompleted {
+        job_id: String,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "job_failed")]
+    JobFailed {
+        job_id: String,
+        error: String,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "skill_extracted")]
+    SkillExtracted {
+        skill_id: String,
+        skill_name: String,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "evolution_created")]
+    EvolutionCreated {
+        evolution_id: String,
+        playbook_id: String,
+        version: u32,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "evolution_promoted")]
+    EvolutionPromoted {
+        evolution_id: String,
+        version: u32,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "metrics_update")]
+    MetricsUpdate {
+        uptime_seconds: u64,
+        memory_usage_mb: u64,
+        active_connections: usize,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// WebSocket connection manager
