@@ -17,6 +17,21 @@ pub struct ExecutionRecord {
     pub timestamp: DateTime<Utc>,
 }
 
+impl ExecutionRecord {
+    /// Create an ExecutionRecord from a GenerateResult
+    pub fn from_generate_result(node_id: String, result: &crate::flow::intelligence::GenerateResult) -> Self {
+        Self {
+            node_id,
+            model: result.model.clone(),
+            provider: result.provider.clone(),
+            latency_ms: result.latency_ms,
+            tokens: result.tokens_used,
+            cost: None, // Cost calculation to be implemented based on provider pricing
+            timestamp: Utc::now(),
+        }
+    }
+}
+
 /// WorkContext - the primary object for managing persistent work across time
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkContext {
