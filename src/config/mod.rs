@@ -2,4 +2,4 @@
 
 pub mod settings;
 
-pub use settings::{AppConfig, DEFAULT_CONFIG_PATH, MemoryBudget};
+pub use settings::{AppConfig, DEFAULT_CONFIG_PATH, MemoryBudget, StrictMode};

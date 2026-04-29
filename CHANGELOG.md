@@ -652,8 +652,8 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #16: Store evaluation result in WorkContext and expose via API/CLI
 
 ### Phase 6 — Strict Mode (EPIC 6)
-- [ ] Issue #17: Add `StrictMode` config flag — missing inputs → error, missing services → error, empty outputs → error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
-- [ ] Issue #18: Enforce strict mode in FlowExecutionService and WorkExecutionService
+- [x] Issue #17: Add `StrictMode` config flag — missing inputs → error, missing services → error, empty outputs → error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
+- [x] Issue #18: Enforce strict mode in FlowExecutionService and WorkExecutionService
 
 ### Phase 7 — Observability (EPIC 7)
 - [ ] Issue #19: Add structured node execution logs (input/output summaries, duration, status)
@@ -671,7 +671,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [ ] Issue #29: Test strict mode enforcement (missing inputs, empty outputs, unwrap guard, Option::None guard, idempotency)
 - [ ] Issue #30: Test observability (node logs, tool calls, LLM latency, hierarchical trace structure)
 
-**Status:** v1.3 - In Progress (16/30 implemented)
+**Status:** v1.3 - In Progress (18/30 implemented)
 **See:** `docs/prd/prometheos-lite-V1.3.md` for full specification
 
 ---

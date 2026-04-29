@@ -39,6 +39,10 @@ pub struct SharedState {
     #[serde(skip)]
     #[serde(default)]
     pub playbook_id: Option<String>,
+    /// Strict mode enforcer for runtime validation (not serialized)
+    #[serde(skip)]
+    #[serde(default)]
+    pub strict_mode_enforcer: Option<Arc<super::StrictModeEnforcer>>,
 }
 
 impl Clone for SharedState {
@@ -51,6 +55,7 @@ impl Clone for SharedState {
             meta: self.meta.clone(),
             budget_guard: self.budget_guard.clone(),
             playbook_id: self.playbook_id.clone(),
+            strict_mode_enforcer: self.strict_mode_enforcer.clone(),
         }
     }
 }
@@ -65,6 +70,7 @@ impl Default for SharedState {
             meta: HashMap::new(),
             budget_guard: None,
             playbook_id: None,
+            strict_mode_enforcer: None,
         }
     }
 }
@@ -80,6 +86,7 @@ impl SharedState {
             meta: HashMap::new(),
             budget_guard: None,
             playbook_id: None,
+            strict_mode_enforcer: None,
         }
     }
 
@@ -223,6 +230,16 @@ impl SharedState {
     /// Get the playbook ID
     pub fn get_playbook(&self) -> Option<&String> {
         self.playbook_id.as_ref()
+    }
+
+    /// Set the strict mode enforcer for runtime validation
+    pub fn set_strict_mode_enforcer(&mut self, enforcer: Arc<super::StrictModeEnforcer>) {
+        self.strict_mode_enforcer = Some(enforcer);
+    }
+
+    /// Get the strict mode enforcer
+    pub fn get_strict_mode_enforcer(&self) -> Option<Arc<super::StrictModeEnforcer>> {
+        self.strict_mode_enforcer.as_ref().cloned()
     }
 
     /// Add execution metadata (from GenerateResult)

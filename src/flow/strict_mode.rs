@@ -1,0 +1,337 @@
+//! Strict mode enforcement for flow and work execution
+//!
+//! This module provides runtime enforcement of strict mode policies:
+//! - Missing inputs → error instead of silent fallback
+//! - Missing services → error instead of silent fallback
+//! - Empty outputs → error instead of silent fallback
+//! - No silent Option::None propagation
+//! - Tool idempotency checks
+
+use anyhow::{bail, Context, Result};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use uuid::Uuid;
+
+use crate::config::StrictMode as StrictModeConfig;
+
+/// Strict mode enforcement context
+#[derive(Debug, Clone)]
+pub struct StrictModeEnforcer {
+    config: StrictModeConfig,
+    /// Track tool call results for idempotency checks
+    tool_call_cache: Arc<Mutex<HashMap<String, ToolCallResult>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallResult {
+    result_hash: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+impl StrictModeEnforcer {
+    /// Create a new strict mode enforcer
+    pub fn new(config: StrictModeConfig) -> Self {
+        Self {
+            config,
+            tool_call_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Check if strict mode is enabled
+    pub fn is_enabled(&self) -> bool {
+        self.config.enforce_missing_inputs
+            || self.config.enforce_missing_services
+            || self.config.enforce_empty_outputs
+            || self.config.enforce_no_silent_none
+            || self.config.enforce_idempotency
+    }
+
+    /// Validate input is present and non-empty
+    pub fn validate_input(&self, input: &Value, field_name: &str) -> Result<()> {
+        if !self.config.enforce_missing_inputs {
+            return Ok(());
+        }
+
+        if input.is_null() {
+            bail!(
+                "Strict mode violation: Input '{}' is null. Missing inputs are not allowed.",
+                field_name
+            );
+        }
+
+        if let Some(obj) = input.as_object() {
+            if obj.is_empty() {
+                bail!(
+                    "Strict mode violation: Input '{}' is empty object. Missing inputs are not allowed.",
+                    field_name
+                );
+            }
+        }
+
+        if let Some(arr) = input.as_array() {
+            if arr.is_empty() {
+                bail!(
+                    "Strict mode violation: Input '{}' is empty array. Missing inputs are not allowed.",
+                    field_name
+                );
+            }
+        }
+
+        if let Some(s) = input.as_str() {
+            if s.trim().is_empty() {
+                bail!(
+                    "Strict mode violation: Input '{}' is empty string. Missing inputs are not allowed.",
+                    field_name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate service is available
+    pub fn validate_service<T>(&self, service: Option<&T>, service_name: &str) -> Result<()> {
+        if !self.config.enforce_missing_services {
+            return Ok(());
+        }
+
+        if service.is_none() {
+            bail!(
+                "Strict mode violation: Service '{}' is not available. Missing services are not allowed.",
+                service_name
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Validate output is non-empty
+    pub fn validate_output(&self, output: &Value, output_name: &str) -> Result<()> {
+        if !self.config.enforce_empty_outputs {
+            return Ok(());
+        }
+
+        if output.is_null() {
+            bail!(
+                "Strict mode violation: Output '{}' is null. Empty outputs are not allowed.",
+                output_name
+            );
+        }
+
+        if let Some(obj) = output.as_object() {
+            if obj.is_empty() {
+                bail!(
+                    "Strict mode violation: Output '{}' is empty object. Empty outputs are not allowed.",
+                    output_name
+                );
+            }
+        }
+
+        if let Some(arr) = output.as_array() {
+            if arr.is_empty() {
+                bail!(
+                    "Strict mode violation: Output '{}' is empty array. Empty outputs are not allowed.",
+                    output_name
+                );
+            }
+        }
+
+        if let Some(s) = output.as_str() {
+            if s.trim().is_empty() {
+                bail!(
+                    "Strict mode violation: Output '{}' is empty string. Empty outputs are not allowed.",
+                    output_name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate Option is not None (no silent None propagation)
+    pub fn validate_option<T: Clone>(&self, value: Option<&T>, value_name: &str) -> Result<T> {
+        if !self.config.enforce_no_silent_none {
+            return value
+                .cloned()
+                .context(format!("Value '{}' is None", value_name));
+        }
+
+        value
+            .cloned()
+            .context(format!(
+                "Strict mode violation: Value '{}' is None. Silent None propagation is not allowed.",
+                value_name
+            ))
+    }
+
+    /// Check tool idempotency - same args should produce same result
+    pub fn check_tool_idempotency(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        result: &Value,
+    ) -> Result<()> {
+        if !self.config.enforce_idempotency {
+            return Ok(());
+        }
+
+        let args_hash = self.compute_hash(args);
+        let result_hash = self.compute_hash(result);
+        let cache_key = format!("{}:{}", tool_name, args_hash);
+
+        let mut cache = self.tool_call_cache.lock().unwrap();
+        
+        if let Some(cached) = cache.get(&cache_key) {
+            // Check if result is consistent with previous call
+            if cached.result_hash != result_hash {
+                bail!(
+                    "Strict mode violation: Tool '{}' produced different result for same arguments. Idempotency check failed. Previous hash: {}, Current hash: {}",
+                    tool_name,
+                    cached.result_hash,
+                    result_hash
+                );
+            }
+        } else {
+            // Cache this result
+            cache.insert(
+                cache_key,
+                ToolCallResult {
+                    result_hash,
+                    timestamp: chrono::Utc::now(),
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Clear tool call cache (useful for testing or when idempotency is not required)
+    pub fn clear_tool_cache(&self) {
+        let mut cache = self.tool_call_cache.lock().unwrap();
+        cache.clear();
+    }
+
+    /// Compute a simple hash for JSON values
+    fn compute_hash(&self, value: &Value) -> String {
+        format!("{:x}", md5::compute(value.to_string().as_bytes()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_strict_enforcer() -> StrictModeEnforcer {
+        StrictModeEnforcer::new(StrictModeConfig {
+            enforce_missing_inputs: true,
+            enforce_missing_services: true,
+            enforce_empty_outputs: true,
+            enforce_no_unwrap: false,
+            enforce_no_silent_none: true,
+            enforce_idempotency: true,
+        })
+    }
+
+    fn create_lenient_enforcer() -> StrictModeEnforcer {
+        StrictModeEnforcer::new(StrictModeConfig {
+            enforce_missing_inputs: false,
+            enforce_missing_services: false,
+            enforce_empty_outputs: false,
+            enforce_no_unwrap: false,
+            enforce_no_silent_none: false,
+            enforce_idempotency: false,
+        })
+    }
+
+    #[test]
+    fn test_validate_input_strict() {
+        let enforcer = create_strict_enforcer();
+
+        // Valid input
+        assert!(enforcer.validate_input(&json!("test"), "field").is_ok());
+        assert!(enforcer.validate_input(&json!({"key": "value"}), "field").is_ok());
+        assert!(enforcer.validate_input(&json!(["item"]), "field").is_ok());
+
+        // Invalid input
+        assert!(enforcer.validate_input(&json!(null), "field").is_err());
+        assert!(enforcer.validate_input(&json!(""), "field").is_err());
+        assert!(enforcer.validate_input(&json!({}), "field").is_err());
+        assert!(enforcer.validate_input(&json!([]), "field").is_err());
+    }
+
+    #[test]
+    fn test_validate_input_lenient() {
+        let enforcer = create_lenient_enforcer();
+
+        // All inputs should pass in lenient mode
+        assert!(enforcer.validate_input(&json!(null), "field").is_ok());
+        assert!(enforcer.validate_input(&json!(""), "field").is_ok());
+        assert!(enforcer.validate_input(&json!({}), "field").is_ok());
+    }
+
+    #[test]
+    fn test_validate_service_strict() {
+        let enforcer = create_strict_enforcer();
+
+        let service = "test_service";
+        assert!(enforcer.validate_service(Some(&service), "service").is_ok());
+        assert!(enforcer.validate_service::<String>(None, "service").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_lenient() {
+        let enforcer = create_lenient_enforcer();
+
+        assert!(enforcer.validate_service::<String>(None, "service").is_ok());
+    }
+
+    #[test]
+    fn test_validate_output_strict() {
+        let enforcer = create_strict_enforcer();
+
+        assert!(enforcer.validate_output(&json!("result"), "output").is_ok());
+        assert!(enforcer.validate_output(&json!(null), "output").is_err());
+        assert!(enforcer.validate_output(&json!(""), "output").is_err());
+    }
+
+    #[test]
+    fn test_validate_option_strict() {
+        let enforcer = create_strict_enforcer();
+
+        let value = "test";
+        assert!(enforcer.validate_option(Some(&value), "value").is_ok());
+        assert!(enforcer.validate_option::<String>(None, "value").is_err());
+    }
+
+    #[test]
+    fn test_tool_idempotency() {
+        let enforcer = create_strict_enforcer();
+
+        let args = json!({"input": "test"});
+        let result1 = json!({"output": "result1"});
+
+        // First call should succeed
+        assert!(enforcer
+            .check_tool_idempotency("test_tool", &args, &result1)
+            .is_ok());
+
+        // Same args, same result should succeed
+        assert!(enforcer
+            .check_tool_idempotency("test_tool", &args, &result1)
+            .is_ok());
+
+        // Same args, different result should fail
+        let result2 = json!({"output": "result2"});
+        assert!(enforcer
+            .check_tool_idempotency("test_tool", &args, &result2)
+            .is_err());
+
+        // Clear cache and retry
+        enforcer.clear_tool_cache();
+        assert!(enforcer
+            .check_tool_idempotency("test_tool", &args, &result2)
+            .is_ok());
+    }
+}

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
+use crate::flow::StrictModeEnforcer;
 use crate::work::{
     domain::WorkDomainProfile,
     playbook::WorkContextPlaybook,
@@ -19,6 +20,7 @@ use crate::db::repository::{DomainProfileOperations, PlaybookOperations};
 pub struct WorkExecutionService {
     work_context_service: Arc<WorkContextService>,
     flow_execution_service: Arc<FlowExecutionService>,
+    strict_mode: Option<StrictModeEnforcer>,
 }
 
 impl WorkExecutionService {
@@ -30,7 +32,26 @@ impl WorkExecutionService {
         Self {
             work_context_service,
             flow_execution_service,
+            strict_mode: None,
         }
+    }
+
+    /// Create a new WorkExecutionService with strict mode
+    pub fn with_strict_mode(
+        work_context_service: Arc<WorkContextService>,
+        flow_execution_service: Arc<FlowExecutionService>,
+        strict_mode: StrictModeEnforcer,
+    ) -> Self {
+        Self {
+            work_context_service,
+            flow_execution_service,
+            strict_mode: Some(strict_mode),
+        }
+    }
+
+    /// Set strict mode enforcer
+    pub fn set_strict_mode(&mut self, strict_mode: StrictModeEnforcer) {
+        self.strict_mode = Some(strict_mode);
     }
 
     /// Resolve flow reference to absolute path
@@ -124,8 +145,13 @@ impl WorkExecutionService {
         let flow_path = self.resolve_flow_path(flow_ref, &context.domain)?;
         let flow_file = self.load_flow_file(&flow_path)?;
 
+        // Build execution options with strict mode if enabled
+        let mut options = ExecutionOptions::default();
+        if let Some(ref strict_mode) = self.strict_mode {
+            options = options.with_strict_mode(strict_mode.clone());
+        }
+
         // Execute flow directly without intent override
-        let options = ExecutionOptions::default();
         let final_output = self
             .flow_execution_service
             .execute_flow_file(&flow_file, &context.goal, options)

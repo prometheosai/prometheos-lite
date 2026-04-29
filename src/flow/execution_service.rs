@@ -34,6 +34,8 @@ pub struct ExecutionOptions {
     pub flows_dir: Option<std::path::PathBuf>,
     /// Optional work context ID for context tracking
     pub work_context_id: Option<String>,
+    /// Optional strict mode enforcer
+    pub strict_mode: Option<crate::flow::StrictModeEnforcer>,
 }
 
 impl Default for ExecutionOptions {
@@ -45,6 +47,7 @@ impl Default for ExecutionOptions {
             override_intent: None,
             flows_dir: None,
             work_context_id: None,
+            strict_mode: None,
         }
     }
 }
@@ -72,6 +75,11 @@ impl ExecutionOptions {
 
     pub fn with_work_context_id(mut self, id: String) -> Self {
         self.work_context_id = Some(id);
+        self
+    }
+
+    pub fn with_strict_mode(mut self, enforcer: crate::flow::StrictModeEnforcer) -> Self {
+        self.strict_mode = Some(enforcer);
         self
     }
 }
@@ -271,14 +279,24 @@ impl FlowExecutionService {
             state.set_budget_guard(guard);
         }
 
-        // 6. Execute
+        // Set strict mode enforcer in state for runtime enforcement
+        if let Some(ref strict_mode) = options.strict_mode {
+            state.set_strict_mode_enforcer(Arc::new(strict_mode.clone()));
+        }
+
+        // 6. Validate input if strict mode is enabled
+        if let Some(ref strict_mode) = options.strict_mode {
+            strict_mode.validate_input(&serde_json::json!(message), "task")?;
+        }
+
+        // 7. Execute
         let result = flow.run(&mut state).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // 7. Extract budget report from state
+        // 8. Extract budget report from state
         let budget_report = state.get_budget_report().cloned();
 
-        // 8. Count trace events from tracer if available
+        // 9. Count trace events from tracer if available
         let events_count = if let Some(tracer) = &options.tracer {
             if let Ok(t) = tracer.lock() {
                 t.get_logs().len()
@@ -358,7 +376,7 @@ impl FlowExecutionService {
         }
 
         // 14. Produce FinalOutput
-        match result {
+        let final_output = match result {
             Ok(()) => {
                 let primary = state
                     .get_output("llm_response")
@@ -386,7 +404,7 @@ impl FlowExecutionService {
                     duration_ms,
                 );
                 output.execution_metadata = execution_metadata;
-                Ok(output)
+                output
             }
             Err(e) => {
                 let mut output = FinalOutput::failure(
@@ -397,9 +415,18 @@ impl FlowExecutionService {
                     duration_ms,
                 );
                 output.execution_metadata = execution_metadata;
-                Ok(output)
+                output
+            }
+        };
+
+        // 15. Validate output if strict mode is enabled
+        if let Some(ref strict_mode) = options.strict_mode {
+            if final_output.success {
+                strict_mode.validate_output(&final_output.primary, "primary_output")?;
             }
         }
+
+        Ok(final_output)
     }
 
     /// Execute a flow from a pre-loaded FlowFile (skip classification)

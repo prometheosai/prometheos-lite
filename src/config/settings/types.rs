@@ -1,8 +1,8 @@
 //! Configuration types
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub provider: String,
     pub base_url: String,
@@ -17,9 +17,46 @@ pub struct AppConfig {
     pub context_window_size: usize,
     #[serde(default = "super::defaults::default_memory_budget")]
     pub memory_budget: MemoryBudget,
+    #[serde(default = "super::defaults::default_strict_mode")]
+    pub strict_mode: StrictMode,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StrictMode {
+    /// Enforce error on missing inputs instead of silent fallback
+    #[serde(default = "super::defaults::default_strict_mode_enforce_missing_inputs")]
+    pub enforce_missing_inputs: bool,
+    /// Enforce error on missing services instead of silent fallback
+    #[serde(default = "super::defaults::default_strict_mode_enforce_missing_services")]
+    pub enforce_missing_services: bool,
+    /// Enforce error on empty outputs instead of silent fallback
+    #[serde(default = "super::defaults::default_strict_mode_enforce_empty_outputs")]
+    pub enforce_empty_outputs: bool,
+    /// Enforce no unwrap() calls in code (compile-time linting)
+    #[serde(default = "super::defaults::default_strict_mode_enforce_no_unwrap")]
+    pub enforce_no_unwrap: bool,
+    /// Enforce no silent Option::None propagation
+    #[serde(default = "super::defaults::default_strict_mode_enforce_no_silent_none")]
+    pub enforce_no_silent_none: bool,
+    /// Enforce tool idempotency checks
+    #[serde(default = "super::defaults::default_strict_mode_enforce_idempotency")]
+    pub enforce_idempotency: bool,
+}
+
+impl Default for StrictMode {
+    fn default() -> Self {
+        Self {
+            enforce_missing_inputs: false,
+            enforce_missing_services: false,
+            enforce_empty_outputs: false,
+            enforce_no_unwrap: false,
+            enforce_no_silent_none: false,
+            enforce_idempotency: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryBudget {
     pub project_facts: f32,
     pub user_preferences: f32,
