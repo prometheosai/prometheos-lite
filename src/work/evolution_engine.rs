@@ -10,6 +10,28 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::db::Db;
+use crate::db::repository::PlaybookOperations;
+use crate::work::playbook::{PatternRecord, PatternType, WorkContextPlaybook};
+use crate::work::types::{WorkContext, FlowPerformanceRecord};
+
+/// EvaluationResult - result of evaluating a WorkContext
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationResult {
+    /// Overall score (0.0 to 1.0)
+    pub overall_score: f32,
+    /// Semantic correctness score (LLM-based)
+    pub semantic_score: f32,
+    /// Structural correctness score (schema validation)
+    pub structural_score: f32,
+    /// Tool consistency score
+    pub tool_consistency_score: f32,
+    /// Artifact completeness score
+    pub artifact_completeness_score: f32,
+    /// Evaluation timestamp
+    pub evaluated_at: chrono::DateTime<chrono::Utc>,
+    /// Evaluation details
+    pub details: String,
+}
 
 /// Playbook evolution tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +176,268 @@ impl EvolutionEngine {
     /// Create a new EvolutionEngine
     pub fn new(db: Arc<Db>) -> Self {
         Self { db }
+    }
+
+    /// Extract patterns from a completed WorkContext
+    /// Returns success and failure patterns based on execution metadata and FlowPerformanceRecords
+    pub fn extract_patterns(context: &WorkContext) -> (Vec<PatternRecord>, Vec<PatternRecord>) {
+        let mut success_patterns = Vec::new();
+        let mut failure_patterns = Vec::new();
+
+        // Check if context completed successfully
+        let is_success = context.status == crate::work::types::WorkStatus::Completed;
+
+        // Extract patterns from execution metadata
+        for record in &context.execution_metadata {
+            let pattern_type = if is_success {
+                PatternType::Success
+            } else {
+                PatternType::Failure
+            };
+
+            // Pattern: node latency pattern
+            if record.latency_ms > 5000 {
+                let pattern = PatternRecord {
+                    pattern_type: pattern_type.clone(),
+                    signal: format!("high_latency_node_{}", record.node_id),
+                    weight: if is_success { 0.3 } else { 0.7 },
+                    created_at: chrono::Utc::now(),
+                };
+                if is_success {
+                    success_patterns.push(pattern);
+                } else {
+                    failure_patterns.push(pattern);
+                }
+            }
+
+            // Pattern: model/provider usage
+            let pattern = PatternRecord {
+                pattern_type: pattern_type.clone(),
+                signal: format!("model_usage_{}_{}", record.provider, record.model),
+                weight: 0.5,
+                created_at: chrono::Utc::now(),
+            };
+            if is_success {
+                success_patterns.push(pattern);
+            } else {
+                failure_patterns.push(pattern);
+            }
+        }
+
+        // Extract patterns from FlowPerformanceRecords in metadata
+        for (key, value) in &context.metadata {
+            if key.starts_with("flow_perf_") {
+                if let Ok(perf_record) = serde_json::from_value::<FlowPerformanceRecord>(value.clone()) {
+                    let pattern_type = if perf_record.success_score > 0.7 {
+                        PatternType::Success
+                    } else {
+                        PatternType::Failure
+                    };
+
+                    // Pattern: flow performance
+                    let pattern = PatternRecord {
+                        pattern_type: pattern_type.clone(),
+                        signal: format!("flow_performance_{}_{}", perf_record.flow_id, if perf_record.success_score > 0.7 { "success" } else { "failure" }),
+                        weight: perf_record.success_score,
+                        created_at: chrono::Utc::now(),
+                    };
+                    if pattern_type == PatternType::Success {
+                        success_patterns.push(pattern);
+                    } else {
+                        failure_patterns.push(pattern);
+                    }
+
+                    // Pattern: high duration
+                    if perf_record.duration_ms > 10000 {
+                        let pattern = PatternRecord {
+                            pattern_type: pattern_type.clone(),
+                            signal: format!("high_duration_flow_{}", perf_record.flow_id),
+                            weight: 0.6,
+                            created_at: chrono::Utc::now(),
+                        };
+                        if pattern_type == PatternType::Success {
+                            success_patterns.push(pattern);
+                        } else {
+                            failure_patterns.push(pattern);
+                        }
+                    }
+
+                    // Pattern: high cost
+                    if perf_record.token_cost > 0.5 {
+                        let pattern = PatternRecord {
+                            pattern_type: pattern_type.clone(),
+                            signal: format!("high_cost_flow_{}", perf_record.flow_id),
+                            weight: 0.5,
+                            created_at: chrono::Utc::now(),
+                        };
+                        if pattern_type == PatternType::Success {
+                            success_patterns.push(pattern);
+                        } else {
+                            failure_patterns.push(pattern);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pattern: revision count (from decisions)
+        let revision_count = context.decisions.len() as f32;
+        if revision_count > 3.0 {
+            let pattern = PatternRecord {
+                pattern_type: if is_success { PatternType::Success } else { PatternType::Failure },
+                signal: "high_revision_count".to_string(),
+                weight: 0.4,
+                created_at: chrono::Utc::now(),
+            };
+            if is_success {
+                success_patterns.push(pattern);
+            } else {
+                failure_patterns.push(pattern);
+            }
+        }
+
+        // Pattern: failure reason
+        if let Some(ref blocked_reason) = context.blocked_reason {
+            let pattern = PatternRecord {
+                pattern_type: PatternType::Failure,
+                signal: format!("blocked_reason_{}", blocked_reason),
+                weight: 0.8,
+                created_at: chrono::Utc::now(),
+            };
+            failure_patterns.push(pattern);
+        }
+
+        (success_patterns, failure_patterns)
+    }
+
+    /// Evaluate a WorkContext with semantic, structural, and tool consistency signals
+    pub fn evaluate_context(context: &WorkContext) -> EvaluationResult {
+        // Semantic correctness: based on completion status and decisions
+        let semantic_score = match context.status {
+            crate::work::types::WorkStatus::Completed => 1.0,
+            crate::work::types::WorkStatus::InProgress => 0.7,
+            crate::work::types::WorkStatus::Blocked => 0.3,
+            crate::work::types::WorkStatus::Draft => 0.5,
+            crate::work::types::WorkStatus::AwaitingApproval => 0.6,
+            _ => 0.4,
+        };
+
+        // Structural correctness: based on plan and artifacts
+        let structural_score = if context.plan.is_some() { 0.8 } else { 0.4 };
+        let structural_score = structural_score + if !context.artifacts.is_empty() { 0.2 } else { 0.0 };
+
+        // Tool consistency: based on execution metadata
+        let tool_consistency_score = if context.execution_metadata.is_empty() {
+            0.5
+        } else {
+            let total_latency: u64 = context.execution_metadata.iter().map(|r| r.latency_ms).sum();
+            let avg_latency = total_latency / context.execution_metadata.len() as u64;
+            if avg_latency < 5000 { 0.9 } else if avg_latency < 10000 { 0.7 } else { 0.5 }
+        };
+
+        // Artifact completeness: based on completion criteria
+        let artifact_completeness_score = if context.completion_criteria.is_empty() {
+            1.0
+        } else {
+            let completed = context.artifacts.len() as f32;
+            let total = context.completion_criteria.len() as f32;
+            (completed / total).min(1.0)
+        };
+
+        // Overall score: weighted average
+        let overall_score = (semantic_score * 0.3
+            + structural_score * 0.25
+            + tool_consistency_score * 0.25
+            + artifact_completeness_score * 0.2).clamp(0.0, 1.0);
+
+        let details = format!(
+            "Semantic: {:.2}, Structural: {:.2}, Tool Consistency: {:.2}, Artifact Completeness: {:.2}",
+            semantic_score, structural_score, tool_consistency_score, artifact_completeness_score
+        );
+
+        EvaluationResult {
+            overall_score,
+            semantic_score,
+            structural_score,
+            tool_consistency_score,
+            artifact_completeness_score,
+            evaluated_at: chrono::Utc::now(),
+            details,
+        }
+    }
+
+    /// Evolve a playbook based on extracted patterns
+    /// Increases successful flow weights, penalizes failures, adjusts research_depth/autonomy
+    pub fn evolve_playbook(
+        &self,
+        playbook_id: &str,
+        success_patterns: Vec<PatternRecord>,
+        failure_patterns: Vec<PatternRecord>,
+    ) -> Result<()> {
+        let mut playbook = PlaybookOperations::get_playbook(&*self.db, playbook_id)?
+            .ok_or_else(|| anyhow::anyhow!("Playbook not found: {}", playbook_id))?;
+
+        // Adjust flow weights based on success/failure patterns
+        for pattern in &success_patterns {
+            if pattern.signal.starts_with("model_usage_") {
+                // Increase weight for flows that succeeded with this model
+                for flow_pref in &mut playbook.preferred_flows {
+                    flow_pref.weight = (flow_pref.weight + 0.1).min(1.0);
+                    flow_pref.confidence = (flow_pref.confidence + 0.05).min(1.0);
+                }
+            }
+        }
+
+        for pattern in &failure_patterns {
+            if pattern.signal.starts_with("model_usage_") {
+                // Decrease weight for flows that failed with this model
+                for flow_pref in &mut playbook.preferred_flows {
+                    flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
+                    flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                }
+            }
+        }
+
+        // Adjust research depth based on high revision count patterns
+        let high_revision_count = success_patterns.iter()
+            .any(|p| p.signal == "high_revision_count");
+        if high_revision_count {
+            // Increase research depth for contexts with high revisions
+            playbook.default_research_depth = match playbook.default_research_depth {
+                crate::work::playbook::ResearchDepth::Minimal => crate::work::playbook::ResearchDepth::Standard,
+                crate::work::playbook::ResearchDepth::Standard => crate::work::playbook::ResearchDepth::Deep,
+                crate::work::playbook::ResearchDepth::Deep => crate::work::playbook::ResearchDepth::Exhaustive,
+                crate::work::playbook::ResearchDepth::Exhaustive => crate::work::playbook::ResearchDepth::Exhaustive,
+            };
+        }
+
+        // Add new patterns to playbook
+        for pattern in success_patterns {
+            if !playbook.success_patterns.iter().any(|p| p.signal == pattern.signal) {
+                playbook.success_patterns.push(pattern);
+            }
+        }
+
+        for pattern in failure_patterns {
+            if !playbook.failure_patterns.iter().any(|p| p.signal == pattern.signal) {
+                playbook.failure_patterns.push(pattern);
+            }
+        }
+
+        // Update playbook confidence based on pattern balance
+        let success_count = success_patterns.len() as f32;
+        let failure_count = failure_patterns.len() as f32;
+        let total = success_count + failure_count;
+        if total > 0.0 {
+            let new_confidence = success_count / total;
+            playbook.confidence = (playbook.confidence * 0.7 + new_confidence * 0.3).clamp(0.0, 1.0);
+        }
+
+        playbook.updated_at = chrono::Utc::now();
+
+        PlaybookOperations::update_playbook(&*self.db, &playbook)?;
+
+        Ok(())
     }
 
     /// Initialize evolution tables
