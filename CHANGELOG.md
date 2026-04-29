@@ -643,7 +643,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - ~~Implement hover preview for chats~~ (Design document, may not apply to current stack)
 
 ### v1.2.5 - Harness Spine (Mostly Complete - API Integration Partial)
-- [~] Issue #25: Propagate metadata from router to WorkContext execution_metadata (partially complete - router-level only)
+- [x] Issue #25: Propagate metadata from router to WorkContext execution_metadata
 - [x] Issue #29: Wire submit_intent, continue_work_context, run_until_complete to WorkOrchestrator
 - [x] Issue #30: Complete error handling consistency for WorkOrchestrator handlers
 - [x] Issue #33: Add deterministic tests proving API → WorkOrchestrator → WorkExecutionService
