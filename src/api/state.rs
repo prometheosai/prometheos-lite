@@ -30,6 +30,10 @@ pub struct AppState {
     pub embedding_provider: Arc<dyn EmbeddingProvider>,
     /// Memory service for persistent memory storage and retrieval
     pub memory_service: Arc<MemoryService>,
+    /// FlowExecutionService for flow execution (shared across requests)
+    pub flow_execution_service: Arc<FlowExecutionService>,
+    /// IntentClassifier for intent classification (shared across requests)
+    pub intent_classifier: Arc<IntentClassifier>,
 }
 
 impl AppState {
@@ -39,33 +43,38 @@ impl AppState {
         runtime: Arc<RuntimeContext>,
         embedding_provider: Arc<dyn EmbeddingProvider>,
         memory_service: Arc<MemoryService>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime.clone())
+            .map_err(|e| e.to_string())?);
+        let intent_classifier = Arc::new(IntentClassifier::new()
+            .map_err(|e| e.to_string())?);
+
+        Ok(Self {
             db_path,
             runtime,
             ws_manager: ConnectionManager::new(),
             embedding_provider,
             memory_service,
-        }
+            flow_execution_service,
+            intent_classifier,
+        })
     }
 
     /// Create a WorkOrchestrator instance for this request
     /// Database connections are created per-request for thread safety
-    pub fn create_work_orchestrator(&self) -> anyhow::Result<WorkOrchestrator> {
-        let db = Arc::new(Db::new(&self.db_path)?);
+    pub fn create_work_orchestrator(&self) -> Result<WorkOrchestrator, String> {
+        let db = Arc::new(Db::new(&self.db_path).map_err(|e| e.to_string())?);
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
         let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
-        let flow_execution_service = Arc::new(FlowExecutionService::new(self.runtime.clone())?);
         let work_execution_service = Arc::new(WorkExecutionService::new(
             work_context_service.clone(),
-            flow_execution_service,
+            self.flow_execution_service.clone(),
         ));
-        let intent_classifier = IntentClassifier::new()?;
         Ok(WorkOrchestrator::new(
             work_context_service,
             playbook_resolver,
             work_execution_service,
-            intent_classifier,
+            self.intent_classifier.clone(),
         ))
     }
 }

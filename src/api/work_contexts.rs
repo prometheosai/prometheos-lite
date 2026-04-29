@@ -13,6 +13,9 @@ use crate::db::Db;
 use crate::work::{
     types::{WorkDomain, WorkStatus, WorkContext},
     WorkContextService,
+    PlaybookResolver,
+    WorkExecutionService,
+    WorkOrchestrator,
 };
 
 /// Request to create a new WorkContext
@@ -126,11 +129,13 @@ impl From<anyhow::Error> for ApiError {
 pub async fn list_work_contexts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<WorkContextResponse>>, ApiError> {
-    let db = Db::new(&state.db_path)?;
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let contexts = work_context_service
-        .list_contexts("api-user")?;
+        .list_contexts("api-user")
+        .map_err(|e| ApiError::Internal(format!("Failed to list contexts: {}", e)))?;
 
     let response = contexts
         .into_iter()
@@ -145,11 +150,13 @@ pub async fn get_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)?;
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let context = work_context_service
-        .get_context(&id)?
+        .get_context(&id)
+        .map_err(|e| ApiError::Internal(format!("Failed to get context: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -160,7 +167,8 @@ pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWorkContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)?;
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let domain = match req.domain.to_lowercase().as_str() {
@@ -181,7 +189,8 @@ pub async fn create_work_context(
     };
 
     let context = work_context_service
-        .create_context(user_id, req.title, domain, req.goal)?;
+        .create_context(user_id, req.title, domain, req.goal)
+        .map_err(|e| ApiError::Internal(format!("Failed to create context: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
 }
@@ -192,11 +201,13 @@ pub async fn update_work_context_status(
     Path(id): Path<String>,
     Json(req): Json<UpdateStatusRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)?;
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let mut context = work_context_service
-        .get_context(&id)?
+        .get_context(&id)
+        .map_err(|e| ApiError::Internal(format!("Failed to get context: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
 
     let new_status = match req.status.to_lowercase().as_str() {
@@ -209,7 +220,8 @@ pub async fn update_work_context_status(
     };
 
     work_context_service
-        .update_status(&mut context, new_status)?;
+        .update_status(&mut context, new_status)
+        .map_err(|e| ApiError::Internal(format!("Failed to update status: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
 }
@@ -219,11 +231,13 @@ pub async fn get_work_context_artifacts(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
-    let db = Db::new(&state.db_path)?;
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?;
     let work_context_service = WorkContextService::new(Arc::new(db));
 
     let context = work_context_service
-        .get_context(&id)?
+        .get_context(&id)
+        .map_err(|e| ApiError::Internal(format!("Failed to get context: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
 
     let response: Vec<ArtifactResponse> = context
@@ -258,15 +272,23 @@ pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
-
-    let context = work_context_service
-        .get_context(&id)?
-        .ok_or_else(|| ApiError::NotFound(format!("Context not found: {}", id)))?;
-
-    // TODO: Wire to WorkOrchestrator::continue_context once Handler trait issue is resolved
-    // For now, just return the context to verify the endpoint works
+    // Create WorkOrchestrator with per-request database connection
+    let db = Arc::new(Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?);
+    let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+    let playbook_resolver = Arc::new(PlaybookResolver::new(db));
+    let work_execution_service = Arc::new(WorkExecutionService::new(
+        work_context_service.clone(),
+        state.flow_execution_service.clone(),
+    ));
+    let orchestrator = WorkOrchestrator::new(
+        work_context_service,
+        playbook_resolver,
+        work_execution_service,
+        state.intent_classifier.clone(),
+    );
+    let context = orchestrator.continue_context(id).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -275,19 +297,27 @@ pub async fn submit_intent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitIntentRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
-
-    let domain = match req.message.to_lowercase().as_str() {
-        msg if msg.contains("code") || msg.contains("implement") => WorkDomain::Software,
-        _ => WorkDomain::General,
-    };
-
-    let context = work_context_service
-        .create_context(req.user_id, req.message.clone(), domain, req.message)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // TODO: Wire to WorkOrchestrator::submit_user_intent once Handler trait issue is resolved
+    // Create WorkOrchestrator with per-request database connection
+    let db = Arc::new(Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?);
+    let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+    let playbook_resolver = Arc::new(PlaybookResolver::new(db));
+    let work_execution_service = Arc::new(WorkExecutionService::new(
+        work_context_service.clone(),
+        state.flow_execution_service.clone(),
+    ));
+    let orchestrator = WorkOrchestrator::new(
+        work_context_service,
+        playbook_resolver,
+        work_execution_service,
+        state.intent_classifier.clone(),
+    );
+    let context = orchestrator.submit_user_intent(
+        req.user_id,
+        req.message,
+        req.conversation_id,
+    ).await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -297,17 +327,29 @@ pub async fn run_until_complete(
     Path(id): Path<String>,
     Json(req): Json<RunContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let db = Db::new(&state.db_path)?;
-    let work_context_service = WorkContextService::new(Arc::new(db));
-
-    let mut context = work_context_service
-        .get_context(&id)?
-        .ok_or_else(|| ApiError::NotFound(format!("Context not found: {}", id)))?;
-
-    // TODO: Wire to WorkOrchestrator::run_until_blocked_or_complete once Handler trait issue is resolved
-    // For now, just update status to InProgress and return the context
-    work_context_service.update_status(&mut context, crate::work::types::WorkStatus::InProgress)
+    // Create WorkOrchestrator with per-request database connection
+    let db = Arc::new(Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("Failed to open database: {}", e)))?);
+    let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+    let playbook_resolver = Arc::new(PlaybookResolver::new(db));
+    let work_execution_service = Arc::new(WorkExecutionService::new(
+        work_context_service.clone(),
+        state.flow_execution_service.clone(),
+    ));
+    let orchestrator = WorkOrchestrator::new(
+        work_context_service,
+        playbook_resolver,
+        work_execution_service,
+        state.intent_classifier.clone(),
+    );
+    let limits = crate::work::orchestrator::ExecutionLimits {
+        max_iterations: req.max_iterations.unwrap_or(10) as u32,
+        max_runtime_ms: req.max_runtime_ms.unwrap_or(300_000),
+        max_tool_calls: req.max_tool_calls.unwrap_or(50) as u32,
+        max_cost: req.max_cost.unwrap_or(1.0),
+        ..Default::default()
+    };
+    let context = orchestrator.run_until_blocked_or_complete(id, limits).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-
     Ok(Json(WorkContextResponse::from(context)))
 }
