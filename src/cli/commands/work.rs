@@ -92,7 +92,7 @@ impl WorkCommand {
         let runtime = Arc::new(RuntimeContext::default());
         let flow_execution_service = Arc::new(FlowExecutionService::new(runtime)?);
         let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
-        let intent_classifier = IntentClassifier::new()?;
+        let intent_classifier = Arc::new(IntentClassifier::new()?);
         let work_execution_service = Arc::new(WorkExecutionService::new(
             work_context_service.clone(),
             flow_execution_service.clone(),

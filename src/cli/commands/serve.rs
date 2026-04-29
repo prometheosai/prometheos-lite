@@ -48,7 +48,7 @@ impl ServeCommand {
             std::sync::Arc::new(runtime),
             api_embedding,
             memory_service,
-        ));
+        ).map_err(|e| anyhow::anyhow!("Failed to create AppState: {}", e))?);
 
         // Parse address
         let addr: std::net::SocketAddr = format!("{}:{}", self.host, self.port)
