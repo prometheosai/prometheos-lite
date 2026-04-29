@@ -5,12 +5,13 @@
 //! call through this single service.
 
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::flow::budget::{BudgetGuard, ExecutionBudget};
-use crate::flow::execution::Flow;
+use crate::flow::execution::{Flow, RunDb, ContinuationEngine};
 use crate::flow::factory::{DefaultNodeFactory, NodeFactory};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::flow::output::{Evaluation, FinalOutput};
@@ -88,6 +89,8 @@ pub struct FlowExecutionService {
     runtime: Arc<RuntimeContext>,
     flow_selector: Arc<dyn FlowSelector>,
     intent_classifier: IntentClassifier,
+    run_db: Option<Arc<Mutex<RunDb>>>,
+    continuation_engine: Option<Arc<Mutex<ContinuationEngine>>>,
 }
 
 impl FlowExecutionService {
@@ -95,10 +98,19 @@ impl FlowExecutionService {
     pub fn new(runtime: Arc<RuntimeContext>) -> Result<Self> {
         let flow_selector = Arc::new(DefaultFlowSelector::with_default_dir());
         let intent_classifier = IntentClassifier::new()?;
+
+        // Initialize RunDb and ContinuationEngine with default paths
+        let db_path = PathBuf::from(".prometheos/runs.db");
+        let run_db = RunDb::new(db_path).ok().map(|db| Arc::new(Mutex::new(db)));
+        let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
+        let continuation_engine = Some(Arc::new(Mutex::new(ContinuationEngine::new(checkpoint_dir))));
+
         Ok(Self {
             runtime,
             flow_selector,
             intent_classifier,
+            run_db,
+            continuation_engine,
         })
     }
 
@@ -108,10 +120,19 @@ impl FlowExecutionService {
         flow_selector: Arc<dyn FlowSelector>,
     ) -> Result<Self> {
         let intent_classifier = IntentClassifier::new()?;
+
+        // Initialize RunDb and ContinuationEngine with default paths
+        let db_path = PathBuf::from(".prometheos/runs.db");
+        let run_db = RunDb::new(db_path).ok().map(|db| Arc::new(Mutex::new(db)));
+        let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
+        let continuation_engine = Some(Arc::new(Mutex::new(ContinuationEngine::new(checkpoint_dir))));
+
         Ok(Self {
             runtime,
             flow_selector,
             intent_classifier,
+            run_db,
+            continuation_engine,
         })
     }
 
@@ -311,7 +332,32 @@ impl FlowExecutionService {
             .into_iter()
             .collect();
 
-        // 12. Produce FinalOutput
+        // 12. Save checkpoint if continuation engine is available
+        if let Some(ref continuation_engine) = self.continuation_engine {
+            if let Ok(engine) = continuation_engine.lock() {
+                let _ = engine.save_checkpoint(&run_id, &state);
+            }
+        }
+
+        // 13. Persist run to database if RunDb is available
+        if let Some(ref run_db) = self.run_db {
+            if let Ok(db) = run_db.lock() {
+                use crate::flow::execution::{FlowRun, RunStatus};
+                let mut flow_run = FlowRun::new(flow_name.clone());
+                flow_run.id = run_id.clone();
+                match result {
+                    Ok(()) => {
+                        flow_run.mark_completed(state.clone());
+                    }
+                    Err(_) => {
+                        flow_run.mark_failed("Execution failed".to_string());
+                    }
+                }
+                let _ = db.save_run(&flow_run);
+            }
+        }
+
+        // 14. Produce FinalOutput
         match result {
             Ok(()) => {
                 let primary = state
@@ -442,6 +488,31 @@ impl FlowExecutionService {
             .get_execution_metadata()
             .into_iter()
             .collect();
+
+        // Save checkpoint if continuation engine is available
+        if let Some(ref continuation_engine) = self.continuation_engine {
+            if let Ok(engine) = continuation_engine.lock() {
+                let _ = engine.save_checkpoint(&run_id, &state);
+            }
+        }
+
+        // Persist run to database if RunDb is available
+        if let Some(ref run_db) = self.run_db {
+            if let Ok(db) = run_db.lock() {
+                use crate::flow::execution::{FlowRun, RunStatus};
+                let mut flow_run = FlowRun::new(flow_name.clone());
+                flow_run.id = run_id.clone();
+                match result {
+                    Ok(()) => {
+                        flow_run.mark_completed(state.clone());
+                    }
+                    Err(_) => {
+                        flow_run.mark_failed("Execution failed".to_string());
+                    }
+                }
+                let _ = db.save_run(&flow_run);
+            }
+        }
 
         match result {
             Ok(()) => {

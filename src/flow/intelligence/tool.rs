@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
 
-use crate::tools::{ToolContext, ToolPermission, ToolPolicy};
+use crate::tools::{ToolContext, ToolMetadata, ToolPermission, ToolPolicy};
 
 /// Tool input and output types
 pub type ToolInput = serde_json::Value;
@@ -314,6 +314,16 @@ pub trait Tool: Send + Sync {
 
     /// Get the tool description
     fn description(&self) -> String;
+
+    /// Get the tool metadata (including schema hash)
+    fn metadata(&self) -> ToolMetadata {
+        let mut metadata = ToolMetadata::new(self.name(), self.name(), self.description());
+        if let Some(schema) = self.input_schema() {
+            let hash = ToolMetadata::generate_schema_hash(&schema);
+            metadata = metadata.with_schema_hash(hash);
+        }
+        metadata
+    }
 
     /// Execute the tool with the given input
     async fn call(&self, input: ToolInput) -> Result<ToolOutput>;
