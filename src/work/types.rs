@@ -17,6 +17,27 @@ pub struct ExecutionRecord {
     pub timestamp: DateTime<Utc>,
 }
 
+/// FlowPerformanceRecord - tracks performance metrics for flow executions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowPerformanceRecord {
+    /// Unique identifier
+    pub id: String,
+    /// Flow ID that was executed
+    pub flow_id: String,
+    /// WorkContext ID this execution belongs to
+    pub work_context_id: String,
+    /// Success score (0.0 to 1.0)
+    pub success_score: f32,
+    /// Execution duration in milliseconds
+    pub duration_ms: u64,
+    /// Token cost
+    pub token_cost: f64,
+    /// Number of revisions during execution
+    pub revision_count: u32,
+    /// Timestamp of execution
+    pub executed_at: DateTime<Utc>,
+}
+
 impl ExecutionRecord {
     /// Create an ExecutionRecord from a GenerateResult
     pub fn from_generate_result(node_id: String, result: &crate::flow::intelligence::GenerateResult) -> Self {
@@ -100,6 +121,12 @@ pub struct WorkContext {
     // Extensibility
     pub metadata: serde_json::Value,
 
+    // Playbook tracking
+    pub playbook_id: Option<String>,
+
+    // Evaluation result
+    pub evaluation_result: Option<serde_json::Value>,
+
     // Timestamps
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -147,7 +174,9 @@ impl WorkContext {
             summary: None,
             completion_criteria: Vec::new(),
             last_activity_at: now,
-            metadata: serde_json::json!({}),
+            metadata: serde_json::Value::null(),
+            playbook_id: None,
+            evaluation_result: None,
             created_at: now,
             updated_at: now,
         }
@@ -157,6 +186,12 @@ impl WorkContext {
     pub fn touch(&mut self) {
         self.last_activity_at = Utc::now();
         self.updated_at = Utc::now();
+    }
+
+    /// Set the evaluation result
+    pub fn set_evaluation_result(&mut self, evaluation_result: serde_json::Value) {
+        self.evaluation_result = Some(evaluation_result);
+        self.touch();
     }
 
     /// Check if the context is blocked
