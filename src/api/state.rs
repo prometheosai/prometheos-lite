@@ -70,11 +70,13 @@ impl AppState {
             work_context_service.clone(),
             self.flow_execution_service.clone(),
         ));
+        let evolution_engine = Arc::new(crate::work::evolution_engine::EvolutionEngine::new(db.clone()));
         Ok(WorkOrchestrator::new(
             work_context_service,
             playbook_resolver,
             work_execution_service,
             self.intent_classifier.clone(),
+            evolution_engine,
         ))
     }
 

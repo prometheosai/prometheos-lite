@@ -4,7 +4,7 @@ use anyhow::Context;
 use rusqlite::params;
 
 use super::trait_def::Repository;
-use crate::work::{FlowPreference, NodePreference, PatternRecord, WorkContextPlaybook};
+use crate::work::playbook::{FlowPreference, NodePreference, PatternRecord, WorkContextPlaybook};
 
 /// PlaybookOperations trait for playbook repository operations
 pub trait PlaybookOperations: Repository {

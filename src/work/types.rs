@@ -174,7 +174,7 @@ impl WorkContext {
             summary: None,
             completion_criteria: Vec::new(),
             last_activity_at: now,
-            metadata: serde_json::Value::null(),
+            metadata: serde_json::Value::Null,
             playbook_id: None,
             evaluation_result: None,
             created_at: now,

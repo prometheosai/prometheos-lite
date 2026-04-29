@@ -123,7 +123,7 @@ impl PhaseController {
 
         // Weighted random selection with exploration
         let mut rng = rand::thread_rng();
-        let random_val: f32 = rng.gen();
+        let random_val: f32 = rng.gen_range(0.0..1.0);
 
         if random_val < exploration_factor {
             // Exploration: pick random flow

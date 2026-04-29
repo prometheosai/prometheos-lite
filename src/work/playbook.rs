@@ -95,7 +95,7 @@ pub struct PatternRecord {
 }
 
 /// PatternType - classification of pattern
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PatternType {
     Success,
     Failure,

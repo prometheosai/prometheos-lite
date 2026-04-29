@@ -43,6 +43,8 @@ pub fn software_development_template(title: String, goal: String) -> WorkContext
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        playbook_id: None,
+        evaluation_result: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -86,6 +88,8 @@ pub fn research_template(title: String, goal: String) -> WorkContext {
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        playbook_id: None,
+        evaluation_result: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -129,6 +133,8 @@ pub fn planning_template(title: String, goal: String) -> WorkContext {
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        playbook_id: None,
+        evaluation_result: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -173,6 +179,8 @@ pub fn bug_fix_template(title: String, goal: String) -> WorkContext {
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        playbook_id: None,
+        evaluation_result: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

@@ -3,7 +3,7 @@
 //! This module provides the WorkOrchestrator, which owns the high-level
 //! execution loop for persistent work contexts with hard stop contracts.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use super::execution_service::WorkExecutionService;

@@ -87,7 +87,7 @@ impl<T: AsDb> WorkContextOperations for T {
                     goal, requirements, constraints, status, current_phase, blocked_reason,
                     plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
                     tool_trace, execution_metadata, open_questions, autonomy_level, approval_policy, summary,
-                    completion_criteria, last_activity_at, metadata, created_at, updated_at
+                    completion_criteria, last_activity_at, metadata, playbook_id, evaluation_result, created_at, updated_at
              FROM work_contexts WHERE id = ?1"
         ).context("Failed to prepare work context query")?;
 
@@ -125,8 +125,10 @@ impl<T: AsDb> WorkContextOperations for T {
                 completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
                 last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
                 metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(33)?).unwrap().with_timezone(&Utc),
+                playbook_id: row.get(32)?,
+                evaluation_result: row.get::<_, Option<String>>(33)?.and_then(|s| serde_json::from_str(&s).ok()),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?).unwrap().with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?).unwrap().with_timezone(&Utc),
             })
         });
 
@@ -198,7 +200,7 @@ impl<T: AsDb> WorkContextOperations for T {
                     goal, requirements, constraints, status, current_phase, blocked_reason,
                     plan, approved_plan, artifacts, memory_refs, decisions, flow_runs,
                     tool_trace, execution_metadata, open_questions, autonomy_level, approval_policy, summary,
-                    completion_criteria, last_activity_at, metadata, created_at, updated_at
+                    completion_criteria, last_activity_at, metadata, playbook_id, evaluation_result, created_at, updated_at
              FROM work_contexts WHERE user_id = ?1 ORDER BY created_at DESC"
         ).context("Failed to prepare work contexts list query")?;
 
@@ -236,8 +238,10 @@ impl<T: AsDb> WorkContextOperations for T {
                 completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
                 last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
                 metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(33)?).unwrap().with_timezone(&Utc),
+                playbook_id: row.get(32)?,
+                evaluation_result: row.get::<_, Option<String>>(33)?.and_then(|s| serde_json::from_str(&s).ok()),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?).unwrap().with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?).unwrap().with_timezone(&Utc),
             })
         }).context("Failed to query work contexts")?;
 
@@ -261,7 +265,7 @@ impl<T: AsDb> WorkContextOperations for T {
                     wc.goal, wc.requirements, wc.constraints, wc.status, wc.current_phase, wc.blocked_reason,
                     wc.plan, wc.approved_plan, wc.artifacts, wc.memory_refs, wc.decisions, wc.flow_runs,
                     wc.tool_trace, wc.execution_metadata, wc.open_questions, wc.autonomy_level, wc.approval_policy, wc.summary,
-                    wc.completion_criteria, wc.last_activity_at, wc.metadata, wc.created_at, wc.updated_at
+                    wc.completion_criteria, wc.last_activity_at, wc.metadata, wc.playbook_id, wc.evaluation_result, wc.created_at, wc.updated_at
              FROM work_contexts wc
              INNER JOIN conversation_work_contexts cwc ON wc.id = cwc.work_context_id
              WHERE cwc.conversation_id = ?1 AND cwc.is_active = 1"
@@ -301,8 +305,10 @@ impl<T: AsDb> WorkContextOperations for T {
                 completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
                 last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
                 metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(32)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(33)?).unwrap().with_timezone(&Utc),
+                playbook_id: row.get(32)?,
+                evaluation_result: row.get::<_, Option<String>>(33)?.and_then(|s| serde_json::from_str(&s).ok()),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?).unwrap().with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?).unwrap().with_timezone(&Utc),
             })
         });
 

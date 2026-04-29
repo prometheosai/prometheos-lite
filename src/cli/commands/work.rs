@@ -10,6 +10,7 @@ use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::{
     artifact::Artifact,
+    evolution_engine::EvolutionEngine,
     execution_service::WorkExecutionService,
     template_loader::TemplateLoader,
     types::{WorkDomain, WorkStatus},
@@ -97,11 +98,13 @@ impl WorkCommand {
             work_context_service.clone(),
             flow_execution_service.clone(),
         ));
+        let evolution_engine = Arc::new(EvolutionEngine::new(db.clone()));
         let work_orchestrator = Arc::new(WorkOrchestrator::new(
             work_context_service.clone(),
             playbook_resolver,
             work_execution_service,
             intent_classifier,
+            evolution_engine,
         ));
 
         match self.command {
