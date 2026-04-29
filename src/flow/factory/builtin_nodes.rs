@@ -646,7 +646,7 @@ impl Node for FileWriterNode {
         let file_path = state
             .get_input("file_path")
             .and_then(|v| v.as_str())
-            .unwrap_or("output.txt")
+            .context("FileWriterNode requires file_path input")?
             .to_string();
 
         // Build ToolContext from state
@@ -958,7 +958,7 @@ impl Node for ConditionalNode {
         let condition = state
             .get_input("condition")
             .and_then(|v| v.as_str())
-            .unwrap_or("true")
+            .context("ConditionalNode requires condition input")?
             .to_string();
         Ok(serde_json::json!({ "condition": condition }))
     }
@@ -974,7 +974,8 @@ impl Node for ConditionalNode {
             "false" => false,
             _ => {
                 // Try to parse as boolean
-                condition.parse::<bool>().unwrap_or(true)
+                condition.parse::<bool>()
+                    .context("Failed to parse condition as boolean")?
             }
         };
 
@@ -982,11 +983,14 @@ impl Node for ConditionalNode {
     }
 
     fn post(&self, _state: &mut SharedState, output: serde_json::Value) -> String {
-        let result = output["result"].as_bool().unwrap_or(true);
-        if result {
-            "true".to_string()
-        } else {
-            "false".to_string()
+        let result = output["result"]
+            .as_bool()
+            .context("ConditionalNode post requires boolean result");
+        
+        match result {
+            Ok(true) => "true".to_string(),
+            Ok(false) => "false".to_string(),
+            Err(_) => "error".to_string(),
         }
     }
 
