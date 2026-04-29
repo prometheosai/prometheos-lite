@@ -26,7 +26,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Separator } from "@/components/ui/separator"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { useChat } from "@/context/chat-context"
 import { useProfile } from "@/context/profile-context"
 import { cn } from "@/lib/utils"
@@ -936,7 +936,8 @@ export function LeftSidebar() {
                 >
                   {profile.avatarUrl ? (
                     <Avatar className="h-6 w-6">
-                      <img src={profile.avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+                      <AvatarImage src={profile.avatarUrl} alt="Profile" />
+                      <AvatarFallback className="text-xs">{profile.initials}</AvatarFallback>
                     </Avatar>
                   ) : (
                     <Avatar className="h-6 w-6">
@@ -956,7 +957,8 @@ export function LeftSidebar() {
             >
               {profile.avatarUrl ? (
                 <Avatar className="h-6 w-6 mr-2">
-                  <img src={profile.avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+                  <AvatarImage src={profile.avatarUrl} alt="Profile" />
+                  <AvatarFallback className="text-xs">{profile.initials}</AvatarFallback>
                 </Avatar>
               ) : (
                 <Avatar className="h-6 w-6 mr-2">

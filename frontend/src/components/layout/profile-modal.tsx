@@ -4,7 +4,7 @@ import { useState, useRef } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -199,7 +199,8 @@ export function ProfileModal({ open, onOpenChange }: ProfileModalProps) {
                         />
                         {profile.avatarUrl ? (
                           <Avatar className="h-16 w-16 cursor-pointer" onClick={() => fileInputRef.current?.click()}>
-                            <img src={profile.avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+                            <AvatarImage src={profile.avatarUrl} alt="Profile" />
+                            <AvatarFallback className="text-lg">{profile.initials}</AvatarFallback>
                           </Avatar>
                         ) : (
                           <Avatar className="h-16 w-16 cursor-pointer" onClick={() => fileInputRef.current?.click()}>
