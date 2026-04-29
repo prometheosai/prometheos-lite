@@ -1,0 +1,708 @@
+//! EvolutionEngine - playbook evolution and A/B testing system
+//!
+//! This module implements the EvolutionEngine which tracks playbook performance,
+//! tests variants, and promotes successful mutations.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use uuid::Uuid;
+
+use crate::db::Db;
+
+/// Playbook evolution tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybookEvolution {
+    /// Unique identifier
+    pub id: String,
+    /// Playbook ID this evolution belongs to
+    pub playbook_id: String,
+    /// Version number
+    pub version: u32,
+    /// Parent version (for tracking lineage)
+    pub parent_version: Option<u32>,
+    /// Mutation strategy used
+    pub mutation_strategy: MutationStrategy,
+    /// Performance metrics
+    pub performance: PerformanceMetrics,
+    /// Number of executions
+    pub execution_count: u32,
+    /// Success rate
+    pub success_rate: f64,
+    /// Average duration in milliseconds
+    pub avg_duration_ms: u64,
+    /// Status
+    pub status: EvolutionStatus,
+    /// Created at timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Updated at timestamp
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mutation strategies for playbook evolution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MutationStrategy {
+    /// Add a new node
+    AddNode {
+        node_id: String,
+        node_type: String,
+        position: String,
+    },
+    /// Remove a node
+    RemoveNode {
+        node_id: String,
+    },
+    /// Reorder nodes
+    ReorderNodes {
+        node_order: Vec<String>,
+    },
+    /// Modify node parameters
+    ModifyNode {
+        node_id: String,
+        parameter_changes: HashMap<String, serde_json::Value>,
+    },
+    /// Combine two playbooks
+    Combine {
+        other_playbook_id: String,
+    },
+}
+
+/// Performance metrics for a playbook evolution
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PerformanceMetrics {
+    /// Success rate (0.0 to 1.0)
+    pub success_rate: f64,
+    /// Average execution duration in milliseconds
+    pub avg_duration_ms: u64,
+    /// Average cost
+    pub avg_cost: f64,
+    /// Average number of tool calls
+    pub avg_tool_calls: f64,
+    /// User satisfaction score (if available)
+    pub user_satisfaction: Option<f64>,
+}
+
+/// Evolution status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum EvolutionStatus {
+    /// Testing in progress
+    Testing,
+    /// Ready for promotion
+    ReadyForPromotion,
+    /// Promoted to production
+    Promoted,
+    /// Rejected
+    Rejected,
+    /// Deprecated
+    Deprecated,
+}
+
+/// A/B test configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbTest {
+    /// Unique identifier
+    pub id: String,
+    /// Playbook ID being tested
+    pub playbook_id: String,
+    /// Version A (control)
+    pub version_a: u32,
+    /// Version B (variant)
+    pub version_b: u32,
+    /// Traffic split (0.0 to 1.0 for version B)
+    pub traffic_split: f64,
+    /// Start time
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// End time (if completed)
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Status
+    pub status: AbTestStatus,
+    /// Results
+    pub results: Option<AbTestResults>,
+}
+
+/// A/B test status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AbTestStatus {
+    /// Running
+    Running,
+    /// Completed
+    Completed,
+    /// Stopped early
+    StoppedEarly,
+}
+
+/// A/B test results
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbTestResults {
+    /// Version A metrics
+    pub metrics_a: PerformanceMetrics,
+    /// Version B metrics
+    pub metrics_b: PerformanceMetrics,
+    /// Statistical significance
+    pub significance: f64,
+    /// Winner
+    pub winner: Option<u32>,
+}
+
+/// EvolutionEngine - manages playbook evolution
+pub struct EvolutionEngine {
+    db: Arc<Db>,
+}
+
+impl EvolutionEngine {
+    /// Create a new EvolutionEngine
+    pub fn new(db: Arc<Db>) -> Self {
+        Self { db }
+    }
+
+    /// Initialize evolution tables
+    fn init_tables(&self) -> Result<()> {
+        // Create playbook_evolutions table
+        self.db.conn().execute(
+            "CREATE TABLE IF NOT EXISTS playbook_evolutions (
+                id TEXT PRIMARY KEY,
+                playbook_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                parent_version INTEGER,
+                mutation_strategy TEXT NOT NULL,
+                performance TEXT NOT NULL,
+                execution_count INTEGER NOT NULL DEFAULT 0,
+                success_rate REAL NOT NULL DEFAULT 0.0,
+                avg_duration_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        ).context("Failed to create playbook_evolutions table")?;
+
+        // Create ab_tests table
+        self.db.conn().execute(
+            "CREATE TABLE IF NOT EXISTS ab_tests (
+                id TEXT PRIMARY KEY,
+                playbook_id TEXT NOT NULL,
+                version_a INTEGER NOT NULL,
+                version_b INTEGER NOT NULL,
+                traffic_split REAL NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL,
+                results TEXT,
+                UNIQUE(playbook_id, status)
+            )",
+            [],
+        ).context("Failed to create ab_tests table")?;
+
+        Ok(())
+    }
+
+    /// Create a new playbook evolution
+    pub fn create_evolution(
+        &self,
+        playbook_id: String,
+        version: u32,
+        parent_version: Option<u32>,
+        mutation_strategy: MutationStrategy,
+    ) -> Result<PlaybookEvolution> {
+        self.init_tables()?;
+
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let evolution = PlaybookEvolution {
+            id: id.clone(),
+            playbook_id,
+            version,
+            parent_version,
+            mutation_strategy,
+            performance: PerformanceMetrics {
+                success_rate: 0.0,
+                avg_duration_ms: 0,
+                avg_cost: 0.0,
+                avg_tool_calls: 0.0,
+                user_satisfaction: None,
+            },
+            execution_count: 0,
+            success_rate: 0.0,
+            avg_duration_ms: 0,
+            status: EvolutionStatus::Testing,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.store_evolution(&evolution)?;
+
+        Ok(evolution)
+    }
+
+    /// Store an evolution in the database
+    fn store_evolution(&self, evolution: &PlaybookEvolution) -> Result<()> {
+        let strategy_json = serde_json::to_string(&evolution.mutation_strategy)
+            .context("Failed to serialize mutation strategy")?;
+        let performance_json = serde_json::to_string(&evolution.performance)
+            .context("Failed to serialize performance metrics")?;
+        let status_str = match evolution.status {
+            EvolutionStatus::Testing => "testing",
+            EvolutionStatus::ReadyForPromotion => "ready_for_promotion",
+            EvolutionStatus::Promoted => "promoted",
+            EvolutionStatus::Rejected => "rejected",
+            EvolutionStatus::Deprecated => "deprecated",
+        };
+
+        self.db.conn().execute(
+            "INSERT OR REPLACE INTO playbook_evolutions (
+                id, playbook_id, version, parent_version, mutation_strategy,
+                performance, execution_count, success_rate, avg_duration_ms,
+                status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            [
+                &evolution.id,
+                &evolution.playbook_id,
+                &(evolution.version.to_string()),
+                &evolution.parent_version.as_ref().map(|v| v.to_string()).unwrap_or_default(),
+                &strategy_json,
+                &performance_json,
+                &(evolution.execution_count.to_string()),
+                &evolution.success_rate.to_string(),
+                &(evolution.avg_duration_ms.to_string()),
+                status_str,
+                &evolution.created_at.to_rfc3339(),
+                &evolution.updated_at.to_rfc3339(),
+            ],
+        ).context("Failed to store evolution")?;
+
+        Ok(())
+    }
+
+    /// Record execution results for an evolution
+    pub fn record_execution(
+        &self,
+        evolution_id: &str,
+        success: bool,
+        duration_ms: u64,
+        cost: f64,
+        tool_calls: u32,
+    ) -> Result<()> {
+        if let Some(mut evolution) = self.get_evolution(evolution_id)? {
+            evolution.execution_count += 1;
+            evolution.avg_duration_ms = (evolution.avg_duration_ms * (evolution.execution_count - 1) as u64 + duration_ms) / evolution.execution_count as u64;
+
+            // Update success rate
+            let total_successes = (evolution.success_rate * (evolution.execution_count - 1) as f64) + if success { 1.0 } else { 0.0 };
+            evolution.success_rate = total_successes / evolution.execution_count as f64;
+
+            // Update performance metrics
+            evolution.performance.success_rate = evolution.success_rate;
+            evolution.performance.avg_duration_ms = evolution.avg_duration_ms;
+            evolution.performance.avg_cost = (evolution.performance.avg_cost * (evolution.execution_count - 1) as f64 + cost) / evolution.execution_count as f64;
+            evolution.performance.avg_tool_calls = (evolution.performance.avg_tool_calls * (evolution.execution_count - 1) as f64 + tool_calls as f64) / evolution.execution_count as f64;
+
+            evolution.updated_at = chrono::Utc::now();
+
+            // Check if ready for promotion (needs at least 10 executions)
+            if evolution.execution_count >= 10 && evolution.success_rate > 0.8 {
+                evolution.status = EvolutionStatus::ReadyForPromotion;
+            }
+
+            self.store_evolution(&evolution)?;
+        }
+
+        Ok(())
+    }
+
+    /// Get an evolution by ID
+    pub fn get_evolution(&self, id: &str) -> Result<Option<PlaybookEvolution>> {
+        self.init_tables()?;
+
+        let mut stmt = self.db.conn().prepare(
+            "SELECT id, playbook_id, version, parent_version, mutation_strategy,
+                    performance, execution_count, success_rate, avg_duration_ms,
+                    status, created_at, updated_at
+             FROM playbook_evolutions WHERE id = ?1"
+        )?;
+
+        let mut rows = stmt.query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })?;
+
+        if let Some(row) = rows.next() {
+            let (id, playbook_id, version_str, parent_version_str, strategy_json, performance_json,
+                 execution_count_str, success_rate_str, avg_duration_ms_str, status_str,
+                 created_at, updated_at) = row?;
+
+            let mutation_strategy: MutationStrategy = serde_json::from_str(&strategy_json)
+                .context("Failed to deserialize mutation strategy")?;
+            let performance: PerformanceMetrics = serde_json::from_str(&performance_json)
+                .context("Failed to deserialize performance metrics")?;
+            let status = match status_str.as_str() {
+                "testing" => EvolutionStatus::Testing,
+                "ready_for_promotion" => EvolutionStatus::ReadyForPromotion,
+                "promoted" => EvolutionStatus::Promoted,
+                "rejected" => EvolutionStatus::Rejected,
+                "deprecated" => EvolutionStatus::Deprecated,
+                _ => EvolutionStatus::Testing,
+            };
+
+            let version = version_str.parse::<u32>().unwrap_or(0);
+            let parent_version = parent_version_str.and_then(|s| s.parse::<u32>().ok());
+            let execution_count = execution_count_str.parse::<u32>().unwrap_or(0);
+            let success_rate = success_rate_str.parse::<f64>().unwrap_or(0.0);
+            let avg_duration_ms = avg_duration_ms_str.parse::<u64>().unwrap_or(0);
+
+            Ok(Some(PlaybookEvolution {
+                id,
+                playbook_id,
+                version,
+                parent_version,
+                mutation_strategy,
+                performance,
+                execution_count,
+                success_rate,
+                avg_duration_ms,
+                status,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List evolutions for a playbook
+    pub fn list_evolutions(&self, playbook_id: &str) -> Result<Vec<PlaybookEvolution>> {
+        self.init_tables()?;
+
+        let mut stmt = self.db.conn().prepare(
+            "SELECT id, playbook_id, version, parent_version, mutation_strategy,
+                    performance, execution_count, success_rate, avg_duration_ms,
+                    status, created_at, updated_at
+             FROM playbook_evolutions WHERE playbook_id = ?1 ORDER BY version DESC"
+        )?;
+
+        let mut evolutions = Vec::new();
+
+        let rows = stmt.query_map([playbook_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (id, playbook_id, version_str, parent_version_str, strategy_json, performance_json,
+                 execution_count_str, success_rate_str, avg_duration_ms_str, status_str,
+                 created_at, updated_at) = row?;
+
+            let mutation_strategy: MutationStrategy = serde_json::from_str(&strategy_json)
+                .context("Failed to deserialize mutation strategy")?;
+            let performance: PerformanceMetrics = serde_json::from_str(&performance_json)
+                .context("Failed to deserialize performance metrics")?;
+            let status = match status_str.as_str() {
+                "testing" => EvolutionStatus::Testing,
+                "ready_for_promotion" => EvolutionStatus::ReadyForPromotion,
+                "promoted" => EvolutionStatus::Promoted,
+                "rejected" => EvolutionStatus::Rejected,
+                "deprecated" => EvolutionStatus::Deprecated,
+                _ => EvolutionStatus::Testing,
+            };
+
+            let version = version_str.parse::<u32>().unwrap_or(0);
+            let parent_version = parent_version_str.and_then(|s| s.parse::<u32>().ok());
+            let execution_count = execution_count_str.parse::<u32>().unwrap_or(0);
+            let success_rate = success_rate_str.parse::<f64>().unwrap_or(0.0);
+            let avg_duration_ms = avg_duration_ms_str.parse::<u64>().unwrap_or(0);
+
+            evolutions.push(PlaybookEvolution {
+                id,
+                playbook_id,
+                version,
+                parent_version,
+                mutation_strategy,
+                performance,
+                execution_count,
+                success_rate,
+                avg_duration_ms,
+                status,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+            });
+        }
+
+        Ok(evolutions)
+    }
+
+    /// Promote an evolution to production
+    pub fn promote_evolution(&self, evolution_id: &str) -> Result<()> {
+        if let Some(mut evolution) = self.get_evolution(evolution_id)? {
+            // Deprecate previous promoted version
+            let evolutions = self.list_evolutions(&evolution.playbook_id)?;
+            for e in evolutions {
+                if e.status == EvolutionStatus::Promoted && e.id != evolution_id {
+                    let mut deprecated = e;
+                    deprecated.status = EvolutionStatus::Deprecated;
+                    self.store_evolution(&deprecated)?;
+                }
+            }
+
+            // Promote this version
+            evolution.status = EvolutionStatus::Promoted;
+            evolution.updated_at = chrono::Utc::now();
+            self.store_evolution(&evolution)?;
+        }
+
+        Ok(())
+    }
+
+    /// Start an A/B test
+    pub fn start_ab_test(
+        &self,
+        playbook_id: String,
+        version_a: u32,
+        version_b: u32,
+        traffic_split: f64,
+    ) -> Result<AbTest> {
+        self.init_tables()?;
+
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let test = AbTest {
+            id: id.clone(),
+            playbook_id,
+            version_a,
+            version_b,
+            traffic_split,
+            started_at: now,
+            ended_at: None,
+            status: AbTestStatus::Running,
+            results: None,
+        };
+
+        self.store_ab_test(&test)?;
+
+        Ok(test)
+    }
+
+    /// Store an A/B test
+    fn store_ab_test(&self, test: &AbTest) -> Result<()> {
+        let status_str = match test.status {
+            AbTestStatus::Running => "running",
+            AbTestStatus::Completed => "completed",
+            AbTestStatus::StoppedEarly => "stopped_early",
+        };
+        let results_json = test.results.as_ref()
+            .map(|r| serde_json::to_string(r).ok())
+            .flatten()
+            .unwrap_or_default();
+
+        self.db.conn().execute(
+            "INSERT OR REPLACE INTO ab_tests (
+                id, playbook_id, version_a, version_b, traffic_split,
+                started_at, ended_at, status, results
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            [
+                &test.id,
+                &test.playbook_id,
+                &(test.version_a.to_string()),
+                &(test.version_b.to_string()),
+                &test.traffic_split.to_string(),
+                &test.started_at.to_rfc3339(),
+                &test.ended_at.as_ref().map(|t| t.to_rfc3339()).unwrap_or_default(),
+                status_str,
+                &results_json,
+            ],
+        ).context("Failed to store A/B test")?;
+
+        Ok(())
+    }
+
+    /// Complete an A/B test and determine winner
+    pub fn complete_ab_test(&self, test_id: &str) -> Result<AbTest> {
+        if let Some(mut test) = self.get_ab_test(test_id)? {
+            test.ended_at = Some(chrono::Utc::now());
+            test.status = AbTestStatus::Completed;
+
+            // Get performance metrics for both versions
+            let evolutions = self.list_evolutions(&test.playbook_id)?;
+            let metrics_a = evolutions.iter()
+                .find(|e| e.version == test.version_a)
+                .map(|e| e.performance.clone())
+                .unwrap_or_default();
+            let metrics_b = evolutions.iter()
+                .find(|e| e.version == test.version_b)
+                .map(|e| e.performance.clone())
+                .unwrap_or_default();
+
+            // Determine winner based on success rate
+            let winner = if metrics_b.success_rate > metrics_a.success_rate {
+                Some(test.version_b)
+            } else {
+                Some(test.version_a)
+            };
+
+            // Calculate significance (simplified)
+            let significance = (metrics_b.success_rate - metrics_a.success_rate).abs();
+
+            test.results = Some(AbTestResults {
+                metrics_a,
+                metrics_b,
+                significance,
+                winner,
+            });
+
+            self.store_ab_test(&test)?;
+
+            Ok(test)
+        } else {
+            Err(anyhow::anyhow!("A/B test not found"))
+        }
+    }
+
+    /// Get an A/B test by ID
+    fn get_ab_test(&self, id: &str) -> Result<Option<AbTest>> {
+        self.init_tables()?;
+
+        let mut stmt = self.db.conn().prepare(
+            "SELECT id, playbook_id, version_a, version_b, traffic_split,
+                    started_at, ended_at, status, results
+             FROM ab_tests WHERE id = ?1"
+        )?;
+
+        let mut rows = stmt.query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+
+        if let Some(row) = rows.next() {
+            let (id, playbook_id, version_a_str, version_b_str, traffic_split_str,
+                 started_at, ended_at, status_str, results_json) = row?;
+
+            let status = match status_str.as_str() {
+                "running" => AbTestStatus::Running,
+                "completed" => AbTestStatus::Completed,
+                "stopped_early" => AbTestStatus::StoppedEarly,
+                _ => AbTestStatus::Running,
+            };
+
+            let results = if !results_json.is_empty() {
+                Some(serde_json::from_str(&results_json)?)
+            } else {
+                None
+            };
+
+            let version_a = version_a_str.parse::<u32>().unwrap_or(0);
+            let version_b = version_b_str.parse::<u32>().unwrap_or(0);
+            let traffic_split = traffic_split_str.parse::<f64>().unwrap_or(0.5);
+
+            Ok(Some(AbTest {
+                id,
+                playbook_id,
+                version_a,
+                version_b,
+                traffic_split,
+                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&chrono::Utc),
+                ended_at: ended_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&chrono::Utc)),
+                status,
+                results,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List A/B tests for a playbook
+    pub fn list_ab_tests(&self, playbook_id: &str) -> Result<Vec<AbTest>> {
+        self.init_tables()?;
+
+        let mut stmt = self.db.conn().prepare(
+            "SELECT id, playbook_id, version_a, version_b, traffic_split,
+                    started_at, ended_at, status, results
+             FROM ab_tests WHERE playbook_id = ?1 ORDER BY started_at DESC"
+        )?;
+
+        let mut tests = Vec::new();
+
+        let rows = stmt.query_map([playbook_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (id, playbook_id, version_a_str, version_b_str, traffic_split_str,
+                 started_at, ended_at, status_str, results_json) = row?;
+
+            let status = match status_str.as_str() {
+                "running" => AbTestStatus::Running,
+                "completed" => AbTestStatus::Completed,
+                "stopped_early" => AbTestStatus::StoppedEarly,
+                _ => AbTestStatus::Running,
+            };
+
+            let results = if !results_json.is_empty() {
+                Some(serde_json::from_str(&results_json)?)
+            } else {
+                None
+            };
+
+            let version_a = version_a_str.parse::<u32>().unwrap_or(0);
+            let version_b = version_b_str.parse::<u32>().unwrap_or(0);
+            let traffic_split = traffic_split_str.parse::<f64>().unwrap_or(0.5);
+
+            tests.push(AbTest {
+                id,
+                playbook_id,
+                version_a,
+                version_b,
+                traffic_split,
+                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&chrono::Utc),
+                ended_at: ended_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&chrono::Utc)),
+                status,
+                results,
+            });
+        }
+
+        Ok(tests)
+    }
+}
