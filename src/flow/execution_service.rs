@@ -305,7 +305,13 @@ impl FlowExecutionService {
             }
         }
 
-        // 11. Produce FinalOutput
+        // 11. Extract execution metadata from state
+        let execution_metadata: std::collections::HashMap<String, serde_json::Value> = state
+            .get_execution_metadata()
+            .into_iter()
+            .collect();
+
+        // 12. Produce FinalOutput
         match result {
             Ok(()) => {
                 let primary = state
@@ -322,7 +328,7 @@ impl FlowExecutionService {
                     }
                 }
 
-                Ok(FinalOutput::success(
+                let mut output = FinalOutput::success(
                     run_id,
                     trace_id,
                     flow_name,
@@ -332,15 +338,21 @@ impl FlowExecutionService {
                     budget_report,
                     events_count,
                     duration_ms,
-                ))
+                );
+                output.execution_metadata = execution_metadata;
+                Ok(output)
             }
-            Err(e) => Ok(FinalOutput::failure(
-                run_id,
-                trace_id,
-                flow_name,
-                e.to_string(),
-                duration_ms,
-            )),
+            Err(e) => {
+                let mut output = FinalOutput::failure(
+                    run_id,
+                    trace_id,
+                    flow_name,
+                    e.to_string(),
+                    duration_ms,
+                );
+                output.execution_metadata = execution_metadata;
+                Ok(output)
+            }
         }
     }
 
@@ -425,6 +437,12 @@ impl FlowExecutionService {
             }
         }
 
+        // Extract execution metadata from state
+        let execution_metadata: std::collections::HashMap<String, serde_json::Value> = state
+            .get_execution_metadata()
+            .into_iter()
+            .collect();
+
         match result {
             Ok(()) => {
                 let primary = state
@@ -441,7 +459,7 @@ impl FlowExecutionService {
                     }
                 }
 
-                Ok(FinalOutput::success(
+                let mut output = FinalOutput::success(
                     run_id,
                     trace_id,
                     flow_name,
@@ -451,15 +469,21 @@ impl FlowExecutionService {
                     budget_report,
                     events_count,
                     duration_ms,
-                ))
+                );
+                output.execution_metadata = execution_metadata;
+                Ok(output)
             }
-            Err(e) => Ok(FinalOutput::failure(
-                run_id,
-                trace_id,
-                flow_name,
-                e.to_string(),
-                duration_ms,
-            )),
+            Err(e) => {
+                let mut output = FinalOutput::failure(
+                    run_id,
+                    trace_id,
+                    flow_name,
+                    e.to_string(),
+                    duration_ms,
+                );
+                output.execution_metadata = execution_metadata;
+                Ok(output)
+            }
         }
     }
 
