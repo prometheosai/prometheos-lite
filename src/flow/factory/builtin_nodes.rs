@@ -89,7 +89,7 @@ impl Node for PlannerNode {
         let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .context("PlannerNode requires task input")?
             .to_string();
 
         // Include personality mode in input for use in exec()
@@ -192,7 +192,7 @@ impl Node for CoderNode {
         let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .context("CoderNode requires task input")?
             .to_string();
 
         // Include personality mode in input for use in exec()
@@ -420,7 +420,7 @@ impl Node for LlmNode {
         let prompt = state
             .get_input("prompt")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .context("LlmNode requires prompt input")?
             .to_string();
 
         // Include personality mode in input for use in exec()
@@ -829,7 +829,7 @@ impl Node for ContextLoaderNode {
         let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .context("MemoryReadNode requires task input")?
             .to_string();
 
         Ok(serde_json::json!({ "query": task }))
@@ -894,7 +894,7 @@ impl Node for MemoryWriteNode {
         let task = state
             .get_input("task")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .context("MemoryWriteNode requires task input")?
             .to_string();
 
         Ok(serde_json::json!({ "task": task }))
