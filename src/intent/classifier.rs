@@ -14,6 +14,10 @@ pub struct IntentClassifier {
     cache: HashMap<String, IntentClassificationResult>,
 }
 
+// Ensure IntentClassifier is Send + Sync for use in async handlers
+unsafe impl Send for IntentClassifier {}
+unsafe impl Sync for IntentClassifier {}
+
 impl IntentClassifier {
     /// Create a new intent classifier
     pub fn new() -> Result<Self> {
