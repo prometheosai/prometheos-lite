@@ -33,11 +33,16 @@ async fn test_read_file_works() {
 async fn test_patch_file_applies_valid_diff() {
     let temp_dir = tempfile::tempdir().unwrap();
     let repo_path = temp_dir.path();
+    
+    // Use fallback mode on Windows where patch command may not be available
+    let tool = if cfg!(windows) {
+        PatchFileTool::with_fallback_allowed(repo_path.to_path_buf())
+    } else {
+        PatchFileTool::new(repo_path.to_path_buf())
+    };
 
     // Create a test file
     std::fs::write(repo_path.join("test.txt"), "old content").unwrap();
-
-    let tool = PatchFileTool::new(repo_path.to_path_buf());
 
     let valid_diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old content\n+new content";
 
@@ -62,10 +67,15 @@ async fn test_patch_file_rejects_invalid_diff() {
     let temp_dir = tempfile::tempdir().unwrap();
     let repo_path = temp_dir.path();
 
+    // Use fallback mode on Windows where patch command may not be available
+    let tool = if cfg!(windows) {
+        PatchFileTool::with_fallback_allowed(repo_path.to_path_buf())
+    } else {
+        PatchFileTool::new(repo_path.to_path_buf())
+    };
+
     // Create a test file
     std::fs::write(repo_path.join("test.txt"), "old content").unwrap();
-
-    let tool = PatchFileTool::new(repo_path.to_path_buf());
 
     let invalid_diff = "not a valid diff";
 
@@ -181,6 +191,99 @@ mod tests {
     // The second run should succeed (or at least execute without error)
     // Cargo test may still have warnings, so we just check it didn't error out
     assert!(result2["success"].is_boolean());
+}
+
+#[tokio::test]
+async fn test_default_tool_registration() {
+    use prometheos_lite::flow::intelligence::{ToolRuntime, ToolSandboxProfile};
+    use std::path::PathBuf;
+
+    let repo_path = PathBuf::from("tests/fixtures/sample_repo");
+    let runtime = ToolRuntime::with_default_tools(ToolSandboxProfile::new(), repo_path);
+    let registry = runtime.registry();
+
+    // Verify all repo tools are registered
+    let tool_names = registry.list_tools();
+    
+    assert!(tool_names.contains(&"list_tree".to_string()), "list_tree should be registered");
+    assert!(tool_names.contains(&"read_file".to_string()), "read_file should be registered");
+    assert!(tool_names.contains(&"search_files".to_string()), "search_files should be registered");
+    assert!(tool_names.contains(&"write_file".to_string()), "write_file should be registered");
+    assert!(tool_names.contains(&"patch_file".to_string()), "patch_file should be registered");
+    assert!(tool_names.contains(&"git_diff".to_string()), "git_diff should be registered");
+    
+    // Verify command tools are registered
+    assert!(tool_names.contains(&"run_command".to_string()), "run_command should be registered");
+    assert!(tool_names.contains(&"run_tests".to_string()), "run_tests should be registered");
+}
+
+#[tokio::test]
+async fn test_patch_file_to_git_diff_workflow() {
+    use tempfile::TempDir;
+    use std::process::Command;
+
+    // Create a temporary git repository
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path();
+
+    // Initialize git repo
+    Command::new("git")
+        .arg("init")
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to initialize git repo");
+
+    // Create a test file
+    let test_file = repo_path.join("test.txt");
+    std::fs::write(&test_file, "original content\nline 2\n").unwrap();
+
+    // Commit the file
+    Command::new("git")
+        .args(["add", "test.txt"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to add file to git");
+
+    Command::new("git")
+        .args(["commit", "-m", "Initial commit"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to commit file");
+
+    // Apply a patch
+    let patch_tool = if cfg!(windows) {
+        PatchFileTool::with_fallback_allowed(repo_path.to_path_buf())
+    } else {
+        PatchFileTool::new(repo_path.to_path_buf())
+    };
+    let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,2 @@\n-original content\n+modified content\n line 2";
+
+    let patch_result = patch_tool
+        .call(serde_json::json!({
+            "path": "test.txt",
+            "diff": diff
+        }))
+        .await
+        .unwrap();
+
+    assert!(patch_result["success"].as_bool().unwrap());
+
+    // Verify the file was patched
+    let patched_content = std::fs::read_to_string(&test_file).unwrap();
+    assert!(patched_content.contains("modified content"));
+
+    // Get git diff to verify the change
+    let git_diff_tool = GitDiffTool::new(repo_path.to_path_buf());
+    let diff_result = git_diff_tool
+        .call(serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(diff_result["success"].as_bool().unwrap());
+    
+    // Verify diff contains the change
+    let diff_output = diff_result.get("diff").and_then(|d| d.as_str()).unwrap_or("");
+    assert!(diff_output.contains("modified content") || diff_output.contains("original content"));
 }
 
 #[tokio::test]
