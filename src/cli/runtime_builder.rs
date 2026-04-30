@@ -38,7 +38,12 @@ impl RuntimeBuilder {
             OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
         let model_router = Arc::new(ModelRouter::new(vec![Box::new(openai_provider)]));
 
-        let tool_runtime = Arc::new(ToolRuntime::new(ToolSandboxProfile::new()));
+        // Create tool runtime with default tools registered
+        let repo_path = std::path::PathBuf::from(self.config.repo_path.clone());
+        let tool_runtime = Arc::new(ToolRuntime::with_default_tools(
+            ToolSandboxProfile::new(),
+            repo_path,
+        ));
 
         // Create persistent memory service with local embedding provider from config
         let embedding: Box<dyn EmbeddingProvider> = Box::new(LocalEmbeddingProvider::new(
@@ -64,7 +69,12 @@ impl RuntimeBuilder {
             OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
         let model_router = Arc::new(ModelRouter::new(vec![Box::new(openai_provider)]));
 
-        let tool_runtime = Arc::new(ToolRuntime::new(ToolSandboxProfile::new()));
+        // Create tool runtime with default tools registered
+        let repo_path = std::path::PathBuf::from(self.config.repo_path.clone());
+        let tool_runtime = Arc::new(ToolRuntime::with_default_tools(
+            ToolSandboxProfile::new(),
+            repo_path,
+        ));
 
         Ok(RuntimeContext::new()
             .with_model_router(model_router)
