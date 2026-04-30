@@ -75,6 +75,12 @@ pub enum ArtifactKind {
     EmailDraft,
     Report,
     Other,
+    // V1.4 artifact types
+    CodePatch,
+    TestResult,
+    Diff,
+    CommandOutput,
+    RepoSnapshot,
 }
 
 /// ArtifactStorage - how the artifact content is stored
