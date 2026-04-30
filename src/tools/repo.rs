@@ -433,6 +433,7 @@ impl Tool for WriteFileTool {
 pub struct PatchFileTool {
     repo_path: PathBuf,
     path_guard: PathGuard,
+    allow_fallback: bool,
 }
 
 impl PatchFileTool {
@@ -441,6 +442,18 @@ impl PatchFileTool {
         Self {
             repo_path,
             path_guard: PathGuard::new(base_dir),
+            allow_fallback: false, // Production default: no fallback
+        }
+    }
+
+    /// Create a PatchFileTool with simplified fallback allowed (dev-only)
+    /// This should NOT be used in production as the simplified patcher is less robust
+    pub fn with_fallback_allowed(repo_path: PathBuf) -> Self {
+        let base_dir = repo_path.to_string_lossy().to_string();
+        Self {
+            repo_path,
+            path_guard: PathGuard::new(base_dir),
+            allow_fallback: true,
         }
     }
 }
@@ -556,8 +569,12 @@ impl PatchFileTool {
             return Ok(patched);
         }
 
-        // Fallback to simplified implementation if patch is not available
-        self.apply_patch_simplified(original, diff)
+        // Fallback to simplified implementation only if explicitly allowed (dev-only)
+        if self.allow_fallback {
+            self.apply_patch_simplified(original, diff)
+        } else {
+            anyhow::bail!("System patch command not available and fallback is disabled for production safety")
+        }
     }
 
     fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
@@ -565,6 +582,7 @@ impl PatchFileTool {
         let mut child = Command::new("patch")
             .arg("-p1")  // Strip first directory component
             .arg("--dry-run")  // First validate the patch
+            .current_dir(&self.repo_path)  // Execute in repo directory
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -587,6 +605,7 @@ impl PatchFileTool {
         // Apply the patch for real
         let mut child = Command::new("patch")
             .arg("-p1")
+            .current_dir(&self.repo_path)  // Execute in repo directory
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -610,7 +629,8 @@ impl PatchFileTool {
 
     fn apply_patch_simplified(&self, original: &str, diff: &str) -> Result<String> {
         // Simplified diff application - handles basic unified diffs
-        // This is a fallback when system patch is not available
+        // DEV-ONLY: This is a fallback when system patch is not available
+        // NOT PRODUCTION READY - use system patch command in production
         let mut result_lines: Vec<&str> = original.lines().collect();
         let diff_lines: Vec<&str> = diff.lines().collect();
         let mut i = 0;
@@ -630,7 +650,7 @@ impl PatchFileTool {
                     let old_count: usize = if old_parts.len() > 1 { old_parts[1].parse().unwrap_or(1) } else { 1 };
 
                     let new_parts: Vec<&str> = new_info.trim_start_matches('+').split(',').collect();
-                    let new_start: usize = new_parts[0].parse().unwrap_or(1);
+                    let _new_start: usize = new_parts[0].parse().unwrap_or(1);
 
                     let mut old_idx = old_start - 1;
                     let mut new_lines = Vec::new();
