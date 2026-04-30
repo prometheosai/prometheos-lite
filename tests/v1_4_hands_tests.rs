@@ -287,6 +287,25 @@ async fn test_patch_file_to_git_diff_workflow() {
 }
 
 #[tokio::test]
+async fn test_software_dev_flow_tool_references() {
+    use std::path::PathBuf;
+    use std::fs;
+
+    // Load the software_dev flow YAML
+    let flow_path = PathBuf::from("flows/software_dev.yaml");
+    let flow_content = fs::read_to_string(&flow_path).expect("Failed to read software_dev flow");
+
+    // Verify the flow exists
+    assert!(flow_content.contains("name: \"software_dev\""), "Flow should have name software_dev");
+    
+    // Verify the flow references the correct tools
+    assert!(flow_content.contains("tool: list_tree"), "Flow should reference list_tree tool");
+    assert!(flow_content.contains("tool: read_file"), "Flow should reference read_file tool");
+    assert!(flow_content.contains("tool: patch_file"), "Flow should reference patch_file tool");
+    assert!(flow_content.contains("tool: run_tests"), "Flow should reference run_tests tool");
+}
+
+#[tokio::test]
 async fn test_forbidden_path_rejection() {
     let guard = PathGuard::default();
 
