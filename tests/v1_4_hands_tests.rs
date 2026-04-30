@@ -298,11 +298,19 @@ async fn test_software_dev_flow_tool_references() {
     // Verify the flow exists
     assert!(flow_content.contains("name: \"software_dev\""), "Flow should have name software_dev");
     
+    // Verify the flow has separate task and file_path inputs
+    assert!(flow_content.contains("task:"), "Flow should have task input");
+    assert!(flow_content.contains("file_path:"), "Flow should have file_path input");
+    
     // Verify the flow references the correct tools
     assert!(flow_content.contains("tool: list_tree"), "Flow should reference list_tree tool");
     assert!(flow_content.contains("tool: read_file"), "Flow should reference read_file tool");
     assert!(flow_content.contains("tool: patch_file"), "Flow should reference patch_file tool");
     assert!(flow_content.contains("tool: run_tests"), "Flow should reference run_tests tool");
+    
+    // Verify coder outputs unified_diff
+    assert!(flow_content.contains("unified_diff:"), "Flow should output unified_diff from coder");
+    assert!(flow_content.contains("from: implement.unified_diff"), "Patch should use unified_diff from implement");
 }
 
 #[tokio::test]
