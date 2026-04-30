@@ -9,7 +9,7 @@
 //! - git_diff: Get git diff output
 
 use crate::flow::Tool;
-use crate::tools::{ToolContext, ToolMetadata};
+use crate::tools::{PathGuard, ToolContext, ToolMetadata};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,11 +23,17 @@ pub trait RepoTool: Send + Sync {
 /// List tree tool - lists files and directories in a repository
 pub struct ListTreeTool {
     repo_path: PathBuf,
+    path_guard: PathGuard,
 }
 
 impl ListTreeTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        // Use repo_path as base directory for PathGuard
+        let base_dir = repo_path.to_string_lossy().to_string();
+        Self {
+            repo_path,
+            path_guard: PathGuard::new(base_dir),
+        }
     }
 }
 
@@ -62,6 +68,14 @@ impl Tool for ListTreeTool {
         let root = input.get("root")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        // Validate path with PathGuard
+        if !root.is_empty() && !self.path_guard.is_safe_path(root) {
+            return Ok(serde_json::json!({
+                "error": format!("Path validation failed: {}", root),
+                "success": false
+            }));
+        }
 
         let depth = input.get("depth")
             .and_then(|v| v.as_u64())
@@ -132,11 +146,16 @@ impl ListTreeTool {
 /// Read file tool - reads file contents
 pub struct RepoReadFileTool {
     repo_path: PathBuf,
+    path_guard: PathGuard,
 }
 
 impl RepoReadFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        let base_dir = repo_path.to_string_lossy().to_string();
+        Self {
+            repo_path,
+            path_guard: PathGuard::new(base_dir),
+        }
     }
 }
 
@@ -168,6 +187,14 @@ impl Tool for RepoReadFileTool {
             .and_then(|v| v.as_str())
             .context("Missing path")?;
 
+        // Validate path with PathGuard
+        if !self.path_guard.is_safe_path(path) {
+            return Ok(serde_json::json!({
+                "error": format!("Path validation failed: {}", path),
+                "success": false
+            }));
+        }
+
         let full_path = self.repo_path.join(path);
 
         if !full_path.exists() {
@@ -192,11 +219,16 @@ impl Tool for RepoReadFileTool {
 /// Search files tool - searches for patterns across files
 pub struct SearchFilesTool {
     repo_path: PathBuf,
+    path_guard: PathGuard,
 }
 
 impl SearchFilesTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        let base_dir = repo_path.to_string_lossy().to_string();
+        Self {
+            repo_path,
+            path_guard: PathGuard::new(base_dir),
+        }
     }
 }
 
@@ -319,11 +351,16 @@ impl SearchFilesTool {
 /// Write file tool - writes content to a file
 pub struct WriteFileTool {
     repo_path: PathBuf,
+    path_guard: PathGuard,
 }
 
 impl WriteFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        let base_dir = repo_path.to_string_lossy().to_string();
+        Self {
+            repo_path,
+            path_guard: PathGuard::new(base_dir),
+        }
     }
 }
 
@@ -363,6 +400,14 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .context("Missing content")?;
 
+        // Validate path with PathGuard
+        if !self.path_guard.is_safe_path(path) {
+            return Ok(serde_json::json!({
+                "error": format!("Path validation failed: {}", path),
+                "success": false
+            }));
+        }
+
         let full_path = self.repo_path.join(path);
 
         // Create parent directories if they don't exist
@@ -387,11 +432,16 @@ impl Tool for WriteFileTool {
 /// Patch file tool - applies a diff to a file with validation
 pub struct PatchFileTool {
     repo_path: PathBuf,
+    path_guard: PathGuard,
 }
 
 impl PatchFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        let base_dir = repo_path.to_string_lossy().to_string();
+        Self {
+            repo_path,
+            path_guard: PathGuard::new(base_dir),
+        }
     }
 }
 
@@ -430,6 +480,15 @@ impl Tool for PatchFileTool {
         let diff = input.get("diff")
             .and_then(|v| v.as_str())
             .context("Missing diff")?;
+
+        // Validate path with PathGuard
+        if !self.path_guard.is_safe_path(path) {
+            return Ok(serde_json::json!({
+                "error": format!("Path validation failed: {}", path),
+                "success": false,
+                "validation": "failed"
+            }));
+        }
 
         let full_path = self.repo_path.join(path);
 
@@ -492,8 +551,66 @@ impl PatchFileTool {
     }
 
     fn apply_patch(&self, original: &str, diff: &str) -> Result<String> {
-        // Simple diff application - for production, use a proper diff library
-        // This is a simplified implementation that handles basic unified diffs
+        // Try to use system patch command for robust diff application
+        if let Ok(patched) = self.apply_patch_with_system(diff) {
+            return Ok(patched);
+        }
+
+        // Fallback to simplified implementation if patch is not available
+        self.apply_patch_simplified(original, diff)
+    }
+
+    fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
+        // Use the system 'patch' command for reliable diff application
+        let mut child = Command::new("patch")
+            .arg("-p1")  // Strip first directory component
+            .arg("--dry-run")  // First validate the patch
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn patch command")?;
+
+        // Write diff to stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin.write_all(diff.as_bytes()).context("Failed to write diff to patch")?;
+        }
+
+        let output = child.wait_with_output().context("Failed to execute patch validation")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Patch validation failed: {}", stderr);
+        }
+
+        // Apply the patch for real
+        let mut child = Command::new("patch")
+            .arg("-p1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn patch command")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin.write_all(diff.as_bytes()).context("Failed to write diff to patch")?;
+        }
+
+        let output = child.wait_with_output().context("Failed to execute patch")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Patch application failed: {}", stderr);
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn apply_patch_simplified(&self, original: &str, diff: &str) -> Result<String> {
+        // Simplified diff application - handles basic unified diffs
+        // This is a fallback when system patch is not available
         let mut result_lines: Vec<&str> = original.lines().collect();
         let diff_lines: Vec<&str> = diff.lines().collect();
         let mut i = 0;
