@@ -682,6 +682,80 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ---
 
+## v1.4 PRD - Hands (Coding Harness & Repo Execution)
+
+**Codename:** "V1.4 — Hands (Coding Harness & Repo Execution)"
+
+**Objective:** Give the system safe, deterministic access to codebases with repo tooling, command harness, verification loops, and real code execution capabilities.
+
+### EPIC 1 — Repo Tooling Layer
+- [x] Issue #1: Create RepoTool trait in src/tools/repo.rs with name() and execute() methods
+- [x] Issue #2: Implement list_tree tool (root: String, depth: Option<u32>) returning files and dirs
+- [x] Issue #3: Implement read_file tool (path: String)
+- [x] Issue #4: Implement search_files tool (query: String, glob: Option<String>)
+- [x] Issue #5: Implement write_file tool (path: String, content: String)
+- [x] Issue #6: Implement patch_file tool (path: String, diff: String) with validation rules (must validate diff applies cleanly, must reject partial/invalid patches, must produce artifact: diff + result)
+- [x] Issue #7: Implement git_diff tool
+
+### EPIC 2 — Command Harness
+- [x] Issue #8: Create CommandTool in src/tools/command.rs with run_command(command: String, args: Vec<String>, cwd: String)
+- [x] Issue #9: Ensure run_command returns structured output (stdout, stderr, exit_code, duration_ms)
+- [x] Issue #10: Implement run_tests wrapper around run_command
+- [x] Issue #11: Enforce requirements (timeout enforced, max output size, no interactive prompts, deterministic execution)
+
+### EPIC 3 — ToolRuntime Upgrade
+- [x] Issue #12: Modify src/flow/intelligence/tool.rs to add tool registry injection
+- [x] Issue #13: Add tool whitelist per WorkContext
+- [x] Issue #14: Add strict mode enforcement in ToolRuntime
+- [x] Issue #15: Add ToolPolicy struct (allowed_paths, forbidden_paths, allow_commands)
+
+### EPIC 4 — Coding Flow Template
+- [x] Issue #16: Create flows/software_dev.yaml with nodes: inspect_repo, read_context, plan, implement, apply_patch, run_tests, review
+- [x] Issue #17: Define transitions: plan → implement → apply_patch → run_tests → review
+- [x] Issue #18: Integrate software_dev.yaml with FlowSelector
+
+### EPIC 5 — Verification Loop
+- [x] Issue #19: Modify Orchestrator to add retry loop (plan → patch → test → failure → re-plan → patch → test)
+- [x] Issue #20: Add bounds: max_iterations = 5, max_failures = 3
+- [x] Issue #21: Integrate verification loop with WorkContext lifecycle
+
+### EPIC 6 — Artifact System Extension
+- [x] Issue #22: Add code_patch artifact type
+- [x] Issue #23: Add test_result artifact type
+- [x] Issue #24: Add diff artifact type
+- [x] Issue #25: Add command_output artifact type
+- [x] Issue #26: Add repo_snapshot artifact type
+
+### EPIC 7 — Safety Layer
+- [x] Issue #27: Implement PathGuard (no writes outside workspace root, no system paths like /etc, /usr)
+- [x] Issue #28: Implement CommandGuard (block dangerous commands, whitelist safe binaries)
+- [x] Issue #29: Integrate PathGuard and CommandGuard with ToolRuntime
+
+### EPIC 8 — Strict Mode Enforcement
+- [x] Issue #30: Extend strict behavior: tool failure = stop
+- [x] Issue #31: Extend strict behavior: invalid patch = stop
+- [x] Issue #32: Extend strict behavior: test failure = retry loop
+- [x] Issue #33: Extend strict behavior: missing output = error
+
+### EPIC 9 — Testing
+- [x] Issue #34: Create tests/fixtures/sample_repo/ fixture repository
+- [x] Issue #35: Test read_file works correctly
+- [x] Issue #36: Test patch_file applies valid diff
+- [x] Issue #37: Test patch_file rejects invalid diff
+- [x] Issue #38: Test run_tests returns failure correctly
+- [x] Issue #39: Test full loop: failing test → fix → pass
+- [x] Issue #40: Test forbidden path rejection
+
+### EPIC 10 — Observability
+- [x] Issue #41: Add tool_call logs to trace events
+- [x] Issue #42: Add command logs to trace events
+- [x] Issue #43: Add execution trace per WorkContext
+
+**Status:** v1.4 - Complete (43/43 implemented)
+**See:** `docs/prd/prometheos-lite-V1.4-hands.md` for full specification
+
+---
+
 ## Unfinished / Deferred / Deprecated Tasks
 
 ### v0.0.1 - Optional Post-Launch (Deprecated)
