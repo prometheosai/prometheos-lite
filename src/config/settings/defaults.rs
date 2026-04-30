@@ -54,3 +54,7 @@ pub fn default_strict_mode_enforce_no_silent_none() -> bool {
 pub fn default_strict_mode_enforce_idempotency() -> bool {
     false
 }
+
+pub fn default_repo_path() -> String {
+    ".".to_string()
+}

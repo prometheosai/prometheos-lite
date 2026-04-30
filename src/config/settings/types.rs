@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub memory_budget: MemoryBudget,
     #[serde(default = "super::defaults::default_strict_mode")]
     pub strict_mode: StrictMode,
+    #[serde(default = "super::defaults::default_repo_path")]
+    pub repo_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
