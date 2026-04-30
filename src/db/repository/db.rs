@@ -213,6 +213,8 @@ impl Db {
                 last_activity_at TEXT NOT NULL,
                 metadata TEXT,
                 execution_metadata TEXT,
+                playbook_id TEXT,
+                evaluation_result TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",

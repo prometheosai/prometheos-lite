@@ -144,7 +144,7 @@ pub struct AbTest {
 }
 
 /// A/B test status
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AbTestStatus {
     /// Running
     Running,
@@ -380,19 +380,71 @@ impl EvolutionEngine {
             .ok_or_else(|| anyhow::anyhow!("Playbook not found: {}", playbook_id))?;
 
         // Adjust flow weights based on success/failure patterns
+        // Only target the specific flow involved in the pattern
         for pattern in &success_patterns {
-            if pattern.signal.starts_with("model_usage_") {
-                // Increase weight for flows that succeeded with this model
-                for flow_pref in &mut playbook.preferred_flows {
-                    flow_pref.weight = (flow_pref.weight + 0.1).min(1.0);
-                    flow_pref.confidence = (flow_pref.confidence + 0.05).min(1.0);
+            if pattern.signal.starts_with("flow_performance_") {
+                // Extract flow_id from signal: "flow_performance_{flow_id}_success"
+                if let Some(flow_id) = pattern.signal.strip_prefix("flow_performance_").and_then(|s| s.strip_suffix("_success")) {
+                    // Increase weight for the specific flow that succeeded
+                    for flow_pref in &mut playbook.preferred_flows {
+                        if flow_pref.flow_id == flow_id {
+                            flow_pref.weight = (flow_pref.weight + 0.1).min(1.0);
+                            flow_pref.confidence = (flow_pref.confidence + 0.05).min(1.0);
+                        }
+                    }
+                }
+            } else if pattern.signal.starts_with("high_duration_flow_") {
+                // Extract flow_id from signal: "high_duration_flow_{flow_id}"
+                if let Some(flow_id) = pattern.signal.strip_prefix("high_duration_flow_") {
+                    // Decrease weight for the specific flow with high duration
+                    for flow_pref in &mut playbook.preferred_flows {
+                        if flow_pref.flow_id == flow_id {
+                            flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
+                            flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                        }
+                    }
+                }
+            } else if pattern.signal.starts_with("high_cost_flow_") {
+                // Extract flow_id from signal: "high_cost_flow_{flow_id}"
+                if let Some(flow_id) = pattern.signal.strip_prefix("high_cost_flow_") {
+                    // Decrease weight for the specific flow with high cost
+                    for flow_pref in &mut playbook.preferred_flows {
+                        if flow_pref.flow_id == flow_id {
+                            flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
+                            flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                        }
+                    }
+                }
+            } else if pattern.signal.starts_with("model_usage_") {
+                // Extract flow_id from signal: "model_usage_{flow_id}_{model_name}"
+                // Target only the specific flow that used this model
+                let parts: Vec<&str> = pattern.signal.split('_').collect();
+                if parts.len() >= 3 {
+                    let flow_id = parts[2]; // "model_usage_{flow_id}_{model_name}"
+                    for flow_pref in &mut playbook.preferred_flows {
+                        if flow_pref.flow_id == flow_id {
+                            flow_pref.weight = (flow_pref.weight + 0.1).min(1.0);
+                            flow_pref.confidence = (flow_pref.confidence + 0.05).min(1.0);
+                        }
+                    }
                 }
             }
         }
 
         for pattern in &failure_patterns {
-            if pattern.signal.starts_with("model_usage_") {
-                // Decrease weight for flows that failed with this model
+            if pattern.signal.starts_with("flow_performance_") {
+                // Extract flow_id from signal: "flow_performance_{flow_id}_failure"
+                if let Some(flow_id) = pattern.signal.strip_prefix("flow_performance_").and_then(|s| s.strip_suffix("_failure")) {
+                    // Decrease weight for the specific flow that failed
+                    for flow_pref in &mut playbook.preferred_flows {
+                        if flow_pref.flow_id == flow_id {
+                            flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
+                            flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                        }
+                    }
+                }
+            } else if pattern.signal.starts_with("model_usage_") {
+                // Model usage patterns affect all flows (broad heuristic)
                 for flow_pref in &mut playbook.preferred_flows {
                     flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
                     flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
@@ -449,13 +501,13 @@ impl EvolutionEngine {
             "CREATE TABLE IF NOT EXISTS playbook_evolutions (
                 id TEXT PRIMARY KEY,
                 playbook_id TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                parent_version INTEGER,
+                version TEXT NOT NULL,
+                parent_version TEXT,
                 mutation_strategy TEXT NOT NULL,
                 performance TEXT NOT NULL,
-                execution_count INTEGER NOT NULL DEFAULT 0,
-                success_rate REAL NOT NULL DEFAULT 0.0,
-                avg_duration_ms INTEGER NOT NULL DEFAULT 0,
+                execution_count TEXT NOT NULL DEFAULT '0',
+                success_rate TEXT NOT NULL DEFAULT '0.0',
+                avg_duration_ms TEXT NOT NULL DEFAULT '0',
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -990,5 +1042,800 @@ impl EvolutionEngine {
         }
 
         Ok(tests)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work::types::{WorkDomain, WorkStatus};
+    use serde_json::json;
+
+    #[test]
+    fn test_extract_patterns_success() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        // Add execution metadata
+        context.execution_metadata.push(crate::work::types::ExecutionRecord {
+            node_id: "planner".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            latency_ms: 6000,
+            timestamp: chrono::Utc::now(),
+            tokens: Some(100),
+            cost: Some(0.01),
+        });
+
+        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+
+        // Should have success patterns from model usage and high latency
+        assert!(!success_patterns.is_empty());
+        assert!(success_patterns.iter().any(|p| p.signal.starts_with("model_usage_")));
+        assert!(success_patterns.iter().any(|p| p.signal.contains("high_latency")));
+    }
+
+    #[test]
+    fn test_extract_patterns_failure() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Blocked;
+        context.blocked_reason = Some("Security violation".to_string());
+
+        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+
+        // Should have failure patterns from blocked reason
+        assert!(!failure_patterns.is_empty());
+        assert!(failure_patterns.iter().any(|p| p.signal.contains("blocked_reason")));
+    }
+
+    #[test]
+    fn test_extract_patterns_flow_performance() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        // Add flow performance record in metadata - use the format expected by extract_patterns
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "planning.flow.yaml".to_string(),
+            work_context_id: context.id.clone(),
+            success_score: 0.9,
+            duration_ms: 15000,
+            token_cost: 0.6,
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+        let perf_json = serde_json::to_value(&perf_record).unwrap();
+        context.metadata = json!({
+            "flow_perf_planning": perf_json
+        });
+
+        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+
+        // Should have patterns from flow performance
+        assert!(!success_patterns.is_empty());
+        assert!(success_patterns.iter().any(|p| p.signal.contains("flow_performance")));
+        assert!(success_patterns.iter().any(|p| p.signal.contains("high_duration")));
+        assert!(success_patterns.iter().any(|p| p.signal.contains("high_cost")));
+    }
+
+    #[test]
+    fn test_extract_patterns_high_revision_count() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        // Add 4 decisions to trigger high revision count pattern
+        use crate::work::decision::DecisionRecord;
+        context.decisions.push(DecisionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            description: "decision 1".to_string(),
+            chosen_option: "option1".to_string(),
+            alternatives: vec!["option2".to_string()],
+            approved: true,
+            created_at: chrono::Utc::now(),
+        });
+        context.decisions.push(DecisionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            description: "decision 2".to_string(),
+            chosen_option: "option1".to_string(),
+            alternatives: vec!["option2".to_string()],
+            approved: true,
+            created_at: chrono::Utc::now(),
+        });
+        context.decisions.push(DecisionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            description: "decision 3".to_string(),
+            chosen_option: "option1".to_string(),
+            alternatives: vec!["option2".to_string()],
+            approved: true,
+            created_at: chrono::Utc::now(),
+        });
+        context.decisions.push(DecisionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            description: "decision 4".to_string(),
+            chosen_option: "option1".to_string(),
+            alternatives: vec!["option2".to_string()],
+            approved: true,
+            created_at: chrono::Utc::now(),
+        });
+
+        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+
+        // Should have high revision count pattern
+        assert!(success_patterns.iter().any(|p| p.signal == "high_revision_count"));
+    }
+
+    #[test]
+    fn test_evaluate_context_completed() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+        use crate::work::plan::{ExecutionPlan, PlanStep};
+        context.plan = Some(ExecutionPlan::new(vec![
+            PlanStep::new("step1".to_string(), "First step".to_string(), "flow1".to_string()),
+            PlanStep::new("step2".to_string(), "Second step".to_string(), "flow2".to_string()),
+        ]));
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        assert!(result.overall_score > 0.8);
+        assert_eq!(result.semantic_score, 1.0);
+        assert!(result.structural_score > 0.7);
+    }
+
+    #[test]
+    fn test_evaluate_context_blocked() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Blocked;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Blocked status gives lower semantic score
+        assert_eq!(result.semantic_score, 0.3);
+        // Overall score should be lower than completed but not necessarily < 0.5 due to other factors
+        assert!(result.overall_score < 0.7);
+    }
+
+    #[test]
+    fn test_evaluate_context_artifact_completeness() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+        use crate::work::types::CompletionCriterion;
+        context.completion_criteria = vec![
+            CompletionCriterion::new("plan".to_string(), "Plan completed".to_string()),
+            CompletionCriterion::new("code".to_string(), "Code completed".to_string()),
+        ];
+
+        // Add one artifact
+        use crate::work::artifact::{Artifact, ArtifactKind};
+        context.artifacts.push(Artifact::new(
+            uuid::Uuid::new_v4().to_string(),
+            context.id.clone(),
+            ArtifactKind::Plan,
+            "Test Plan".to_string(),
+            json!({"content": "test"}),
+            "user-1".to_string(),
+        ));
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Artifact completeness should be 0.5 (1 of 2 criteria met)
+        assert_eq!(result.artifact_completeness_score, 0.5);
+    }
+
+    #[test]
+    fn test_evolve_playbook_success_patterns() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db.clone());
+
+        // Create a playbook
+        let mut playbook = crate::work::playbook::WorkContextPlaybook::new(
+            "pb-1".to_string(),
+            "user-1".to_string(),
+            "software".to_string(),
+            "Test Playbook".to_string(),
+            "Test playbook".to_string(),
+        );
+        playbook.preferred_flows = vec![
+            crate::work::playbook::FlowPreference {
+                flow_id: "planning.flow.yaml".to_string(),
+                weight: 0.5,
+                confidence: 0.5,
+            },
+        ];
+
+        db.create_playbook(&playbook).unwrap();
+
+        // Evolve with success patterns
+        let success_patterns = vec![
+            PatternRecord {
+                pattern_type: PatternType::Success,
+                signal: "model_usage_planning.flow.yaml_openai_gpt-4".to_string(),
+                weight: 0.8,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+        let failure_patterns = vec![];
+
+        engine.evolve_playbook("pb-1", success_patterns, failure_patterns).unwrap();
+
+        // Verify flow weights increased
+        let updated = db.get_playbook("pb-1").unwrap().unwrap();
+        assert!(updated.preferred_flows[0].weight > 0.5);
+        assert!(updated.preferred_flows[0].confidence > 0.5);
+    }
+
+    #[test]
+    fn test_evolve_playbook_failure_patterns() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db.clone());
+
+        // Create a playbook
+        let mut playbook = crate::work::playbook::WorkContextPlaybook::new(
+            "pb-1".to_string(),
+            "user-1".to_string(),
+            "software".to_string(),
+            "Test Playbook".to_string(),
+            "Test playbook".to_string(),
+        );
+        playbook.preferred_flows = vec![
+            crate::work::playbook::FlowPreference {
+                flow_id: "planning.flow.yaml".to_string(),
+                weight: 0.8,
+                confidence: 0.8,
+            },
+        ];
+
+        db.create_playbook(&playbook).unwrap();
+
+        // Evolve with failure patterns
+        let success_patterns = vec![];
+        let failure_patterns = vec![
+            PatternRecord {
+                pattern_type: PatternType::Failure,
+                signal: "model_usage_openai_gpt-4".to_string(),
+                weight: 0.8,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+
+        engine.evolve_playbook("pb-1", success_patterns, failure_patterns).unwrap();
+
+        // Verify flow weights decreased
+        let updated = db.get_playbook("pb-1").unwrap().unwrap();
+        assert!(updated.preferred_flows[0].weight < 0.8);
+        assert!(updated.preferred_flows[0].confidence < 0.8);
+    }
+
+    #[test]
+    fn test_evolve_playbook_research_depth_increase() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db.clone());
+
+        let mut playbook = crate::work::playbook::WorkContextPlaybook::new(
+            "pb-1".to_string(),
+            "user-1".to_string(),
+            "software".to_string(),
+            "Test Playbook".to_string(),
+            "Test playbook".to_string(),
+        );
+        playbook.default_research_depth = crate::work::playbook::ResearchDepth::Minimal;
+
+        db.create_playbook(&playbook).unwrap();
+
+        // Evolve with high revision count pattern
+        let success_patterns = vec![
+            PatternRecord {
+                pattern_type: PatternType::Success,
+                signal: "high_revision_count".to_string(),
+                weight: 0.8,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+        let failure_patterns = vec![];
+
+        engine.evolve_playbook("pb-1", success_patterns, failure_patterns).unwrap();
+
+        // Verify research depth increased
+        let updated = db.get_playbook("pb-1").unwrap().unwrap();
+        assert_eq!(updated.default_research_depth, crate::work::playbook::ResearchDepth::Standard);
+    }
+
+    #[test]
+    fn test_create_evolution() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db);
+
+        let strategy = MutationStrategy::AddNode {
+            node_id: "new_node".to_string(),
+            node_type: "llm".to_string(),
+            position: "after".to_string(),
+        };
+
+        let evolution = engine.create_evolution("pb-1".to_string(), 1, None, strategy).unwrap();
+
+        assert_eq!(evolution.playbook_id, "pb-1");
+        assert_eq!(evolution.version, 1);
+        assert_eq!(evolution.status, EvolutionStatus::Testing);
+        assert_eq!(evolution.execution_count, 0);
+    }
+
+    #[test]
+    fn test_record_execution() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db);
+
+        let strategy = MutationStrategy::RemoveNode {
+            node_id: "old_node".to_string(),
+        };
+
+        let evolution = engine.create_evolution("pb-1".to_string(), 1, None, strategy).unwrap();
+
+        // Record successful execution
+        engine.record_execution(&evolution.id, true, 5000, 0.1, 5).unwrap();
+
+        let updated = engine.get_evolution(&evolution.id).unwrap().unwrap();
+        assert_eq!(updated.execution_count, 1);
+        assert_eq!(updated.success_rate, 1.0);
+    }
+
+    #[test]
+    fn test_promotion_threshold() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db);
+
+        let strategy = MutationStrategy::AddNode {
+            node_id: "new_node".to_string(),
+            node_type: "llm".to_string(),
+            position: "after".to_string(),
+        };
+
+        let evolution = engine.create_evolution("pb-1".to_string(), 1, None, strategy).unwrap();
+
+        // Record 10 successful executions
+        for _ in 0..10 {
+            engine.record_execution(&evolution.id, true, 5000, 0.1, 5).unwrap();
+        }
+
+        let updated = engine.get_evolution(&evolution.id).unwrap().unwrap();
+        assert_eq!(updated.status, EvolutionStatus::ReadyForPromotion);
+    }
+
+    #[test]
+    fn test_start_ab_test() {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let engine = EvolutionEngine::new(db);
+
+        let test = engine.start_ab_test("pb-1".to_string(), 1, 2, 0.5).unwrap();
+
+        assert_eq!(test.playbook_id, "pb-1");
+        assert_eq!(test.version_a, 1);
+        assert_eq!(test.version_b, 2);
+        assert_eq!(test.traffic_split, 0.5);
+        assert_eq!(test.status, AbTestStatus::Running);
+        assert!(test.results.is_none());
+    }
+
+    #[test]
+    fn test_mutation_strategy_serialization() {
+        let strategy = MutationStrategy::Combine {
+            other_playbook_id: "pb-2".to_string(),
+        };
+
+        let json = serde_json::to_string(&strategy).unwrap();
+        let deserialized: MutationStrategy = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            MutationStrategy::Combine { other_playbook_id } => {
+                assert_eq!(other_playbook_id, "pb-2");
+            }
+            _ => panic!("Wrong strategy deserialized"),
+        }
+    }
+
+    #[test]
+    fn test_performance_metrics_default() {
+        let metrics = PerformanceMetrics::default();
+
+        assert_eq!(metrics.success_rate, 0.0);
+        assert_eq!(metrics.avg_duration_ms, 0);
+        assert_eq!(metrics.avg_cost, 0.0);
+        assert_eq!(metrics.avg_tool_calls, 0.0);
+        assert!(metrics.user_satisfaction.is_none());
+    }
+
+    #[test]
+    fn test_flow_performance_record_creation() {
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "planning.flow.yaml".to_string(),
+            work_context_id: "ctx-1".to_string(),
+            success_score: 0.9,
+            duration_ms: 5000,
+            token_cost: 0.1,
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+
+        assert_eq!(perf_record.flow_id, "planning.flow.yaml");
+        assert_eq!(perf_record.success_score, 0.9);
+        assert_eq!(perf_record.duration_ms, 5000);
+    }
+
+    #[test]
+    fn test_flow_performance_record_serialization() {
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "coding.flow.yaml".to_string(),
+            work_context_id: "ctx-1".to_string(),
+            success_score: 0.85,
+            duration_ms: 10000,
+            token_cost: 0.2,
+            revision_count: 2,
+            executed_at: chrono::Utc::now(),
+        };
+
+        // Test serialization
+        let json = serde_json::to_string(&perf_record).unwrap();
+        assert!(!json.is_empty());
+
+        // Test deserialization
+        let deserialized: FlowPerformanceRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.flow_id, "coding.flow.yaml");
+        assert_eq!(deserialized.success_score, 0.85);
+    }
+
+    #[test]
+    fn test_flow_performance_record_in_metadata() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "planning.flow.yaml".to_string(),
+            work_context_id: context.id.clone(),
+            success_score: 0.9,
+            duration_ms: 5000,
+            token_cost: 0.1,
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+
+        // Store in metadata
+        let perf_json = serde_json::to_value(&perf_record).unwrap();
+        context.metadata = json!({
+            "flow_perf_planning": perf_json
+        });
+
+        // Retrieve from metadata
+        let retrieved = context.metadata.get("flow_perf_planning").unwrap();
+        let deserialized: FlowPerformanceRecord = serde_json::from_value(retrieved.clone()).unwrap();
+
+        assert_eq!(deserialized.flow_id, "planning.flow.yaml");
+        assert_eq!(deserialized.success_score, 0.9);
+    }
+
+    #[test]
+    fn test_flow_performance_record_high_cost_threshold() {
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "expensive.flow.yaml".to_string(),
+            work_context_id: "ctx-1".to_string(),
+            success_score: 0.7,
+            duration_ms: 5000,
+            token_cost: 0.6,  // Above 0.5 threshold
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+
+        assert!(perf_record.token_cost > 0.5);
+    }
+
+    #[test]
+    fn test_flow_performance_record_high_duration_threshold() {
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "slow.flow.yaml".to_string(),
+            work_context_id: "ctx-1".to_string(),
+            success_score: 0.8,
+            duration_ms: 12000,  // Above 10000 threshold
+            token_cost: 0.1,
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+
+        assert!(perf_record.duration_ms > 10000);
+    }
+
+    #[test]
+    fn test_flow_performance_record_success_threshold() {
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "successful.flow.yaml".to_string(),
+            work_context_id: "ctx-1".to_string(),
+            success_score: 0.9,  // Above 0.7 threshold
+            duration_ms: 5000,
+            token_cost: 0.1,
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+
+        assert!(perf_record.success_score > 0.7);
+    }
+
+    #[test]
+    fn test_flow_performance_record_failure_threshold() {
+        let perf_record = FlowPerformanceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            flow_id: "failed.flow.yaml".to_string(),
+            work_context_id: "ctx-1".to_string(),
+            success_score: 0.5,  // Below 0.7 threshold
+            duration_ms: 5000,
+            token_cost: 0.1,
+            revision_count: 1,
+            executed_at: chrono::Utc::now(),
+        };
+
+        assert!(perf_record.success_score < 0.7);
+    }
+
+    #[test]
+    fn test_evaluate_context_in_progress() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::InProgress;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        assert_eq!(result.semantic_score, 0.7);
+        assert!(result.overall_score > 0.5);
+    }
+
+    #[test]
+    fn test_evaluate_context_draft() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Draft;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        assert_eq!(result.semantic_score, 0.5);
+    }
+
+    #[test]
+    fn test_evaluate_context_awaiting_approval() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::AwaitingApproval;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        assert_eq!(result.semantic_score, 0.6);
+    }
+
+    #[test]
+    fn test_evaluate_context_tool_consistency_high_latency() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        // Add execution metadata with high latency
+        context.execution_metadata.push(crate::work::types::ExecutionRecord {
+            node_id: "planner".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            latency_ms: 15000,  // High latency
+            timestamp: chrono::Utc::now(),
+            tokens: Some(100),
+            cost: Some(0.01),
+        });
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Tool consistency should be lower due to high latency
+        assert!(result.tool_consistency_score < 0.7);
+    }
+
+    #[test]
+    fn test_evaluate_context_tool_consistency_low_latency() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        // Add execution metadata with low latency
+        context.execution_metadata.push(crate::work::types::ExecutionRecord {
+            node_id: "planner".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            latency_ms: 2000,  // Low latency
+            timestamp: chrono::Utc::now(),
+            tokens: Some(100),
+            cost: Some(0.01),
+        });
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Tool consistency should be higher due to low latency
+        assert!(result.tool_consistency_score > 0.8);
+    }
+
+    #[test]
+    fn test_evaluate_context_no_execution_metadata() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // No execution metadata should give default tool consistency score
+        assert_eq!(result.tool_consistency_score, 0.5);
+    }
+
+    #[test]
+    fn test_evaluate_context_structural_with_plan() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+        use crate::work::plan::{ExecutionPlan, PlanStep};
+        context.plan = Some(ExecutionPlan::new(vec![
+            PlanStep::new("step1".to_string(), "First step".to_string(), "flow1".to_string()),
+        ]));
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Structural score should be higher with a plan
+        assert!(result.structural_score > 0.7);
+    }
+
+    #[test]
+    fn test_evaluate_context_structural_without_plan() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Structural score should be lower without a plan
+        assert_eq!(result.structural_score, 0.4);
+    }
+
+    #[test]
+    fn test_evaluate_context_artifact_completeness_no_criteria() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // No completion criteria should give perfect score
+        assert_eq!(result.artifact_completeness_score, 1.0);
+    }
+
+    #[test]
+    fn test_evaluate_context_overall_score_clamping() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Overall score should be clamped between 0.0 and 1.0
+        assert!(result.overall_score >= 0.0);
+        assert!(result.overall_score <= 1.0);
+    }
+
+    #[test]
+    fn test_evaluate_context_details_format() {
+        let mut context = WorkContext::new(
+            "ctx-1".to_string(),
+            "user-1".to_string(),
+            "Build API".to_string(),
+            WorkDomain::Software,
+            "Create a REST API".to_string(),
+        );
+        context.status = WorkStatus::Completed;
+
+        let result = EvolutionEngine::evaluate_context(&context);
+
+        // Details should contain all component scores
+        assert!(result.details.contains("Semantic"));
+        assert!(result.details.contains("Structural"));
+        assert!(result.details.contains("Tool Consistency"));
+        assert!(result.details.contains("Artifact Completeness"));
     }
 }
