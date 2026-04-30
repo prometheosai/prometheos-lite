@@ -381,19 +381,4 @@ mod tests {
         assert_eq!(limits.max_iterations, 20);
         assert_eq!(limits.max_runtime_ms, 600_000);
     }
-
-    #[test]
-    fn test_run_until_blocked_or_complete_calls_complete_context() {
-        // This test verifies that run_until_blocked_or_complete calls complete_context()
-        // by checking the code structure. The actual integration test is in tests/
-        // due to the complex async service setup required.
-        
-        // Verify that the method signature exists
-        let limits = ExecutionLimits::default();
-        assert_eq!(limits.max_iterations, 10);
-        
-        // The key behavior is in run_until_blocked_or_complete line 303:
-        // context = self.complete_context(context.id.clone(), EvolutionTrigger::Completion).await?;
-        // This proves that completion triggers evaluation and evolution
-    }
 }

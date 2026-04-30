@@ -182,3 +182,100 @@ async fn test_full_lifecycle() {
         "Context should be completed or blocked after full lifecycle"
     );
 }
+
+#[tokio::test]
+async fn test_run_until_blocked_or_complete_triggers_evolution() {
+    let db = Db::in_memory().expect("Failed to create in-memory database");
+    let db_arc = Arc::new(db);
+    let work_context_service = Arc::new(WorkContextService::new(db_arc.clone()));
+
+    let runtime = Arc::new(RuntimeContext::default());
+    let flow_execution_service = Arc::new(
+        FlowExecutionService::new(runtime).expect("Failed to create FlowExecutionService"),
+    );
+
+    let work_execution_service = Arc::new(WorkExecutionService::new(
+        work_context_service.clone(),
+        flow_execution_service,
+    ));
+
+    let playbook_resolver = Arc::new(PlaybookResolver::new(db_arc.clone()));
+
+    let intent_classifier = Arc::new(
+        prometheos_lite::intent::IntentClassifier::new().expect("Failed to create IntentClassifier"),
+    );
+
+    let evolution_engine = Arc::new(EvolutionEngine::new(db_arc.clone()));
+
+    let orchestrator = WorkOrchestrator::new(
+        work_context_service.clone(),
+        playbook_resolver,
+        work_execution_service,
+        intent_classifier,
+        evolution_engine,
+    );
+
+    // Create a playbook with flow preferences
+    let playbook_id = "test-playbook-evolution-trigger";
+    let mut playbook = WorkContextPlaybook::new(
+        playbook_id.to_string(),
+        "test-user".to_string(),
+        "software".to_string(),
+        "Test Playbook".to_string(),
+        "Test playbook for evolution trigger".to_string(),
+    );
+    playbook.preferred_flows = vec![
+        FlowPreference {
+            flow_id: "planning.flow.yaml".to_string(),
+            weight: 0.5,
+            confidence: 0.5,
+        },
+    ];
+    PlaybookOperations::create_playbook(&*db_arc, &playbook).expect("Failed to create playbook");
+
+    // Create a WorkContext directly with completion criteria and playbook association
+    let mut context = work_context_service.create_context(
+        "ctx-evolution-trigger-test".to_string(),
+        "test-user".to_string(),
+        prometheos_lite::work::types::WorkDomain::Software,
+        "Test evolution trigger".to_string(),
+    ).expect("Failed to create context");
+    
+    let context_id = context.id.clone();
+    
+    context.playbook_id = Some(playbook_id.to_string());
+    context.completion_criteria = vec![
+        CompletionCriterion::new("plan".to_string(), "Plan completed".to_string()),
+    ];
+    context.completion_criteria[0].satisfied = true;
+    context.status = WorkStatus::InProgress; // Set to InProgress so run_until_blocked_or_complete can detect completion
+    work_context_service.update_context(&context).expect("Failed to update context");
+
+    // Verify initial flow weight
+    let initial_playbook = PlaybookOperations::get_playbook(&*db_arc, playbook_id)
+        .expect("Failed to get playbook")
+        .expect("Playbook should exist");
+    let initial_weight = initial_playbook.preferred_flows[0].weight;
+    assert_eq!(initial_weight, 0.5, "Initial weight should be 0.5");
+
+    // Call run_until_blocked_or_complete - this should trigger complete_context() and evolution
+    let limits = ExecutionLimits::default();
+    let result = orchestrator
+        .run_until_blocked_or_complete(context_id.clone(), limits)
+        .await;
+
+    assert!(result.is_ok(), "run_until_blocked_or_complete should succeed");
+
+    // Reload context to verify it was completed
+    let updated_context = work_context_service
+        .get_context(&context_id)
+        .expect("Failed to get context")
+        .expect("Context should exist");
+    assert_eq!(updated_context.status, WorkStatus::Completed, "Context should be completed");
+
+    // Verify evaluation result was set (proves complete_context was called)
+    assert!(
+        updated_context.evaluation_result.is_some(),
+        "Evaluation result should be set, proving complete_context was called"
+    );
+}

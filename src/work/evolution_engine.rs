@@ -444,10 +444,17 @@ impl EvolutionEngine {
                     }
                 }
             } else if pattern.signal.starts_with("model_usage_") {
-                // Model usage patterns affect all flows (broad heuristic)
-                for flow_pref in &mut playbook.preferred_flows {
-                    flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
-                    flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                // Extract flow_id from signal: "model_usage_{flow_id}_{model_name}"
+                // Target only the specific flow that used this model
+                let parts: Vec<&str> = pattern.signal.split('_').collect();
+                if parts.len() >= 3 {
+                    let flow_id = parts[2]; // "model_usage_{flow_id}_{model_name}"
+                    for flow_pref in &mut playbook.preferred_flows {
+                        if flow_pref.flow_id == flow_id {
+                            flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
+                            flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                        }
+                    }
                 }
             }
         }

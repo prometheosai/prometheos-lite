@@ -150,8 +150,8 @@ impl<T: AsDb> WorkContextOperations for T {
                 blocked_reason = ?15, plan = ?16, approved_plan = ?17, artifacts = ?18, memory_refs = ?19,
                 decisions = ?20, flow_runs = ?21, tool_trace = ?22, execution_metadata = ?23, open_questions = ?24,
                 autonomy_level = ?25, approval_policy = ?26, summary = ?27, completion_criteria = ?28,
-                last_activity_at = ?29, metadata = ?30, updated_at = ?31
-             WHERE id = ?32",
+                last_activity_at = ?29, metadata = ?30, playbook_id = ?31, evaluation_result = ?32, updated_at = ?33
+             WHERE id = ?34",
             params![
                 &context.title,
                 serde_json::to_string(&context.domain)?,
@@ -183,6 +183,8 @@ impl<T: AsDb> WorkContextOperations for T {
                 serde_json::to_string(&context.completion_criteria)?,
                 &context.last_activity_at.to_rfc3339(),
                 serde_json::to_string(&context.metadata)?,
+                &context.playbook_id,
+                &context.evaluation_result.as_ref().map(|v| serde_json::to_string(v).ok()).flatten(),
                 &context.updated_at.to_rfc3339(),
                 &context.id,
             ],
