@@ -795,5 +795,68 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 ### v0.2.4 - Module Refactoring (Deleted)
 - This PRD file was deleted and is no longer tracked.
 
-**Note:** v1.0 Core, v1.1 Guardrails, and v1.2 Operation PRDs have been updated above with their current implementation status. This section now only contains truly unfinished or deprecated tasks.
+---
+
+## v1.5 PRD - Stabilization & Context Control
+
+**Codename:** "V1.5 — Stabilization & Context Control"
+
+**Objective:** Prevent system collapse under intelligence theater by controlling token usage, pruning memory, upgrading evaluation, and adding real observability.
+
+### EPIC 1 — Context Budgeter
+- [x] Issue #1: Define ContextBudgeter struct (max_tokens, reserved_output_tokens) in src/context/budgeter.rs
+- [x] Issue #2: Implement budget allocation strategy (system prompt > task > plan > critical memory > recent artifacts > long-tail memory)
+- [x] Issue #3: Add token estimation utility (estimate_tokens function)
+- [x] Issue #4: Implement context trimming (build_context with priority-based truncation, preserve structural integrity, never cut mid-JSON/code block)
+- [x] Issue #5: Integrate ContextBudgeter into PlannerNode, CoderNode, ReviewerNode, LlmNode
+
+### EPIC 2 — Memory Pruning & Summarization
+- [x] Issue #6: Add MemoryScore struct (relevance, recency, usage) in src/memory/scoring.rs
+- [x] Issue #7: Implement memory ranking function (rank_memories)
+- [x] Issue #8: Implement memory pruning function (prune with max limit)
+- [x] Issue #9: Create MemorySummarizer in src/memory/summarizer.rs (summarize function for memory clusters)
+- [x] Issue #10: Implement compression trigger (memory count > threshold, token size > threshold)
+- [x] Issue #11: Integrate pruning/summarization into MemoryService and ContextBuilder
+
+### EPIC 3 — Evaluation System Upgrade
+- [x] Issue #12: Expand EvaluationResult with EvaluationDimensions (correctness, completeness, efficiency, reliability) in src/work/evaluation.rs
+- [x] Issue #13: Implement structural validation (patch validity, test pass/fail, artifact schema compliance)
+- [x] Issue #14: Implement semantic evaluation (LLM-based scoring function)
+- [x] Issue #15: Add penalization rules (high retries → penalty, failed tests → strong penalty, hallucinated output → critical penalty)
+- [x] Issue #16: Feed enhanced evaluation into EvolutionEngine and FlowPerformanceRecord
+
+### EPIC 4 — Observability (Real Tracing)
+- [x] Issue #17: Create trace storage schema in SQLite (execution_traces, node_runs, tool_calls tables)
+- [x] Issue #18: Implement trace persistence (save ExecutionTrace, NodeRun, ToolCallLog to database)
+- [x] Issue #19: Ensure trace hierarchy (WorkContext → FlowRun → NodeRun → ToolCall)
+- [x] Issue #20: Add LLM metrics to trace (latency, token usage, model used)
+- [x] Issue #21: Integrate trace storage into RuntimeContext, FlowExecutionService, ToolRuntime
+
+### EPIC 5 — Context Builder Refactor
+- [x] Issue #22: Create ContextBuilder struct in src/context/builder.rs (budgeter, memory_service)
+- [x] Issue #23: Define ContextInputs struct (task, plan, memory, artifacts)
+- [x] Issue #24: Define BuiltContext struct (prompt, dropped_items)
+- [x] Issue #25: Replace direct prompt construction in all nodes with ContextBuilder
+- [x] Issue #26: Ensure consistent context shaping across PlannerNode, CoderNode, ReviewerNode, LlmNode
+
+### EPIC 6 — Strict Mode Hardening
+- [x] Issue #27: Enforce no silent fallback (missing inputs → error, missing memory → error, empty outputs → error, tool failure → error)
+- [x] Issue #28: Ban unsafe patterns (no unwrap() in runtime path, no Option::None propagation)
+- [x] Issue #29: Implement idempotency check (prevent duplicate tool execution, check tool_outbox before re-run)
+- [x] Issue #30: Integrate strict mode enforcement into FlowExecutionService and WorkExecutionService
+
+### EPIC 7 — Testing & Validation
+- [x] Issue #31: Test context overflow trimming (deterministic behavior under overflow)
+- [x] Issue #32: Test memory pruning correctness (old/low-value memory removed, summaries replace clusters)
+- [x] Issue #33: Test evaluation scoring correctness (semantic, structural, tool consistency)
+- [x] Issue #34: Test trace generation correctness (every execution has trace_id, every node logged, every tool call logged)
+- [x] Issue #35: Test failure trace visibility (failures are traceable)
+- [x] Issue #36: Test token budget enforcement (no LLM call exceeds token limit)
+
+**Status:** v1.5 - Complete (36/36 implemented)
+**See:** `docs/prd/prmetheos-lite-V1.5-context.md` for full specification
+
+---
+
+## Unfinished / Deferred / Deprecated Tasks
 
