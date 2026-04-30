@@ -7,17 +7,21 @@ inputs:
     type: string
     description: "The development task to complete"
     required: true
+  file_path:
+    type: string
+    description: "The file path to modify"
+    required: true
 
 outputs:
   plan:
     type: string
     description: "The development plan"
-  code:
+  unified_diff:
     type: string
-    description: "The generated code"
-  diff:
-    type: string
-    description: "The applied diff"
+    description: "The unified diff to apply"
+  patch_result:
+    type: object
+    description: "Patch application result"
   test_results:
     type: object
     description: "Test execution results"
@@ -41,7 +45,7 @@ nodes:
     tool: read_file
     inputs:
       path:
-        from: input.task
+        from: input.file_path
     outputs:
       file_content:
         from: result
@@ -69,7 +73,7 @@ nodes:
       context:
         from: read_context.file_content
     outputs:
-      code:
+      unified_diff:
         from: result
 
   - id: apply_patch
@@ -77,9 +81,9 @@ nodes:
     tool: patch_file
     inputs:
       path:
-        from: input.task
+        from: input.file_path
       diff:
-        from: implement.code
+        from: implement.unified_diff
     outputs:
       patch_result:
         from: result
@@ -96,8 +100,8 @@ nodes:
   - id: review
     type: reviewer
     inputs:
-      code:
-        from: implement.code
+      unified_diff:
+        from: implement.unified_diff
       test_results:
         from: run_tests.test_results
       plan:
