@@ -192,16 +192,102 @@ async fn test_forbidden_path_rejection() {
     assert!(guard.validate_path("../../secret").is_err());
     assert!(guard.validate_path("C:\\Windows\\System32").is_err());
 
-    // Test allowed paths - PathGuard requires absolute paths to be within base_dir
-    // For relative paths, it depends on the base_dir configuration
-    // The default base_dir is current directory, so relative paths should work
-    let result = guard.validate_path("safe/file.txt");
-    // PathGuard may reject relative paths depending on implementation
-    // Let's just verify it doesn't crash and returns a Result
-    let _ = result;
-    
     // Test that absolute paths outside base_dir are rejected
     assert!(guard.validate_path("/etc/passwd").is_err());
+}
+
+#[tokio::test]
+async fn test_path_traversal_protection_read_file() {
+    let repo_path = PathBuf::from("tests/fixtures/sample_repo");
+    let tool = RepoReadFileTool::new(repo_path);
+
+    // Test path traversal attacks
+    let result = tool
+        .call(serde_json::json!({"path": "../../Cargo.toml"}))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+
+    let result = tool
+        .call(serde_json::json!({"path": "../../../etc/passwd"}))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+
+    // Test absolute path
+    let result = tool
+        .call(serde_json::json!({"path": "/etc/passwd"}))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+}
+
+#[tokio::test]
+async fn test_path_traversal_protection_write_file() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let repo_path = temp_dir.path();
+    let tool = WriteFileTool::new(repo_path.to_path_buf());
+
+    // Test path traversal attacks
+    let result = tool
+        .call(serde_json::json!({
+            "path": "../../evil.txt",
+            "content": "malicious"
+        }))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+
+    // Test absolute path
+    let result = tool
+        .call(serde_json::json!({
+            "path": "/tmp/evil.txt",
+            "content": "malicious"
+        }))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+}
+
+#[tokio::test]
+async fn test_path_traversal_protection_patch_file() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let repo_path = temp_dir.path();
+    
+    // Create a test file
+    std::fs::write(repo_path.join("test.txt"), "original content").unwrap();
+    
+    let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+    // Test path traversal attacks
+    let result = tool
+        .call(serde_json::json!({
+            "path": "../../test.txt",
+            "diff": "--- a/test.txt\n+++ b/test.txt\n@@ -1 +1 @@\n-original\n+patched"
+        }))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+}
+
+#[tokio::test]
+async fn test_path_traversal_protection_list_tree() {
+    let repo_path = PathBuf::from("tests/fixtures/sample_repo");
+    let tool = ListTreeTool::new(repo_path);
+
+    // Test path traversal attacks
+    let result = tool
+        .call(serde_json::json!({"root": "../../"}))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
+
+    // Test absolute path
+    let result = tool
+        .call(serde_json::json!({"root": "/etc"}))
+        .await
+        .unwrap();
+    assert!(!result["success"].as_bool().unwrap_or(true));
 }
 
 #[tokio::test]
