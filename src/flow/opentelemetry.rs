@@ -342,4 +342,183 @@ mod tests {
         let result = exporter.export_llm_call(&llm_call);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_export_complex_hierarchical_trace() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let node_run = NodeRun {
+            node_id: "planner".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            input_summary: Some("Create API".to_string()),
+            output_summary: Some("Plan created".to_string()),
+            status: "success".to_string(),
+            duration_ms: 100,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+        };
+
+        let tool_call = ToolCall {
+            tool_name: "file_writer".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            args_hash: "hash123".to_string(),
+            result_hash: "hash456".to_string(),
+            success: true,
+            duration_ms: 50,
+            called_at: Utc::now(),
+        };
+
+        let llm_call = LlmCall {
+            node_id: "planner".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            prompt_tokens: 100,
+            completion_tokens: 200,
+            latency_ms: 1500,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+
+        let trace = HierarchicalTrace {
+            trace_id: TraceId::from("trace-123"),
+            work_context_id: Some("ctx-123".to_string()),
+            flow_run_id: RunId::from("run-123"),
+            node_runs: vec![node_run],
+            tool_calls: vec![tool_call],
+            llm_calls: vec![llm_call],
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+
+        let result = exporter.export_trace(&trace);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_node_run_with_error() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let node_run = NodeRun {
+            node_id: "failing_node".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            input_summary: Some("input".to_string()),
+            output_summary: None,
+            status: "failed".to_string(),
+            duration_ms: 100,
+            error: Some("Timeout error".to_string()),
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+        };
+
+        let result = exporter.export_node_run(&node_run);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_tool_call_failure() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let tool_call = ToolCall {
+            tool_name: "file_writer".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            args_hash: "hash123".to_string(),
+            result_hash: "hash456".to_string(),
+            success: false,
+            duration_ms: 50,
+            called_at: Utc::now(),
+        };
+
+        let result = exporter.export_tool_call(&tool_call);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_llm_call_with_error() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let llm_call = LlmCall {
+            node_id: "planner".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            prompt_tokens: 100,
+            completion_tokens: 0,
+            latency_ms: 5000,
+            error: Some("Rate limit exceeded".to_string()),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        };
+
+        let result = exporter.export_llm_call(&llm_call);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_otel_config_builder_methods() {
+        let config1 = OtelConfig::with_service_name("custom-service");
+        assert_eq!(config1.service_name, "custom-service");
+
+        let config2 = OtelConfig::with_endpoint("http://localhost:4317");
+        assert_eq!(config2.endpoint, Some("http://localhost:4317".to_string()));
+
+        let config3 = OtelConfig::with_stdout_export();
+        assert!(config3.export_to_stdout);
+    }
+
+    #[test]
+    fn test_exporter_tracer_reference() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let tracer = exporter.tracer();
+        assert!(!std::ptr::eq(tracer, std::ptr::null()));
+    }
+
+    #[test]
+    fn test_export_trace_with_no_completion() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let trace = HierarchicalTrace {
+            trace_id: TraceId::from("trace-123"),
+            work_context_id: None,
+            flow_run_id: RunId::from("run-123"),
+            node_runs: vec![],
+            tool_calls: vec![],
+            llm_calls: vec![],
+            started_at: Utc::now(),
+            completed_at: None,  // Incomplete trace
+        };
+
+        let result = exporter.export_trace(&trace);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_node_run_no_output_summary() {
+        let config = OtelConfig::default();
+        let exporter = OtelExporter::new(config).unwrap();
+
+        let node_run = NodeRun {
+            node_id: "planner".to_string(),
+            trace_id: TraceId::from("trace-123"),
+            input_summary: Some("input".to_string()),
+            output_summary: None,  // No output
+            status: "in_progress".to_string(),
+            duration_ms: 100,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+        };
+
+        let result = exporter.export_node_run(&node_run);
+        assert!(result.is_ok());
+    }
 }

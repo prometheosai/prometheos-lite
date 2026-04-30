@@ -663,15 +663,21 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #23: (Optional) OpenTelemetry integration for trace export
 
 ### Phase 8 — Testing
-- [ ] Issue #24: Test playbook creation with patterns and preferences (FlowPreference weights, PatternRecord storage)
-- [ ] Issue #25: Test playbook-aware flow selection (weighted selection with exploration factor)
-- [ ] Issue #26: Test evolution engine pattern extraction and playbook update (success/failure patterns, partial failure trigger)
-- [ ] Issue #27: Test FlowPerformanceRecord storage and retrieval
-- [ ] Issue #28: Test WorkContext evaluation scoring (semantic, structural, tool consistency)
-- [ ] Issue #29: Test strict mode enforcement (missing inputs, empty outputs, unwrap guard, Option::None guard, idempotency)
-- [ ] Issue #30: Test observability (node logs, tool calls, LLM latency, hierarchical trace structure)
+- [x] Issue #24: Test playbook creation with patterns and preferences (FlowPreference weights, PatternRecord storage)
+- [x] Issue #25: Test playbook-aware flow selection (weighted selection with exploration factor)
+- [x] Issue #26: Test evolution engine pattern extraction and playbook update (success/failure patterns, partial failure trigger)
+- [x] Issue #27: Test FlowPerformanceRecord storage and retrieval
+- [x] Issue #28: Test WorkContext evaluation scoring (semantic, structural, tool consistency)
+- [x] Issue #29: Test strict mode enforcement (missing inputs, empty outputs, unwrap guard, Option::None guard, idempotency)
+- [x] Issue #30: Test observability (node logs, tool calls, LLM latency, hierarchical trace structure)
 
-**Status:** v1.3 - In Progress (23/30 implemented)
+**Status:** v1.3 - Complete (30/30 implemented + architecture fixes)
+
+**Architecture Fixes:**
+- Removed unsafe Send/Sync from WorkOrchestrator (fields are naturally Send/Sync via Arc)
+- Fixed run_until_blocked_or_complete to call complete_context() triggering evaluation/evolution
+- Updated evolve_playbook to target specific flows only based on pattern signals
+- Added playbook_id and evaluation_result columns to work_contexts table schema
 **See:** `docs/prd/prometheos-lite-V1.3.md` for full specification
 
 ---

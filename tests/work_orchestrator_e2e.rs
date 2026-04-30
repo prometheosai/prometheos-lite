@@ -4,13 +4,16 @@
 //! including submit, continue, and run_until_complete operations.
 
 use prometheos_lite::db::Db;
+use prometheos_lite::db::repository::PlaybookOperations;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::work::execution_service::WorkExecutionService;
 use prometheos_lite::work::orchestrator::{ExecutionLimits, WorkOrchestrator};
 use prometheos_lite::work::playbook_resolver::PlaybookResolver;
 use prometheos_lite::work::service::WorkContextService;
-use prometheos_lite::work::types::{WorkPhase, WorkStatus};
+use prometheos_lite::work::types::{CompletionCriterion, WorkPhase, WorkStatus};
+use prometheos_lite::work::playbook::{FlowPreference, WorkContextPlaybook};
+use prometheos_lite::work::evolution_engine::EvolutionEngine;
 use std::sync::Arc;
 
 /// Setup helper to create a WorkOrchestrator with in-memory database
@@ -31,15 +34,18 @@ fn setup_orchestrator() -> WorkOrchestrator {
 
     let playbook_resolver = Arc::new(PlaybookResolver::new(db_arc.clone()));
 
-    let intent_classifier = prometheos_lite::intent::IntentClassifier::new(
-        flow_execution_service.clone(),
+    let intent_classifier = Arc::new(
+        prometheos_lite::intent::IntentClassifier::new().expect("Failed to create IntentClassifier"),
     );
+
+    let evolution_engine = Arc::new(EvolutionEngine::new(db_arc.clone()));
 
     WorkOrchestrator::new(
         work_context_service,
         playbook_resolver,
         work_execution_service,
         intent_classifier,
+        evolution_engine,
     )
 }
 
