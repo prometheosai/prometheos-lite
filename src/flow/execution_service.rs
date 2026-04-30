@@ -282,10 +282,8 @@ impl FlowExecutionService {
         // Set strict mode enforcer in state for runtime enforcement
         if let Some(ref strict_mode) = options.strict_mode {
             state.set_strict_mode_enforcer(Arc::new(strict_mode.clone()));
-        }
-
-        // 6. Validate input if strict mode is enabled
-        if let Some(ref strict_mode) = options.strict_mode {
+            
+            // V1.5: Enforce no silent failures - validate input
             strict_mode.validate_input(&serde_json::json!(message), "task")?;
         }
 
