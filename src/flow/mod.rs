@@ -35,7 +35,7 @@ pub use factory::{
     LlmNode, MemoryWriteNode, NodeFactory, PassthroughNode, PlannerNode, ReviewerNode, ToolNode,
 };
 pub use idempotency::*;
-pub use intelligence::*;
+pub use intelligence::{ModelRouter, Tool, ToolInput, ToolOutput, ToolRegistry, ToolRuntime, ToolSandboxProfile};
 pub use loader::*;
 pub use loop_detection::*;
 pub use memory::*;

@@ -10,5 +10,5 @@ mod tests;
 
 pub use provider::{LlmProvider, OpenAiProvider, StreamCallback};
 pub use router::{GenerateResult, ModelRouter};
-pub use tool::{Tool, ToolInput, ToolOutput, ToolRuntime, ToolSandboxProfile};
+pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolRuntime, ToolSandboxProfile};
 pub use utils::LlmUtilities;

@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -235,18 +237,89 @@ impl ToolSandboxProfile {
     }
 }
 
+/// Tool registry for managing available tools
+pub struct ToolRegistry {
+    tools: HashMap<String, Arc<dyn Tool>>,
+    tool_whitelist: HashMap<String, Vec<String>>, // context_id -> allowed tool names
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+            tool_whitelist: HashMap::new(),
+        }
+    }
+
+    /// Register a tool
+    pub fn register(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.insert(tool.name(), tool);
+    }
+
+    /// Get a tool by name
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
+    /// Set tool whitelist for a context
+    pub fn set_whitelist(&mut self, context_id: String, allowed_tools: Vec<String>) {
+        self.tool_whitelist.insert(context_id, allowed_tools);
+    }
+
+    /// Check if a tool is allowed for a context
+    pub fn is_tool_allowed(&self, context_id: &str, tool_name: &str) -> bool {
+        if let Some(allowed) = self.tool_whitelist.get(context_id) {
+            allowed.contains(&tool_name.to_string())
+        } else {
+            // If no whitelist set, allow all tools
+            true
+        }
+    }
+
+    /// Get all registered tool names
+    pub fn list_tools(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tool runtime for executing tools with sandboxing
 pub struct ToolRuntime {
     profile: ToolSandboxProfile,
+    registry: Arc<ToolRegistry>,
+    strict_mode: bool,
 }
 
 impl ToolRuntime {
     pub fn new(profile: ToolSandboxProfile) -> Self {
-        Self { profile }
+        Self {
+            profile,
+            registry: Arc::new(ToolRegistry::new()),
+            strict_mode: false,
+        }
     }
 
     pub fn with_default_profile() -> Self {
         Self::new(ToolSandboxProfile::new())
+    }
+
+    pub fn with_registry(mut self, registry: Arc<ToolRegistry>) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    pub fn with_strict_mode(mut self, strict: bool) -> Self {
+        self.strict_mode = strict;
+        self
+    }
+
+    pub fn registry(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.registry)
     }
 
     /// Execute a command as a tool with context
@@ -302,7 +375,23 @@ impl ToolRuntime {
         input: ToolInput,
         context: &ToolContext,
     ) -> Result<ToolOutput> {
-        tool.call(input).await
+        // Check tool whitelist if strict mode is enabled
+        if self.strict_mode {
+            if !self.registry.is_tool_allowed(&context.run_id, &tool.name()) {
+                anyhow::bail!("Tool '{}' is not in the whitelist for context '{}'", tool.name(), context.run_id);
+            }
+        }
+
+        let result = tool.call(input).await?;
+
+        // In strict mode, check for empty outputs
+        if self.strict_mode {
+            if result.is_null() || (result.is_object() && result.as_object().map(|o| o.is_empty()).unwrap_or(false)) {
+                anyhow::bail!("Tool '{}' returned empty output in strict mode", tool.name());
+            }
+        }
+
+        Ok(result)
     }
 }
 
