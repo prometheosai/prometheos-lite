@@ -102,6 +102,43 @@ pub enum TraceEvent {
         success: bool,
     },
 
+    // V1.4 Tool call logs
+    ToolCallLog {
+        run_id: RunId,
+        trace_id: TraceId,
+        tool_name: String,
+        input: serde_json::Value,
+        output: serde_json::Value,
+        duration_ms: u64,
+        success: bool,
+        error: Option<String>,
+    },
+
+    // V1.4 Command logs
+    CommandLog {
+        run_id: RunId,
+        trace_id: TraceId,
+        command: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        duration_ms: u64,
+        success: bool,
+    },
+
+    // V1.4 Execution trace per WorkContext
+    WorkContextTrace {
+        work_context_id: String,
+        run_id: RunId,
+        trace_id: TraceId,
+        phase: String,
+        action: String,
+        timestamp: DateTime<Utc>,
+        metadata: serde_json::Value,
+    },
+
     // Memory events
     MemoryRead {
         run_id: RunId,
