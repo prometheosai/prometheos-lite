@@ -92,11 +92,12 @@ impl CommandTool {
     }
 
     fn is_command_allowed(&self, command: &str) -> bool {
-        // Check blocked commands first
-        for blocked in &self.blocked_commands {
-            if command.starts_with(blocked) {
-                return false;
-            }
+        // Extract the base command (first word, handling paths)
+        let base_command = self.extract_base_command(command);
+
+        // Check blocked commands first (exact match)
+        if self.blocked_commands.contains(&base_command) {
+            return false;
         }
 
         // If allowed list is empty, allow all (except blocked)
@@ -104,14 +105,29 @@ impl CommandTool {
             return true;
         }
 
-        // Check allowed commands
-        for allowed in &self.allowed_commands {
-            if command.starts_with(allowed) {
-                return true;
-            }
+        // Check allowed commands (exact match)
+        self.allowed_commands.contains(&base_command)
+    }
+
+    /// Extract the base command name from a command string
+    /// Handles paths like "/usr/bin/cargo" -> "cargo"
+    /// and simple commands like "cargo test" -> "cargo"
+    fn extract_base_command(&self, command: &str) -> String {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        if parts.is_empty() {
+            return String::new();
         }
 
-        false
+        let first_part = parts[0];
+        // Extract just the binary name from a path
+        if let Some(binary_name) = first_part.rsplit('/').next() {
+            if let Some(windows_name) = binary_name.rsplit('\\').next() {
+                return windows_name.to_string();
+            }
+            return binary_name.to_string();
+        }
+
+        first_part.to_string()
     }
 }
 
