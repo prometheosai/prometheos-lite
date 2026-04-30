@@ -8,6 +8,10 @@ use uuid::Uuid;
 
 use crate::flow::{NodeId, SharedState};
 
+pub mod storage;
+
+pub use storage::TraceStorage;
+
 /// Run ID for tracking a complete flow execution
 pub type RunId = String;
 
