@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use super::db::MemoryDb;
 use super::embedding::EmbeddingProvider;
+use super::scoring::{prune_combined, rank_memories};
+use super::summarizer::MemorySummarizer;
 use super::types::{ContextBundle, Memory, MemoryKind, MemoryType, MemoryWriteTask};
 use super::vector::{BruteForceBackend, VectorSearchBackend};
 
@@ -18,6 +20,9 @@ pub struct MemoryService {
     embedding_provider: Box<dyn EmbeddingProvider>,
     vector_backend: Arc<tokio::sync::Mutex<BruteForceBackend>>,
     write_tx: mpsc::UnboundedSender<MemoryWriteTask>,
+    summarizer: MemorySummarizer,
+    max_memory_count: usize,
+    compression_threshold_tokens: usize,
 }
 
 impl MemoryService {
@@ -34,6 +39,40 @@ impl MemoryService {
             embedding_provider,
             vector_backend: Arc::new(tokio::sync::Mutex::new(vector_backend)),
             write_tx,
+            summarizer: MemorySummarizer::default(),
+            max_memory_count: 1000,
+            compression_threshold_tokens: 100_000,
+        };
+
+        // Spawn background task processor
+        tokio::spawn(async move {
+            Self::process_write_tasks(db_arc, write_rx).await;
+        });
+
+        service
+    }
+
+    /// Create a new memory service with custom pruning settings
+    pub fn with_pruning_config(
+        db: MemoryDb,
+        embedding_provider: Box<dyn EmbeddingProvider>,
+        max_memory_count: usize,
+        compression_threshold_tokens: usize,
+    ) -> Self {
+        let vector_backend = BruteForceBackend::new();
+
+        let (write_tx, write_rx) = mpsc::unbounded_channel();
+
+        let db_arc = Arc::new(tokio::sync::Mutex::new(db));
+
+        let service = Self {
+            db: db_arc.clone(),
+            embedding_provider,
+            vector_backend: Arc::new(tokio::sync::Mutex::new(vector_backend)),
+            write_tx,
+            summarizer: MemorySummarizer::default(),
+            max_memory_count,
+            compression_threshold_tokens,
         };
 
         // Spawn background task processor
@@ -395,4 +434,85 @@ impl MemoryService {
 
         Ok(())
     }
+
+    /// Prune memories based on configured thresholds
+    pub async fn prune_memories(&self) -> Result<usize> {
+        let db_guard = self.db.lock().await;
+        let all_memories = db_guard.get_all_memories()?;
+        drop(db_guard);
+
+        if all_memories.len() <= self.max_memory_count {
+            return Ok(0);
+        }
+
+        // Prune using combined strategy
+        let pruned = prune_combined(all_memories, self.max_memory_count, 0.3);
+        let pruned_count = pruned.len();
+
+        // Delete pruned memories from database
+        let db_guard = self.db.lock().await;
+        for memory in pruned {
+            let _ = db_guard.delete_memory(&memory.id);
+        }
+
+        Ok(pruned_count)
+    }
+
+    /// Compress memories if threshold exceeded
+    pub async fn compress_if_needed(&self) -> Result<bool> {
+        let db_guard = self.db.lock().await;
+        let all_memories = db_guard.get_all_memories()?;
+        drop(db_guard);
+
+        let summarizer = std::sync::Arc::new(self.summarizer.clone());
+        
+        if summarizer.should_compress(&all_memories, self.max_memory_count, self.compression_threshold_tokens) {
+            let compressed = summarizer.compress(all_memories, 10).await?;
+            
+            // Delete original memories and add compressed ones
+            let db_guard = self.db.lock().await;
+            for memory in compressed {
+                let _ = db_guard.delete_memory(&memory.id);
+                let _ = db_guard.create_memory(&memory);
+            }
+            
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Get memory statistics
+    pub async fn get_memory_stats(&self) -> Result<MemoryStats> {
+        let db_guard = self.db.lock().await;
+        let all_memories = db_guard.get_all_memories()?;
+        drop(db_guard);
+
+        let total_count = all_memories.len();
+        let total_tokens: usize = all_memories
+            .iter()
+            .map(|m| crate::context::ContextBudgeter::estimate_tokens(&m.content))
+            .sum();
+
+        let ranked = rank_memories(all_memories);
+        let avg_importance = ranked.iter().map(|(_, s)| s.overall).sum::<f32>() / ranked.len() as f32;
+
+        Ok(MemoryStats {
+            total_count,
+            total_tokens,
+            avg_importance,
+            max_count: self.max_memory_count,
+            compression_threshold: self.compression_threshold_tokens,
+        })
+    }
+}
+
+/// Memory statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryStats {
+    pub total_count: usize,
+    pub total_tokens: usize,
+    pub avg_importance: f32,
+    pub max_count: usize,
+    pub compression_threshold: usize,
 }
