@@ -1,9 +1,4 @@
-//! Strict mode enforcement for flow and work execution
-//!
-//! This module provides runtime enforcement of strict mode policies:
-//! - Missing inputs → error instead of silent fallback
-//! - Missing services → error instead of silent fallback
-//! - Empty outputs → error instead of silent fallback
+//! Strict mode enforcement for flow execution
 //! - No silent Option::None propagation
 //! - Tool idempotency checks
 
@@ -215,6 +210,56 @@ impl StrictModeEnforcer {
     /// Compute a simple hash for JSON values
     fn compute_hash(&self, value: &Value) -> String {
         format!("{:x}", md5::compute(value.to_string().as_bytes()))
+    }
+
+    /// V1.4: Check if tool failure should stop execution
+    pub fn should_stop_on_tool_failure(&self) -> bool {
+        self.config.enforce_empty_outputs // Reuse existing flag for tool failure
+    }
+
+    /// V1.4: Check if invalid patch should stop execution
+    pub fn should_stop_on_invalid_patch(&self) -> bool {
+        self.config.enforce_empty_outputs // Reuse existing flag for invalid patch
+    }
+
+    /// V1.4: Check if test failure should trigger retry
+    pub fn should_retry_on_test_failure(&self) -> bool {
+        !self.config.enforce_empty_outputs // Invert for retry behavior
+    }
+
+    /// V1.4: Validate patch result in strict mode
+    pub fn validate_patch_result(&self, patch_result: &Value) -> Result<()> {
+        if self.should_stop_on_invalid_patch() {
+            let success = patch_result.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let validation = patch_result.get("validation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if !success || validation == "failed" {
+                bail!(
+                    "Strict mode violation: Patch validation failed. Result: {:?}",
+                    patch_result
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// V1.4: Validate test result in strict mode
+    pub fn validate_test_result(&self, test_result: &Value) -> Result<bool> {
+        let success = test_result.get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !success && self.should_stop_on_tool_failure() {
+            bail!("Strict mode violation: Test execution failed");
+        }
+
+        Ok(success)
     }
 }
 
