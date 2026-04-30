@@ -1,6 +1,7 @@
 //! Strict mode enforcement for flow execution
 //! - No silent Option::None propagation
 //! - Tool idempotency checks
+//! - No silent failures
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -16,6 +17,8 @@ pub struct StrictModeEnforcer {
     config: StrictModeConfig,
     /// Track tool call results for idempotency checks
     tool_call_cache: Arc<Mutex<HashMap<String, ToolCallResult>>>,
+    /// Track tool outbox to prevent duplicate executions
+    tool_outbox: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +33,7 @@ impl StrictModeEnforcer {
         Self {
             config,
             tool_call_cache: Arc::new(Mutex::new(HashMap::new())),
+            tool_outbox: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -201,10 +205,36 @@ impl StrictModeEnforcer {
         Ok(())
     }
 
+    /// Check if tool has already been executed (prevent duplicate execution)
+    pub fn check_tool_outbox(&self, tool_name: &str, args: &Value) -> Result<bool> {
+        if !self.config.enforce_idempotency {
+            return Ok(false);
+        }
+
+        let args_hash = self.compute_hash(args);
+        let outbox_key = format!("{}:{}", tool_name, args_hash);
+
+        let mut outbox = self.tool_outbox.lock().unwrap();
+        
+        if outbox.contains_key(&outbox_key) {
+            return Ok(true); // Already executed
+        }
+
+        // Mark as executed
+        outbox.insert(outbox_key, true);
+        Ok(false)
+    }
+
     /// Clear tool call cache (useful for testing or when idempotency is not required)
     pub fn clear_tool_cache(&self) {
         let mut cache = self.tool_call_cache.lock().unwrap();
         cache.clear();
+    }
+
+    /// Clear tool outbox
+    pub fn clear_tool_outbox(&self) {
+        let mut outbox = self.tool_outbox.lock().unwrap();
+        outbox.clear();
     }
 
     /// Compute a simple hash for JSON values
@@ -260,6 +290,20 @@ impl StrictModeEnforcer {
         }
 
         Ok(success)
+    }
+
+    /// V1.5: Enforce no silent failures - any error should be propagated
+    pub fn enforce_no_silent_failure(&self, result: Result<()>, operation: &str) -> Result<()> {
+        if self.config.enforce_empty_outputs {
+            result.with_context(|| format!("Strict mode violation: Operation '{}' failed", operation))
+        } else {
+            result
+        }
+    }
+
+    /// V1.5: Ban unsafe unwrap - provide safe alternative
+    pub fn safe_unwrap<T: Clone>(&self, value: Option<&T>, context: &str) -> Result<T> {
+        self.validate_option(value, context)
     }
 }
 
