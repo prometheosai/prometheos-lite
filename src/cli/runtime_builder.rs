@@ -7,8 +7,9 @@ use prometheos_lite::{
     config::AppConfig,
     flow::{
         EmbeddingProvider, LocalEmbeddingProvider, MemoryDb, MemoryService, ModelRouter,
-        OpenAiProvider, RuntimeContext, ToolRuntime, ToolSandboxProfile,
+        RuntimeContext, ToolRuntime, ToolSandboxProfile,
     },
+    flow::intelligence::OpenAiProvider,
     llm::LlmClient,
 };
 
