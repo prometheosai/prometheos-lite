@@ -297,15 +297,41 @@ pub struct ToolRuntime {
 
 impl ToolRuntime {
     pub fn new(profile: ToolSandboxProfile) -> Self {
+        let registry = Arc::new(ToolRegistry::new());
         Self {
             profile,
-            registry: Arc::new(ToolRegistry::new()),
+            registry,
             strict_mode: false,
         }
     }
 
     pub fn with_default_profile() -> Self {
         Self::new(ToolSandboxProfile::new())
+    }
+
+    /// Create a ToolRuntime with default tools registered
+    pub fn with_default_tools(profile: ToolSandboxProfile, repo_path: std::path::PathBuf) -> Self {
+        let mut registry = ToolRegistry::new();
+
+        // Register repo tools
+        use crate::tools::{ListTreeTool, RepoReadFileTool, SearchFilesTool, WriteFileTool, PatchFileTool, GitDiffTool};
+        registry.register(Arc::new(ListTreeTool::new(repo_path.clone())));
+        registry.register(Arc::new(RepoReadFileTool::new(repo_path.clone())));
+        registry.register(Arc::new(SearchFilesTool::new(repo_path.clone())));
+        registry.register(Arc::new(WriteFileTool::new(repo_path.clone())));
+        registry.register(Arc::new(PatchFileTool::new(repo_path.clone())));
+        registry.register(Arc::new(GitDiffTool::new(repo_path)));
+
+        // Register command tools
+        use crate::tools::{CommandTool, RunTestsTool};
+        registry.register(Arc::new(CommandTool::new()));
+        registry.register(Arc::new(RunTestsTool::new()));
+
+        Self {
+            profile,
+            registry: Arc::new(registry),
+            strict_mode: false,
+        }
     }
 
     pub fn with_registry(mut self, registry: Arc<ToolRegistry>) -> Self {
