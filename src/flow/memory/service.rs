@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -438,7 +439,8 @@ impl MemoryService {
     /// Prune memories based on configured thresholds
     pub async fn prune_memories(&self) -> Result<usize> {
         let db_guard = self.db.lock().await;
-        let all_memories = db_guard.get_all_memories()?;
+        // Get all memories by kind (semantic is the main one we care about)
+        let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
         drop(db_guard);
 
         if all_memories.len() <= self.max_memory_count {
@@ -461,21 +463,25 @@ impl MemoryService {
     /// Compress memories if threshold exceeded
     pub async fn compress_if_needed(&self) -> Result<bool> {
         let db_guard = self.db.lock().await;
-        let all_memories = db_guard.get_all_memories()?;
+        let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
         drop(db_guard);
 
         let summarizer = std::sync::Arc::new(self.summarizer.clone());
-        
-        if summarizer.should_compress(&all_memories, self.max_memory_count, self.compression_threshold_tokens) {
+
+        if summarizer.should_compress(
+            &all_memories,
+            self.max_memory_count,
+            self.compression_threshold_tokens,
+        ) {
             let compressed = summarizer.compress(all_memories, 10).await?;
-            
+
             // Delete original memories and add compressed ones
             let db_guard = self.db.lock().await;
             for memory in compressed {
                 let _ = db_guard.delete_memory(&memory.id);
                 let _ = db_guard.create_memory(&memory);
             }
-            
+
             Ok(true)
         } else {
             Ok(false)
@@ -485,7 +491,7 @@ impl MemoryService {
     /// Get memory statistics
     pub async fn get_memory_stats(&self) -> Result<MemoryStats> {
         let db_guard = self.db.lock().await;
-        let all_memories = db_guard.get_all_memories()?;
+        let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
         drop(db_guard);
 
         let total_count = all_memories.len();
@@ -495,7 +501,7 @@ impl MemoryService {
             .sum();
 
         let ranked = rank_memories(all_memories);
-        let avg_importance = ranked.iter().map(|(_, s)| s.overall).sum::<f32>() / ranked.len() as f32;
+        let avg_importance = if ranked.is_empty() { 0.5 } else { ranked.iter().map(|(_, s)| s.overall).sum::<f32>() / ranked.len() as f32 };
 
         Ok(MemoryStats {
             total_count,
