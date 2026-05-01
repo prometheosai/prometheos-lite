@@ -98,7 +98,7 @@ impl Handler {
             Intent::ProjectAction => Handler::ProjectAction,
             Intent::Planning => Handler::Planning,
             Intent::Approval => Handler::WorkOrchestrator, // Approval continues with WorkOrchestrator
-            Intent::Ambiguous => Handler::DirectLlm,  // Default to direct LLM for ambiguous
+            Intent::Ambiguous => Handler::DirectLlm,       // Default to direct LLM for ambiguous
         }
     }
 }

@@ -114,7 +114,7 @@ impl JobQueue {
     /// Submit a new job to the queue
     pub async fn submit(&self, job: Job) -> Result<String> {
         let job_id = job.id.clone();
-        
+
         // Add to jobs map
         {
             let mut jobs = self.jobs.write().await;
@@ -166,7 +166,7 @@ impl JobQueue {
             if job.status == JobStatus::Pending {
                 job.status = JobStatus::Cancelled;
                 job.completed_at = Some(chrono::Utc::now());
-                
+
                 // Remove from pending queue
                 let mut pending = self.pending_jobs.lock().await;
                 pending.retain(|id| id != job_id);
@@ -217,7 +217,9 @@ impl JobQueue {
             let job_id_clone = job_id.clone();
 
             tokio::spawn(async move {
-                let result = executor.execute(&jobs.read().await.get(&job_id_clone).unwrap()).await;
+                let result = executor
+                    .execute(&jobs.read().await.get(&job_id_clone).unwrap())
+                    .await;
 
                 let mut jobs = jobs.write().await;
                 if let Some(job) = jobs.get_mut(&job_id_clone) {
