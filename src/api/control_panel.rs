@@ -4,12 +4,15 @@
 //! including system metrics, job queue status, and skill/evolution management.
 
 use crate::api::state::AppState;
-use crate::queue::{JobQueue, JobQueueStats};
-use crate::work::{EvolutionEngine, SkillKernel};
+use crate::queue::JobQueueStats;
 use axum::{Router, extract::State, http::StatusCode, response::Json, routing::get};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
+use sysinfo::System;
+use std::time::Instant;
+
+/// Global startup time for uptime calculation
+static STARTUP_TIME: once_cell::sync::Lazy<Instant> = once_cell::sync::Lazy::new(Instant::now);
 
 /// System health metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,17 +137,26 @@ async fn get_job_queue_stats(
 }
 
 /// Get system metrics
+/// 
+/// Uses sysinfo to gather actual process and system metrics.
 async fn get_system_metrics() -> SystemMetrics {
-    // Get uptime (placeholder - would track actual uptime)
-    let uptime_seconds = 0;
+    // Calculate uptime
+    let uptime_seconds = STARTUP_TIME.elapsed().as_secs();
 
-    // Get memory usage (placeholder - would use actual system metrics)
-    let memory_usage_mb = 0;
+    // Get actual memory usage using sysinfo
+    let mut system = System::new_all();
+    system.refresh_all();
+    
+    // Get current process memory usage
+    let memory_usage_mb = sysinfo::get_current_pid()
+        .ok()
+        .and_then(|pid| system.process(pid).map(|p| p.memory() / 1024))
+        .unwrap_or(0);
 
-    // Get active connections (placeholder)
+    // Active connections - not tracked yet, return 0 as "not available"
     let active_connections = 0;
 
-    // Get total requests (placeholder)
+    // Total requests - not tracked yet, return 0 as "not available"  
     let total_requests = 0;
 
     SystemMetrics {
