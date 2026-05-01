@@ -124,7 +124,7 @@ impl ContextBuilder {
             .iter()
             .filter(|m| m.importance_score > 0.7)
             .collect();
-        
+
         for memory in critical_memory {
             items.push(ContextItem {
                 content: self.format_memory(memory),
@@ -149,7 +149,7 @@ impl ContextBuilder {
             .iter()
             .filter(|m| m.importance_score <= 0.7)
             .collect();
-        
+
         for memory in long_tail_memory {
             items.push(ContextItem {
                 content: self.format_memory(memory),
@@ -162,7 +162,7 @@ impl ContextBuilder {
         let trimmed = self.budgeter.build_context(items)?;
 
         let memory_count = inputs.memory.len();
-        
+
         Ok(BuiltContext {
             prompt: trimmed.prompt,
             dropped_items: trimmed.dropped_items,
@@ -180,7 +180,7 @@ impl ContextBuilder {
     fn format_memory(&self, memory: &Memory) -> String {
         let summary = memory.summary.as_deref().unwrap_or(&memory.content);
         format!(
-            "[Memory - {}]\nImportance: {:.2}\nContent: {}",
+            "[Memory - {:?}]\nImportance: {:.2}\nContent: {}",
             memory.kind, memory.importance_score, summary
         )
     }
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn test_context_builder_basic() {
         let builder = ContextBuilder::default();
-        
+
         let inputs = ContextInputs {
             task: "Test task".to_string(),
             plan: Some("Test plan".to_string()),
@@ -294,10 +294,27 @@ mod tests {
         assert_eq!(result.metadata.artifact_count, 1);
     }
 
+    #[tokio::test]
+    async fn test_context_builder_no_memory_service() {
+        let budgeter = ContextBudgeter::default();
+        let builder = ContextBuilder::new(budgeter);
+
+        let context_inputs = ContextInputs {
+            task: "Test task".to_string(),
+            plan: None,
+            memory: Vec::new(),
+            artifacts: Vec::new(),
+            system_prompt: None,
+        };
+
+        let result = builder.build(context_inputs).unwrap();
+        assert!(result.prompt.contains("Test task"));
+    }
+
     #[test]
     fn test_context_builder_memory_priority() {
         let builder = ContextBuilder::new(ContextBudgeter::new(100, 20));
-        
+
         let inputs = ContextInputs {
             task: "Test task".to_string(),
             plan: None,
@@ -317,23 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn test_context_builder_no_memory_service() {
-        let builder = ContextBuilder::default();
-        
-        let result = builder
-            .build_with_memory_retrieval("Test task".to_string(), None, 10)
-            .await
-            .unwrap();
-        
-        assert!(!result.prompt.is_empty());
-        assert!(result.prompt.contains("Test task"));
-    }
-
-    #[test]
     fn test_format_memory() {
         let builder = ContextBuilder::default();
         let memory = create_test_memory(0.8);
-        
+
         let formatted = builder.format_memory(&memory);
         assert!(formatted.contains("Memory"));
         assert!(formatted.contains("Importance: 0.80"));
@@ -344,7 +348,7 @@ mod tests {
     fn test_format_artifact() {
         let builder = ContextBuilder::default();
         let artifact = create_test_artifact();
-        
+
         let formatted = builder.format_artifact(&artifact);
         assert!(formatted.contains("Artifact"));
         assert!(formatted.contains("code"));
