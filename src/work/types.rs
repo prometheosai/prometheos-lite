@@ -449,3 +449,24 @@ mod tests {
         assert!(context.is_completion_satisfied());
     }
 }
+
+/// V1.5: Test execution result from verification loop
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestExecutionResult {
+    /// Whether tests passed overall
+    pub success: bool,
+    /// Command that was executed
+    pub command: String,
+    /// Full test output
+    pub output: String,
+    /// List of error messages
+    pub errors: Vec<String>,
+    /// Total number of tests run
+    pub tests_run: usize,
+    /// Number of tests that passed
+    pub tests_passed: usize,
+    /// Number of tests that failed
+    pub tests_failed: usize,
+    /// Detected project type (rust, node, python, go)
+    pub project_type: String,
+}
