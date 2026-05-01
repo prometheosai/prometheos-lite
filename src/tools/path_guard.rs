@@ -47,8 +47,7 @@ impl PathGuard {
         }
 
         // Ensure base directory exists
-        std::fs::create_dir_all(&self.base_dir)
-            .context("Failed to create base directory")?;
+        std::fs::create_dir_all(&self.base_dir).context("Failed to create base directory")?;
 
         // Build full path inside base directory
         let full_path = format!("{}/{}", self.base_dir, file_path);
@@ -109,7 +108,12 @@ mod tests {
         let guard = PathGuard::default();
         let result = guard.validate_path("/etc/passwd");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Absolute paths not allowed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Absolute paths not allowed")
+        );
     }
 
     #[test]
@@ -117,7 +121,12 @@ mod tests {
         let guard = PathGuard::default();
         let result = guard.validate_path("C:\\Windows\\System32");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Absolute paths not allowed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Absolute paths not allowed")
+        );
     }
 
     #[test]
@@ -125,10 +134,12 @@ mod tests {
         let guard = PathGuard::default();
         let result = guard.validate_path("../../secret");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Parent directory traversal"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Parent directory traversal")
+        );
     }
 
     #[test]

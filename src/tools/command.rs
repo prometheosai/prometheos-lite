@@ -32,7 +32,7 @@ pub struct CommandTool {
 impl CommandTool {
     pub fn new() -> Self {
         Self {
-            timeout_ms: 30000, // 30 seconds default
+            timeout_ms: 30000,                  // 30 seconds default
             max_output_bytes: 10 * 1024 * 1024, // 10 MB default
             allowed_commands: vec![
                 "cargo".to_string(),
@@ -170,17 +170,22 @@ impl Tool for CommandTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let command = input.get("command")
+        let command = input
+            .get("command")
             .and_then(|v| v.as_str())
             .context("Missing command")?;
 
-        let args: Vec<String> = input.get("args")
+        let args: Vec<String> = input
+            .get("args")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let cwd = input.get("cwd")
-            .and_then(|v| v.as_str());
+        let cwd = input.get("cwd").and_then(|v| v.as_str());
 
         // Check if command is allowed
         if !self.is_command_allowed(command) {
@@ -309,22 +314,29 @@ impl Tool for RunTestsTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let cwd = input.get("cwd")
-            .and_then(|v| v.as_str());
+        let cwd = input.get("cwd").and_then(|v| v.as_str());
 
-        let test_command = input.get("test_command")
-            .and_then(|v| v.as_str());
+        let test_command = input.get("test_command").and_then(|v| v.as_str());
 
-        let additional_args: Vec<String> = input.get("args")
+        let additional_args: Vec<String> = input
+            .get("args")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Auto-detect test command if not provided
         let (command, args) = if let Some(tc) = test_command {
             let parts: Vec<&str> = tc.split_whitespace().collect();
             let cmd = parts[0];
-            let cmd_args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).chain(additional_args).collect();
+            let cmd_args: Vec<String> = parts[1..]
+                .iter()
+                .map(|s| s.to_string())
+                .chain(additional_args)
+                .collect();
             (cmd.to_string(), cmd_args)
         } else {
             self.detect_test_command(cwd, additional_args)?
@@ -356,34 +368,68 @@ impl Tool for RunTestsTool {
 }
 
 impl RunTestsTool {
-    fn detect_test_command(&self, cwd: Option<&str>, additional_args: Vec<String>) -> Result<(String, Vec<String>)> {
+    fn detect_test_command(
+        &self,
+        cwd: Option<&str>,
+        additional_args: Vec<String>,
+    ) -> Result<(String, Vec<String>)> {
         // Check for common project files to determine test command
         if let Some(working_dir) = cwd {
             let path = std::path::Path::new(working_dir);
 
             // Check for Cargo.toml (Rust)
             if path.join("Cargo.toml").exists() {
-                return Ok(("cargo".to_string(), vec!["test".to_string()].into_iter().chain(additional_args).collect()));
+                return Ok((
+                    "cargo".to_string(),
+                    vec!["test".to_string()]
+                        .into_iter()
+                        .chain(additional_args)
+                        .collect(),
+                ));
             }
 
             // Check for package.json (Node.js)
             if path.join("package.json").exists() {
-                return Ok(("npm".to_string(), vec!["test".to_string()].into_iter().chain(additional_args).collect()));
+                return Ok((
+                    "npm".to_string(),
+                    vec!["test".to_string()]
+                        .into_iter()
+                        .chain(additional_args)
+                        .collect(),
+                ));
             }
 
             // Check for go.mod (Go)
             if path.join("go.mod").exists() {
-                return Ok(("go".to_string(), vec!["test".to_string()].into_iter().chain(additional_args).collect()));
+                return Ok((
+                    "go".to_string(),
+                    vec!["test".to_string()]
+                        .into_iter()
+                        .chain(additional_args)
+                        .collect(),
+                ));
             }
 
             // Check for pom.xml (Maven)
             if path.join("pom.xml").exists() {
-                return Ok(("mvn".to_string(), vec!["test".to_string()].into_iter().chain(additional_args).collect()));
+                return Ok((
+                    "mvn".to_string(),
+                    vec!["test".to_string()]
+                        .into_iter()
+                        .chain(additional_args)
+                        .collect(),
+                ));
             }
 
             // Check for build.gradle (Gradle)
             if path.join("build.gradle").exists() || path.join("build.gradle.kts").exists() {
-                return Ok(("gradle".to_string(), vec!["test".to_string()].into_iter().chain(additional_args).collect()));
+                return Ok((
+                    "gradle".to_string(),
+                    vec!["test".to_string()]
+                        .into_iter()
+                        .chain(additional_args)
+                        .collect(),
+                ));
             }
 
             // Check for .csproj file (dotnet)
@@ -391,7 +437,13 @@ impl RunTestsTool {
                 for entry in entries.flatten() {
                     if let Some(name) = entry.file_name().to_str() {
                         if name.ends_with(".csproj") {
-                            return Ok(("dotnet".to_string(), vec!["test".to_string()].into_iter().chain(additional_args).collect()));
+                            return Ok((
+                                "dotnet".to_string(),
+                                vec!["test".to_string()]
+                                    .into_iter()
+                                    .chain(additional_args)
+                                    .collect(),
+                            ));
                         }
                     }
                 }
@@ -405,8 +457,14 @@ impl RunTestsTool {
     fn parse_test_results(&self, result: &serde_json::Value) -> serde_json::Value {
         let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
         let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-        let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let exit_code = result
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Parse common test output formats
         let total_tests = self.extract_test_count(stdout, stderr);
@@ -424,27 +482,49 @@ impl RunTestsTool {
 
     fn extract_test_count(&self, stdout: &str, stderr: &str) -> u64 {
         let combined = format!("{} {}", stdout, stderr);
-        
+
         // Cargo test output: "test result: ok. X passed"
-        if let Some(captures) = regex::Regex::new(r"test result: ok\. (\d+) passed").unwrap().captures(&combined) {
+        if let Some(captures) = regex::Regex::new(r"test result: ok\. (\d+) passed")
+            .unwrap()
+            .captures(&combined)
+        {
             if let Some(count) = captures.get(1) {
                 return count.as_str().parse().unwrap_or(0);
             }
         }
 
         // Cargo test output: "test result: FAILED. X passed; Y failed"
-        if let Some(captures) = regex::Regex::new(r"test result: FAILED\. (\d+) passed; (\d+) failed").unwrap().captures(&combined) {
-            let passed = captures.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
-            let failed = captures.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        if let Some(captures) =
+            regex::Regex::new(r"test result: FAILED\. (\d+) passed; (\d+) failed")
+                .unwrap()
+                .captures(&combined)
+        {
+            let passed = captures
+                .get(1)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(0);
+            let failed = captures
+                .get(2)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(0);
             return passed + failed;
         }
 
         // pytest output: "X passed, Y failed"
-        if let Some(captures) = regex::Regex::new(r"(\d+) passed").unwrap().captures(&combined) {
+        if let Some(captures) = regex::Regex::new(r"(\d+) passed")
+            .unwrap()
+            .captures(&combined)
+        {
             if let Some(count) = captures.get(1) {
                 let passed = count.as_str().parse().unwrap_or(0);
-                if let Some(failed_captures) = regex::Regex::new(r"(\d+) failed").unwrap().captures(&combined) {
-                    let failed = failed_captures.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+                if let Some(failed_captures) = regex::Regex::new(r"(\d+) failed")
+                    .unwrap()
+                    .captures(&combined)
+                {
+                    let failed = failed_captures
+                        .get(1)
+                        .and_then(|m| m.as_str().parse().ok())
+                        .unwrap_or(0);
                     return passed + failed;
                 }
                 return passed;
@@ -458,7 +538,10 @@ impl RunTestsTool {
         let combined = format!("{} {}", stdout, stderr);
 
         // Cargo test output
-        if let Some(captures) = regex::Regex::new(r"(\d+) passed").unwrap().captures(&combined) {
+        if let Some(captures) = regex::Regex::new(r"(\d+) passed")
+            .unwrap()
+            .captures(&combined)
+        {
             if let Some(count) = captures.get(1) {
                 return count.as_str().parse().unwrap_or(0);
             }
@@ -471,7 +554,10 @@ impl RunTestsTool {
         let combined = format!("{} {}", stdout, stderr);
 
         // Cargo test output
-        if let Some(captures) = regex::Regex::new(r"(\d+) failed").unwrap().captures(&combined) {
+        if let Some(captures) = regex::Regex::new(r"(\d+) failed")
+            .unwrap()
+            .captures(&combined)
+        {
             if let Some(count) = captures.get(1) {
                 return count.as_str().parse().unwrap_or(0);
             }
@@ -489,10 +575,13 @@ mod tests {
     #[tokio::test]
     async fn test_command_tool_echo() {
         let tool = CommandTool::new();
-        let result = tool.call(serde_json::json!({
-            "command": "echo",
-            "args": ["hello", "world"]
-        })).await.unwrap();
+        let result = tool
+            .call(serde_json::json!({
+                "command": "echo",
+                "args": ["hello", "world"]
+            }))
+            .await
+            .unwrap();
 
         assert!(result["success"].as_bool().unwrap());
         assert_eq!(result["stdout"].as_str().unwrap(), "hello world\n");
@@ -502,10 +591,13 @@ mod tests {
     #[tokio::test]
     async fn test_command_tool_blocked() {
         let tool = CommandTool::new();
-        let result = tool.call(serde_json::json!({
-            "command": "rm",
-            "args": ["-rf", "/"]
-        })).await.unwrap();
+        let result = tool
+            .call(serde_json::json!({
+                "command": "rm",
+                "args": ["-rf", "/"]
+            }))
+            .await
+            .unwrap();
 
         assert!(!result["success"].as_bool().unwrap());
         assert!(result["error"].as_str().unwrap().contains("not allowed"));
@@ -514,10 +606,12 @@ mod tests {
     #[tokio::test]
     async fn test_command_tool_timeout() {
         let tool = CommandTool::new().with_timeout(100); // 100ms timeout
-        let result = tool.call(serde_json::json!({
-            "command": "sleep",
-            "args": ["10"]
-        })).await;
+        let result = tool
+            .call(serde_json::json!({
+                "command": "sleep",
+                "args": ["10"]
+            }))
+            .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
@@ -540,7 +634,9 @@ mod tests {
         std::fs::write(repo_path.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
 
         let tool = RunTestsTool::new();
-        let (command, args) = tool.detect_test_command(Some(repo_path.to_str().unwrap()), vec![]).unwrap();
+        let (command, args) = tool
+            .detect_test_command(Some(repo_path.to_str().unwrap()), vec![])
+            .unwrap();
 
         assert_eq!(command, "cargo");
         assert_eq!(args, vec!["test"]);
@@ -554,7 +650,9 @@ mod tests {
         std::fs::write(repo_path.join("package.json"), "{\"name\": \"test\"}").unwrap();
 
         let tool = RunTestsTool::new();
-        let (command, args) = tool.detect_test_command(Some(repo_path.to_str().unwrap()), vec![]).unwrap();
+        let (command, args) = tool
+            .detect_test_command(Some(repo_path.to_str().unwrap()), vec![])
+            .unwrap();
 
         assert_eq!(command, "npm");
         assert_eq!(args, vec!["test"]);

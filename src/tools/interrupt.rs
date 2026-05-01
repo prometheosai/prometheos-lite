@@ -101,7 +101,10 @@ impl InterruptContext {
     /// Approve the interrupt with a decision
     pub fn approve(&mut self, decision: serde_json::Value) -> Result<(), String> {
         if self.status != InterruptStatus::Pending {
-            return Err(format!("Cannot approve interrupt in status: {:?}", self.status));
+            return Err(format!(
+                "Cannot approve interrupt in status: {:?}",
+                self.status
+            ));
         }
 
         // Validate decision against expected schema
@@ -117,7 +120,10 @@ impl InterruptContext {
     /// Deny the interrupt
     pub fn deny(&mut self) -> Result<(), String> {
         if self.status != InterruptStatus::Pending {
-            return Err(format!("Cannot deny interrupt in status: {:?}", self.status));
+            return Err(format!(
+                "Cannot deny interrupt in status: {:?}",
+                self.status
+            ));
         }
 
         self.status = InterruptStatus::Denied;
@@ -169,7 +175,8 @@ impl InterruptContext {
             &self.reason,
             &self.expected_schema.to_string(),
             self.work_context_id.as_deref(),
-        ).map_err(|e| format!("Failed to persist interrupt: {}", e))?;
+        )
+        .map_err(|e| format!("Failed to persist interrupt: {}", e))?;
 
         Ok(())
     }
@@ -188,31 +195,34 @@ impl InterruptContext {
         let entry = InterruptOperations::get_interrupt(&db, interrupt_id)
             .map_err(|e| format!("Failed to load interrupt: {}", e))?;
 
-        entry.map(|e| {
-            let expected_schema: serde_json::Value = serde_json::from_str(&e.expected_schema)
-                .unwrap_or(serde_json::Value::Null);
-            let decision: Option<serde_json::Value> = e.decision.and_then(|d| serde_json::from_str(&d).ok());
+        entry
+            .map(|e| {
+                let expected_schema: serde_json::Value =
+                    serde_json::from_str(&e.expected_schema).unwrap_or(serde_json::Value::Null);
+                let decision: Option<serde_json::Value> =
+                    e.decision.and_then(|d| serde_json::from_str(&d).ok());
 
-            Ok(Self {
-                interrupt_id: e.id,
-                run_id: e.run_id,
-                trace_id: e.trace_id,
-                node_id: e.node_id,
-                reason: e.reason,
-                expected_schema,
-                expires_at: e.expires_at,
-                status: match e.status.as_str() {
-                    "pending" => InterruptStatus::Pending,
-                    "approved" => InterruptStatus::Approved,
-                    "denied" => InterruptStatus::Denied,
-                    "expired" => InterruptStatus::Expired,
-                    _ => InterruptStatus::Pending,
-                },
-                decision,
-                work_context_id: e.work_context_id,
-                created_at: e.created_at,
+                Ok(Self {
+                    interrupt_id: e.id,
+                    run_id: e.run_id,
+                    trace_id: e.trace_id,
+                    node_id: e.node_id,
+                    reason: e.reason,
+                    expected_schema,
+                    expires_at: e.expires_at,
+                    status: match e.status.as_str() {
+                        "pending" => InterruptStatus::Pending,
+                        "approved" => InterruptStatus::Approved,
+                        "denied" => InterruptStatus::Denied,
+                        "expired" => InterruptStatus::Expired,
+                        _ => InterruptStatus::Pending,
+                    },
+                    decision,
+                    work_context_id: e.work_context_id,
+                    created_at: e.created_at,
+                })
             })
-        }).transpose()
+            .transpose()
     }
 }
 

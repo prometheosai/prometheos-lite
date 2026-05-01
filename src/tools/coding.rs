@@ -43,12 +43,13 @@ impl Tool for ReadFileTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let file_path = input.get("file_path")
+        let file_path = input
+            .get("file_path")
             .and_then(|v| v.as_str())
             .context("Missing file_path")?;
 
         let full_path = self.repo_path.join(file_path);
-        
+
         if !full_path.exists() {
             return Ok(serde_json::json!({
                 "error": format!("File not found: {}", full_path.display()),
@@ -56,7 +57,8 @@ impl Tool for ReadFileTool {
             }));
         }
 
-        let content = tokio::fs::read_to_string(&full_path).await
+        let content = tokio::fs::read_to_string(&full_path)
+            .await
             .context("Failed to read file")?;
 
         Ok(serde_json::json!({
@@ -106,15 +108,16 @@ impl Tool for SearchCodeTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let pattern = input.get("pattern")
+        let pattern = input
+            .get("pattern")
             .and_then(|v| v.as_str())
             .context("Missing pattern")?;
 
-        let file_pattern = input.get("file_pattern")
-            .and_then(|v| v.as_str());
+        let file_pattern = input.get("file_pattern").and_then(|v| v.as_str());
 
         let mut results = Vec::new();
-        self.search_repo(pattern, file_pattern, &mut results).await?;
+        self.search_repo(pattern, file_pattern, &mut results)
+            .await?;
 
         Ok(serde_json::json!({
             "pattern": pattern,
@@ -126,20 +129,26 @@ impl Tool for SearchCodeTool {
 }
 
 impl SearchCodeTool {
-    async fn search_repo(&self, pattern: &str, file_pattern: Option<&str>, results: &mut Vec<serde_json::Value>) -> Result<()> {
-        let mut entries = tokio::fs::read_dir(&self.repo_path).await
+    async fn search_repo(
+        &self,
+        pattern: &str,
+        file_pattern: Option<&str>,
+        results: &mut Vec<serde_json::Value>,
+    ) -> Result<()> {
+        let mut entries = tokio::fs::read_dir(&self.repo_path)
+            .await
             .context("Failed to read repo directory")?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            
+
             if path.is_dir() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name == "target" || name == "node_modules" || name == ".git" {
                         continue;
                     }
                 }
-                
+
                 let mut sub_entries = tokio::fs::read_dir(&path).await?;
                 while let Some(sub_entry) = sub_entries.next_entry().await? {
                     let sub_path = sub_entry.path();
@@ -161,14 +170,20 @@ impl SearchCodeTool {
                 self.search_file(&path, pattern, results).await?;
             }
         }
-        
+
         Ok(())
     }
 
-    async fn search_file(&self, path: &Path, pattern: &str, results: &mut Vec<serde_json::Value>) -> Result<()> {
-        let content = tokio::fs::read_to_string(path).await
+    async fn search_file(
+        &self,
+        path: &Path,
+        pattern: &str,
+        results: &mut Vec<serde_json::Value>,
+    ) -> Result<()> {
+        let content = tokio::fs::read_to_string(path)
+            .await
             .context("Failed to read file")?;
-        
+
         for (line_num, line) in content.lines().enumerate() {
             if line.contains(pattern) {
                 results.push(serde_json::json!({
@@ -179,7 +194,7 @@ impl SearchCodeTool {
                 }));
             }
         }
-        
+
         Ok(())
     }
 
@@ -231,11 +246,13 @@ impl Tool for ListFilesTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let directory = input.get("directory")
+        let directory = input
+            .get("directory")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let recursive = input.get("recursive")
+        let recursive = input
+            .get("recursive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -246,7 +263,7 @@ impl Tool for ListFilesTool {
         };
 
         let mut files = Vec::new();
-        
+
         if recursive {
             self.list_recursive(&base_path, &mut files).await?;
         } else {
@@ -264,37 +281,39 @@ impl Tool for ListFilesTool {
 
 impl ListFilesTool {
     async fn list_directory(&self, path: &Path, files: &mut Vec<serde_json::Value>) -> Result<()> {
-        let mut entries = tokio::fs::read_dir(path).await
+        let mut entries = tokio::fs::read_dir(path)
+            .await
             .context("Failed to read directory")?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
             let is_dir = entry_path.is_dir();
-            
+
             files.push(serde_json::json!({
                 "name": entry.file_name().to_string_lossy().to_string(),
                 "path": entry_path.to_string_lossy().to_string(),
                 "is_directory": is_dir
             }));
         }
-        
+
         Ok(())
     }
 
     async fn list_recursive(&self, path: &Path, files: &mut Vec<serde_json::Value>) -> Result<()> {
-        let mut entries = tokio::fs::read_dir(path).await
+        let mut entries = tokio::fs::read_dir(path)
+            .await
             .context("Failed to read directory")?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
             let is_dir = entry_path.is_dir();
-            
+
             files.push(serde_json::json!({
                 "name": entry.file_name().to_string_lossy().to_string(),
                 "path": entry_path.to_string_lossy().to_string(),
                 "is_directory": is_dir
             }));
-            
+
             if is_dir {
                 if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
                     if name != "target" && name != "node_modules" && name != ".git" {
@@ -303,7 +322,7 @@ impl ListFilesTool {
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -343,12 +362,13 @@ impl Tool for GetFileInfoTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let file_path = input.get("file_path")
+        let file_path = input
+            .get("file_path")
             .and_then(|v| v.as_str())
             .context("Missing file_path")?;
 
         let full_path = self.repo_path.join(file_path);
-        
+
         if !full_path.exists() {
             return Ok(serde_json::json!({
                 "error": format!("File not found: {}", full_path.display()),
@@ -356,10 +376,12 @@ impl Tool for GetFileInfoTool {
             }));
         }
 
-        let metadata = tokio::fs::metadata(&full_path).await
+        let metadata = tokio::fs::metadata(&full_path)
+            .await
             .context("Failed to get file metadata")?;
 
-        let extension = full_path.extension()
+        let extension = full_path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("unknown");
 

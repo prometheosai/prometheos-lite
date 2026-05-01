@@ -112,12 +112,18 @@ impl ToolContext {
             ApprovalPolicy::ManualAll => true,
             ApprovalPolicy::RequireForTools => true,
             ApprovalPolicy::RequireForUntrusted => {
-                matches!(self.trust_level, TrustLevel::Untrusted | TrustLevel::External)
+                matches!(
+                    self.trust_level,
+                    TrustLevel::Untrusted | TrustLevel::External
+                )
             }
             ApprovalPolicy::RequireForSideEffects => {
                 // This will be checked based on tool permissions
-                self.policy.is_allowed(crate::tools::permissions::ToolPermission::FileWrite)
-                    || self.policy.is_allowed(crate::tools::permissions::ToolPermission::Shell)
+                self.policy
+                    .is_allowed(crate::tools::permissions::ToolPermission::FileWrite)
+                    || self
+                        .policy
+                        .is_allowed(crate::tools::permissions::ToolPermission::Shell)
             }
         }
     }

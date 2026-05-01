@@ -131,8 +131,7 @@ mod tests {
 
     #[test]
     fn test_trust_policy_with_approval() {
-        let policy = TrustPolicy::new("test".to_string(), TrustLevel::Trusted)
-            .with_approval(true);
+        let policy = TrustPolicy::new("test".to_string(), TrustLevel::Trusted).with_approval(true);
         assert!(policy.require_approval);
     }
 

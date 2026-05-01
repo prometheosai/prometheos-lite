@@ -17,5 +17,8 @@ pub use interrupt::{InterruptContext, InterruptStatus};
 pub use metadata::ToolMetadata;
 pub use path_guard::PathGuard;
 pub use permissions::{ToolPermission, ToolPolicy};
-pub use repo::{GitDiffTool, ListTreeTool, PatchFileTool, RepoReadFileTool, RepoTool, SearchFilesTool, WriteFileTool};
+pub use repo::{
+    GitDiffTool, ListTreeTool, PatchFileTool, RepoReadFileTool, RepoTool, SearchFilesTool,
+    WriteFileTool,
+};
 pub use trust::{TrustPolicy, TrustRegistry};

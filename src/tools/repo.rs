@@ -65,9 +65,7 @@ impl Tool for ListTreeTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let root = input.get("root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let root = input.get("root").and_then(|v| v.as_str()).unwrap_or("");
 
         // Validate path with PathGuard
         if !root.is_empty() && !self.path_guard.is_safe_path(root) {
@@ -77,7 +75,8 @@ impl Tool for ListTreeTool {
             }));
         }
 
-        let depth = input.get("depth")
+        let depth = input
+            .get("depth")
             .and_then(|v| v.as_u64())
             .map(|d| d as u32);
 
@@ -91,9 +90,11 @@ impl Tool for ListTreeTool {
         let mut dirs = Vec::new();
 
         if let Some(max_depth) = depth {
-            self.list_tree_recursive(&base_path, 0, max_depth, &mut files, &mut dirs).await?;
+            self.list_tree_recursive(&base_path, 0, max_depth, &mut files, &mut dirs)
+                .await?;
         } else {
-            self.list_tree_recursive(&base_path, 0, u32::MAX, &mut files, &mut dirs).await?;
+            self.list_tree_recursive(&base_path, 0, u32::MAX, &mut files, &mut dirs)
+                .await?;
         }
 
         Ok(serde_json::json!({
@@ -123,7 +124,7 @@ impl ListTreeTool {
 
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
-            
+
             // Skip common ignored directories
             if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
                 if name == "target" || name == "node_modules" || name == ".git" || name == ".next" {
@@ -133,7 +134,14 @@ impl ListTreeTool {
 
             if entry_path.is_dir() {
                 dirs.push(entry_path.to_string_lossy().to_string());
-                Box::pin(self.list_tree_recursive(&entry_path, current_depth + 1, max_depth, files, dirs)).await?;
+                Box::pin(self.list_tree_recursive(
+                    &entry_path,
+                    current_depth + 1,
+                    max_depth,
+                    files,
+                    dirs,
+                ))
+                .await?;
             } else {
                 files.push(entry_path.to_string_lossy().to_string());
             }
@@ -183,7 +191,8 @@ impl Tool for RepoReadFileTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let path = input.get("path")
+        let path = input
+            .get("path")
             .and_then(|v| v.as_str())
             .context("Missing path")?;
 
@@ -260,12 +269,12 @@ impl Tool for SearchFilesTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let query = input.get("query")
+        let query = input
+            .get("query")
             .and_then(|v| v.as_str())
             .context("Missing query")?;
 
-        let glob = input.get("glob")
-            .and_then(|v| v.as_str());
+        let glob = input.get("glob").and_then(|v| v.as_str());
 
         let mut results = Vec::new();
         self.search_repo(query, glob, &mut results).await?;
@@ -280,7 +289,12 @@ impl Tool for SearchFilesTool {
 }
 
 impl SearchFilesTool {
-    async fn search_repo(&self, query: &str, glob: Option<&str>, results: &mut Vec<serde_json::Value>) -> Result<()> {
+    async fn search_repo(
+        &self,
+        query: &str,
+        glob: Option<&str>,
+        results: &mut Vec<serde_json::Value>,
+    ) -> Result<()> {
         let mut entries = tokio::fs::read_dir(&self.repo_path)
             .await
             .context("Failed to read repo directory")?;
@@ -320,7 +334,12 @@ impl SearchFilesTool {
         Ok(())
     }
 
-    async fn search_file(&self, path: &Path, query: &str, results: &mut Vec<serde_json::Value>) -> Result<()> {
+    async fn search_file(
+        &self,
+        path: &Path,
+        query: &str,
+        results: &mut Vec<serde_json::Value>,
+    ) -> Result<()> {
         let content = tokio::fs::read_to_string(path)
             .await
             .context("Failed to read file")?;
@@ -392,11 +411,13 @@ impl Tool for WriteFileTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let path = input.get("path")
+        let path = input
+            .get("path")
             .and_then(|v| v.as_str())
             .context("Missing path")?;
 
-        let content = input.get("content")
+        let content = input
+            .get("content")
             .and_then(|v| v.as_str())
             .context("Missing content")?;
 
@@ -486,11 +507,13 @@ impl Tool for PatchFileTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let path = input.get("path")
+        let path = input
+            .get("path")
             .and_then(|v| v.as_str())
             .context("Missing path")?;
 
-        let diff = input.get("diff")
+        let diff = input
+            .get("diff")
             .and_then(|v| v.as_str())
             .context("Missing diff")?;
 
@@ -529,7 +552,8 @@ impl Tool for PatchFileTool {
             .context("Failed to read original file")?;
 
         // Apply patch
-        let patched_content = self.apply_patch(&original_content, diff)
+        let patched_content = self
+            .apply_patch(&original_content, diff)
             .context("Failed to apply patch")?;
 
         // Write patched content
@@ -556,7 +580,9 @@ impl PatchFileTool {
         }
 
         // Check for diff header
-        let has_header = lines.iter().any(|line| line.starts_with("---") || line.starts_with("+++"));
+        let has_header = lines
+            .iter()
+            .any(|line| line.starts_with("---") || line.starts_with("+++"));
         // Check for hunk headers
         let has_hunk = lines.iter().any(|line| line.starts_with("@@"));
 
@@ -573,16 +599,18 @@ impl PatchFileTool {
         if self.allow_fallback {
             self.apply_patch_simplified(original, diff)
         } else {
-            anyhow::bail!("System patch command not available and fallback is disabled for production safety")
+            anyhow::bail!(
+                "System patch command not available and fallback is disabled for production safety"
+            )
         }
     }
 
     fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
         // Use the system 'patch' command for reliable diff application
         let mut child = Command::new("patch")
-            .arg("-p1")  // Strip first directory component
-            .arg("--dry-run")  // First validate the patch
-            .current_dir(&self.repo_path)  // Execute in repo directory
+            .arg("-p1") // Strip first directory component
+            .arg("--dry-run") // First validate the patch
+            .current_dir(&self.repo_path) // Execute in repo directory
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -592,10 +620,14 @@ impl PatchFileTool {
         // Write diff to stdin
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(diff.as_bytes()).context("Failed to write diff to patch")?;
+            stdin
+                .write_all(diff.as_bytes())
+                .context("Failed to write diff to patch")?;
         }
 
-        let output = child.wait_with_output().context("Failed to execute patch validation")?;
+        let output = child
+            .wait_with_output()
+            .context("Failed to execute patch validation")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -605,7 +637,7 @@ impl PatchFileTool {
         // Apply the patch for real
         let mut child = Command::new("patch")
             .arg("-p1")
-            .current_dir(&self.repo_path)  // Execute in repo directory
+            .current_dir(&self.repo_path) // Execute in repo directory
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -614,10 +646,14 @@ impl PatchFileTool {
 
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(diff.as_bytes()).context("Failed to write diff to patch")?;
+            stdin
+                .write_all(diff.as_bytes())
+                .context("Failed to write diff to patch")?;
         }
 
-        let output = child.wait_with_output().context("Failed to execute patch")?;
+        let output = child
+            .wait_with_output()
+            .context("Failed to execute patch")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -645,18 +681,28 @@ impl PatchFileTool {
                     let old_info = parts[1]; // -old_start,old_count
                     let new_info = parts[2]; // +new_start,new_count
 
-                    let old_parts: Vec<&str> = old_info.trim_start_matches('-').split(',').collect();
+                    let old_parts: Vec<&str> =
+                        old_info.trim_start_matches('-').split(',').collect();
                     let old_start: usize = old_parts[0].parse().unwrap_or(1);
-                    let old_count: usize = if old_parts.len() > 1 { old_parts[1].parse().unwrap_or(1) } else { 1 };
+                    let old_count: usize = if old_parts.len() > 1 {
+                        old_parts[1].parse().unwrap_or(1)
+                    } else {
+                        1
+                    };
 
-                    let new_parts: Vec<&str> = new_info.trim_start_matches('+').split(',').collect();
+                    let new_parts: Vec<&str> =
+                        new_info.trim_start_matches('+').split(',').collect();
                     let _new_start: usize = new_parts[0].parse().unwrap_or(1);
 
                     let mut old_idx = old_start - 1;
                     let mut new_lines = Vec::new();
 
                     i += 1;
-                    while i < diff_lines.len() && !diff_lines[i].starts_with("@@") && !diff_lines[i].starts_with("---") && !diff_lines[i].starts_with("+++") {
+                    while i < diff_lines.len()
+                        && !diff_lines[i].starts_with("@@")
+                        && !diff_lines[i].starts_with("---")
+                        && !diff_lines[i].starts_with("+++")
+                    {
                         let diff_line = diff_lines[i];
 
                         if diff_line.starts_with(' ') {
@@ -734,7 +780,8 @@ impl Tool for GitDiffTool {
     }
 
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let cached = input.get("cached")
+        let cached = input
+            .get("cached")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -745,8 +792,7 @@ impl Tool for GitDiffTool {
         }
         cmd.current_dir(&self.repo_path);
 
-        let output = cmd.output()
-            .context("Failed to execute git diff")?;
+        let output = cmd.output().context("Failed to execute git diff")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -777,9 +823,15 @@ mod tests {
         let repo_path = temp_dir.path();
 
         // Create test structure
-        tokio::fs::create_dir_all(repo_path.join("src")).await.unwrap();
-        tokio::fs::write(repo_path.join("src/main.rs"), "fn main() {}").await.unwrap();
-        tokio::fs::write(repo_path.join("README.md"), "# Test").await.unwrap();
+        tokio::fs::create_dir_all(repo_path.join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(repo_path.join("src/main.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(repo_path.join("README.md"), "# Test")
+            .await
+            .unwrap();
 
         let tool = ListTreeTool::new(repo_path.to_path_buf());
         let result = tool.call(serde_json::json!({})).await.unwrap();
@@ -793,10 +845,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path();
 
-        tokio::fs::write(repo_path.join("test.txt"), "Hello, World!").await.unwrap();
+        tokio::fs::write(repo_path.join("test.txt"), "Hello, World!")
+            .await
+            .unwrap();
 
         let tool = RepoReadFileTool::new(repo_path.to_path_buf());
-        let result = tool.call(serde_json::json!({"path": "test.txt"})).await.unwrap();
+        let result = tool
+            .call(serde_json::json!({"path": "test.txt"}))
+            .await
+            .unwrap();
 
         assert!(result["success"].as_bool().unwrap());
         assert_eq!(result["content"].as_str().unwrap(), "Hello, World!");
@@ -808,16 +865,21 @@ mod tests {
         let repo_path = temp_dir.path();
 
         let tool = WriteFileTool::new(repo_path.to_path_buf());
-        let result = tool.call(serde_json::json!({
-            "path": "new_file.txt",
-            "content": "New content"
-        })).await.unwrap();
+        let result = tool
+            .call(serde_json::json!({
+                "path": "new_file.txt",
+                "content": "New content"
+            }))
+            .await
+            .unwrap();
 
         assert!(result["success"].as_bool().unwrap());
         assert_eq!(result["bytes_written"].as_u64().unwrap(), 11);
 
         // Verify file was written
-        let content = tokio::fs::read_to_string(repo_path.join("new_file.txt")).await.unwrap();
+        let content = tokio::fs::read_to_string(repo_path.join("new_file.txt"))
+            .await
+            .unwrap();
         assert_eq!(content, "New content");
     }
 
@@ -826,11 +888,21 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path();
 
-        tokio::fs::write(repo_path.join("test.rs"), "fn main() { println!(\"hello\"); }").await.unwrap();
-        tokio::fs::write(repo_path.join("test.txt"), "hello world").await.unwrap();
+        tokio::fs::write(
+            repo_path.join("test.rs"),
+            "fn main() { println!(\"hello\"); }",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(repo_path.join("test.txt"), "hello world")
+            .await
+            .unwrap();
 
         let tool = SearchFilesTool::new(repo_path.to_path_buf());
-        let result = tool.call(serde_json::json!({"query": "hello"})).await.unwrap();
+        let result = tool
+            .call(serde_json::json!({"query": "hello"}))
+            .await
+            .unwrap();
 
         assert!(result["success"].as_bool().unwrap());
         assert!(result["count"].as_u64().unwrap() > 0);
