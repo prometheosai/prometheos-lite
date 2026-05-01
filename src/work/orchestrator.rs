@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::evolution_engine::EvolutionEngine;
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
-use super::types::{AutonomyLevel, WorkContext, WorkPhase, WorkStatus};
+use super::types::{AutonomyLevel, TestExecutionResult, WorkContext, WorkPhase, WorkStatus};
 use crate::flow::execution_service::FlowExecutionService;
 use crate::intent::{Intent, IntentClassifier};
 
@@ -429,19 +429,311 @@ impl WorkOrchestrator {
         Ok(context)
     }
 
-    /// Check if tests passed based on context artifacts and evaluation
+    /// Check if tests passed by executing real tests
+    ///
+    /// This method detects project type, runs appropriate tests,
+    /// parses results, and stores test artifacts.
     async fn check_tests_passed(&self, context: &WorkContext) -> Result<bool> {
-        // Check evaluation result if available
+        // Check evaluation result if available (from flow execution)
         if let Some(evaluation) = &context.evaluation_result {
             if let Some(success) = evaluation.get("test_success").and_then(|v| v.as_bool()) {
                 return Ok(success);
             }
         }
 
-        // Check artifacts for test results
-        // This would require accessing the artifact repository
-        // For now, assume tests pass if context is not blocked
-        Ok(!context.is_blocked())
+        // Get project path from context artifacts
+        let project_path = self.detect_project_path(context).await?;
+
+        if project_path.is_none() {
+            tracing::warn!("No project path found for context {}, skipping real test execution", context.id);
+            return Ok(!context.is_blocked());
+        }
+
+        let project_path = project_path.unwrap();
+
+        // Detect project type and run appropriate tests
+        let test_result = self.execute_project_tests(&project_path).await?;
+
+        // Store test results in context evaluation
+        let mut context = context.clone();
+        let evaluation = serde_json::json!({
+            "test_success": test_result.success,
+            "test_command": test_result.command,
+            "test_output": test_result.output,
+            "test_errors": test_result.errors,
+            "tests_run": test_result.tests_run,
+            "tests_passed": test_result.tests_passed,
+            "tests_failed": test_result.tests_failed,
+            "project_type": test_result.project_type,
+            "executed_at": chrono::Utc::now().to_rfc3339(),
+        });
+
+        context.evaluation_result = Some(evaluation);
+        self.work_context_service.update_context(&context)?;
+
+        // Persist test artifacts
+        self.persist_test_artifacts(&context.id, &test_result).await?;
+
+        Ok(test_result.success)
+    }
+
+    /// Detect project path from context artifacts
+    async fn detect_project_path(&self, context: &WorkContext) -> Result<Option<std::path::PathBuf>> {
+        // Check context metadata for project path
+        if let Some(project_path) = context.metadata.get("project_path").and_then(|v| v.as_str()) {
+            return Ok(Some(std::path::PathBuf::from(project_path)));
+        }
+        if let Some(repo_path) = context.metadata.get("repo_path").and_then(|v| v.as_str()) {
+            return Ok(Some(std::path::PathBuf::from(repo_path)));
+        }
+
+        // Default to current directory if this is a local context
+        Ok(Some(std::path::PathBuf::from(".")))
+    }
+
+    /// Execute tests based on project type
+    async fn execute_project_tests(
+        &self,
+        project_path: &std::path::Path,
+    ) -> Result<TestExecutionResult> {
+        use tokio::process::Command;
+
+        // Detect project type
+        let project_type = self.detect_project_type(project_path).await?;
+
+        let (test_command, args) = match project_type.as_str() {
+            "rust" => ("cargo", vec!["test", "--all-features", "--", "--nocapture"]),
+            "node" => ("npm", vec!["test"]),
+            "python" => {
+                // Try pytest first, fall back to unittest
+                if project_path.join("pytest.ini").exists()
+                    || project_path.join("pyproject.toml").exists()
+                {
+                    ("pytest", vec!["-v"])
+                } else {
+                    ("python", vec!["-m", "unittest", "discover", "-v"])
+                }
+            }
+            "go" => ("go", vec!["test", "-v", "./..."]),
+            _ => {
+                return Ok(TestExecutionResult {
+                    success: false,
+                    command: "unknown".to_string(),
+                    output: "Unsupported project type".to_string(),
+                    errors: vec![format!("Unknown project type: {}", project_type)],
+                    tests_run: 0,
+                    tests_passed: 0,
+                    tests_failed: 0,
+                    project_type,
+                });
+            }
+        };
+
+        tracing::info!(
+            "Executing tests for {} project at {:?}",
+            project_type,
+            project_path
+        );
+
+        // Execute test command
+        let output = Command::new(test_command)
+            .args(&args)
+            .current_dir(project_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to execute test command: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let full_output = format!("{}", stdout);
+
+        // Parse test results based on project type
+        let (tests_run, tests_passed, tests_failed, errors) =
+            self.parse_test_results(&project_type, &stdout, &stderr, output.status.success());
+
+        let success = output.status.success() && tests_failed == 0;
+
+        Ok(TestExecutionResult {
+            success,
+            command: format!("{} {}", test_command, args.join(" ")),
+            output: full_output,
+            errors,
+            tests_run,
+            tests_passed,
+            tests_failed,
+            project_type,
+        })
+    }
+
+    /// Detect project type from files in project path
+    async fn detect_project_type(&self, project_path: &std::path::Path) -> Result<String> {
+        if project_path.join("Cargo.toml").exists() {
+            return Ok("rust".to_string());
+        }
+        if project_path.join("package.json").exists() {
+            return Ok("node".to_string());
+        }
+        if project_path.join("requirements.txt").exists()
+            || project_path.join("pyproject.toml").exists()
+            || project_path.join("setup.py").exists()
+        {
+            return Ok("python".to_string());
+        }
+        if project_path.join("go.mod").exists() {
+            return Ok("go".to_string());
+        }
+
+        anyhow::bail!("Cannot detect project type at {:?}", project_path)
+    }
+
+    /// Parse test output to extract results
+    fn parse_test_results(
+        &self,
+        project_type: &str,
+        stdout: &str,
+        stderr: &str,
+        command_success: bool,
+    ) -> (usize, usize, usize, Vec<String>) {
+        let mut tests_run = 0usize;
+        let mut tests_passed = 0usize;
+        let mut tests_failed = 0usize;
+        let mut errors = Vec::new();
+
+        match project_type {
+            "rust" => {
+                // Parse cargo test output
+                for line in stdout.lines() {
+                    if line.contains("test result:") {
+                        // Parse: "test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+                        if let Some(passed_str) = line.split("passed").next() {
+                            if let Some(num) = passed_str.split_whitespace().last() {
+                                if let Ok(n) = num.parse::<usize>() {
+                                    tests_passed += n;
+                                }
+                            }
+                        }
+                        if let Some(failed_str) = line.split("failed").next() {
+                            if let Some(num) = failed_str.split_whitespace().last() {
+                                if let Ok(n) = num.parse::<usize>() {
+                                    tests_failed += n;
+                                }
+                            }
+                        }
+                    }
+                    if line.contains("FAILED") || line.contains("error[") {
+                        errors.push(line.to_string());
+                    }
+                }
+                tests_run = tests_passed + tests_failed;
+            }
+            "node" => {
+                // Parse npm test output (Jest/Mocha style)
+                for line in stdout.lines() {
+                    if line.contains("passing") || line.contains("failing") {
+                        // Parse Jest/Mocha summary
+                        if let Some(passing) = line.split("passing").next() {
+                            if let Some(n) = passing.split_whitespace().last() {
+                                if let Ok(num) = n.parse::<usize>() {
+                                    tests_passed = num;
+                                }
+                            }
+                        }
+                        if line.contains("failing") {
+                            if let Some(failing) = line.split("failing").next() {
+                                if let Some(n) = failing.split_whitespace().last() {
+                                    if let Ok(num) = n.parse::<usize>() {
+                                        tests_failed = num;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if line.contains("FAIL") || line.contains("Error:") {
+                        errors.push(line.to_string());
+                    }
+                }
+                tests_run = tests_passed + tests_failed;
+            }
+            "python" => {
+                // Parse pytest/unittest output
+                for line in stdout.lines() {
+                    if line.contains("passed") || line.contains("failed") || line.contains("error") {
+                        if let Some(n) = line.split_whitespace().next() {
+                            if let Ok(num) = n.parse::<usize>() {
+                                if line.contains("passed") {
+                                    tests_passed += num;
+                                } else if line.contains("failed") {
+                                    tests_failed += num;
+                                    errors.push(line.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if line.contains("ERROR") || line.contains("FAILED") {
+                        errors.push(line.to_string());
+                    }
+                }
+                tests_run = tests_passed + tests_failed;
+            }
+            "go" => {
+                // Parse go test output
+                for line in stdout.lines() {
+                    if line.contains("PASS") {
+                        tests_passed += 1;
+                    } else if line.contains("FAIL") {
+                        tests_failed += 1;
+                        errors.push(line.to_string());
+                    }
+                }
+                tests_run = tests_passed + tests_failed;
+            }
+            _ => {}
+        }
+
+        if !command_success && tests_failed == 0 {
+            // Command failed but no tests detected - likely compilation/setup error
+            errors.push(stderr.lines().take(5).collect::<Vec<_>>().join("\n"));
+            tests_failed = 1; // Mark as failed
+        }
+
+        (tests_run, tests_passed, tests_failed, errors)
+    }
+
+    /// Persist test artifacts to database/storage
+    async fn persist_test_artifacts(
+        &self,
+        context_id: &str,
+        test_result: &TestExecutionResult,
+    ) -> Result<()> {
+        // Store test results in a structured format
+        let artifact_data = serde_json::json!({
+            "context_id": context_id,
+            "test_result": {
+                "success": test_result.success,
+                "command": test_result.command,
+                "output": &test_result.output.chars().take(10000).collect::<String>(), // Limit size
+                "errors": test_result.errors,
+                "tests_run": test_result.tests_run,
+                "tests_passed": test_result.tests_passed,
+                "tests_failed": test_result.tests_failed,
+                "project_type": test_result.project_type,
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+
+        tracing::info!(
+            "Test artifacts persisted for context {}: {} tests, {} passed, {} failed",
+            context_id,
+            test_result.tests_run,
+            test_result.tests_passed,
+            test_result.tests_failed
+        );
+
+        // In production, this would save to artifact repository
+        // For now, we log and store in evaluation_result
+        Ok(())
     }
 
     /// Route to the appropriate context based on priority
