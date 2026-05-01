@@ -211,7 +211,7 @@ mod tests {
         assert!(summary.ends_with("..."));
     }
 
-    #[test]
+    #[tokio::test]
     async fn test_compress_memories() {
         let summarizer = MemorySummarizer::new(None);
         let memories = vec![
@@ -226,7 +226,7 @@ mod tests {
         assert!(compressed.len() <= 3);
     }
 
-    #[test]
+    #[tokio::test]
     async fn test_compress_with_target_count() {
         let summarizer = MemorySummarizer::default();
         let memories = vec![
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(compressed.len(), 2);
     }
 
-    #[test]
+    #[tokio::test]
     async fn test_compress_empty_memories() {
         let summarizer = MemorySummarizer::default();
         let memories: Vec<Memory> = Vec::new();
