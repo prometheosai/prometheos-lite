@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use std::sync::Arc;
+use tracing;
 
 use prometheos_lite::{
     config::AppConfig,

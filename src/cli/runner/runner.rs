@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use tracing;
 
 use prometheos_lite::flow::loader::FlowFile;
 use prometheos_lite::flow::{

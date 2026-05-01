@@ -117,8 +117,8 @@ impl GuardrailCmd {
         let interrupts = if let Some(run_id) = run_id_filter {
             db.list_pending_interrupts(&run_id)?
         } else {
-            // List all pending interrupts (not implemented in current schema)
-            vec![]
+            // List all pending interrupts across all runs
+            db.list_all_pending_interrupts()?
         };
 
         let result = json!({
