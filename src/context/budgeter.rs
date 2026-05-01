@@ -199,16 +199,9 @@ impl ContextBudgeter {
             return Ok(content.to_string());
         }
 
-        // Check if content is JSON
-        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(content) {
-            // For JSON, we can't easily trim - return error or truncate at safe boundary
-            // For now, we'll truncate and try to re-parse
-            let truncated = &content[..max_chars.min(content.len())];
-            if serde_json::from_str::<serde_json::Value>(truncated).is_ok() {
-                return Ok(truncated.to_string());
-            }
-            // If invalid JSON after truncation, return a placeholder
-            return Ok("[Content too large - would break JSON structure]".to_string());
+        // Check if content is JSON - use intelligent truncation
+        if serde_json::from_str::<serde_json::Value>(content).is_ok() {
+            return self.truncate_json(content, max_chars);
         }
 
         // Check for code blocks
@@ -272,6 +265,89 @@ impl ContextBudgeter {
         report.insert("reserved_output".to_string(), self.reserved_output_tokens);
 
         report
+    }
+
+    /// Intelligently truncate JSON content while preserving structure
+    fn truncate_json(&self, content: &str, max_chars: usize) -> Result<String> {
+        // First try simple truncation and re-parse
+        let truncated = &content[..max_chars.min(content.len())];
+        if serde_json::from_str::<serde_json::Value>(truncated).is_ok() {
+            return Ok(truncated.to_string());
+        }
+
+        // Try to parse and intelligently truncate
+        match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(json_value) => {
+                let truncated_value = self.truncate_json_value(&json_value, max_chars);
+                serde_json::to_string(&truncated_value)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize truncated JSON: {}", e))
+            }
+            Err(_) => {
+                // If we can't parse it, truncate with a note
+                let available = max_chars.saturating_sub(50);
+                let truncated = &content[..available.min(content.len())];
+                Ok(format!("{}... [truncated due to size]", truncated))
+            }
+        }
+    }
+
+    /// Recursively truncate JSON value to fit within character limit
+    fn truncate_json_value(&self, value: &serde_json::Value, max_chars: usize) -> serde_json::Value {
+        let json_str = value.to_string();
+        if json_str.len() <= max_chars {
+            return value.clone();
+        }
+
+        match value {
+            serde_json::Value::Array(arr) => {
+                // Truncate arrays by keeping first N items
+                let item_limit = (max_chars / 50).max(3); // Estimate ~50 chars per item, keep at least 3
+                let truncated: Vec<serde_json::Value> = arr
+                    .iter()
+                    .take(item_limit)
+                    .cloned()
+                    .collect();
+
+                if truncated.len() < arr.len() {
+                    let mut result = truncated;
+                    result.push(serde_json::Value::String(
+                        format!("... ({} more items)", arr.len() - result.len() + 1)
+                    ));
+                    serde_json::Value::Array(result)
+                } else {
+                    serde_json::Value::Array(truncated)
+                }
+            }
+            serde_json::Value::Object(obj) => {
+                // Truncate objects by keeping most important keys
+                let mut result = serde_json::Map::new();
+                let key_limit = (max_chars / 100).max(5); // Estimate ~100 chars per key-value pair
+
+                for (i, (key, val)) in obj.iter().enumerate() {
+                    if i >= key_limit {
+                        result.insert(
+                            "_truncated".to_string(),
+                            serde_json::Value::String(format!("{} more fields", obj.len() - i))
+                        );
+                        break;
+                    }
+                    // Recursively truncate values
+                    let truncated_val = self.truncate_json_value(val, max_chars / key_limit);
+                    result.insert(key.clone(), truncated_val);
+                }
+                serde_json::Value::Object(result)
+            }
+            serde_json::Value::String(s) => {
+                // Truncate long strings
+                if s.len() > max_chars {
+                    let truncated = &s[..max_chars.saturating_sub(20).min(s.len())];
+                    serde_json::Value::String(format!("{}... [truncated]", truncated))
+                } else {
+                    value.clone()
+                }
+            }
+            _ => value.clone(), // Numbers, booleans, null - keep as-is
+        }
     }
 }
 
