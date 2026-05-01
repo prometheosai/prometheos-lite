@@ -44,6 +44,11 @@ impl LlmClient {
         self
     }
 
+    /// Get the model name
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     async fn generate_with_retry(
         &self,
         request: &ChatCompletionRequest<'_>,

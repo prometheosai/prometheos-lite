@@ -64,8 +64,6 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn model(&self) -> &str {
-        // LlmClient doesn't expose model publicly, so we return a placeholder
-        // In a real implementation, we'd add a model() method to LlmClient
-        "unknown"
+        self.client.model()
     }
 }
