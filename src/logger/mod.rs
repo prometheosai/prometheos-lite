@@ -48,6 +48,10 @@ impl Logger {
         eprintln!("[ERROR] {}", message);
     }
 
+    pub fn warn(&self, message: &str) {
+        println!("[WARN] {}", message);
+    }
+
     pub fn success(&self, message: &str) {
         println!("[SUCCESS] {}", message);
     }
