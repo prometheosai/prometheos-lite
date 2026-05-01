@@ -18,6 +18,7 @@ pub struct DefaultNodeFactory {
     tool_runtime: Option<std::sync::Arc<ToolRuntime>>,
     memory_service: Option<std::sync::Arc<MemoryService>>,
     context_builder: Option<ContextBuilder>,
+    repo_path: Option<std::path::PathBuf>,
 }
 
 impl DefaultNodeFactory {
@@ -27,16 +28,53 @@ impl DefaultNodeFactory {
             tool_runtime: None,
             memory_service: None,
             context_builder: None,
+            repo_path: None,
         }
     }
 
+    pub fn with_repo_path(mut self, path: std::path::PathBuf) -> Self {
+        self.repo_path = Some(path);
+        self
+    }
+
     /// Create a DefaultNodeFactory from a RuntimeContext
+    /// 
+    /// The ContextBuilder is automatically wired with the memory service if available,
+    /// enabling automatic memory retrieval for all LLM nodes.
     pub fn from_runtime(runtime: crate::flow::RuntimeContext) -> Self {
+        let context_builder = runtime.memory_service.as_ref().map(|ms| {
+            ContextBuilder::with_memory_service(
+                crate::context::ContextBudgeter::default(),
+                ms.clone(),
+            )
+        });
+
         Self {
             model_router: runtime.model_router,
             tool_runtime: runtime.tool_runtime,
             memory_service: runtime.memory_service,
-            context_builder: Some(ContextBuilder::default()),
+            context_builder,
+            repo_path: None,
+        }
+    }
+
+    pub fn from_runtime_with_repo(
+        runtime: crate::flow::RuntimeContext,
+        repo_path: std::path::PathBuf,
+    ) -> Self {
+        let context_builder = runtime.memory_service.as_ref().map(|ms| {
+            ContextBuilder::with_memory_service(
+                crate::context::ContextBudgeter::default(),
+                ms.clone(),
+            )
+        });
+
+        Self {
+            model_router: runtime.model_router,
+            tool_runtime: runtime.tool_runtime,
+            memory_service: runtime.memory_service,
+            context_builder,
+            repo_path: Some(repo_path),
         }
     }
 
@@ -126,9 +164,34 @@ impl NodeFactory for DefaultNodeFactory {
             "passthrough" => Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(
                 node_config,
             ))),
+            // V1.5.2: AST-based coding harness nodes
+            "code_analysis" => {
+                let repo_path = self.repo_path.clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                Ok(Arc::new(super::coding_nodes::CodeAnalysisNode::new(
+                    node_config,
+                    repo_path,
+                )))
+            }
+            "symbol_resolution" => {
+                let repo_path = self.repo_path.clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                Ok(Arc::new(super::coding_nodes::SymbolResolutionNode::new(
+                    node_config,
+                    repo_path,
+                )))
+            }
+            "dependency_analysis" => {
+                let repo_path = self.repo_path.clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                Ok(Arc::new(super::coding_nodes::DependencyAnalysisNode::new(
+                    node_config,
+                    repo_path,
+                )))
+            }
             _ => {
                 anyhow::bail!(
-                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough",
+                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough, code_analysis, symbol_resolution, dependency_analysis",
                     node_type
                 )
             }

@@ -112,17 +112,28 @@ impl Node for PlannerNode {
             .as_ref()
             .context("PlannerNode requires ModelRouter to be configured")?;
 
-        let context_inputs = ContextInputs {
-            task: task.to_string(),
-            plan: None,
-            memory: Vec::new(),
-            artifacts: Vec::new(),
-            system_prompt: Some("You are a planning assistant. Create a structured plan for the following task. Provide a step-by-step plan as a JSON array of strings.".to_string()),
+        // Use memory-aware context building if memory service is available
+        let built_context = if self.context_builder.memory_service().is_some() {
+            self.context_builder
+                .build_with_memory_retrieval(
+                    task.to_string(),
+                    None, // project_id - could be passed from state in future
+                    5,    // Retrieve top 5 relevant memories
+                )
+                .await
+                .context("Failed to build context with memory retrieval")?
+        } else {
+            let context_inputs = ContextInputs {
+                task: task.to_string(),
+                plan: None,
+                memory: Vec::new(),
+                artifacts: Vec::new(),
+                system_prompt: Some("You are a planning assistant. Create a structured plan for the following task. Provide a step-by-step plan as a JSON array of strings.".to_string()),
+            };
+            self.context_builder
+                .build(context_inputs)
+                .context("Failed to build context with ContextBuilder")?
         };
-
-        let built_context = self.context_builder
-            .build(context_inputs)
-            .context("Failed to build context with ContextBuilder")?;
 
         let base_prompt = built_context.prompt;
 
@@ -230,17 +241,29 @@ impl Node for CoderNode {
             .context("CoderNode requires ModelRouter to be configured")?;
 
         let plan_str = serde_json::to_string(plan).unwrap_or_default();
-        let context_inputs = ContextInputs {
-            task: task.to_string(),
-            plan: Some(plan_str),
-            memory: Vec::new(),
-            artifacts: Vec::new(),
-            system_prompt: Some("You are a coding assistant. Generate code for the following task based on the provided plan. Provide the generated code only, without explanations.".to_string()),
+        
+        // Use memory-aware context building if memory service is available
+        let built_context = if self.context_builder.memory_service().is_some() {
+            self.context_builder
+                .build_with_memory_retrieval(
+                    task.to_string(),
+                    None, // project_id - could be passed from state in future
+                    5,    // Retrieve top 5 relevant memories
+                )
+                .await
+                .context("Failed to build context with memory retrieval")?
+        } else {
+            let context_inputs = ContextInputs {
+                task: task.to_string(),
+                plan: Some(plan_str),
+                memory: Vec::new(),
+                artifacts: Vec::new(),
+                system_prompt: Some("You are a coding assistant. Generate code for the following task based on the provided plan. Provide the generated code only, without explanations.".to_string()),
+            };
+            self.context_builder
+                .build(context_inputs)
+                .context("Failed to build context with ContextBuilder")?
         };
-
-        let built_context = self.context_builder
-            .build(context_inputs)
-            .context("Failed to build context with ContextBuilder")?;
 
         let base_prompt = built_context.prompt;
 
@@ -349,17 +372,29 @@ impl Node for ReviewerNode {
             .context("ReviewerNode requires ModelRouter to be configured")?;
 
         let generated_str = serde_json::to_string(generated).unwrap_or_default();
-        let context_inputs = ContextInputs {
-            task: "Review the following code".to_string(),
-            plan: None,
-            memory: Vec::new(),
-            artifacts: Vec::new(),
-            system_prompt: Some("You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.".to_string()),
+        
+        // Use memory-aware context building if memory service is available
+        let built_context = if self.context_builder.memory_service().is_some() {
+            self.context_builder
+                .build_with_memory_retrieval(
+                    "Review the following code".to_string(),
+                    None, // project_id - could be passed from state in future
+                    3,    // Retrieve top 3 relevant memories for review context
+                )
+                .await
+                .context("Failed to build context with memory retrieval")?
+        } else {
+            let context_inputs = ContextInputs {
+                task: "Review the following code".to_string(),
+                plan: None,
+                memory: Vec::new(),
+                artifacts: Vec::new(),
+                system_prompt: Some("You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.".to_string()),
+            };
+            self.context_builder
+                .build(context_inputs)
+                .context("Failed to build context with ContextBuilder")?
         };
-
-        let built_context = self.context_builder
-            .build(context_inputs)
-            .context("Failed to build context with ContextBuilder")?;
 
         let base_prompt = built_context.prompt;
 
@@ -481,17 +516,28 @@ impl Node for LlmNode {
             .as_ref()
             .context("LlmNode requires ModelRouter to be configured")?;
 
-        let context_inputs = ContextInputs {
-            task: prompt.to_string(),
-            plan: None,
-            memory: Vec::new(),
-            artifacts: Vec::new(),
-            system_prompt: None,
+        // Use memory-aware context building if memory service is available
+        let built_context = if self.context_builder.memory_service().is_some() {
+            self.context_builder
+                .build_with_memory_retrieval(
+                    prompt.to_string(),
+                    None, // project_id - could be passed from state in future
+                    5,    // Retrieve top 5 relevant memories
+                )
+                .await
+                .context("Failed to build context with memory retrieval")?
+        } else {
+            let context_inputs = ContextInputs {
+                task: prompt.to_string(),
+                plan: None,
+                memory: Vec::new(),
+                artifacts: Vec::new(),
+                system_prompt: None,
+            };
+            self.context_builder
+                .build(context_inputs)
+                .context("Failed to build context with ContextBuilder")?
         };
-
-        let built_context = self.context_builder
-            .build(context_inputs)
-            .context("Failed to build context with ContextBuilder")?;
 
         let final_prompt = if let Some(template) = &self.prompt_template {
             template.replace("{{prompt}}", &built_context.prompt)
