@@ -1,7 +1,10 @@
 //! WorkContext templates for common work patterns
 
-use crate::work::types::{ApprovalPolicy, AutonomyLevel, CompletionCriterion, WorkDomain, WorkPhase, WorkPriority, WorkStatus};
 use crate::work::WorkContext;
+use crate::work::types::{
+    ApprovalPolicy, AutonomyLevel, CompletionCriterion, WorkDomain, WorkPhase, WorkPriority,
+    WorkStatus,
+};
 use uuid::Uuid;
 
 /// WorkContext template for software development tasks
@@ -37,9 +40,18 @@ pub fn software_development_template(title: String, goal: String) -> WorkContext
         approval_policy: ApprovalPolicy::RequireForSideEffects,
         summary: None,
         completion_criteria: vec![
-            CompletionCriterion::new("code-generated".to_string(), "Code has been generated".to_string()),
-            CompletionCriterion::new("tests-written".to_string(), "Tests have been written".to_string()),
-            CompletionCriterion::new("code-reviewed".to_string(), "Code has been reviewed".to_string()),
+            CompletionCriterion::new(
+                "code-generated".to_string(),
+                "Code has been generated".to_string(),
+            ),
+            CompletionCriterion::new(
+                "tests-written".to_string(),
+                "Tests have been written".to_string(),
+            ),
+            CompletionCriterion::new(
+                "code-reviewed".to_string(),
+                "Code has been reviewed".to_string(),
+            ),
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -83,8 +95,14 @@ pub fn research_template(title: String, goal: String) -> WorkContext {
         approval_policy: ApprovalPolicy::Auto,
         summary: None,
         completion_criteria: vec![
-            CompletionCriterion::new("research-complete".to_string(), "Research is complete".to_string()),
-            CompletionCriterion::new("document-created".to_string(), "Document has been created".to_string()),
+            CompletionCriterion::new(
+                "research-complete".to_string(),
+                "Research is complete".to_string(),
+            ),
+            CompletionCriterion::new(
+                "document-created".to_string(),
+                "Document has been created".to_string(),
+            ),
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -128,8 +146,14 @@ pub fn planning_template(title: String, goal: String) -> WorkContext {
         approval_policy: ApprovalPolicy::ManualAll,
         summary: None,
         completion_criteria: vec![
-            CompletionCriterion::new("plan-approved".to_string(), "Plan has been approved".to_string()),
-            CompletionCriterion::new("document-created".to_string(), "Document has been created".to_string()),
+            CompletionCriterion::new(
+                "plan-approved".to_string(),
+                "Plan has been approved".to_string(),
+            ),
+            CompletionCriterion::new(
+                "document-created".to_string(),
+                "Document has been created".to_string(),
+            ),
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -173,9 +197,18 @@ pub fn bug_fix_template(title: String, goal: String) -> WorkContext {
         approval_policy: ApprovalPolicy::RequireForSideEffects,
         summary: None,
         completion_criteria: vec![
-            CompletionCriterion::new("bug-reproduced".to_string(), "Bug has been reproduced".to_string()),
-            CompletionCriterion::new("fix-implemented".to_string(), "Fix has been implemented".to_string()),
-            CompletionCriterion::new("tests-written".to_string(), "Tests have been written".to_string()),
+            CompletionCriterion::new(
+                "bug-reproduced".to_string(),
+                "Bug has been reproduced".to_string(),
+            ),
+            CompletionCriterion::new(
+                "fix-implemented".to_string(),
+                "Fix has been implemented".to_string(),
+            ),
+            CompletionCriterion::new(
+                "tests-written".to_string(),
+                "Tests have been written".to_string(),
+            ),
         ],
         last_activity_at: chrono::Utc::now(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -192,10 +225,8 @@ mod tests {
 
     #[test]
     fn test_software_development_template() {
-        let context = software_development_template(
-            "Build API".to_string(),
-            "Create a REST API".to_string(),
-        );
+        let context =
+            software_development_template("Build API".to_string(), "Create a REST API".to_string());
         assert_eq!(context.domain, WorkDomain::Software);
         assert_eq!(context.priority, WorkPriority::High);
         assert_eq!(context.autonomy_level, AutonomyLevel::Review);
@@ -225,10 +256,7 @@ mod tests {
 
     #[test]
     fn test_bug_fix_template() {
-        let context = bug_fix_template(
-            "Fix bug".to_string(),
-            "Fix critical issue".to_string(),
-        );
+        let context = bug_fix_template("Fix bug".to_string(), "Fix critical issue".to_string());
         assert_eq!(context.priority, WorkPriority::Urgent);
         assert_eq!(context.context_type, "bugfix");
     }

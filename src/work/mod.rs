@@ -26,9 +26,14 @@ pub use artifact::{Artifact, ArtifactKind, ArtifactStorage};
 pub use artifact_mapper::ArtifactMapper;
 pub use decision::DecisionRecord;
 pub use domain::{LifecycleTemplate, WorkDomainProfile};
-pub use evaluation::{EnhancedEvaluationResult, EvaluationDimensions, EvaluationEngine, Penalty, PenaltyType, StructuralValidation};
+pub use evaluation::{
+    EnhancedEvaluationResult, EvaluationDimensions, EvaluationEngine, Penalty, PenaltyType,
+    StructuralValidation,
+};
 pub use event::WorkContextEvent;
-pub use evolution_engine::{AbTest, EvolutionEngine, EvolutionStatus, MutationStrategy, PlaybookEvolution};
+pub use evolution_engine::{
+    AbTest, EvolutionEngine, EvolutionStatus, MutationStrategy, PlaybookEvolution,
+};
 pub use execution_service::WorkExecutionService;
 pub use orchestrator::{ExecutionLimits, WorkOrchestrator};
 pub use phase_controller::PhaseController;
@@ -38,7 +43,9 @@ pub use playbook_resolver::PlaybookResolver;
 pub use service::WorkContextService;
 pub use skill_kernel::{Skill, SkillKernel, SkillMatch, SkillMatchingRequest};
 pub use template_loader::TemplateLoader;
-pub use templates::{bug_fix_template, planning_template, research_template, software_development_template};
+pub use templates::{
+    bug_fix_template, planning_template, research_template, software_development_template,
+};
 pub use types::{
     ApprovalPolicy, AutonomyLevel, CompletionCriterion, WorkContext, WorkDomain, WorkPhase,
     WorkPriority, WorkStatus,

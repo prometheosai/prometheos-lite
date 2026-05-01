@@ -4,16 +4,16 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::db::repository::{DomainProfileOperations, PlaybookOperations};
+use crate::flow::StrictModeEnforcer;
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
-use crate::flow::StrictModeEnforcer;
 use crate::work::{
+    ArtifactMapper, PhaseController, WorkContext, WorkContextService,
     domain::WorkDomainProfile,
     playbook::WorkContextPlaybook,
-    types::{AutonomyLevel, ApprovalPolicy, WorkPhase, WorkStatus, FlowPerformanceRecord},
-    ArtifactMapper, PhaseController, WorkContext, WorkContextService,
+    types::{ApprovalPolicy, AutonomyLevel, FlowPerformanceRecord, WorkPhase, WorkStatus},
 };
-use crate::db::repository::{DomainProfileOperations, PlaybookOperations};
 
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
@@ -102,14 +102,23 @@ impl WorkExecutionService {
 
     /// Load a flow file from path
     fn load_flow_file(&self, path: &PathBuf) -> Result<FlowFile> {
-        if path.extension().and_then(|s| s.to_str()) == Some("yaml") || path.extension().and_then(|s| s.to_str()) == Some("yml") {
+        if path.extension().and_then(|s| s.to_str()) == Some("yaml")
+            || path.extension().and_then(|s| s.to_str()) == Some("yml")
+        {
             let loader = YamlLoader::new();
-            loader.load_from_path(path).context("Failed to load YAML flow")
+            loader
+                .load_from_path(path)
+                .context("Failed to load YAML flow")
         } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
             let loader = JsonLoader::new();
-            loader.load_from_path(path).context("Failed to load JSON flow")
+            loader
+                .load_from_path(path)
+                .context("Failed to load JSON flow")
         } else {
-            Err(anyhow::anyhow!("Unsupported flow file extension: {:?}", path.extension()))
+            Err(anyhow::anyhow!(
+                "Unsupported flow file extension: {:?}",
+                path.extension()
+            ))
         }
     }
 
@@ -159,9 +168,10 @@ impl WorkExecutionService {
 
         // Convert execution metadata to ExecutionRecords and add to WorkContext
         for (node_id, metadata_json) in &final_output.execution_metadata {
-            if let Ok(generate_result) = serde_json::from_value::<crate::flow::intelligence::GenerateResult>(
-                metadata_json.clone()
-            ) {
+            if let Ok(generate_result) = serde_json::from_value::<
+                crate::flow::intelligence::GenerateResult,
+            >(metadata_json.clone())
+            {
                 let execution_record = super::types::ExecutionRecord::from_generate_result(
                     node_id.clone(),
                     &generate_result,
@@ -247,19 +257,17 @@ impl WorkExecutionService {
             )
         } else {
             // Fallback to static flow selection
-            PhaseController::flow_for_phase(
-                context.current_phase,
-                domain_profile.as_ref()
-            )
+            PhaseController::flow_for_phase(context.current_phase, domain_profile.as_ref())
         };
-        
+
         if context.current_phase == WorkPhase::Finalization {
             return Ok(context);
         }
 
         // Execute flow
         let start_time = std::time::Instant::now();
-        self.execute_flow_in_context(&mut context, &next_flow).await?;
+        self.execute_flow_in_context(&mut context, &next_flow)
+            .await?;
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
         // Create and store FlowPerformanceRecord
@@ -267,9 +275,15 @@ impl WorkExecutionService {
             id: uuid::Uuid::new_v4().to_string(),
             flow_id: next_flow.clone(),
             work_context_id: context.id.clone(),
-            success_score: if context.status == WorkStatus::Completed { 1.0 } else { 0.5 },
+            success_score: if context.status == WorkStatus::Completed {
+                1.0
+            } else {
+                0.5
+            },
             duration_ms,
-            token_cost: context.execution_metadata.iter()
+            token_cost: context
+                .execution_metadata
+                .iter()
                 .filter_map(|r| r.cost)
                 .sum(),
             revision_count: context.decisions.len() as u32,
@@ -279,7 +293,8 @@ impl WorkExecutionService {
         // Store performance record in context metadata for now
         // TODO: Add dedicated database table for FlowPerformanceRecord
         let performance_key = format!("flow_perf_{}", next_flow);
-        context.metadata[performance_key] = serde_json::to_value(&performance_record).unwrap_or(serde_json::Value::Null);
+        context.metadata[performance_key] =
+            serde_json::to_value(&performance_record).unwrap_or(serde_json::Value::Null);
 
         // Update status
         if context.current_phase == WorkPhase::Finalization {
@@ -341,16 +356,15 @@ mod tests {
         let db = Arc::new(Db::in_memory().unwrap());
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
         let runtime = Arc::new(RuntimeContext::default());
-        let flow_execution_service = Arc::new(
-            FlowExecutionService::new(runtime.clone()).unwrap()
-        );
-        let execution_service = WorkExecutionService::new(
-            work_context_service.clone(),
-            flow_execution_service,
-        );
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime.clone()).unwrap());
+        let execution_service =
+            WorkExecutionService::new(work_context_service.clone(), flow_execution_service);
 
         // Verify service creation
-        assert!(Arc::ptr_eq(&execution_service.work_context_service, &work_context_service));
+        assert!(Arc::ptr_eq(
+            &execution_service.work_context_service,
+            &work_context_service
+        ));
     }
 
     #[tokio::test]
@@ -358,13 +372,9 @@ mod tests {
         let db = Arc::new(Db::in_memory().unwrap());
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
         let runtime = Arc::new(RuntimeContext::default());
-        let flow_execution_service = Arc::new(
-            FlowExecutionService::new(runtime.clone()).unwrap()
-        );
-        let execution_service = WorkExecutionService::new(
-            work_context_service.clone(),
-            flow_execution_service,
-        );
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime.clone()).unwrap());
+        let execution_service =
+            WorkExecutionService::new(work_context_service.clone(), flow_execution_service);
 
         let mut context = work_context_service
             .create_context(
@@ -389,13 +399,9 @@ mod tests {
         let db = Arc::new(Db::in_memory().unwrap());
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
         let runtime = Arc::new(RuntimeContext::default());
-        let flow_execution_service = Arc::new(
-            FlowExecutionService::new(runtime.clone()).unwrap()
-        );
-        let execution_service = WorkExecutionService::new(
-            work_context_service.clone(),
-            flow_execution_service,
-        );
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime.clone()).unwrap());
+        let execution_service =
+            WorkExecutionService::new(work_context_service.clone(), flow_execution_service);
 
         let mut context = work_context_service
             .create_context(
@@ -419,10 +425,12 @@ mod tests {
     async fn test_zero_artifact_error() {
         // Test the artifact extraction error handling directly
         let artifacts: Vec<crate::work::artifact::Artifact> = vec![];
-        
-        let result = artifacts.into_iter().next()
+
+        let result = artifacts
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("Flow produced no artifacts"));
-        
+
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("no artifacts"));
     }

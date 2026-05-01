@@ -26,20 +26,29 @@ impl PlaybookResolver {
     pub fn resolve_playbook(&self, context: &WorkContext) -> Result<Option<WorkContextPlaybook>> {
         // Tier 1: Try user+domain specific playbook
         if let Some(ref domain_profile_id) = context.domain_profile_id {
-            if let Some(playbook) = self.db.get_playbook_by_user_and_domain(&context.user_id, domain_profile_id)? {
+            if let Some(playbook) = self
+                .db
+                .get_playbook_by_user_and_domain(&context.user_id, domain_profile_id)?
+            {
                 return Ok(Some(playbook));
             }
         }
 
         // Tier 2: Try domain default playbook (user_id = "domain-default")
         if let Some(ref domain_profile_id) = context.domain_profile_id {
-            if let Some(playbook) = self.db.get_playbook_by_user_and_domain("domain-default", domain_profile_id)? {
+            if let Some(playbook) = self
+                .db
+                .get_playbook_by_user_and_domain("domain-default", domain_profile_id)?
+            {
                 return Ok(Some(playbook));
             }
         }
 
         // Tier 3: Try global default playbook (user_id = "global", domain_profile_id = "global")
-        if let Some(playbook) = self.db.get_playbook_by_user_and_domain("global", "global")? {
+        if let Some(playbook) = self
+            .db
+            .get_playbook_by_user_and_domain("global", "global")?
+        {
             return Ok(Some(playbook));
         }
 
@@ -65,7 +74,8 @@ impl PlaybookResolver {
         &self,
         context: &WorkContext,
     ) -> Result<Vec<(WorkContextPlaybook, f32)>> {
-        let user_playbooks = PlaybookOperations::get_playbooks_for_user(&*self.db, &context.user_id)?;
+        let user_playbooks =
+            PlaybookOperations::get_playbooks_for_user(&*self.db, &context.user_id)?;
 
         let mut scored: Vec<(WorkContextPlaybook, f32)> = user_playbooks
             .into_iter()
@@ -454,10 +464,10 @@ mod tests {
 
         let resolved = resolver.resolve_playbook(&context).unwrap();
         assert!(resolved.is_some());
-        
+
         let resolved_pb = resolved.unwrap();
         assert_eq!(resolved_pb.preferred_flows.len(), 3);
-        
+
         // Verify flows are ordered by weight
         assert!(resolved_pb.preferred_flows[0].weight >= resolved_pb.preferred_flows[1].weight);
         assert!(resolved_pb.preferred_flows[1].weight >= resolved_pb.preferred_flows[2].weight);
@@ -500,11 +510,11 @@ mod tests {
         db.create_playbook(&playbook_low_usage).unwrap();
 
         let scored = resolver.score_playbooks(&context).unwrap();
-        
+
         // High usage playbook should score higher due to usage boost
         let high_usage_score = scored.iter().find(|(pb, _)| pb.id == "pb-1").unwrap().1;
         let low_usage_score = scored.iter().find(|(pb, _)| pb.id == "pb-2").unwrap().1;
-        
+
         assert!(high_usage_score > low_usage_score);
     }
 }

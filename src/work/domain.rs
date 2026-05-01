@@ -82,7 +82,10 @@ mod tests {
         let profile = WorkDomainProfile::new(
             "software".to_string(),
             "Software Development".to_string(),
-            vec!["planning.flow.yaml".to_string(), "codegen.flow.yaml".to_string()],
+            vec![
+                "planning.flow.yaml".to_string(),
+                "codegen.flow.yaml".to_string(),
+            ],
             vec!["Code".to_string(), "Document".to_string()],
         );
 

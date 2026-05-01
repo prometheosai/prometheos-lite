@@ -98,19 +98,28 @@ impl TemplateLoader {
             WorkDomainProfile::new(
                 "software".to_string(),
                 "Software Development".to_string(),
-                vec!["planning.flow.yaml".to_string(), "codegen.flow.yaml".to_string()],
+                vec![
+                    "planning.flow.yaml".to_string(),
+                    "codegen.flow.yaml".to_string(),
+                ],
                 vec!["Code".to_string(), "Document".to_string()],
             ),
             WorkDomainProfile::new(
                 "business".to_string(),
                 "Business Operations".to_string(),
-                vec!["planning.flow.yaml".to_string(), "analysis.flow.yaml".to_string()],
+                vec![
+                    "planning.flow.yaml".to_string(),
+                    "analysis.flow.yaml".to_string(),
+                ],
                 vec!["Report".to_string(), "Document".to_string()],
             ),
             WorkDomainProfile::new(
                 "marketing".to_string(),
                 "Marketing".to_string(),
-                vec!["content.flow.yaml".to_string(), "campaign.flow.yaml".to_string()],
+                vec![
+                    "content.flow.yaml".to_string(),
+                    "campaign.flow.yaml".to_string(),
+                ],
                 vec!["Content".to_string(), "Asset".to_string()],
             ),
             WorkDomainProfile::new(
@@ -122,19 +131,28 @@ impl TemplateLoader {
             WorkDomainProfile::new(
                 "creative".to_string(),
                 "Creative".to_string(),
-                vec!["design.flow.yaml".to_string(), "content.flow.yaml".to_string()],
+                vec![
+                    "design.flow.yaml".to_string(),
+                    "content.flow.yaml".to_string(),
+                ],
                 vec!["Design".to_string(), "Content".to_string()],
             ),
             WorkDomainProfile::new(
                 "research".to_string(),
                 "Research".to_string(),
-                vec!["investigation.flow.yaml".to_string(), "analysis.flow.yaml".to_string()],
+                vec![
+                    "investigation.flow.yaml".to_string(),
+                    "analysis.flow.yaml".to_string(),
+                ],
                 vec!["Document".to_string(), "Data".to_string()],
             ),
             WorkDomainProfile::new(
                 "operations".to_string(),
                 "Operations".to_string(),
-                vec!["maintenance.flow.yaml".to_string(), "monitoring.flow.yaml".to_string()],
+                vec![
+                    "maintenance.flow.yaml".to_string(),
+                    "monitoring.flow.yaml".to_string(),
+                ],
                 vec!["Log".to_string(), "Report".to_string()],
             ),
             WorkDomainProfile::new(

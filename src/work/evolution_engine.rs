@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::db::Db;
 use crate::db::repository::PlaybookOperations;
 use crate::work::playbook::{PatternRecord, PatternType, WorkContextPlaybook};
-use crate::work::types::{WorkContext, FlowPerformanceRecord};
+use crate::work::types::{FlowPerformanceRecord, WorkContext};
 
 /// EvaluationResult - result of evaluating a WorkContext
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,22 +72,16 @@ pub enum MutationStrategy {
         position: String,
     },
     /// Remove a node
-    RemoveNode {
-        node_id: String,
-    },
+    RemoveNode { node_id: String },
     /// Reorder nodes
-    ReorderNodes {
-        node_order: Vec<String>,
-    },
+    ReorderNodes { node_order: Vec<String> },
     /// Modify node parameters
     ModifyNode {
         node_id: String,
         parameter_changes: HashMap<String, serde_json::Value>,
     },
     /// Combine two playbooks
-    Combine {
-        other_playbook_id: String,
-    },
+    Combine { other_playbook_id: String },
 }
 
 /// Performance metrics for a playbook evolution
@@ -228,7 +222,9 @@ impl EvolutionEngine {
         if let Some(obj) = context.metadata.as_object() {
             for (key, value) in obj {
                 if key.starts_with("flow_perf_") {
-                    if let Ok(perf_record) = serde_json::from_value::<FlowPerformanceRecord>(value.clone()) {
+                    if let Ok(perf_record) =
+                        serde_json::from_value::<FlowPerformanceRecord>(value.clone())
+                    {
                         let pattern_type = if perf_record.success_score > 0.7 {
                             PatternType::Success
                         } else {
@@ -238,7 +234,15 @@ impl EvolutionEngine {
                         // Pattern: flow performance
                         let pattern = PatternRecord {
                             pattern_type: pattern_type.clone(),
-                            signal: format!("flow_performance_{}_{}", perf_record.flow_id, if perf_record.success_score > 0.7 { "success" } else { "failure" }),
+                            signal: format!(
+                                "flow_performance_{}_{}",
+                                perf_record.flow_id,
+                                if perf_record.success_score > 0.7 {
+                                    "success"
+                                } else {
+                                    "failure"
+                                }
+                            ),
                             weight: perf_record.success_score,
                             created_at: chrono::Utc::now(),
                         };
@@ -286,7 +290,11 @@ impl EvolutionEngine {
         let revision_count = context.decisions.len() as f32;
         if revision_count > 3.0 {
             let pattern = PatternRecord {
-                pattern_type: if is_success { PatternType::Success } else { PatternType::Failure },
+                pattern_type: if is_success {
+                    PatternType::Success
+                } else {
+                    PatternType::Failure
+                },
                 signal: "high_revision_count".to_string(),
                 weight: 0.4,
                 created_at: chrono::Utc::now(),
@@ -326,15 +334,30 @@ impl EvolutionEngine {
 
         // Structural correctness: based on plan and artifacts
         let structural_score = if context.plan.is_some() { 0.8 } else { 0.4 };
-        let structural_score = structural_score + if !context.artifacts.is_empty() { 0.2 } else { 0.0 };
+        let structural_score = structural_score
+            + if !context.artifacts.is_empty() {
+                0.2
+            } else {
+                0.0
+            };
 
         // Tool consistency: based on execution metadata
         let tool_consistency_score = if context.execution_metadata.is_empty() {
             0.5
         } else {
-            let total_latency: u64 = context.execution_metadata.iter().map(|r| r.latency_ms).sum();
+            let total_latency: u64 = context
+                .execution_metadata
+                .iter()
+                .map(|r| r.latency_ms)
+                .sum();
             let avg_latency = total_latency / context.execution_metadata.len() as u64;
-            if avg_latency < 5000 { 0.9 } else if avg_latency < 10000 { 0.7 } else { 0.5 }
+            if avg_latency < 5000 {
+                0.9
+            } else if avg_latency < 10000 {
+                0.7
+            } else {
+                0.5
+            }
         };
 
         // Artifact completeness: based on completion criteria
@@ -350,7 +373,8 @@ impl EvolutionEngine {
         let overall_score = (semantic_score * 0.3
             + structural_score * 0.25
             + tool_consistency_score * 0.25
-            + artifact_completeness_score * 0.2).clamp(0.0, 1.0);
+            + artifact_completeness_score * 0.2)
+            .clamp(0.0, 1.0);
 
         let details = format!(
             "Semantic: {:.2}, Structural: {:.2}, Tool Consistency: {:.2}, Artifact Completeness: {:.2}",
@@ -384,7 +408,11 @@ impl EvolutionEngine {
         for pattern in &success_patterns {
             if pattern.signal.starts_with("flow_performance_") {
                 // Extract flow_id from signal: "flow_performance_{flow_id}_success"
-                if let Some(flow_id) = pattern.signal.strip_prefix("flow_performance_").and_then(|s| s.strip_suffix("_success")) {
+                if let Some(flow_id) = pattern
+                    .signal
+                    .strip_prefix("flow_performance_")
+                    .and_then(|s| s.strip_suffix("_success"))
+                {
                     // Increase weight for the specific flow that succeeded
                     for flow_pref in &mut playbook.preferred_flows {
                         if flow_pref.flow_id == flow_id {
@@ -434,7 +462,11 @@ impl EvolutionEngine {
         for pattern in &failure_patterns {
             if pattern.signal.starts_with("flow_performance_") {
                 // Extract flow_id from signal: "flow_performance_{flow_id}_failure"
-                if let Some(flow_id) = pattern.signal.strip_prefix("flow_performance_").and_then(|s| s.strip_suffix("_failure")) {
+                if let Some(flow_id) = pattern
+                    .signal
+                    .strip_prefix("flow_performance_")
+                    .and_then(|s| s.strip_suffix("_failure"))
+                {
                     // Decrease weight for the specific flow that failed
                     for flow_pref in &mut playbook.preferred_flows {
                         if flow_pref.flow_id == flow_id {
@@ -460,27 +492,44 @@ impl EvolutionEngine {
         }
 
         // Adjust research depth based on high revision count patterns
-        let high_revision_count = success_patterns.iter()
+        let high_revision_count = success_patterns
+            .iter()
             .any(|p| p.signal == "high_revision_count");
         if high_revision_count {
             // Increase research depth for contexts with high revisions
             playbook.default_research_depth = match playbook.default_research_depth {
-                crate::work::playbook::ResearchDepth::Minimal => crate::work::playbook::ResearchDepth::Standard,
-                crate::work::playbook::ResearchDepth::Standard => crate::work::playbook::ResearchDepth::Deep,
-                crate::work::playbook::ResearchDepth::Deep => crate::work::playbook::ResearchDepth::Exhaustive,
-                crate::work::playbook::ResearchDepth::Exhaustive => crate::work::playbook::ResearchDepth::Exhaustive,
+                crate::work::playbook::ResearchDepth::Minimal => {
+                    crate::work::playbook::ResearchDepth::Standard
+                }
+                crate::work::playbook::ResearchDepth::Standard => {
+                    crate::work::playbook::ResearchDepth::Deep
+                }
+                crate::work::playbook::ResearchDepth::Deep => {
+                    crate::work::playbook::ResearchDepth::Exhaustive
+                }
+                crate::work::playbook::ResearchDepth::Exhaustive => {
+                    crate::work::playbook::ResearchDepth::Exhaustive
+                }
             };
         }
 
         // Add new patterns to playbook
         for pattern in &success_patterns {
-            if !playbook.success_patterns.iter().any(|p| p.signal == pattern.signal) {
+            if !playbook
+                .success_patterns
+                .iter()
+                .any(|p| p.signal == pattern.signal)
+            {
                 playbook.success_patterns.push(pattern.clone());
             }
         }
 
         for pattern in &failure_patterns {
-            if !playbook.failure_patterns.iter().any(|p| p.signal == pattern.signal) {
+            if !playbook
+                .failure_patterns
+                .iter()
+                .any(|p| p.signal == pattern.signal)
+            {
                 playbook.failure_patterns.push(pattern.clone());
             }
         }
@@ -491,7 +540,8 @@ impl EvolutionEngine {
         let total = success_count + failure_count;
         if total > 0.0 {
             let new_confidence = success_count / total;
-            playbook.confidence = (playbook.confidence * 0.7 + new_confidence * 0.3).clamp(0.0, 1.0);
+            playbook.confidence =
+                (playbook.confidence * 0.7 + new_confidence * 0.3).clamp(0.0, 1.0);
         }
 
         playbook.updated_at = chrono::Utc::now();
@@ -504,8 +554,10 @@ impl EvolutionEngine {
     /// Initialize evolution tables
     fn init_tables(&self) -> Result<()> {
         // Create playbook_evolutions table
-        self.db.conn().execute(
-            "CREATE TABLE IF NOT EXISTS playbook_evolutions (
+        self.db
+            .conn()
+            .execute(
+                "CREATE TABLE IF NOT EXISTS playbook_evolutions (
                 id TEXT PRIMARY KEY,
                 playbook_id TEXT NOT NULL,
                 version TEXT NOT NULL,
@@ -519,12 +571,15 @@ impl EvolutionEngine {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
-            [],
-        ).context("Failed to create playbook_evolutions table")?;
+                [],
+            )
+            .context("Failed to create playbook_evolutions table")?;
 
         // Create ab_tests table
-        self.db.conn().execute(
-            "CREATE TABLE IF NOT EXISTS ab_tests (
+        self.db
+            .conn()
+            .execute(
+                "CREATE TABLE IF NOT EXISTS ab_tests (
                 id TEXT PRIMARY KEY,
                 playbook_id TEXT NOT NULL,
                 version_a INTEGER NOT NULL,
@@ -536,8 +591,9 @@ impl EvolutionEngine {
                 results TEXT,
                 UNIQUE(playbook_id, status)
             )",
-            [],
-        ).context("Failed to create ab_tests table")?;
+                [],
+            )
+            .context("Failed to create ab_tests table")?;
 
         Ok(())
     }
@@ -595,27 +651,34 @@ impl EvolutionEngine {
             EvolutionStatus::Deprecated => "deprecated",
         };
 
-        self.db.conn().execute(
-            "INSERT OR REPLACE INTO playbook_evolutions (
+        self.db
+            .conn()
+            .execute(
+                "INSERT OR REPLACE INTO playbook_evolutions (
                 id, playbook_id, version, parent_version, mutation_strategy,
                 performance, execution_count, success_rate, avg_duration_ms,
                 status, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            [
-                &evolution.id,
-                &evolution.playbook_id,
-                &(evolution.version.to_string()),
-                &evolution.parent_version.as_ref().map(|v| v.to_string()).unwrap_or_default(),
-                &strategy_json,
-                &performance_json,
-                &(evolution.execution_count.to_string()),
-                &evolution.success_rate.to_string(),
-                &(evolution.avg_duration_ms.to_string()),
-                status_str,
-                &evolution.created_at.to_rfc3339(),
-                &evolution.updated_at.to_rfc3339(),
-            ],
-        ).context("Failed to store evolution")?;
+                [
+                    &evolution.id,
+                    &evolution.playbook_id,
+                    &(evolution.version.to_string()),
+                    &evolution
+                        .parent_version
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    &strategy_json,
+                    &performance_json,
+                    &(evolution.execution_count.to_string()),
+                    &evolution.success_rate.to_string(),
+                    &(evolution.avg_duration_ms.to_string()),
+                    status_str,
+                    &evolution.created_at.to_rfc3339(),
+                    &evolution.updated_at.to_rfc3339(),
+                ],
+            )
+            .context("Failed to store evolution")?;
 
         Ok(())
     }
@@ -631,17 +694,25 @@ impl EvolutionEngine {
     ) -> Result<()> {
         if let Some(mut evolution) = self.get_evolution(evolution_id)? {
             evolution.execution_count += 1;
-            evolution.avg_duration_ms = (evolution.avg_duration_ms * (evolution.execution_count - 1) as u64 + duration_ms) / evolution.execution_count as u64;
+            evolution.avg_duration_ms =
+                (evolution.avg_duration_ms * (evolution.execution_count - 1) as u64 + duration_ms)
+                    / evolution.execution_count as u64;
 
             // Update success rate
-            let total_successes = (evolution.success_rate * (evolution.execution_count - 1) as f64) + if success { 1.0 } else { 0.0 };
+            let total_successes = (evolution.success_rate * (evolution.execution_count - 1) as f64)
+                + if success { 1.0 } else { 0.0 };
             evolution.success_rate = total_successes / evolution.execution_count as f64;
 
             // Update performance metrics
             evolution.performance.success_rate = evolution.success_rate;
             evolution.performance.avg_duration_ms = evolution.avg_duration_ms;
-            evolution.performance.avg_cost = (evolution.performance.avg_cost * (evolution.execution_count - 1) as f64 + cost) / evolution.execution_count as f64;
-            evolution.performance.avg_tool_calls = (evolution.performance.avg_tool_calls * (evolution.execution_count - 1) as f64 + tool_calls as f64) / evolution.execution_count as f64;
+            evolution.performance.avg_cost =
+                (evolution.performance.avg_cost * (evolution.execution_count - 1) as f64 + cost)
+                    / evolution.execution_count as f64;
+            evolution.performance.avg_tool_calls = (evolution.performance.avg_tool_calls
+                * (evolution.execution_count - 1) as f64
+                + tool_calls as f64)
+                / evolution.execution_count as f64;
 
             evolution.updated_at = chrono::Utc::now();
 
@@ -664,7 +735,7 @@ impl EvolutionEngine {
             "SELECT id, playbook_id, version, parent_version, mutation_strategy,
                     performance, execution_count, success_rate, avg_duration_ms,
                     status, created_at, updated_at
-             FROM playbook_evolutions WHERE id = ?1"
+             FROM playbook_evolutions WHERE id = ?1",
         )?;
 
         let mut rows = stmt.query_map([id], |row| {
@@ -685,9 +756,20 @@ impl EvolutionEngine {
         })?;
 
         if let Some(row) = rows.next() {
-            let (id, playbook_id, version_str, parent_version_str, strategy_json, performance_json,
-                 execution_count_str, success_rate_str, avg_duration_ms_str, status_str,
-                 created_at, updated_at) = row?;
+            let (
+                id,
+                playbook_id,
+                version_str,
+                parent_version_str,
+                strategy_json,
+                performance_json,
+                execution_count_str,
+                success_rate_str,
+                avg_duration_ms_str,
+                status_str,
+                created_at,
+                updated_at,
+            ) = row?;
 
             let mutation_strategy: MutationStrategy = serde_json::from_str(&strategy_json)
                 .context("Failed to deserialize mutation strategy")?;
@@ -719,8 +801,10 @@ impl EvolutionEngine {
                 success_rate,
                 avg_duration_ms,
                 status,
-                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
+                    .with_timezone(&chrono::Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?
+                    .with_timezone(&chrono::Utc),
             }))
         } else {
             Ok(None)
@@ -735,7 +819,7 @@ impl EvolutionEngine {
             "SELECT id, playbook_id, version, parent_version, mutation_strategy,
                     performance, execution_count, success_rate, avg_duration_ms,
                     status, created_at, updated_at
-             FROM playbook_evolutions WHERE playbook_id = ?1 ORDER BY version DESC"
+             FROM playbook_evolutions WHERE playbook_id = ?1 ORDER BY version DESC",
         )?;
 
         let mut evolutions = Vec::new();
@@ -758,9 +842,20 @@ impl EvolutionEngine {
         })?;
 
         for row in rows {
-            let (id, playbook_id, version_str, parent_version_str, strategy_json, performance_json,
-                 execution_count_str, success_rate_str, avg_duration_ms_str, status_str,
-                 created_at, updated_at) = row?;
+            let (
+                id,
+                playbook_id,
+                version_str,
+                parent_version_str,
+                strategy_json,
+                performance_json,
+                execution_count_str,
+                success_rate_str,
+                avg_duration_ms_str,
+                status_str,
+                created_at,
+                updated_at,
+            ) = row?;
 
             let mutation_strategy: MutationStrategy = serde_json::from_str(&strategy_json)
                 .context("Failed to deserialize mutation strategy")?;
@@ -792,8 +887,10 @@ impl EvolutionEngine {
                 success_rate,
                 avg_duration_ms,
                 status,
-                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
+                    .with_timezone(&chrono::Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?
+                    .with_timezone(&chrono::Utc),
             });
         }
 
@@ -859,28 +956,37 @@ impl EvolutionEngine {
             AbTestStatus::Completed => "completed",
             AbTestStatus::StoppedEarly => "stopped_early",
         };
-        let results_json = test.results.as_ref()
+        let results_json = test
+            .results
+            .as_ref()
             .map(|r| serde_json::to_string(r).ok())
             .flatten()
             .unwrap_or_default();
 
-        self.db.conn().execute(
-            "INSERT OR REPLACE INTO ab_tests (
+        self.db
+            .conn()
+            .execute(
+                "INSERT OR REPLACE INTO ab_tests (
                 id, playbook_id, version_a, version_b, traffic_split,
                 started_at, ended_at, status, results
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            [
-                &test.id,
-                &test.playbook_id,
-                &(test.version_a.to_string()),
-                &(test.version_b.to_string()),
-                &test.traffic_split.to_string(),
-                &test.started_at.to_rfc3339(),
-                &test.ended_at.as_ref().map(|t| t.to_rfc3339()).unwrap_or_default(),
-                status_str,
-                &results_json,
-            ],
-        ).context("Failed to store A/B test")?;
+                [
+                    &test.id,
+                    &test.playbook_id,
+                    &(test.version_a.to_string()),
+                    &(test.version_b.to_string()),
+                    &test.traffic_split.to_string(),
+                    &test.started_at.to_rfc3339(),
+                    &test
+                        .ended_at
+                        .as_ref()
+                        .map(|t| t.to_rfc3339())
+                        .unwrap_or_default(),
+                    status_str,
+                    &results_json,
+                ],
+            )
+            .context("Failed to store A/B test")?;
 
         Ok(())
     }
@@ -893,11 +999,13 @@ impl EvolutionEngine {
 
             // Get performance metrics for both versions
             let evolutions = self.list_evolutions(&test.playbook_id)?;
-            let metrics_a = evolutions.iter()
+            let metrics_a = evolutions
+                .iter()
                 .find(|e| e.version == test.version_a)
                 .map(|e| e.performance.clone())
                 .unwrap_or_default();
-            let metrics_b = evolutions.iter()
+            let metrics_b = evolutions
+                .iter()
                 .find(|e| e.version == test.version_b)
                 .map(|e| e.performance.clone())
                 .unwrap_or_default();
@@ -934,7 +1042,7 @@ impl EvolutionEngine {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, playbook_id, version_a, version_b, traffic_split,
                     started_at, ended_at, status, results
-             FROM ab_tests WHERE id = ?1"
+             FROM ab_tests WHERE id = ?1",
         )?;
 
         let mut rows = stmt.query_map([id], |row| {
@@ -952,8 +1060,17 @@ impl EvolutionEngine {
         })?;
 
         if let Some(row) = rows.next() {
-            let (id, playbook_id, version_a_str, version_b_str, traffic_split_str,
-                 started_at, ended_at, status_str, results_json) = row?;
+            let (
+                id,
+                playbook_id,
+                version_a_str,
+                version_b_str,
+                traffic_split_str,
+                started_at,
+                ended_at,
+                status_str,
+                results_json,
+            ) = row?;
 
             let status = match status_str.as_str() {
                 "running" => AbTestStatus::Running,
@@ -978,8 +1095,11 @@ impl EvolutionEngine {
                 version_a,
                 version_b,
                 traffic_split,
-                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&chrono::Utc),
-                ended_at: ended_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&chrono::Utc)),
+                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?
+                    .with_timezone(&chrono::Utc),
+                ended_at: ended_at
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc)),
                 status,
                 results,
             }))
@@ -995,7 +1115,7 @@ impl EvolutionEngine {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, playbook_id, version_a, version_b, traffic_split,
                     started_at, ended_at, status, results
-             FROM ab_tests WHERE playbook_id = ?1 ORDER BY started_at DESC"
+             FROM ab_tests WHERE playbook_id = ?1 ORDER BY started_at DESC",
         )?;
 
         let mut tests = Vec::new();
@@ -1015,8 +1135,17 @@ impl EvolutionEngine {
         })?;
 
         for row in rows {
-            let (id, playbook_id, version_a_str, version_b_str, traffic_split_str,
-                 started_at, ended_at, status_str, results_json) = row?;
+            let (
+                id,
+                playbook_id,
+                version_a_str,
+                version_b_str,
+                traffic_split_str,
+                started_at,
+                ended_at,
+                status_str,
+                results_json,
+            ) = row?;
 
             let status = match status_str.as_str() {
                 "running" => AbTestStatus::Running,
@@ -1041,8 +1170,11 @@ impl EvolutionEngine {
                 version_a,
                 version_b,
                 traffic_split,
-                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&chrono::Utc),
-                ended_at: ended_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&chrono::Utc)),
+                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?
+                    .with_timezone(&chrono::Utc),
+                ended_at: ended_at
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc)),
                 status,
                 results,
             });
@@ -1070,22 +1202,32 @@ mod tests {
         context.status = WorkStatus::Completed;
 
         // Add execution metadata
-        context.execution_metadata.push(crate::work::types::ExecutionRecord {
-            node_id: "planner".to_string(),
-            provider: "openai".to_string(),
-            model: "gpt-4".to_string(),
-            latency_ms: 6000,
-            timestamp: chrono::Utc::now(),
-            tokens: Some(100),
-            cost: Some(0.01),
-        });
+        context
+            .execution_metadata
+            .push(crate::work::types::ExecutionRecord {
+                node_id: "planner".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                latency_ms: 6000,
+                timestamp: chrono::Utc::now(),
+                tokens: Some(100),
+                cost: Some(0.01),
+            });
 
         let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
         // Should have success patterns from model usage and high latency
         assert!(!success_patterns.is_empty());
-        assert!(success_patterns.iter().any(|p| p.signal.starts_with("model_usage_")));
-        assert!(success_patterns.iter().any(|p| p.signal.contains("high_latency")));
+        assert!(
+            success_patterns
+                .iter()
+                .any(|p| p.signal.starts_with("model_usage_"))
+        );
+        assert!(
+            success_patterns
+                .iter()
+                .any(|p| p.signal.contains("high_latency"))
+        );
     }
 
     #[test]
@@ -1104,7 +1246,11 @@ mod tests {
 
         // Should have failure patterns from blocked reason
         assert!(!failure_patterns.is_empty());
-        assert!(failure_patterns.iter().any(|p| p.signal.contains("blocked_reason")));
+        assert!(
+            failure_patterns
+                .iter()
+                .any(|p| p.signal.contains("blocked_reason"))
+        );
     }
 
     #[test]
@@ -1138,9 +1284,21 @@ mod tests {
 
         // Should have patterns from flow performance
         assert!(!success_patterns.is_empty());
-        assert!(success_patterns.iter().any(|p| p.signal.contains("flow_performance")));
-        assert!(success_patterns.iter().any(|p| p.signal.contains("high_duration")));
-        assert!(success_patterns.iter().any(|p| p.signal.contains("high_cost")));
+        assert!(
+            success_patterns
+                .iter()
+                .any(|p| p.signal.contains("flow_performance"))
+        );
+        assert!(
+            success_patterns
+                .iter()
+                .any(|p| p.signal.contains("high_duration"))
+        );
+        assert!(
+            success_patterns
+                .iter()
+                .any(|p| p.signal.contains("high_cost"))
+        );
     }
 
     #[test]
@@ -1192,7 +1350,11 @@ mod tests {
         let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
         // Should have high revision count pattern
-        assert!(success_patterns.iter().any(|p| p.signal == "high_revision_count"));
+        assert!(
+            success_patterns
+                .iter()
+                .any(|p| p.signal == "high_revision_count")
+        );
     }
 
     #[test]
@@ -1207,8 +1369,16 @@ mod tests {
         context.status = WorkStatus::Completed;
         use crate::work::plan::{ExecutionPlan, PlanStep};
         context.plan = Some(ExecutionPlan::new(vec![
-            PlanStep::new("step1".to_string(), "First step".to_string(), "flow1".to_string()),
-            PlanStep::new("step2".to_string(), "Second step".to_string(), "flow2".to_string()),
+            PlanStep::new(
+                "step1".to_string(),
+                "First step".to_string(),
+                "flow1".to_string(),
+            ),
+            PlanStep::new(
+                "step2".to_string(),
+                "Second step".to_string(),
+                "flow2".to_string(),
+            ),
         ]));
 
         let result = EvolutionEngine::evaluate_context(&context);
@@ -1283,28 +1453,26 @@ mod tests {
             "Test Playbook".to_string(),
             "Test playbook".to_string(),
         );
-        playbook.preferred_flows = vec![
-            crate::work::playbook::FlowPreference {
-                flow_id: "planning.flow.yaml".to_string(),
-                weight: 0.5,
-                confidence: 0.5,
-            },
-        ];
+        playbook.preferred_flows = vec![crate::work::playbook::FlowPreference {
+            flow_id: "planning.flow.yaml".to_string(),
+            weight: 0.5,
+            confidence: 0.5,
+        }];
 
         db.create_playbook(&playbook).unwrap();
 
         // Evolve with success patterns
-        let success_patterns = vec![
-            PatternRecord {
-                pattern_type: PatternType::Success,
-                signal: "model_usage_planning.flow.yaml_openai_gpt-4".to_string(),
-                weight: 0.8,
-                created_at: chrono::Utc::now(),
-            },
-        ];
+        let success_patterns = vec![PatternRecord {
+            pattern_type: PatternType::Success,
+            signal: "model_usage_planning.flow.yaml_openai_gpt-4".to_string(),
+            weight: 0.8,
+            created_at: chrono::Utc::now(),
+        }];
         let failure_patterns = vec![];
 
-        engine.evolve_playbook("pb-1", success_patterns, failure_patterns).unwrap();
+        engine
+            .evolve_playbook("pb-1", success_patterns, failure_patterns)
+            .unwrap();
 
         // Verify flow weights increased
         let updated = db.get_playbook("pb-1").unwrap().unwrap();
@@ -1325,28 +1493,26 @@ mod tests {
             "Test Playbook".to_string(),
             "Test playbook".to_string(),
         );
-        playbook.preferred_flows = vec![
-            crate::work::playbook::FlowPreference {
-                flow_id: "planning.flow.yaml".to_string(),
-                weight: 0.8,
-                confidence: 0.8,
-            },
-        ];
+        playbook.preferred_flows = vec![crate::work::playbook::FlowPreference {
+            flow_id: "planning.flow.yaml".to_string(),
+            weight: 0.8,
+            confidence: 0.8,
+        }];
 
         db.create_playbook(&playbook).unwrap();
 
         // Evolve with failure patterns
         let success_patterns = vec![];
-        let failure_patterns = vec![
-            PatternRecord {
-                pattern_type: PatternType::Failure,
-                signal: "model_usage_openai_gpt-4".to_string(),
-                weight: 0.8,
-                created_at: chrono::Utc::now(),
-            },
-        ];
+        let failure_patterns = vec![PatternRecord {
+            pattern_type: PatternType::Failure,
+            signal: "model_usage_openai_gpt-4".to_string(),
+            weight: 0.8,
+            created_at: chrono::Utc::now(),
+        }];
 
-        engine.evolve_playbook("pb-1", success_patterns, failure_patterns).unwrap();
+        engine
+            .evolve_playbook("pb-1", success_patterns, failure_patterns)
+            .unwrap();
 
         // Verify flow weights decreased
         let updated = db.get_playbook("pb-1").unwrap().unwrap();
@@ -1371,21 +1537,24 @@ mod tests {
         db.create_playbook(&playbook).unwrap();
 
         // Evolve with high revision count pattern
-        let success_patterns = vec![
-            PatternRecord {
-                pattern_type: PatternType::Success,
-                signal: "high_revision_count".to_string(),
-                weight: 0.8,
-                created_at: chrono::Utc::now(),
-            },
-        ];
+        let success_patterns = vec![PatternRecord {
+            pattern_type: PatternType::Success,
+            signal: "high_revision_count".to_string(),
+            weight: 0.8,
+            created_at: chrono::Utc::now(),
+        }];
         let failure_patterns = vec![];
 
-        engine.evolve_playbook("pb-1", success_patterns, failure_patterns).unwrap();
+        engine
+            .evolve_playbook("pb-1", success_patterns, failure_patterns)
+            .unwrap();
 
         // Verify research depth increased
         let updated = db.get_playbook("pb-1").unwrap().unwrap();
-        assert_eq!(updated.default_research_depth, crate::work::playbook::ResearchDepth::Standard);
+        assert_eq!(
+            updated.default_research_depth,
+            crate::work::playbook::ResearchDepth::Standard
+        );
     }
 
     #[test]
@@ -1399,7 +1568,9 @@ mod tests {
             position: "after".to_string(),
         };
 
-        let evolution = engine.create_evolution("pb-1".to_string(), 1, None, strategy).unwrap();
+        let evolution = engine
+            .create_evolution("pb-1".to_string(), 1, None, strategy)
+            .unwrap();
 
         assert_eq!(evolution.playbook_id, "pb-1");
         assert_eq!(evolution.version, 1);
@@ -1416,10 +1587,14 @@ mod tests {
             node_id: "old_node".to_string(),
         };
 
-        let evolution = engine.create_evolution("pb-1".to_string(), 1, None, strategy).unwrap();
+        let evolution = engine
+            .create_evolution("pb-1".to_string(), 1, None, strategy)
+            .unwrap();
 
         // Record successful execution
-        engine.record_execution(&evolution.id, true, 5000, 0.1, 5).unwrap();
+        engine
+            .record_execution(&evolution.id, true, 5000, 0.1, 5)
+            .unwrap();
 
         let updated = engine.get_evolution(&evolution.id).unwrap().unwrap();
         assert_eq!(updated.execution_count, 1);
@@ -1437,11 +1612,15 @@ mod tests {
             position: "after".to_string(),
         };
 
-        let evolution = engine.create_evolution("pb-1".to_string(), 1, None, strategy).unwrap();
+        let evolution = engine
+            .create_evolution("pb-1".to_string(), 1, None, strategy)
+            .unwrap();
 
         // Record 10 successful executions
         for _ in 0..10 {
-            engine.record_execution(&evolution.id, true, 5000, 0.1, 5).unwrap();
+            engine
+                .record_execution(&evolution.id, true, 5000, 0.1, 5)
+                .unwrap();
         }
 
         let updated = engine.get_evolution(&evolution.id).unwrap().unwrap();
@@ -1561,7 +1740,8 @@ mod tests {
 
         // Retrieve from metadata
         let retrieved = context.metadata.get("flow_perf_planning").unwrap();
-        let deserialized: FlowPerformanceRecord = serde_json::from_value(retrieved.clone()).unwrap();
+        let deserialized: FlowPerformanceRecord =
+            serde_json::from_value(retrieved.clone()).unwrap();
 
         assert_eq!(deserialized.flow_id, "planning.flow.yaml");
         assert_eq!(deserialized.success_score, 0.9);
@@ -1575,7 +1755,7 @@ mod tests {
             work_context_id: "ctx-1".to_string(),
             success_score: 0.7,
             duration_ms: 5000,
-            token_cost: 0.6,  // Above 0.5 threshold
+            token_cost: 0.6, // Above 0.5 threshold
             revision_count: 1,
             executed_at: chrono::Utc::now(),
         };
@@ -1590,7 +1770,7 @@ mod tests {
             flow_id: "slow.flow.yaml".to_string(),
             work_context_id: "ctx-1".to_string(),
             success_score: 0.8,
-            duration_ms: 12000,  // Above 10000 threshold
+            duration_ms: 12000, // Above 10000 threshold
             token_cost: 0.1,
             revision_count: 1,
             executed_at: chrono::Utc::now(),
@@ -1605,7 +1785,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             flow_id: "successful.flow.yaml".to_string(),
             work_context_id: "ctx-1".to_string(),
-            success_score: 0.9,  // Above 0.7 threshold
+            success_score: 0.9, // Above 0.7 threshold
             duration_ms: 5000,
             token_cost: 0.1,
             revision_count: 1,
@@ -1621,7 +1801,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             flow_id: "failed.flow.yaml".to_string(),
             work_context_id: "ctx-1".to_string(),
-            success_score: 0.5,  // Below 0.7 threshold
+            success_score: 0.5, // Below 0.7 threshold
             duration_ms: 5000,
             token_cost: 0.1,
             revision_count: 1,
@@ -1692,15 +1872,17 @@ mod tests {
         context.status = WorkStatus::Completed;
 
         // Add execution metadata with high latency
-        context.execution_metadata.push(crate::work::types::ExecutionRecord {
-            node_id: "planner".to_string(),
-            provider: "openai".to_string(),
-            model: "gpt-4".to_string(),
-            latency_ms: 15000,  // High latency
-            timestamp: chrono::Utc::now(),
-            tokens: Some(100),
-            cost: Some(0.01),
-        });
+        context
+            .execution_metadata
+            .push(crate::work::types::ExecutionRecord {
+                node_id: "planner".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                latency_ms: 15000, // High latency
+                timestamp: chrono::Utc::now(),
+                tokens: Some(100),
+                cost: Some(0.01),
+            });
 
         let result = EvolutionEngine::evaluate_context(&context);
 
@@ -1720,15 +1902,17 @@ mod tests {
         context.status = WorkStatus::Completed;
 
         // Add execution metadata with low latency
-        context.execution_metadata.push(crate::work::types::ExecutionRecord {
-            node_id: "planner".to_string(),
-            provider: "openai".to_string(),
-            model: "gpt-4".to_string(),
-            latency_ms: 2000,  // Low latency
-            timestamp: chrono::Utc::now(),
-            tokens: Some(100),
-            cost: Some(0.01),
-        });
+        context
+            .execution_metadata
+            .push(crate::work::types::ExecutionRecord {
+                node_id: "planner".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                latency_ms: 2000, // Low latency
+                timestamp: chrono::Utc::now(),
+                tokens: Some(100),
+                cost: Some(0.01),
+            });
 
         let result = EvolutionEngine::evaluate_context(&context);
 
@@ -1764,9 +1948,11 @@ mod tests {
         );
         context.status = WorkStatus::Completed;
         use crate::work::plan::{ExecutionPlan, PlanStep};
-        context.plan = Some(ExecutionPlan::new(vec![
-            PlanStep::new("step1".to_string(), "First step".to_string(), "flow1".to_string()),
-        ]));
+        context.plan = Some(ExecutionPlan::new(vec![PlanStep::new(
+            "step1".to_string(),
+            "First step".to_string(),
+            "flow1".to_string(),
+        )]));
 
         let result = EvolutionEngine::evaluate_context(&context);
 

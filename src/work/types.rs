@@ -40,7 +40,10 @@ pub struct FlowPerformanceRecord {
 
 impl ExecutionRecord {
     /// Create an ExecutionRecord from a GenerateResult
-    pub fn from_generate_result(node_id: String, result: &crate::flow::intelligence::GenerateResult) -> Self {
+    pub fn from_generate_result(
+        node_id: String,
+        result: &crate::flow::intelligence::GenerateResult,
+    ) -> Self {
         Self {
             node_id,
             model: result.model.clone(),
@@ -206,9 +209,7 @@ impl WorkContext {
 
     /// Check if all completion criteria are satisfied
     pub fn is_completion_satisfied(&self) -> bool {
-        self.completion_criteria
-            .iter()
-            .all(|c| c.satisfied)
+        self.completion_criteria.iter().all(|c| c.satisfied)
     }
 }
 

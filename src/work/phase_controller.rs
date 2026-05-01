@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 
-use super::types::{WorkContext, WorkPhase, WorkStatus};
 use super::domain::WorkDomainProfile;
 use super::playbook::FlowPreference;
+use super::types::{WorkContext, WorkPhase, WorkStatus};
 use rand::Rng;
 
 /// PhaseController - manages lifecycle phase transitions
@@ -134,7 +134,11 @@ impl PhaseController {
         // Exploitation: pick highest weight
         let best_flow = matching_flows
             .iter()
-            .max_by(|a, b| a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.weight
+                    .partial_cmp(&b.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .unwrap();
         best_flow.flow_id.clone()
     }
@@ -185,25 +189,46 @@ mod tests {
             super::super::types::WorkDomain::Software,
             "Test goal".to_string(),
         );
-        assert_eq!(PhaseController::next_phase(&context), Some(WorkPhase::Planning));
+        assert_eq!(
+            PhaseController::next_phase(&context),
+            Some(WorkPhase::Planning)
+        );
     }
 
     #[test]
     fn test_can_transition_valid() {
-        assert!(PhaseController::can_transition(WorkPhase::Intake, WorkPhase::Planning));
-        assert!(PhaseController::can_transition(WorkPhase::Planning, WorkPhase::Execution));
+        assert!(PhaseController::can_transition(
+            WorkPhase::Intake,
+            WorkPhase::Planning
+        ));
+        assert!(PhaseController::can_transition(
+            WorkPhase::Planning,
+            WorkPhase::Execution
+        ));
     }
 
     #[test]
     fn test_can_transition_invalid() {
-        assert!(!PhaseController::can_transition(WorkPhase::Finalization, WorkPhase::Planning));
-        assert!(!PhaseController::can_transition(WorkPhase::Execution, WorkPhase::Intake));
+        assert!(!PhaseController::can_transition(
+            WorkPhase::Finalization,
+            WorkPhase::Planning
+        ));
+        assert!(!PhaseController::can_transition(
+            WorkPhase::Execution,
+            WorkPhase::Intake
+        ));
     }
 
     #[test]
     fn test_flow_for_phase() {
-        assert_eq!(PhaseController::flow_for_phase(WorkPhase::Planning, None), "planning.flow.yaml");
-        assert_eq!(PhaseController::flow_for_phase(WorkPhase::Execution, None), "execution.flow.yaml");
+        assert_eq!(
+            PhaseController::flow_for_phase(WorkPhase::Planning, None),
+            "planning.flow.yaml"
+        );
+        assert_eq!(
+            PhaseController::flow_for_phase(WorkPhase::Execution, None),
+            "execution.flow.yaml"
+        );
     }
 
     #[test]
@@ -216,12 +241,21 @@ mod tests {
             "Test goal".to_string(),
         );
         context.current_phase = WorkPhase::Planning;
-        assert!(PhaseController::requires_approval(&context, WorkPhase::Execution));
+        assert!(PhaseController::requires_approval(
+            &context,
+            WorkPhase::Execution
+        ));
     }
 
     #[test]
     fn test_status_for_phase() {
-        assert_eq!(PhaseController::status_for_phase(WorkPhase::Intake), WorkStatus::Draft);
-        assert_eq!(PhaseController::status_for_phase(WorkPhase::Finalization), WorkStatus::Completed);
+        assert_eq!(
+            PhaseController::status_for_phase(WorkPhase::Intake),
+            WorkStatus::Draft
+        );
+        assert_eq!(
+            PhaseController::status_for_phase(WorkPhase::Finalization),
+            WorkStatus::Completed
+        );
     }
 }

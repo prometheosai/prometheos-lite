@@ -5,9 +5,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
+    CompletionCriterion,
     event::WorkContextEvent,
     types::{WorkContext, WorkPhase, WorkStatus},
-    CompletionCriterion,
 };
 use crate::db::Db;
 use crate::db::repository::work_artifacts::WorkArtifactOperations;
@@ -238,7 +238,11 @@ impl WorkContextService {
         conversation_id: &str,
         work_context_id: &str,
     ) -> Result<()> {
-        WorkContextOperations::set_active_context_for_conversation(&*self.db, conversation_id, work_context_id)
+        WorkContextOperations::set_active_context_for_conversation(
+            &*self.db,
+            conversation_id,
+            work_context_id,
+        )
     }
 
     /// Route to the appropriate context based on priority

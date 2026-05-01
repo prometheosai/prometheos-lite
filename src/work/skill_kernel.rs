@@ -180,7 +180,10 @@ impl SkillKernel {
     }
 
     /// Infer capability signature from execution metadata
-    fn infer_capability_signature(&self, request: &SkillExtractionRequest) -> Result<CapabilitySignature> {
+    fn infer_capability_signature(
+        &self,
+        request: &SkillExtractionRequest,
+    ) -> Result<CapabilitySignature> {
         // Infer capability signature from execution
         let input_schema = self.infer_schema(&request.input);
         let output_schema = self.infer_schema(&request.final_output);
@@ -285,15 +288,18 @@ impl SkillKernel {
 
     /// Initialize skills table
     fn init_skills_table(&self) -> Result<()> {
-        self.db.conn().execute(
-            "CREATE TABLE IF NOT EXISTS skills (
+        self.db
+            .conn()
+            .execute(
+                "CREATE TABLE IF NOT EXISTS skills (
                 id TEXT PRIMARY KEY,
                 skill_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
-            [],
-        ).context("Failed to create skills table")?;
+                [],
+            )
+            .context("Failed to create skills table")?;
 
         Ok(())
     }
@@ -302,7 +308,10 @@ impl SkillKernel {
     pub fn list_skills(&self) -> Result<Vec<Skill>> {
         self.init_skills_table()?;
 
-        let mut stmt = self.db.conn().prepare("SELECT skill_json FROM skills ORDER BY created_at DESC")?;
+        let mut stmt = self
+            .db
+            .conn()
+            .prepare("SELECT skill_json FROM skills ORDER BY created_at DESC")?;
         let mut skills = Vec::new();
 
         let rows = stmt.query_map([], |row| {
@@ -312,7 +321,8 @@ impl SkillKernel {
 
         for row in rows {
             let skill_json = row?;
-            let skill: Skill = serde_json::from_str(&skill_json).context("Failed to deserialize skill")?;
+            let skill: Skill =
+                serde_json::from_str(&skill_json).context("Failed to deserialize skill")?;
             skills.push(skill);
         }
 
@@ -323,7 +333,10 @@ impl SkillKernel {
     pub fn get_skill(&self, id: &str) -> Result<Option<Skill>> {
         self.init_skills_table()?;
 
-        let mut stmt = self.db.conn().prepare("SELECT skill_json FROM skills WHERE id = ?1")?;
+        let mut stmt = self
+            .db
+            .conn()
+            .prepare("SELECT skill_json FROM skills WHERE id = ?1")?;
         let mut rows = stmt.query_map([id], |row| {
             let skill_json: String = row.get(0)?;
             Ok(skill_json)
@@ -331,7 +344,8 @@ impl SkillKernel {
 
         if let Some(row) = rows.next() {
             let skill_json = row?;
-            let skill: Skill = serde_json::from_str(&skill_json).context("Failed to deserialize skill")?;
+            let skill: Skill =
+                serde_json::from_str(&skill_json).context("Failed to deserialize skill")?;
             Ok(Some(skill))
         } else {
             Ok(None)

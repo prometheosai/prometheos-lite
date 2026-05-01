@@ -124,9 +124,6 @@ mod tests {
         );
 
         assert_eq!(artifact.id, "art-1");
-        assert!(matches!(
-            artifact.storage,
-            ArtifactStorage::FilePath(_)
-        ));
+        assert!(matches!(artifact.storage, ArtifactStorage::FilePath(_)));
     }
 }

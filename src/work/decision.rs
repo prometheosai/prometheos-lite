@@ -53,7 +53,11 @@ mod tests {
             "dec-1".to_string(),
             "Choose database".to_string(),
             "PostgreSQL".to_string(),
-            vec!["PostgreSQL".to_string(), "MySQL".to_string(), "SQLite".to_string()],
+            vec![
+                "PostgreSQL".to_string(),
+                "MySQL".to_string(),
+                "SQLite".to_string(),
+            ],
         );
 
         assert_eq!(decision.id, "dec-1");

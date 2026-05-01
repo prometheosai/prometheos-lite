@@ -89,8 +89,16 @@ mod tests {
     #[test]
     fn test_next_pending_step() {
         let mut plan = ExecutionPlan::new(vec![
-            PlanStep::new("step-1".to_string(), "Plan".to_string(), "planning.flow.yaml".to_string()),
-            PlanStep::new("step-2".to_string(), "Execute".to_string(), "execute.flow.yaml".to_string()),
+            PlanStep::new(
+                "step-1".to_string(),
+                "Plan".to_string(),
+                "planning.flow.yaml".to_string(),
+            ),
+            PlanStep::new(
+                "step-2".to_string(),
+                "Execute".to_string(),
+                "execute.flow.yaml".to_string(),
+            ),
         ]);
 
         let next = plan.next_pending_step();
@@ -121,7 +129,11 @@ mod tests {
 
     #[test]
     fn test_plan_step_transitions() {
-        let mut step = PlanStep::new("step-1".to_string(), "Plan".to_string(), "planning.flow.yaml".to_string());
+        let mut step = PlanStep::new(
+            "step-1".to_string(),
+            "Plan".to_string(),
+            "planning.flow.yaml".to_string(),
+        );
 
         assert_eq!(step.status, StepStatus::Pending);
 

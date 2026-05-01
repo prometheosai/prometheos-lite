@@ -6,10 +6,10 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
+use super::evolution_engine::EvolutionEngine;
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
 use super::types::{AutonomyLevel, WorkContext, WorkPhase, WorkStatus};
-use super::evolution_engine::EvolutionEngine;
 use crate::flow::execution_service::FlowExecutionService;
 use crate::intent::{Intent, IntentClassifier};
 
@@ -52,7 +52,7 @@ impl Default for ExecutionLimits {
             completion_criteria: Vec::new(),
             failure_threshold: 0.3,
             verification_max_iterations: 5, // V1.4 default
-            verification_max_failures: 3, // V1.4 default
+            verification_max_failures: 3,   // V1.4 default
         }
     }
 }
@@ -192,7 +192,9 @@ impl WorkOrchestrator {
             context = self
                 .work_context_service
                 .get_context(&context.id)?
-                .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Context not found after execution: {}", context.id)
+                })?;
         } else {
             // Autonomous mode: execute immediately
             self.work_execution_service
@@ -203,7 +205,9 @@ impl WorkOrchestrator {
             context = self
                 .work_context_service
                 .get_context(&context.id)?
-                .ok_or_else(|| anyhow::anyhow!("Context not found after execution: {}", context.id))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Context not found after execution: {}", context.id)
+                })?;
         }
 
         Ok(context)
@@ -211,7 +215,11 @@ impl WorkOrchestrator {
 
     /// Complete a context and trigger evolution if applicable
     /// Triggers: completion, partial failure, user correction, retry
-    pub async fn complete_context(&self, context_id: String, trigger: EvolutionTrigger) -> Result<WorkContext> {
+    pub async fn complete_context(
+        &self,
+        context_id: String,
+        trigger: EvolutionTrigger,
+    ) -> Result<WorkContext> {
         let context = self
             .work_context_service
             .get_context(&context_id)?
@@ -228,7 +236,11 @@ impl WorkOrchestrator {
             let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
             // Evolve playbook based on patterns
-            self.evolution_engine.evolve_playbook(playbook_id, success_patterns, failure_patterns)?;
+            self.evolution_engine.evolve_playbook(
+                playbook_id,
+                success_patterns,
+                failure_patterns,
+            )?;
         }
 
         // Update context status based on trigger
@@ -237,18 +249,22 @@ impl WorkOrchestrator {
 
         match trigger {
             EvolutionTrigger::Completion => {
-                self.work_context_service.update_status(&mut context, WorkStatus::Completed)?;
+                self.work_context_service
+                    .update_status(&mut context, WorkStatus::Completed)?;
             }
             EvolutionTrigger::PartialFailure => {
-                self.work_context_service.update_status(&mut context, WorkStatus::Blocked)?;
+                self.work_context_service
+                    .update_status(&mut context, WorkStatus::Blocked)?;
             }
             EvolutionTrigger::UserCorrection => {
                 // User corrected the context, continue execution
-                self.work_context_service.clear_blocked_reason(&mut context)?;
+                self.work_context_service
+                    .clear_blocked_reason(&mut context)?;
             }
             EvolutionTrigger::Retry => {
                 // Retry triggered, reset to InProgress
-                self.work_context_service.update_status(&mut context, WorkStatus::InProgress)?;
+                self.work_context_service
+                    .update_status(&mut context, WorkStatus::InProgress)?;
             }
         }
 
@@ -265,7 +281,8 @@ impl WorkOrchestrator {
 
         // Clear blocked reason if set, then execute
         if context.is_blocked() {
-            self.work_context_service.clear_blocked_reason(&mut context)?;
+            self.work_context_service
+                .clear_blocked_reason(&mut context)?;
         }
 
         let context = self
@@ -293,25 +310,25 @@ impl WorkOrchestrator {
         loop {
             // Check limits
             if iterations >= limits.max_iterations {
-                self.work_context_service.set_blocked_reason(
-                    &mut context,
-                    "Max iterations reached".to_string(),
-                )?;
+                self.work_context_service
+                    .set_blocked_reason(&mut context, "Max iterations reached".to_string())?;
                 break;
             }
 
             if start.elapsed().as_millis() as u64 >= limits.max_runtime_ms {
-                self.work_context_service.set_blocked_reason(
-                    &mut context,
-                    "Max runtime exceeded".to_string(),
-                )?;
+                self.work_context_service
+                    .set_blocked_reason(&mut context, "Max runtime exceeded".to_string())?;
                 break;
             }
 
             // Check completion - empty criteria should NOT mean complete
-            if context.is_complete() || (!context.completion_criteria.is_empty() && context.is_completion_satisfied()) {
+            if context.is_complete()
+                || (!context.completion_criteria.is_empty() && context.is_completion_satisfied())
+            {
                 // Use complete_context() to trigger evaluation and evolution
-                context = self.complete_context(context.id.clone(), EvolutionTrigger::Completion).await?;
+                context = self
+                    .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+                    .await?;
                 break;
             }
 
@@ -321,7 +338,10 @@ impl WorkOrchestrator {
             }
 
             // Execute next step using WorkExecutionService
-            context = self.work_execution_service.continue_context(&context.id).await?;
+            context = self
+                .work_execution_service
+                .continue_context(&context.id)
+                .await?;
 
             iterations += 1;
         }
@@ -350,7 +370,10 @@ impl WorkOrchestrator {
             if verification_iterations >= limits.verification_max_iterations {
                 self.work_context_service.set_blocked_reason(
                     &mut context,
-                    format!("Verification max iterations reached: {}", limits.verification_max_iterations),
+                    format!(
+                        "Verification max iterations reached: {}",
+                        limits.verification_max_iterations
+                    ),
                 )?;
                 break;
             }
@@ -359,20 +382,28 @@ impl WorkOrchestrator {
             if verification_failures >= limits.verification_max_failures {
                 self.work_context_service.set_blocked_reason(
                     &mut context,
-                    format!("Verification max failures reached: {}", limits.verification_max_failures),
+                    format!(
+                        "Verification max failures reached: {}",
+                        limits.verification_max_failures
+                    ),
                 )?;
                 break;
             }
 
             // Execute one iteration of the verification loop
-            context = self.work_execution_service.continue_context(&context.id).await?;
+            context = self
+                .work_execution_service
+                .continue_context(&context.id)
+                .await?;
 
             // Check if tests passed (look for test results in artifacts or evaluation)
             let tests_passed = self.check_tests_passed(&context).await?;
 
             if tests_passed {
                 // Tests passed - complete the context
-                context = self.complete_context(context.id.clone(), EvolutionTrigger::Completion).await?;
+                context = self
+                    .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+                    .await?;
                 break;
             } else {
                 // Tests failed - increment failure count and continue loop
@@ -383,7 +414,10 @@ impl WorkOrchestrator {
                 if verification_failures >= limits.verification_max_failures {
                     self.work_context_service.set_blocked_reason(
                         &mut context,
-                        format!("Tests failed {} times, exceeding max failures", verification_failures),
+                        format!(
+                            "Tests failed {} times, exceeding max failures",
+                            verification_failures
+                        ),
                     )?;
                     break;
                 }
@@ -446,13 +480,13 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::db::repository::PlaybookOperations;
-    use crate::work::types::{CompletionCriterion, WorkDomain};
-    use crate::work::playbook::{FlowPreference, ResearchDepth, WorkContextPlaybook};
-    use crate::intent::IntentClassifier;
-    use crate::work::execution_service::WorkExecutionService;
     use crate::flow::execution_service::FlowExecutionService;
-    use crate::work::service::WorkContextService;
+    use crate::intent::IntentClassifier;
     use crate::work::evolution_engine::EvolutionEngine;
+    use crate::work::execution_service::WorkExecutionService;
+    use crate::work::playbook::{FlowPreference, ResearchDepth, WorkContextPlaybook};
+    use crate::work::service::WorkContextService;
+    use crate::work::types::{CompletionCriterion, WorkDomain};
 
     #[test]
     fn test_execution_limits_default() {
