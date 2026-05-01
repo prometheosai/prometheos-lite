@@ -3,9 +3,45 @@
 //! This module implements token estimation, priority-based context allocation,
 //! and intelligent context trimming to prevent LLM calls from exceeding token limits.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Context item with priority for trimming
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextItem {
+    pub content: String,
+    pub priority: ContextPriority,
+    pub label: String,
+}
+
+/// Priority levels for context items
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ContextPriority {
+    /// System prompt - never trim
+    System = 0,
+    /// Task description - highest priority
+    Task = 1,
+    /// Plan - high priority
+    Plan = 2,
+    /// Critical memory - high priority
+    CriticalMemory = 3,
+    /// Recent artifacts - medium priority
+    RecentArtifacts = 4,
+    /// Long-tail memory - low priority
+    LongTailMemory = 5,
+}
+
+/// Trimmed context result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrimmedContext {
+    /// The trimmed prompt text
+    pub prompt: String,
+    /// Items that were dropped due to budget constraints
+    pub dropped_items: Vec<String>,
+    /// Total token count of the trimmed context
+    pub token_count: usize,
+}
 
 /// Context budget configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,42 +87,6 @@ impl ContextBudgeter {
         Self::estimate_tokens(&value.to_string())
     }
 
-    /// Context item with priority for trimming
-    #[derive(Debug, Clone)]
-    pub struct ContextItem {
-        pub content: String,
-        pub priority: ContextPriority,
-        pub label: String,
-    }
-
-    /// Priority levels for context items
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-    pub enum ContextPriority {
-        /// System prompt - never trim
-        System = 0,
-        /// Task description - highest priority
-        Task = 1,
-        /// Plan - high priority
-        Plan = 2,
-        /// Critical memory - high priority
-        CriticalMemory = 3,
-        /// Recent artifacts - medium priority
-        RecentArtifacts = 4,
-        /// Long-tail memory - low priority
-        LongTailMemory = 5,
-    }
-
-    /// Trimmed context result
-    #[derive(Debug, Clone)]
-    pub struct TrimmedContext {
-        /// The trimmed prompt text
-        pub prompt: String,
-        /// Items that were dropped due to budget constraints
-        pub dropped_items: Vec<String>,
-        /// Total token count of the trimmed context
-        pub token_count: usize,
-    }
-
     /// Build context with priority-based trimming
     ///
     /// Rules:
@@ -95,7 +95,7 @@ impl ContextBudgeter {
     /// - Return dropped items for logging
     pub fn build_context(&self, items: Vec<ContextItem>) -> Result<TrimmedContext> {
         let available_tokens = self.available_input_tokens();
-        
+
         // Sort items by priority (lower = higher priority)
         let mut sorted_items: Vec<_> = items.into_iter().enumerate().collect();
         sorted_items.sort_by_key(|(_, item)| item.priority);
@@ -113,7 +113,7 @@ impl ContextBudgeter {
                 .map(|(_, item)| item.content)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            
+
             return Ok(TrimmedContext {
                 prompt,
                 dropped_items: Vec::new(),
@@ -145,7 +145,7 @@ impl ContextBudgeter {
                         ContextItem {
                             content: trimmed_content,
                             priority: item.priority,
-                            label: item.label,
+                            label: item.label.clone(),
                         },
                     ));
                     current_tokens += trimmed_tokens;
@@ -175,8 +175,8 @@ impl ContextBudgeter {
 
     /// Trim content while preserving structural integrity
     ///
-    /// Never cut mid-JSON or mid-code block
-    fn trim_content(&self, content: &str, max_tokens: usize) -> Result<String> {
+    /// Trim content to fit within token limit, preserving JSON/code blocks
+    pub fn trim_content(&self, content: &str, max_tokens: usize) -> Result<String> {
         let max_chars = max_tokens * 4; // Approximate character limit
 
         if content.len() <= max_chars {
@@ -236,12 +236,12 @@ impl ContextBudgeter {
     /// Calculate context budget report
     pub fn budget_report(&self, items: &[ContextItem]) -> HashMap<String, usize> {
         let mut report = HashMap::new();
-        
+
         let total_tokens: usize = items
             .iter()
             .map(|item| Self::estimate_tokens(&item.content))
             .sum();
-        
+
         let available = self.available_input_tokens();
         let usage_percentage = if available > 0 {
             (total_tokens * 100) / available
@@ -267,7 +267,10 @@ mod tests {
     fn test_estimate_tokens() {
         assert_eq!(ContextBudgeter::estimate_tokens("hello world"), 3);
         assert_eq!(ContextBudgeter::estimate_tokens(""), 1);
-        assert_eq!(ContextBudgeter::estimate_tokens("a".repeat(100).as_str()), 25);
+        assert_eq!(
+            ContextBudgeter::estimate_tokens("a".repeat(100).as_str()),
+            25
+        );
     }
 
     #[test]
@@ -279,7 +282,7 @@ mod tests {
     #[test]
     fn test_build_context_within_budget() {
         let budgeter = ContextBudgeter::new(10000, 2000);
-        
+
         let items = vec![
             ContextItem {
                 content: "System prompt".to_string(),
@@ -302,7 +305,7 @@ mod tests {
     #[test]
     fn test_build_context_exceeds_budget() {
         let budgeter = ContextBudgeter::new(100, 20); // Very small budget
-        
+
         let items = vec![
             ContextItem {
                 content: "System prompt".to_string(),
@@ -324,7 +327,12 @@ mod tests {
         let result = budgeter.build_context(items).unwrap();
         assert!(!result.dropped_items.is_empty());
         // Low priority items should be dropped first
-        assert!(result.dropped_items.iter().any(|item| item.contains("memory")));
+        assert!(
+            result
+                .dropped_items
+                .iter()
+                .any(|item| item.contains("memory"))
+        );
     }
 
     #[test]
@@ -340,7 +348,7 @@ mod tests {
     fn test_trim_content_json() {
         let budgeter = ContextBudgeter::default();
         let json_content = r#"{"key": "value", "nested": {"data": "test"}}"#;
-        
+
         let result = budgeter.trim_content(json_content, 5).unwrap();
         // Should either be valid JSON or a placeholder
         if !result.contains("Content too large") {
@@ -352,7 +360,7 @@ mod tests {
     fn test_trim_content_code_block() {
         let budgeter = ContextBudgeter::default();
         let code_content = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
-        
+
         let result = budgeter.trim_content(code_content, 20).unwrap();
         // Should close the code block if truncated
         if result.contains("```") {
@@ -364,14 +372,12 @@ mod tests {
     #[test]
     fn test_budget_report() {
         let budgeter = ContextBudgeter::new(10000, 2000);
-        
-        let items = vec![
-            ContextItem {
-                content: "Test content".to_string(),
-                priority: ContextPriority::Task,
-                label: "task".to_string(),
-            },
-        ];
+
+        let items = vec![ContextItem {
+            content: "Test content".to_string(),
+            priority: ContextPriority::Task,
+            label: "task".to_string(),
+        }];
 
         let report = budgeter.budget_report(&items);
         assert!(report.contains_key("total_tokens"));
