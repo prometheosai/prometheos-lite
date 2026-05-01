@@ -330,17 +330,108 @@ impl ResumeCommand {
             }
         }
 
-        // TODO: Resume execution from checkpoint
-        // This requires integration with FlowExecutionService to continue from the exact node
-        let result = serde_json::json!({
-            "run_id": self.run_id,
-            "status": "resumed",
-            "message": "Resume loaded checkpoint successfully. Full execution resume requires FlowExecutionService integration.",
-            "state_outputs": state.get_all_outputs()
-        });
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        // Resume execution from checkpoint
+        // Load the flow and re-execute with checkpointed state
+        if let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str()) {
+            let flows_dir = PathBuf::from("flows");
+            let flow_path = flows_dir.join(format!("{}.flow.yaml", flow_name));
+
+            if !flow_path.exists() {
+                // Try .yml extension
+                let flow_path_yml = flows_dir.join(format!("{}.flow.yml", flow_name));
+                if flow_path_yml.exists() {
+                    logger.info(&format!("Found flow at: {}", flow_path_yml.display()));
+                    // Re-execute the flow with loaded state
+                    self.execute_resumed_flow(&flow_path_yml, state, &logger).await?;
+                } else {
+                    logger.warn(&format!("Flow file not found for: {}", flow_name));
+                    anyhow::bail!("Cannot resume: flow file not found");
+                }
+            } else {
+                logger.info(&format!("Found flow at: {}", flow_path.display()));
+                // Re-execute the flow with loaded state
+                self.execute_resumed_flow(&flow_path, state, &logger).await?;
+            }
+        } else {
+            logger.warn("No flow_name found in checkpoint state");
+            anyhow::bail!("Cannot resume: no flow_name in checkpoint");
+        }
 
         logger.success("Resume command completed");
+        Ok(())
+    }
+
+    /// Execute a resumed flow with checkpointed state
+    async fn execute_resumed_flow(
+        &self,
+        flow_path: &PathBuf,
+        mut state: prometheos_lite::flow::SharedState,
+        logger: &Logger,
+    ) -> anyhow::Result<()> {
+        use prometheos_lite::flow::loader::{FlowLoader, YamlLoader};
+        use prometheos_lite::flow::{
+            DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState,
+        };
+
+        // Load the flow file
+        let loader = YamlLoader::new();
+        let flow_file = loader.load_from_path(flow_path)?;
+        logger.info(&format!("Loaded flow: {}", flow_file.name));
+
+        // Build the flow
+        let factory = DefaultNodeFactory::new();
+        let mut builder = FlowBuilder::new();
+
+        // Add nodes from flow file
+        for node_def in &flow_file.nodes {
+            let node = factory.create(&node_def.node_type, node_def.config.clone())?;
+            builder = builder.add_node(node_def.id.clone(), node);
+        }
+
+        // Add transitions
+        for trans in &flow_file.transitions {
+            builder = builder
+                .add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
+        }
+
+        // Set start node
+        builder = builder.start(flow_file.start_node.clone());
+
+        // Build the flow
+        let mut flow = builder.build()?;
+
+        // Execute the flow with the loaded state
+        logger.info("Resuming flow execution...");
+        match flow.run(&mut state).await {
+            Ok(()) => {
+                logger.success("Flow execution completed successfully");
+
+                // Save updated checkpoint
+                let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
+                let continuation_engine = ContinuationEngine::new(checkpoint_dir);
+                continuation_engine.save_checkpoint(&self.run_id, &state)?;
+                logger.info("Checkpoint saved with updated state");
+
+                // Display results
+                println!("\n[run_id] {}", self.run_id);
+                println!("[status] completed");
+                println!(
+                    "\n[outputs]\n{}",
+                    serde_json::to_string_pretty(&state.get_all_outputs())?
+                );
+            }
+            Err(e) => {
+                logger.error(&format!("Flow execution failed: {}", e));
+
+                // Save checkpoint even on failure (preserves partial progress)
+                let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
+                let continuation_engine = ContinuationEngine::new(checkpoint_dir);
+                let _ = continuation_engine.save_checkpoint(&self.run_id, &state);
+
+                anyhow::bail!("Flow execution failed during resume: {}", e);
+            }
+        }
+
         Ok(())
     }
 }
