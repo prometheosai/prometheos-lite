@@ -39,11 +39,7 @@ pub trait OutboxOperations {
         input_hash: &str,
     ) -> anyhow::Result<Option<OutboxEntry>>;
 
-    fn mark_outbox_completed(
-        &self,
-        id: &str,
-        output: &str,
-    ) -> anyhow::Result<()>;
+    fn mark_outbox_completed(&self, id: &str, output: &str) -> anyhow::Result<()>;
 
     fn list_pending_outbox(&self, run_id: &str) -> anyhow::Result<Vec<OutboxEntry>>;
 }
@@ -94,23 +90,26 @@ impl<T: AsDb> OutboxOperations for T {
              WHERE run_id = ?1 AND node_id = ?2 AND input_hash = ?3"
         ).context("Failed to prepare outbox query")?;
 
-        let result = stmt.query_row(
-            params![run_id, node_id, input_hash],
-            |row| {
-                Ok(OutboxEntry {
-                    id: row.get(0)?,
-                    run_id: row.get(1)?,
-                    trace_id: row.get(2)?,
-                    node_id: row.get(3)?,
-                    tool_name: row.get(4)?,
-                    input_hash: row.get(5)?,
-                    status: row.get(6)?,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?).unwrap().with_timezone(&chrono::Utc),
-                    completed_at: row.get::<_, Option<String>>(8)?.map(|s| chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc)),
-                    output: row.get::<_, Option<String>>(9)?,
-                })
-            }
-        );
+        let result = stmt.query_row(params![run_id, node_id, input_hash], |row| {
+            Ok(OutboxEntry {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                trace_id: row.get(2)?,
+                node_id: row.get(3)?,
+                tool_name: row.get(4)?,
+                input_hash: row.get(5)?,
+                status: row.get(6)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                completed_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc)
+                }),
+                output: row.get::<_, Option<String>>(9)?,
+            })
+        });
 
         match result {
             Ok(entry) => Ok(Some(entry)),
@@ -119,18 +118,15 @@ impl<T: AsDb> OutboxOperations for T {
         }
     }
 
-    fn mark_outbox_completed(
-        &self,
-        id: &str,
-        output: &str,
-    ) -> anyhow::Result<()> {
+    fn mark_outbox_completed(&self, id: &str, output: &str) -> anyhow::Result<()> {
         let conn = self.as_db().conn();
         let now = Utc::now();
 
         conn.execute(
             "UPDATE tool_outbox SET status = ?1, completed_at = ?2, result_json = ?3 WHERE id = ?4",
             params!["completed", &now.to_rfc3339(), output, id],
-        ).context("Failed to update outbox entry")?;
+        )
+        .context("Failed to update outbox entry")?;
 
         Ok(())
     }
@@ -145,20 +141,28 @@ impl<T: AsDb> OutboxOperations for T {
              ORDER BY created_at"
         ).context("Failed to prepare pending outbox query")?;
 
-        let entries = stmt.query_map(params![run_id], |row| {
-            Ok(OutboxEntry {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                trace_id: row.get(2)?,
-                node_id: row.get(3)?,
-                tool_name: row.get(4)?,
-                input_hash: row.get(5)?,
-                status: row.get(6)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?).unwrap().with_timezone(&chrono::Utc),
-                completed_at: row.get::<_, Option<String>>(8)?.map(|s| chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc)),
-                output: row.get::<_, Option<String>>(9)?,
+        let entries = stmt
+            .query_map(params![run_id], |row| {
+                Ok(OutboxEntry {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    trace_id: row.get(2)?,
+                    node_id: row.get(3)?,
+                    tool_name: row.get(4)?,
+                    input_hash: row.get(5)?,
+                    status: row.get(6)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    completed_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                    }),
+                    output: row.get::<_, Option<String>>(9)?,
+                })
             })
-        }).context("Failed to query pending outbox")?;
+            .context("Failed to query pending outbox")?;
 
         let mut result = Vec::new();
         for entry in entries {

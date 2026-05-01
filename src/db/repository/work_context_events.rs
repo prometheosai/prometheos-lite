@@ -10,7 +10,10 @@ use crate::work::event::WorkContextEvent;
 /// WorkContext event operations trait
 pub trait WorkContextEventOperations {
     fn create_event(&self, event: &WorkContextEvent) -> anyhow::Result<WorkContextEvent>;
-    fn get_events_for_context(&self, work_context_id: &str) -> anyhow::Result<Vec<WorkContextEvent>>;
+    fn get_events_for_context(
+        &self,
+        work_context_id: &str,
+    ) -> anyhow::Result<Vec<WorkContextEvent>>;
 }
 
 impl<T: AsDb> WorkContextEventOperations for T {
@@ -33,29 +36,34 @@ impl<T: AsDb> WorkContextEventOperations for T {
         Ok(event.clone())
     }
 
-    fn get_events_for_context(&self, work_context_id: &str) -> anyhow::Result<Vec<WorkContextEvent>> {
+    fn get_events_for_context(
+        &self,
+        work_context_id: &str,
+    ) -> anyhow::Result<Vec<WorkContextEvent>> {
         let conn = self.as_db().conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, work_context_id, event_type, data, created_at
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, work_context_id, event_type, data, created_at
              FROM work_context_events
              WHERE work_context_id = ?1
              ORDER BY created_at ASC",
-        )
-        .context("Failed to prepare events query")?;
+            )
+            .context("Failed to prepare events query")?;
 
-        let events = stmt.query_map(params![work_context_id], |row| {
-            Ok(WorkContextEvent {
-                id: row.get(0)?,
-                work_context_id: row.get(1)?,
-                event_type: row.get(2)?,
-                data: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .unwrap()
-                    .with_timezone(&Utc),
+        let events = stmt
+            .query_map(params![work_context_id], |row| {
+                Ok(WorkContextEvent {
+                    id: row.get(0)?,
+                    work_context_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    data: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
             })
-        })
-        .context("Failed to query events")?;
+            .context("Failed to query events")?;
 
         let mut result = Vec::new();
         for event in events {

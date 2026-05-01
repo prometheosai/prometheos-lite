@@ -10,7 +10,10 @@ use crate::work::DecisionRecord;
 pub trait DecisionOperations: Repository {
     fn create_decision(&self, decision: &DecisionRecord) -> anyhow::Result<DecisionRecord>;
     fn get_decision(&self, id: &str) -> anyhow::Result<Option<DecisionRecord>>;
-    fn get_decisions_for_context(&self, work_context_id: &str) -> anyhow::Result<Vec<DecisionRecord>>;
+    fn get_decisions_for_context(
+        &self,
+        work_context_id: &str,
+    ) -> anyhow::Result<Vec<DecisionRecord>>;
     fn update_decision(&self, decision: &DecisionRecord) -> anyhow::Result<DecisionRecord>;
     fn delete_decision(&self, id: &str) -> anyhow::Result<()>;
 }
@@ -39,32 +42,34 @@ impl DecisionOperations for crate::db::Db {
     fn get_decision(&self, id: &str) -> anyhow::Result<Option<DecisionRecord>> {
         let conn = self.conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, description, chosen_option, alternatives, approved, created_at
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, description, chosen_option, alternatives, approved, created_at
              FROM decisions
              WHERE id = ?1",
-        )
-        .context("Failed to prepare decision query")?;
+            )
+            .context("Failed to prepare decision query")?;
 
-        let mut rows = stmt.query_map(params![id], |row| {
-            let alternatives_json: String = row.get(3)?;
-            let alternatives: Vec<String> = serde_json::from_str(&alternatives_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let created_at_str: String = row.get(5)?;
-            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
-                .with_timezone(&chrono::Utc);
+        let mut rows = stmt
+            .query_map(params![id], |row| {
+                let alternatives_json: String = row.get(3)?;
+                let alternatives: Vec<String> = serde_json::from_str(&alternatives_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let created_at_str: String = row.get(5)?;
+                let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                    .with_timezone(&chrono::Utc);
 
-            Ok(DecisionRecord {
-                id: row.get(0)?,
-                description: row.get(1)?,
-                chosen_option: row.get(2)?,
-                alternatives,
-                approved: row.get(4)?,
-                created_at,
+                Ok(DecisionRecord {
+                    id: row.get(0)?,
+                    description: row.get(1)?,
+                    chosen_option: row.get(2)?,
+                    alternatives,
+                    approved: row.get(4)?,
+                    created_at,
+                })
             })
-        })
-        .context("Failed to query decision")?;
+            .context("Failed to query decision")?;
 
         match rows.next() {
             Some(result) => Ok(Some(result.context("Failed to parse decision")?)),
@@ -72,16 +77,20 @@ impl DecisionOperations for crate::db::Db {
         }
     }
 
-    fn get_decisions_for_context(&self, work_context_id: &str) -> anyhow::Result<Vec<DecisionRecord>> {
+    fn get_decisions_for_context(
+        &self,
+        work_context_id: &str,
+    ) -> anyhow::Result<Vec<DecisionRecord>> {
         let conn = self.conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, description, chosen_option, alternatives, approved, created_at
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, description, chosen_option, alternatives, approved, created_at
              FROM decisions
              WHERE work_context_id = ?1
              ORDER BY created_at ASC",
-        )
-        .context("Failed to prepare decisions query")?;
+            )
+            .context("Failed to prepare decisions query")?;
 
         let decisions = stmt
             .query_map(params![work_context_id], |row| {

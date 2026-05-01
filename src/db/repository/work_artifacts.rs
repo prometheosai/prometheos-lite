@@ -59,29 +59,32 @@ impl<T: AsDb> WorkArtifactOperations for T {
         )
         .context("Failed to prepare artifacts query")?;
 
-        let artifacts = stmt.query_map(params![work_context_id], |row| {
-            let storage_type: String = row.get(6)?;
-            let storage = if storage_type.starts_with("file:") {
-                let path = storage_type.strip_prefix("file:").unwrap_or("");
-                ArtifactStorage::FilePath(path.to_string())
-            } else {
-                ArtifactStorage::Inline
-            };
+        let artifacts = stmt
+            .query_map(params![work_context_id], |row| {
+                let storage_type: String = row.get(6)?;
+                let storage = if storage_type.starts_with("file:") {
+                    let path = storage_type.strip_prefix("file:").unwrap_or("");
+                    ArtifactStorage::FilePath(path.to_string())
+                } else {
+                    ArtifactStorage::Inline
+                };
 
-            Ok(Artifact {
-                id: row.get(0)?,
-                work_context_id: row.get(1)?,
-                kind: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or(ArtifactKind::Other),
-                name: row.get(3)?,
-                content: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
-                created_by: row.get(5)?,
-                storage,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                    .unwrap()
-                    .with_timezone(&Utc),
+                Ok(Artifact {
+                    id: row.get(0)?,
+                    work_context_id: row.get(1)?,
+                    kind: serde_json::from_str(&row.get::<_, String>(2)?)
+                        .unwrap_or(ArtifactKind::Other),
+                    name: row.get(3)?,
+                    content: serde_json::from_str(&row.get::<_, String>(4)?)
+                        .unwrap_or(serde_json::Value::Null),
+                    created_by: row.get(5)?,
+                    storage,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
             })
-        })
-        .context("Failed to query artifacts")?;
+            .context("Failed to query artifacts")?;
 
         let mut result = Vec::new();
         for artifact in artifacts {
@@ -101,29 +104,32 @@ impl<T: AsDb> WorkArtifactOperations for T {
         )
         .context("Failed to prepare artifact query")?;
 
-        let mut rows = stmt.query_map(params![id], |row| {
-            let storage_type: String = row.get(6)?;
-            let storage = if storage_type.starts_with("file:") {
-                let path = storage_type.strip_prefix("file:").unwrap_or("");
-                ArtifactStorage::FilePath(path.to_string())
-            } else {
-                ArtifactStorage::Inline
-            };
+        let mut rows = stmt
+            .query_map(params![id], |row| {
+                let storage_type: String = row.get(6)?;
+                let storage = if storage_type.starts_with("file:") {
+                    let path = storage_type.strip_prefix("file:").unwrap_or("");
+                    ArtifactStorage::FilePath(path.to_string())
+                } else {
+                    ArtifactStorage::Inline
+                };
 
-            Ok(Artifact {
-                id: row.get(0)?,
-                work_context_id: row.get(1)?,
-                kind: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or(ArtifactKind::Other),
-                name: row.get(3)?,
-                content: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
-                created_by: row.get(5)?,
-                storage,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                    .unwrap()
-                    .with_timezone(&Utc),
+                Ok(Artifact {
+                    id: row.get(0)?,
+                    work_context_id: row.get(1)?,
+                    kind: serde_json::from_str(&row.get::<_, String>(2)?)
+                        .unwrap_or(ArtifactKind::Other),
+                    name: row.get(3)?,
+                    content: serde_json::from_str(&row.get::<_, String>(4)?)
+                        .unwrap_or(serde_json::Value::Null),
+                    created_by: row.get(5)?,
+                    storage,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
             })
-        })
-        .context("Failed to query artifact")?;
+            .context("Failed to query artifact")?;
 
         match rows.next() {
             Some(Ok(artifact)) => Ok(Some(artifact)),

@@ -11,8 +11,8 @@ use super::messages::MessageOperations;
 use super::outbox::OutboxOperations;
 use super::projects::ProjectOperations;
 use super::snapshots::FlowSnapshotOperations;
-use super::trust_policies::TrustPolicyOperations;
 use super::trait_def::Repository;
+use super::trust_policies::TrustPolicyOperations;
 
 /// Database connection wrapper
 pub struct Db {

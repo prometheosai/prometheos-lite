@@ -51,21 +51,29 @@ impl<T: AsDb> TrustPolicyOperations for T {
 
         if updated > 0 {
             // Return updated policy
-            let mut stmt = conn.prepare(
-                "SELECT id, source, trust_level, require_approval, created_at, updated_at
-                 FROM trust_policies WHERE source = ?1"
-            ).context("Failed to prepare trust policy query")?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, source, trust_level, require_approval, created_at, updated_at
+                 FROM trust_policies WHERE source = ?1",
+                )
+                .context("Failed to prepare trust policy query")?;
 
-            let entry = stmt.query_row(params![source], |row| {
-                Ok(TrustPolicyEntry {
-                    id: row.get(0)?,
-                    source: row.get(1)?,
-                    trust_level: row.get(2)?,
-                    require_approval: row.get::<_, i32>(3)? == 1,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?).unwrap().with_timezone(&chrono::Utc),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?).unwrap().with_timezone(&chrono::Utc),
+            let entry = stmt
+                .query_row(params![source], |row| {
+                    Ok(TrustPolicyEntry {
+                        id: row.get(0)?,
+                        source: row.get(1)?,
+                        trust_level: row.get(2)?,
+                        require_approval: row.get::<_, i32>(3)? == 1,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc),
+                    })
                 })
-            }).context("Failed to query updated trust policy")?;
+                .context("Failed to query updated trust policy")?;
 
             return Ok(entry);
         }
@@ -90,10 +98,12 @@ impl<T: AsDb> TrustPolicyOperations for T {
     fn get_trust_policy(&self, source: &str) -> anyhow::Result<Option<TrustPolicyEntry>> {
         let conn = self.as_db().conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, source, trust_level, require_approval, created_at, updated_at
-             FROM trust_policies WHERE source = ?1"
-        ).context("Failed to prepare trust policy query")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source, trust_level, require_approval, created_at, updated_at
+             FROM trust_policies WHERE source = ?1",
+            )
+            .context("Failed to prepare trust policy query")?;
 
         let result = stmt.query_row(params![source], |row| {
             Ok(TrustPolicyEntry {
@@ -101,8 +111,12 @@ impl<T: AsDb> TrustPolicyOperations for T {
                 source: row.get(1)?,
                 trust_level: row.get(2)?,
                 require_approval: row.get::<_, i32>(3)? == 1,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?).unwrap().with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?).unwrap().with_timezone(&chrono::Utc),
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
             })
         });
 
@@ -116,21 +130,29 @@ impl<T: AsDb> TrustPolicyOperations for T {
     fn list_trust_policies(&self) -> anyhow::Result<Vec<TrustPolicyEntry>> {
         let conn = self.as_db().conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, source, trust_level, require_approval, created_at, updated_at
-             FROM trust_policies ORDER BY source"
-        ).context("Failed to prepare trust policies query")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source, trust_level, require_approval, created_at, updated_at
+             FROM trust_policies ORDER BY source",
+            )
+            .context("Failed to prepare trust policies query")?;
 
-        let entries = stmt.query_map([], |row| {
-            Ok(TrustPolicyEntry {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                trust_level: row.get(2)?,
-                require_approval: row.get::<_, i32>(3)? == 1,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?).unwrap().with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?).unwrap().with_timezone(&chrono::Utc),
+        let entries = stmt
+            .query_map([], |row| {
+                Ok(TrustPolicyEntry {
+                    id: row.get(0)?,
+                    source: row.get(1)?,
+                    trust_level: row.get(2)?,
+                    require_approval: row.get::<_, i32>(3)? == 1,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                })
             })
-        }).context("Failed to query trust policies")?;
+            .context("Failed to query trust policies")?;
 
         let mut result = Vec::new();
         for entry in entries {
@@ -146,7 +168,8 @@ impl<T: AsDb> TrustPolicyOperations for T {
         conn.execute(
             "DELETE FROM trust_policies WHERE source = ?1",
             params![source],
-        ).context("Failed to delete trust policy")?;
+        )
+        .context("Failed to delete trust policy")?;
 
         Ok(())
     }

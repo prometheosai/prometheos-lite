@@ -8,18 +8,31 @@ use crate::work::playbook::{FlowPreference, NodePreference, PatternRecord, WorkC
 
 /// PlaybookOperations trait for playbook repository operations
 pub trait PlaybookOperations: Repository {
-    fn create_playbook(&self, playbook: &WorkContextPlaybook) -> anyhow::Result<WorkContextPlaybook>;
+    fn create_playbook(
+        &self,
+        playbook: &WorkContextPlaybook,
+    ) -> anyhow::Result<WorkContextPlaybook>;
     fn get_playbook(&self, id: &str) -> anyhow::Result<Option<WorkContextPlaybook>>;
     fn get_playbooks_for_user(&self, user_id: &str) -> anyhow::Result<Vec<WorkContextPlaybook>>;
-    fn get_playbook_by_user_and_domain(&self, user_id: &str, domain_profile_id: &str) -> anyhow::Result<Option<WorkContextPlaybook>>;
-    fn update_playbook(&self, playbook: &WorkContextPlaybook) -> anyhow::Result<WorkContextPlaybook>;
+    fn get_playbook_by_user_and_domain(
+        &self,
+        user_id: &str,
+        domain_profile_id: &str,
+    ) -> anyhow::Result<Option<WorkContextPlaybook>>;
+    fn update_playbook(
+        &self,
+        playbook: &WorkContextPlaybook,
+    ) -> anyhow::Result<WorkContextPlaybook>;
     fn delete_playbook(&self, id: &str) -> anyhow::Result<()>;
     fn increment_usage_count(&self, id: &str) -> anyhow::Result<()>;
     fn update_confidence(&self, id: &str, confidence: f32) -> anyhow::Result<()>;
 }
 
 impl PlaybookOperations for crate::db::Db {
-    fn create_playbook(&self, playbook: &WorkContextPlaybook) -> anyhow::Result<WorkContextPlaybook> {
+    fn create_playbook(
+        &self,
+        playbook: &WorkContextPlaybook,
+    ) -> anyhow::Result<WorkContextPlaybook> {
         let conn = self.conn();
 
         conn.execute(
@@ -59,64 +72,72 @@ impl PlaybookOperations for crate::db::Db {
         )
         .context("Failed to prepare playbook query")?;
 
-        let mut rows = stmt.query_map(params![id], |row| {
-            let preferred_flows_json: String = row.get(5)?;
-            let preferred_flows: Vec<FlowPreference> = serde_json::from_str(&preferred_flows_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut rows = stmt
+            .query_map(params![id], |row| {
+                let preferred_flows_json: String = row.get(5)?;
+                let preferred_flows: Vec<FlowPreference> =
+                    serde_json::from_str(&preferred_flows_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let preferred_nodes_json: String = row.get(6)?;
-            let preferred_nodes: Vec<NodePreference> = serde_json::from_str(&preferred_nodes_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let preferred_nodes_json: String = row.get(6)?;
+                let preferred_nodes: Vec<NodePreference> =
+                    serde_json::from_str(&preferred_nodes_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let default_approval_policy_json: String = row.get(7)?;
-            let default_approval_policy: crate::work::types::ApprovalPolicy = serde_json::from_str(&default_approval_policy_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_approval_policy_json: String = row.get(7)?;
+                let default_approval_policy: crate::work::types::ApprovalPolicy =
+                    serde_json::from_str(&default_approval_policy_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let default_research_depth_json: String = row.get(8)?;
-            let default_research_depth: crate::work::playbook::ResearchDepth = serde_json::from_str(&default_research_depth_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_research_depth_json: String = row.get(8)?;
+                let default_research_depth: crate::work::playbook::ResearchDepth =
+                    serde_json::from_str(&default_research_depth_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let default_creativity_level_json: String = row.get(9)?;
-            let default_creativity_level: crate::work::playbook::CreativityLevel = serde_json::from_str(&default_creativity_level_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_creativity_level_json: String = row.get(9)?;
+                let default_creativity_level: crate::work::playbook::CreativityLevel =
+                    serde_json::from_str(&default_creativity_level_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let evaluation_rules_json: String = row.get(10)?;
-            let evaluation_rules: Vec<String> = serde_json::from_str(&evaluation_rules_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let evaluation_rules_json: String = row.get(10)?;
+                let evaluation_rules: Vec<String> = serde_json::from_str(&evaluation_rules_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let success_patterns_json: String = row.get(11)?;
-            let success_patterns: Vec<PatternRecord> = serde_json::from_str(&success_patterns_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let success_patterns_json: String = row.get(11)?;
+                let success_patterns: Vec<PatternRecord> =
+                    serde_json::from_str(&success_patterns_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let failure_patterns_json: String = row.get(12)?;
-            let failure_patterns: Vec<PatternRecord> = serde_json::from_str(&failure_patterns_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let failure_patterns_json: String = row.get(12)?;
+                let failure_patterns: Vec<PatternRecord> =
+                    serde_json::from_str(&failure_patterns_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let updated_at_str: String = row.get(15)?;
-            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
-                .with_timezone(&chrono::Utc);
+                let updated_at_str: String = row.get(15)?;
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                    .with_timezone(&chrono::Utc);
 
-            Ok(WorkContextPlaybook {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                domain_profile_id: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                preferred_flows,
-                preferred_nodes,
-                default_approval_policy,
-                default_research_depth,
-                default_creativity_level,
-                evaluation_rules,
-                success_patterns,
-                failure_patterns,
-                confidence: row.get(13)?,
-                usage_count: row.get(14)?,
-                updated_at,
+                Ok(WorkContextPlaybook {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    domain_profile_id: row.get(2)?,
+                    name: row.get(3)?,
+                    description: row.get(4)?,
+                    preferred_flows,
+                    preferred_nodes,
+                    default_approval_policy,
+                    default_research_depth,
+                    default_creativity_level,
+                    evaluation_rules,
+                    success_patterns,
+                    failure_patterns,
+                    confidence: row.get(13)?,
+                    usage_count: row.get(14)?,
+                    updated_at,
+                })
             })
-        })
-        .context("Failed to query playbook")?;
+            .context("Failed to query playbook")?;
 
         match rows.next() {
             Some(result) => Ok(Some(result.context("Failed to parse playbook")?)),
@@ -138,36 +159,43 @@ impl PlaybookOperations for crate::db::Db {
         let playbooks = stmt
             .query_map(params![user_id], |row| {
                 let preferred_flows_json: String = row.get(5)?;
-                let preferred_flows: Vec<FlowPreference> = serde_json::from_str(&preferred_flows_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let preferred_flows: Vec<FlowPreference> =
+                    serde_json::from_str(&preferred_flows_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let preferred_nodes_json: String = row.get(6)?;
-                let preferred_nodes: Vec<NodePreference> = serde_json::from_str(&preferred_nodes_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let preferred_nodes: Vec<NodePreference> =
+                    serde_json::from_str(&preferred_nodes_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let default_approval_policy_json: String = row.get(7)?;
-                let default_approval_policy: crate::work::types::ApprovalPolicy = serde_json::from_str(&default_approval_policy_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_approval_policy: crate::work::types::ApprovalPolicy =
+                    serde_json::from_str(&default_approval_policy_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let default_research_depth_json: String = row.get(8)?;
-                let default_research_depth: crate::work::playbook::ResearchDepth = serde_json::from_str(&default_research_depth_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_research_depth: crate::work::playbook::ResearchDepth =
+                    serde_json::from_str(&default_research_depth_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let default_creativity_level_json: String = row.get(9)?;
-                let default_creativity_level: crate::work::playbook::CreativityLevel = serde_json::from_str(&default_creativity_level_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_creativity_level: crate::work::playbook::CreativityLevel =
+                    serde_json::from_str(&default_creativity_level_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let evaluation_rules_json: String = row.get(10)?;
                 let evaluation_rules: Vec<String> = serde_json::from_str(&evaluation_rules_json)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let success_patterns_json: String = row.get(11)?;
-                let success_patterns: Vec<PatternRecord> = serde_json::from_str(&success_patterns_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let success_patterns: Vec<PatternRecord> =
+                    serde_json::from_str(&success_patterns_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let failure_patterns_json: String = row.get(12)?;
-                let failure_patterns: Vec<PatternRecord> = serde_json::from_str(&failure_patterns_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let failure_patterns: Vec<PatternRecord> =
+                    serde_json::from_str(&failure_patterns_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let updated_at_str: String = row.get(15)?;
                 let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
@@ -203,7 +231,11 @@ impl PlaybookOperations for crate::db::Db {
         Ok(result)
     }
 
-    fn get_playbook_by_user_and_domain(&self, user_id: &str, domain_profile_id: &str) -> anyhow::Result<Option<WorkContextPlaybook>> {
+    fn get_playbook_by_user_and_domain(
+        &self,
+        user_id: &str,
+        domain_profile_id: &str,
+    ) -> anyhow::Result<Option<WorkContextPlaybook>> {
         let conn = self.conn();
 
         let mut stmt = conn.prepare(
@@ -215,64 +247,72 @@ impl PlaybookOperations for crate::db::Db {
         )
         .context("Failed to prepare playbook query")?;
 
-        let mut rows = stmt.query_map(params![user_id, domain_profile_id], |row| {
-            let preferred_flows_json: String = row.get(5)?;
-            let preferred_flows: Vec<FlowPreference> = serde_json::from_str(&preferred_flows_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut rows = stmt
+            .query_map(params![user_id, domain_profile_id], |row| {
+                let preferred_flows_json: String = row.get(5)?;
+                let preferred_flows: Vec<FlowPreference> =
+                    serde_json::from_str(&preferred_flows_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let preferred_nodes_json: String = row.get(6)?;
-            let preferred_nodes: Vec<NodePreference> = serde_json::from_str(&preferred_nodes_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let preferred_nodes_json: String = row.get(6)?;
+                let preferred_nodes: Vec<NodePreference> =
+                    serde_json::from_str(&preferred_nodes_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let default_approval_policy_json: String = row.get(7)?;
-            let default_approval_policy: crate::work::types::ApprovalPolicy = serde_json::from_str(&default_approval_policy_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_approval_policy_json: String = row.get(7)?;
+                let default_approval_policy: crate::work::types::ApprovalPolicy =
+                    serde_json::from_str(&default_approval_policy_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let default_research_depth_json: String = row.get(8)?;
-            let default_research_depth: crate::work::playbook::ResearchDepth = serde_json::from_str(&default_research_depth_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_research_depth_json: String = row.get(8)?;
+                let default_research_depth: crate::work::playbook::ResearchDepth =
+                    serde_json::from_str(&default_research_depth_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let default_creativity_level_json: String = row.get(9)?;
-            let default_creativity_level: crate::work::playbook::CreativityLevel = serde_json::from_str(&default_creativity_level_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_creativity_level_json: String = row.get(9)?;
+                let default_creativity_level: crate::work::playbook::CreativityLevel =
+                    serde_json::from_str(&default_creativity_level_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let evaluation_rules_json: String = row.get(10)?;
-            let evaluation_rules: Vec<String> = serde_json::from_str(&evaluation_rules_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let evaluation_rules_json: String = row.get(10)?;
+                let evaluation_rules: Vec<String> = serde_json::from_str(&evaluation_rules_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let success_patterns_json: String = row.get(11)?;
-            let success_patterns: Vec<PatternRecord> = serde_json::from_str(&success_patterns_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let success_patterns_json: String = row.get(11)?;
+                let success_patterns: Vec<PatternRecord> =
+                    serde_json::from_str(&success_patterns_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let failure_patterns_json: String = row.get(12)?;
-            let failure_patterns: Vec<PatternRecord> = serde_json::from_str(&failure_patterns_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let failure_patterns_json: String = row.get(12)?;
+                let failure_patterns: Vec<PatternRecord> =
+                    serde_json::from_str(&failure_patterns_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let updated_at_str: String = row.get(15)?;
-            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
-                .with_timezone(&chrono::Utc);
+                let updated_at_str: String = row.get(15)?;
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                    .with_timezone(&chrono::Utc);
 
-            Ok(WorkContextPlaybook {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                domain_profile_id: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                preferred_flows,
-                preferred_nodes,
-                default_approval_policy,
-                default_research_depth,
-                default_creativity_level,
-                evaluation_rules,
-                success_patterns,
-                failure_patterns,
-                confidence: row.get(13)?,
-                usage_count: row.get(14)?,
-                updated_at,
+                Ok(WorkContextPlaybook {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    domain_profile_id: row.get(2)?,
+                    name: row.get(3)?,
+                    description: row.get(4)?,
+                    preferred_flows,
+                    preferred_nodes,
+                    default_approval_policy,
+                    default_research_depth,
+                    default_creativity_level,
+                    evaluation_rules,
+                    success_patterns,
+                    failure_patterns,
+                    confidence: row.get(13)?,
+                    usage_count: row.get(14)?,
+                    updated_at,
+                })
             })
-        })
-        .context("Failed to query playbook")?;
+            .context("Failed to query playbook")?;
 
         match rows.next() {
             Some(result) => Ok(Some(result.context("Failed to parse playbook")?)),
@@ -280,7 +320,10 @@ impl PlaybookOperations for crate::db::Db {
         }
     }
 
-    fn update_playbook(&self, playbook: &WorkContextPlaybook) -> anyhow::Result<WorkContextPlaybook> {
+    fn update_playbook(
+        &self,
+        playbook: &WorkContextPlaybook,
+    ) -> anyhow::Result<WorkContextPlaybook> {
         let conn = self.conn();
 
         conn.execute(
@@ -312,8 +355,11 @@ impl PlaybookOperations for crate::db::Db {
     fn delete_playbook(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
 
-        conn.execute("DELETE FROM work_context_playbooks WHERE id = ?1", params![id])
-            .context("Failed to delete playbook")?;
+        conn.execute(
+            "DELETE FROM work_context_playbooks WHERE id = ?1",
+            params![id],
+        )
+        .context("Failed to delete playbook")?;
 
         Ok(())
     }
@@ -335,7 +381,11 @@ impl PlaybookOperations for crate::db::Db {
 
         conn.execute(
             "UPDATE work_context_playbooks SET confidence = ?1, updated_at = ?2 WHERE id = ?3",
-            params![confidence.clamp(0.0, 1.0), chrono::Utc::now().to_rfc3339(), id],
+            params![
+                confidence.clamp(0.0, 1.0),
+                chrono::Utc::now().to_rfc3339(),
+                id
+            ],
         )
         .context("Failed to update playbook confidence")?;
 

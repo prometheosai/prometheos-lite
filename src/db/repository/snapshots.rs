@@ -71,13 +71,15 @@ impl<T: AsDb> FlowSnapshotOperations for T {
     ) -> anyhow::Result<Option<FlowSnapshotEntry>> {
         let conn = self.as_db().conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, flow_name, flow_version, source_hash, source_text, created_at
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, flow_name, flow_version, source_hash, source_text, created_at
              FROM flow_snapshots
              WHERE source_hash = ?1
              ORDER BY created_at DESC
-             LIMIT 1"
-        ).context("Failed to prepare flow snapshot query")?;
+             LIMIT 1",
+            )
+            .context("Failed to prepare flow snapshot query")?;
 
         let result = stmt.query_row(params![source_hash], |row| {
             Ok(FlowSnapshotEntry {
@@ -86,7 +88,9 @@ impl<T: AsDb> FlowSnapshotOperations for T {
                 flow_version: row.get(2)?,
                 source_hash: row.get(3)?,
                 source_text: row.get(4)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?).unwrap().with_timezone(&chrono::Utc),
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
             })
         });
 
@@ -103,13 +107,15 @@ impl<T: AsDb> FlowSnapshotOperations for T {
     ) -> anyhow::Result<Option<FlowSnapshotEntry>> {
         let conn = self.as_db().conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, flow_name, flow_version, source_hash, source_text, created_at
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, flow_name, flow_version, source_hash, source_text, created_at
              FROM flow_snapshots
              WHERE flow_name = ?1
              ORDER BY created_at DESC
-             LIMIT 1"
-        ).context("Failed to prepare latest flow snapshot query")?;
+             LIMIT 1",
+            )
+            .context("Failed to prepare latest flow snapshot query")?;
 
         let result = stmt.query_row(params![flow_name], |row| {
             Ok(FlowSnapshotEntry {
@@ -118,7 +124,9 @@ impl<T: AsDb> FlowSnapshotOperations for T {
                 flow_version: row.get(2)?,
                 source_hash: row.get(3)?,
                 source_text: row.get(4)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?).unwrap().with_timezone(&chrono::Utc),
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
             })
         });
 

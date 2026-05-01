@@ -8,15 +8,24 @@ use crate::work::WorkDomainProfile;
 
 /// DomainProfileOperations trait for domain profile repository operations
 pub trait DomainProfileOperations: Repository {
-    fn create_domain_profile(&self, profile: &WorkDomainProfile) -> anyhow::Result<WorkDomainProfile>;
+    fn create_domain_profile(
+        &self,
+        profile: &WorkDomainProfile,
+    ) -> anyhow::Result<WorkDomainProfile>;
     fn get_domain_profile(&self, id: &str) -> anyhow::Result<Option<WorkDomainProfile>>;
     fn list_domain_profiles(&self) -> anyhow::Result<Vec<WorkDomainProfile>>;
-    fn update_domain_profile(&self, profile: &WorkDomainProfile) -> anyhow::Result<WorkDomainProfile>;
+    fn update_domain_profile(
+        &self,
+        profile: &WorkDomainProfile,
+    ) -> anyhow::Result<WorkDomainProfile>;
     fn delete_domain_profile(&self, id: &str) -> anyhow::Result<()>;
 }
 
 impl DomainProfileOperations for crate::db::Db {
-    fn create_domain_profile(&self, profile: &WorkDomainProfile) -> anyhow::Result<WorkDomainProfile> {
+    fn create_domain_profile(
+        &self,
+        profile: &WorkDomainProfile,
+    ) -> anyhow::Result<WorkDomainProfile> {
         let conn = self.conn();
 
         conn.execute(
@@ -47,34 +56,37 @@ impl DomainProfileOperations for crate::db::Db {
         )
         .context("Failed to prepare domain profile query")?;
 
-        let mut rows = stmt.query_map(params![id], |row| {
-            let default_flows_json: String = row.get(3)?;
-            let default_flows: Vec<String> = serde_json::from_str(&default_flows_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut rows = stmt
+            .query_map(params![id], |row| {
+                let default_flows_json: String = row.get(3)?;
+                let default_flows: Vec<String> = serde_json::from_str(&default_flows_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let artifact_kinds_json: String = row.get(4)?;
-            let artifact_kinds: Vec<String> = serde_json::from_str(&artifact_kinds_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let artifact_kinds_json: String = row.get(4)?;
+                let artifact_kinds: Vec<String> = serde_json::from_str(&artifact_kinds_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let approval_defaults_json: String = row.get(5)?;
-            let approval_defaults: crate::work::types::ApprovalPolicy = serde_json::from_str(&approval_defaults_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let approval_defaults_json: String = row.get(5)?;
+                let approval_defaults: crate::work::types::ApprovalPolicy =
+                    serde_json::from_str(&approval_defaults_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            let lifecycle_template_json: String = row.get(6)?;
-            let lifecycle_template: crate::work::domain::LifecycleTemplate = serde_json::from_str(&lifecycle_template_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let lifecycle_template_json: String = row.get(6)?;
+                let lifecycle_template: crate::work::domain::LifecycleTemplate =
+                    serde_json::from_str(&lifecycle_template_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
-            Ok(WorkDomainProfile {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                parent_domain: row.get(2)?,
-                default_flows,
-                artifact_kinds,
-                approval_defaults,
-                lifecycle_template,
+                Ok(WorkDomainProfile {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    parent_domain: row.get(2)?,
+                    default_flows,
+                    artifact_kinds,
+                    approval_defaults,
+                    lifecycle_template,
+                })
             })
-        })
-        .context("Failed to query domain profile")?;
+            .context("Failed to query domain profile")?;
 
         match rows.next() {
             Some(result) => Ok(Some(result.context("Failed to parse domain profile")?)),
@@ -103,12 +115,14 @@ impl DomainProfileOperations for crate::db::Db {
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let approval_defaults_json: String = row.get(5)?;
-                let approval_defaults: crate::work::types::ApprovalPolicy = serde_json::from_str(&approval_defaults_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let approval_defaults: crate::work::types::ApprovalPolicy =
+                    serde_json::from_str(&approval_defaults_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let lifecycle_template_json: String = row.get(6)?;
-                let lifecycle_template: crate::work::domain::LifecycleTemplate = serde_json::from_str(&lifecycle_template_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let lifecycle_template: crate::work::domain::LifecycleTemplate =
+                    serde_json::from_str(&lifecycle_template_json)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 Ok(WorkDomainProfile {
                     id: row.get(0)?,
@@ -130,7 +144,10 @@ impl DomainProfileOperations for crate::db::Db {
         Ok(result)
     }
 
-    fn update_domain_profile(&self, profile: &WorkDomainProfile) -> anyhow::Result<WorkDomainProfile> {
+    fn update_domain_profile(
+        &self,
+        profile: &WorkDomainProfile,
+    ) -> anyhow::Result<WorkDomainProfile> {
         let conn = self.conn();
 
         conn.execute(
@@ -155,8 +172,11 @@ impl DomainProfileOperations for crate::db::Db {
     fn delete_domain_profile(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
 
-        conn.execute("DELETE FROM work_domain_profiles WHERE id = ?1", params![id])
-            .context("Failed to delete domain profile")?;
+        conn.execute(
+            "DELETE FROM work_domain_profiles WHERE id = ?1",
+            params![id],
+        )
+        .context("Failed to delete domain profile")?;
 
         Ok(())
     }

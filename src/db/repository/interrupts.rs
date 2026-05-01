@@ -38,11 +38,7 @@ pub trait InterruptOperations {
 
     fn list_pending_interrupts(&self, run_id: &str) -> anyhow::Result<Vec<InterruptEntry>>;
 
-    fn approve_interrupt(
-        &self,
-        id: &str,
-        decision: &str,
-    ) -> anyhow::Result<()>;
+    fn approve_interrupt(&self, id: &str, decision: &str) -> anyhow::Result<()>;
 
     fn deny_interrupt(&self, id: &str) -> anyhow::Result<()>;
 }
@@ -92,21 +88,29 @@ impl<T: AsDb> InterruptOperations for T {
              WHERE id = ?1"
         ).context("Failed to prepare interrupt query")?;
 
-        let mut rows = stmt.query_map(params![id], |row| {
-            Ok(InterruptEntry {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                trace_id: row.get(2)?,
-                node_id: row.get(3)?,
-                reason: row.get(4)?,
-                expected_schema: row.get(5)?,
-                status: row.get(6)?,
-                decision: row.get(7)?,
-                expires_at: row.get::<_, Option<String>>(8)?.map(|s| chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc)),
-                work_context_id: row.get(9)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?).unwrap().with_timezone(&chrono::Utc),
+        let mut rows = stmt
+            .query_map(params![id], |row| {
+                Ok(InterruptEntry {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    trace_id: row.get(2)?,
+                    node_id: row.get(3)?,
+                    reason: row.get(4)?,
+                    expected_schema: row.get(5)?,
+                    status: row.get(6)?,
+                    decision: row.get(7)?,
+                    expires_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                    }),
+                    work_context_id: row.get(9)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                })
             })
-        }).context("Failed to query interrupt")?;
+            .context("Failed to query interrupt")?;
 
         match rows.next() {
             Some(result) => Ok(Some(result.context("Failed to parse interrupt")?)),
@@ -124,21 +128,29 @@ impl<T: AsDb> InterruptOperations for T {
              ORDER BY created_at"
         ).context("Failed to prepare pending interrupts query")?;
 
-        let entries = stmt.query_map(params![run_id], |row| {
-            Ok(InterruptEntry {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                trace_id: row.get(2)?,
-                node_id: row.get(3)?,
-                reason: row.get(4)?,
-                expected_schema: row.get(5)?,
-                status: row.get(6)?,
-                decision: row.get(7)?,
-                expires_at: row.get::<_, Option<String>>(8)?.map(|s| chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc)),
-                work_context_id: row.get(9)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?).unwrap().with_timezone(&chrono::Utc),
+        let entries = stmt
+            .query_map(params![run_id], |row| {
+                Ok(InterruptEntry {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    trace_id: row.get(2)?,
+                    node_id: row.get(3)?,
+                    reason: row.get(4)?,
+                    expected_schema: row.get(5)?,
+                    status: row.get(6)?,
+                    decision: row.get(7)?,
+                    expires_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                    }),
+                    work_context_id: row.get(9)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                })
             })
-        }).context("Failed to query pending interrupts")?;
+            .context("Failed to query pending interrupts")?;
 
         let mut result = Vec::new();
         for entry in entries {
@@ -148,17 +160,14 @@ impl<T: AsDb> InterruptOperations for T {
         Ok(result)
     }
 
-    fn approve_interrupt(
-        &self,
-        id: &str,
-        decision: &str,
-    ) -> anyhow::Result<()> {
+    fn approve_interrupt(&self, id: &str, decision: &str) -> anyhow::Result<()> {
         let conn = self.as_db().conn();
 
         conn.execute(
             "UPDATE interrupts SET status = ?1, decision = ?2 WHERE id = ?3",
             params!["approved", decision, id],
-        ).context("Failed to update interrupt status")?;
+        )
+        .context("Failed to update interrupt status")?;
 
         Ok(())
     }
@@ -169,7 +178,8 @@ impl<T: AsDb> InterruptOperations for T {
         conn.execute(
             "UPDATE interrupts SET status = ?1 WHERE id = ?2",
             params!["denied", id],
-        ).context("Failed to update interrupt status")?;
+        )
+        .context("Failed to update interrupt status")?;
 
         Ok(())
     }

@@ -103,7 +103,10 @@ impl<T: AsDb> WorkContextOperations for T {
                 conversation_id: row.get(7)?,
                 parent_context_id: row.get(8)?,
                 priority: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
-                due_at: row.get::<_, Option<String>>(10)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&Utc)),
+                due_at: row
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
                 goal: row.get(11)?,
                 requirements: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
                 constraints: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
@@ -117,18 +120,31 @@ impl<T: AsDb> WorkContextOperations for T {
                 decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
                 flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
                 tool_trace: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
-                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
-                open_questions: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
-                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
-                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
+                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?)
+                    .unwrap_or_default(),
+                open_questions: serde_json::from_str(&row.get::<_, String>(25)?)
+                    .unwrap_or_default(),
+                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?)
+                    .unwrap_or_default(),
+                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?)
+                    .unwrap_or_default(),
                 summary: row.get(28)?,
-                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
-                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
+                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?)
+                    .unwrap_or_default(),
+                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
                 metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
                 playbook_id: row.get(32)?,
-                evaluation_result: row.get::<_, Option<String>>(33)?.and_then(|s| serde_json::from_str(&s).ok()),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?).unwrap().with_timezone(&Utc),
+                evaluation_result: row
+                    .get::<_, Option<String>>(33)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
             })
         });
 
@@ -206,46 +222,69 @@ impl<T: AsDb> WorkContextOperations for T {
              FROM work_contexts WHERE user_id = ?1 ORDER BY created_at DESC"
         ).context("Failed to prepare work contexts list query")?;
 
-        let contexts = stmt.query_map(params![user_id], |row| {
-            Ok(WorkContext {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                title: row.get(2)?,
-                domain: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                domain_profile_id: row.get(4)?,
-                context_type: row.get(5)?,
-                project_id: row.get(6)?,
-                conversation_id: row.get(7)?,
-                parent_context_id: row.get(8)?,
-                priority: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
-                due_at: row.get::<_, Option<String>>(10)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&Utc)),
-                goal: row.get(11)?,
-                requirements: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
-                constraints: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-                status: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
-                current_phase: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_default(),
-                blocked_reason: row.get(16)?,
-                plan: serde_json::from_str(&row.get::<_, String>(17)?).ok(),
-                approved_plan: serde_json::from_str(&row.get::<_, String>(18)?).ok(),
-                artifacts: serde_json::from_str(&row.get::<_, String>(19)?).unwrap_or_default(),
-                memory_refs: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
-                decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
-                flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
-                tool_trace: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
-                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
-                open_questions: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
-                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
-                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
-                summary: row.get(28)?,
-                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
-                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
-                metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
-                playbook_id: row.get(32)?,
-                evaluation_result: row.get::<_, Option<String>>(33)?.and_then(|s| serde_json::from_str(&s).ok()),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?).unwrap().with_timezone(&Utc),
+        let contexts = stmt
+            .query_map(params![user_id], |row| {
+                Ok(WorkContext {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    title: row.get(2)?,
+                    domain: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                    domain_profile_id: row.get(4)?,
+                    context_type: row.get(5)?,
+                    project_id: row.get(6)?,
+                    conversation_id: row.get(7)?,
+                    parent_context_id: row.get(8)?,
+                    priority: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
+                    due_at: row
+                        .get::<_, Option<String>>(10)?
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    goal: row.get(11)?,
+                    requirements: serde_json::from_str(&row.get::<_, String>(12)?)
+                        .unwrap_or_default(),
+                    constraints: serde_json::from_str(&row.get::<_, String>(13)?)
+                        .unwrap_or_default(),
+                    status: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+                    current_phase: serde_json::from_str(&row.get::<_, String>(15)?)
+                        .unwrap_or_default(),
+                    blocked_reason: row.get(16)?,
+                    plan: serde_json::from_str(&row.get::<_, String>(17)?).ok(),
+                    approved_plan: serde_json::from_str(&row.get::<_, String>(18)?).ok(),
+                    artifacts: serde_json::from_str(&row.get::<_, String>(19)?).unwrap_or_default(),
+                    memory_refs: serde_json::from_str(&row.get::<_, String>(20)?)
+                        .unwrap_or_default(),
+                    decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
+                    flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
+                    tool_trace: serde_json::from_str(&row.get::<_, String>(23)?)
+                        .unwrap_or_default(),
+                    execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?)
+                        .unwrap_or_default(),
+                    open_questions: serde_json::from_str(&row.get::<_, String>(25)?)
+                        .unwrap_or_default(),
+                    autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?)
+                        .unwrap_or_default(),
+                    approval_policy: serde_json::from_str(&row.get::<_, String>(27)?)
+                        .unwrap_or_default(),
+                    summary: row.get(28)?,
+                    completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?)
+                        .unwrap_or_default(),
+                    last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
+                    playbook_id: row.get(32)?,
+                    evaluation_result: row
+                        .get::<_, Option<String>>(33)?
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
             })
-        }).context("Failed to query work contexts")?;
+            .context("Failed to query work contexts")?;
 
         let mut result = Vec::new();
         for context in contexts {
@@ -285,7 +324,10 @@ impl<T: AsDb> WorkContextOperations for T {
                 conversation_id: row.get(7)?,
                 parent_context_id: row.get(8)?,
                 priority: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
-                due_at: row.get::<_, Option<String>>(10)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|dt| dt.with_timezone(&Utc)),
+                due_at: row
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
                 goal: row.get(11)?,
                 requirements: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
                 constraints: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
@@ -299,18 +341,31 @@ impl<T: AsDb> WorkContextOperations for T {
                 decisions: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
                 flow_runs: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
                 tool_trace: serde_json::from_str(&row.get::<_, String>(23)?).unwrap_or_default(),
-                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?).unwrap_or_default(),
-                open_questions: serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default(),
-                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?).unwrap_or_default(),
-                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?).unwrap_or_default(),
+                execution_metadata: serde_json::from_str(&row.get::<_, String>(24)?)
+                    .unwrap_or_default(),
+                open_questions: serde_json::from_str(&row.get::<_, String>(25)?)
+                    .unwrap_or_default(),
+                autonomy_level: serde_json::from_str(&row.get::<_, String>(26)?)
+                    .unwrap_or_default(),
+                approval_policy: serde_json::from_str(&row.get::<_, String>(27)?)
+                    .unwrap_or_default(),
                 summary: row.get(28)?,
-                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?).unwrap_or_default(),
-                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?).unwrap().with_timezone(&Utc),
+                completion_criteria: serde_json::from_str(&row.get::<_, String>(29)?)
+                    .unwrap_or_default(),
+                last_activity_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(30)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
                 metadata: serde_json::from_str(&row.get::<_, String>(31)?).unwrap_or_default(),
                 playbook_id: row.get(32)?,
-                evaluation_result: row.get::<_, Option<String>>(33)?.and_then(|s| serde_json::from_str(&s).ok()),
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?).unwrap().with_timezone(&Utc),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?).unwrap().with_timezone(&Utc),
+                evaluation_result: row
+                    .get::<_, Option<String>>(33)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(34)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(35)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
             })
         });
 
@@ -333,7 +388,8 @@ impl<T: AsDb> WorkContextOperations for T {
         conn.execute(
             "UPDATE conversation_work_contexts SET is_active = 0 WHERE conversation_id = ?1",
             params![conversation_id],
-        ).context("Failed to deactivate existing contexts")?;
+        )
+        .context("Failed to deactivate existing contexts")?;
 
         // Then, insert or update the active context
         conn.execute(
