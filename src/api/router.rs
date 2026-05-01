@@ -8,8 +8,8 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 use crate::api::AppState;
-use crate::api::conversations::{create_conversation, get_conversations};
 use crate::api::control_panel::create_control_panel_router;
+use crate::api::conversations::{create_conversation, get_conversations};
 use crate::api::flow_runs::run_flow;
 use crate::api::health::health_check;
 use crate::api::messages::{create_message, get_messages};
@@ -36,13 +36,25 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/messages", post(create_message))
         .route("/conversations/:id/run", post(run_flow))
         .route("/ws/runs/:id", get(websocket_handler))
-        .route("/work-contexts", get(list_work_contexts).post(create_work_context))
+        .route(
+            "/work-contexts",
+            get(list_work_contexts).post(create_work_context),
+        )
         .route("/work-contexts/submit-intent", post(submit_intent))
         .route("/work-contexts/:id", get(get_work_context))
-        .route("/work-contexts/:id/status", post(update_work_context_status))
-        .route("/work-contexts/:id/artifacts", get(get_work_context_artifacts))
+        .route(
+            "/work-contexts/:id/status",
+            post(update_work_context_status),
+        )
+        .route(
+            "/work-contexts/:id/artifacts",
+            get(get_work_context_artifacts),
+        )
         .route("/work-contexts/:id/continue", post(continue_work_context))
-        .route("/work-contexts/:id/run-until-complete", post(run_until_complete))
+        .route(
+            "/work-contexts/:id/run-until-complete",
+            post(run_until_complete),
+        )
         .nest("/control-panel", create_control_panel_router())
         .with_state(state)
         .layer(cors)

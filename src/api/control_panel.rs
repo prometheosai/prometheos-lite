@@ -6,13 +6,7 @@
 use crate::api::state::AppState;
 use crate::queue::{JobQueue, JobQueueStats};
 use crate::work::{EvolutionEngine, SkillKernel};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{Router, extract::State, http::StatusCode, response::Json, routing::get};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,9 +62,11 @@ pub fn create_control_panel_router() -> Router<Arc<AppState>> {
 }
 
 /// Get comprehensive control panel statistics
-async fn get_stats(State(_state): State<Arc<AppState>>) -> Result<Json<ControlPanelStats>, StatusCode> {
+async fn get_stats(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ControlPanelStats>, StatusCode> {
     let system_metrics = get_system_metrics().await;
-    
+
     // Get job queue stats if available
     let job_queue_stats = JobQueueStats {
         total: 0,
@@ -80,7 +76,7 @@ async fn get_stats(State(_state): State<Arc<AppState>>) -> Result<Json<ControlPa
         failed: 0,
         cancelled: 0,
     };
-    
+
     let skills_count = 0;
     let evolutions_count = 0;
     let active_flows = 0;
@@ -97,27 +93,35 @@ async fn get_stats(State(_state): State<Arc<AppState>>) -> Result<Json<ControlPa
 }
 
 /// Get system metrics
-async fn get_metrics(State(_state): State<Arc<AppState>>) -> Result<Json<SystemMetrics>, StatusCode> {
+async fn get_metrics(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<SystemMetrics>, StatusCode> {
     let metrics = get_system_metrics().await;
     Ok(Json(metrics))
 }
 
 /// List all skills
-async fn list_skills(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<SkillSummary>>, StatusCode> {
+async fn list_skills(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SkillSummary>>, StatusCode> {
     // Return empty list for now - would integrate with SkillKernel
     let skills: Vec<SkillSummary> = Vec::new();
     Ok(Json(skills))
 }
 
 /// List all evolutions
-async fn list_evolutions(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<EvolutionSummary>>, StatusCode> {
+async fn list_evolutions(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<Vec<EvolutionSummary>>, StatusCode> {
     // Return empty list for now - would integrate with EvolutionEngine
     let evolutions: Vec<EvolutionSummary> = Vec::new();
     Ok(Json(evolutions))
 }
 
 /// Get job queue statistics
-async fn get_job_queue_stats(State(_state): State<Arc<AppState>>) -> Result<Json<JobQueueStats>, StatusCode> {
+async fn get_job_queue_stats(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<JobQueueStats>, StatusCode> {
     let stats = JobQueueStats {
         total: 0,
         pending: 0,
@@ -133,13 +137,13 @@ async fn get_job_queue_stats(State(_state): State<Arc<AppState>>) -> Result<Json
 async fn get_system_metrics() -> SystemMetrics {
     // Get uptime (placeholder - would track actual uptime)
     let uptime_seconds = 0;
-    
+
     // Get memory usage (placeholder - would use actual system metrics)
     let memory_usage_mb = 0;
-    
+
     // Get active connections (placeholder)
     let active_connections = 0;
-    
+
     // Get total requests (placeholder)
     let total_requests = 0;
 

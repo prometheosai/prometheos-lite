@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::api::state::AppState;
 use crate::work::{
-    types::{WorkDomain, WorkStatus, WorkContext},
     WorkContextService,
+    types::{WorkContext, WorkDomain, WorkStatus},
 };
 
 /// Request to create a new WorkContext
@@ -121,7 +121,8 @@ impl From<anyhow::Error> for ApiError {
 pub async fn list_work_contexts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<WorkContextResponse>>, ApiError> {
-    let work_context_service = state.create_work_context_service()
+    let work_context_service = state
+        .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let contexts = work_context_service
@@ -141,7 +142,8 @@ pub async fn get_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let work_context_service = state.create_work_context_service()
+    let work_context_service = state
+        .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let context = work_context_service
@@ -157,7 +159,8 @@ pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWorkContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let work_context_service = state.create_work_context_service()
+    let work_context_service = state
+        .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let domain = match req.domain.to_lowercase().as_str() {
@@ -190,7 +193,8 @@ pub async fn update_work_context_status(
     Path(id): Path<String>,
     Json(req): Json<UpdateStatusRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let work_context_service = state.create_work_context_service()
+    let work_context_service = state
+        .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let mut context = work_context_service
@@ -204,7 +208,12 @@ pub async fn update_work_context_status(
         "awaiting_approval" => WorkStatus::AwaitingApproval,
         "completed" => WorkStatus::Completed,
         "blocked" => WorkStatus::Blocked,
-        _ => return Err(ApiError::BadRequest(format!("Invalid status: {}", req.status))),
+        _ => {
+            return Err(ApiError::BadRequest(format!(
+                "Invalid status: {}",
+                req.status
+            )));
+        }
     };
 
     work_context_service
@@ -219,7 +228,8 @@ pub async fn get_work_context_artifacts(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
-    let work_context_service = state.create_work_context_service()
+    let work_context_service = state
+        .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let context = work_context_service
@@ -259,9 +269,12 @@ pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let orchestrator = state.create_work_orchestrator()
+    let orchestrator = state
+        .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let context = orchestrator.continue_context(id).await
+    let context = orchestrator
+        .continue_context(id)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
 }
@@ -271,13 +284,12 @@ pub async fn submit_intent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitIntentRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let orchestrator = state.create_work_orchestrator()
+    let orchestrator = state
+        .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let context = orchestrator.submit_user_intent(
-        req.user_id,
-        req.message,
-        req.conversation_id,
-    ).await
+    let context = orchestrator
+        .submit_user_intent(req.user_id, req.message, req.conversation_id)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
 }
@@ -288,7 +300,8 @@ pub async fn run_until_complete(
     Path(id): Path<String>,
     Json(req): Json<RunContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let orchestrator = state.create_work_orchestrator()
+    let orchestrator = state
+        .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let limits = crate::work::orchestrator::ExecutionLimits {
         max_iterations: req.max_iterations.unwrap_or(10) as u32,
@@ -297,7 +310,9 @@ pub async fn run_until_complete(
         max_cost: req.max_cost.unwrap_or(1.0),
         ..Default::default()
     };
-    let context = orchestrator.run_until_blocked_or_complete(id, limits).await
+    let context = orchestrator
+        .run_until_blocked_or_complete(id, limits)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
 }

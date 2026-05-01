@@ -44,10 +44,9 @@ impl AppState {
         embedding_provider: Arc<dyn EmbeddingProvider>,
         memory_service: Arc<MemoryService>,
     ) -> Result<Self, String> {
-        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime.clone())
-            .map_err(|e| e.to_string())?);
-        let intent_classifier = Arc::new(IntentClassifier::new()
-            .map_err(|e| e.to_string())?);
+        let flow_execution_service =
+            Arc::new(FlowExecutionService::new(runtime.clone()).map_err(|e| e.to_string())?);
+        let intent_classifier = Arc::new(IntentClassifier::new().map_err(|e| e.to_string())?);
 
         Ok(Self {
             db_path,
@@ -70,7 +69,9 @@ impl AppState {
             work_context_service.clone(),
             self.flow_execution_service.clone(),
         ));
-        let evolution_engine = Arc::new(crate::work::evolution_engine::EvolutionEngine::new(db.clone()));
+        let evolution_engine = Arc::new(crate::work::evolution_engine::EvolutionEngine::new(
+            db.clone(),
+        ));
         Ok(WorkOrchestrator::new(
             work_context_service,
             playbook_resolver,
