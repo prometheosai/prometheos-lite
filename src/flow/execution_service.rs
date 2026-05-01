@@ -270,11 +270,14 @@ impl FlowExecutionService {
         let mut memory_ops_count = 0;
         let mut memory_compression_performed = false;
         let mut memory_prunes_performed = 0;
+        let mut total_memory_count = 0;
         
         if let Some(ref memory_service) = self.runtime.memory_service {
             // Check memory stats and compress/prune if needed
             match memory_service.get_memory_stats().await {
                 Ok(stats) => {
+                    total_memory_count = stats.total_count;
+                    
                     // Compress if threshold exceeded
                     if stats.total_count > stats.max_count {
                         match memory_service.compress_if_needed().await {
@@ -328,6 +331,7 @@ impl FlowExecutionService {
             "compression_performed": memory_compression_performed,
             "prunes_performed": memory_prunes_performed,
             "total_operations": memory_ops_count,
+            "total_memory_count": total_memory_count,
         });
         state.set_meta("memory_operations".to_string(), memory_metadata);
 
@@ -459,10 +463,11 @@ impl FlowExecutionService {
                 let memory_operations = state.get_meta("memory_operations").and_then(|v| {
                     let compression = v.get("compression_performed").and_then(|c| c.as_bool()).unwrap_or(false);
                     let prunes = v.get("prunes_performed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+                    let total_count = v.get("total_memory_count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
                     Some(crate::flow::output::MemoryExecutionMetadata {
                         compressions_performed: if compression { 1 } else { 0 },
                         prunes_performed: prunes,
-                        total_memory_count: 0, // Would need to query MemoryService for this
+                        total_memory_count: total_count,
                     })
                 });
 
@@ -635,10 +640,11 @@ impl FlowExecutionService {
                 let memory_operations = state.get_meta("memory_operations").and_then(|v| {
                     let compression = v.get("compression_performed").and_then(|c| c.as_bool()).unwrap_or(false);
                     let prunes = v.get("prunes_performed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+                    let total_count = v.get("total_memory_count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
                     Some(crate::flow::output::MemoryExecutionMetadata {
                         compressions_performed: if compression { 1 } else { 0 },
                         prunes_performed: prunes,
-                        total_memory_count: 0,
+                        total_memory_count: total_count,
                     })
                 });
 
