@@ -6,11 +6,13 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::flow::memory::types::{Memory, MemoryKind};
 use crate::flow::ModelRouter;
+use crate::flow::memory::types::{Memory, MemoryKind};
 
-/// Memory summarizer for compressing memory clusters
+/// Memory summarization for compressing memory clusters
+#[derive(Clone)]
 pub struct MemorySummarizer {
+    /// Optional model router for LLM-based summarization
     model_router: Option<std::sync::Arc<ModelRouter>>,
 }
 
@@ -31,17 +33,15 @@ impl MemorySummarizer {
         }
 
         // Calculate combined importance score
-        let combined_importance = memories
-            .iter()
-            .map(|m| m.importance_score)
-            .sum::<f32>() / memories.len() as f32;
+        let combined_importance =
+            memories.iter().map(|m| m.importance_score).sum::<f32>() / memories.len() as f32;
 
         // Collect all content
         let combined_content: String = memories
             .iter()
             .map(|m| {
                 format!(
-                    "[{} - {}]\n{}",
+                    "[{:?} - {}]\n{}",
                     m.kind, m.created_at.format("%Y-%m-%d"), m.content
                 )
             })
@@ -90,11 +90,11 @@ impl MemorySummarizer {
         );
 
         let result = router.generate(&prompt).await?;
-        Ok(result.content)
+        Ok(result)
     }
 
-    /// Heuristic summarization (fallback when LLM unavailable)
-    fn heuristic_summarize(&self, content: &str) -> String {
+    /// Heuristic summarization for when LLM is unavailable
+    pub fn heuristic_summarize(&self, content: &str) -> String {
         // Take first 300 characters as a simple summary
         let truncated = if content.len() > 300 {
             &content[..300]
@@ -189,13 +189,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_summarize_single_memory() {
-        let summarizer = MemorySummarizer::default();
+    #[tokio::test]
+    async fn test_summarize_single_memory() {
+        let summarizer = MemorySummarizer::new(None);
         let memory = create_test_memory("Test content");
-        
-        let result = std::sync::Arc::new(summarizer).summarize(vec![memory]);
-        
+
+        let result = std::sync::Arc::new(summarizer).summarize(vec![memory]).await;
+
         // Should return the same memory unchanged
         assert!(result.is_ok());
     }
@@ -204,11 +204,52 @@ mod tests {
     fn test_heuristic_summarize() {
         let summarizer = MemorySummarizer::default();
         let content = "This is a long piece of content that should be truncated when summarized using the heuristic method because we don't have an LLM available in this test context.";
-        
+
         let summary = summarizer.heuristic_summarize(content);
-        
+
         assert!(summary.len() <= 303); // 300 + "..."
         assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    async fn test_compress_memories() {
+        let summarizer = MemorySummarizer::new(None);
+        let memories = vec![
+            create_test_memory("Memory 1"),
+            create_test_memory("Memory 2"),
+            create_test_memory("Memory 3"),
+        ];
+
+        let result = summarizer.compress(memories, 10).await;
+        assert!(result.is_ok());
+        let compressed = result.unwrap();
+        assert!(compressed.len() <= 3);
+    }
+
+    #[test]
+    async fn test_compress_with_target_count() {
+        let summarizer = MemorySummarizer::default();
+        let memories = vec![
+            create_test_memory("Memory 1"),
+            create_test_memory("Memory 2"),
+            create_test_memory("Memory 3"),
+        ];
+
+        let result = summarizer.compress(memories, 2).await;
+        assert!(result.is_ok());
+        let compressed = result.unwrap();
+        assert_eq!(compressed.len(), 2);
+    }
+
+    #[test]
+    async fn test_compress_empty_memories() {
+        let summarizer = MemorySummarizer::default();
+        let memories: Vec<Memory> = Vec::new();
+
+        let result = summarizer.compress(memories, 10).await;
+        assert!(result.is_ok());
+        let compressed = result.unwrap();
+        assert!(compressed.is_empty());
     }
 
     #[test]
@@ -236,22 +277,22 @@ mod tests {
         assert!(!summarizer.should_compress(&memories, 10, 10000));
     }
 
-    #[test]
-    fn test_compress_no_change_if_under_cluster_size() {
+    #[tokio::test]
+    async fn test_compress_no_change_if_under_cluster_size() {
         let summarizer = MemorySummarizer::default();
         let memories = vec![
             create_test_memory("Memory 1"),
             create_test_memory("Memory 2"),
         ];
 
-        let result = std::sync::Arc::new(summarizer).compress(memories, 5);
-        
+        let result = std::sync::Arc::new(summarizer).compress(memories, 5).await;
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
     }
 
-    #[test]
-    fn test_compress_clusters() {
+    #[tokio::test]
+    async fn test_compress_clusters() {
         let summarizer = MemorySummarizer::default();
         let memories = vec![
             create_test_memory("Memory 1"),
@@ -261,8 +302,8 @@ mod tests {
             create_test_memory("Memory 5"),
         ];
 
-        let result = std::sync::Arc::new(summarizer).compress(memories, 2);
-        
+        let result = std::sync::Arc::new(summarizer).compress(memories, 2).await;
+
         assert!(result.is_ok());
         // Should compress into clusters of 2
         let compressed = result.unwrap();
