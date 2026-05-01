@@ -36,7 +36,10 @@ impl Default for EvaluationDimensions {
 impl EvaluationDimensions {
     /// Calculate overall score from dimensions
     pub fn overall_score(&self) -> f32 {
-        (self.correctness * 0.4 + self.completeness * 0.3 + self.efficiency * 0.15 + self.reliability * 0.15)
+        (self.correctness * 0.4
+            + self.completeness * 0.3
+            + self.efficiency * 0.15
+            + self.reliability * 0.15)
             .clamp(0.0, 1.0)
     }
 }
@@ -121,8 +124,12 @@ impl EvaluationEngine {
 
         // Structural validation
         let structural_validation = self.validate_structure(context, execution_metadata)?;
-        dimensions.correctness = if structural_validation.is_valid { 1.0 } else { 0.5 };
-        
+        dimensions.correctness = if structural_validation.is_valid {
+            1.0
+        } else {
+            0.5
+        };
+
         if !structural_validation.is_valid {
             details.push_str(&format!(
                 "Structural validation failed: {:?}\n",
@@ -192,18 +199,13 @@ impl EvaluationEngine {
         })
     }
 
-    /// Validate structure of context and outputs
-    fn validate_structure(
-        &self,
-        context: &crate::work::types::WorkContext,
-        execution_metadata: &serde_json::Value,
-    ) -> Result<StructuralValidation> {
+    /// Validate the structure of a WorkContext
+    pub fn validate_structure(&self, context: &crate::work::types::WorkContext, execution_metadata: &serde_json::Value) -> Result<StructuralValidation> {
         let mut errors = Vec::new();
-        let mut warnings = Vec::new();
 
         // Check if required fields are present
-        if context.task.is_empty() {
-            errors.push("Task is empty".to_string());
+        if context.goal.is_empty() {
+            errors.push("Goal is empty".to_string());
         }
 
         // Validate patch structure if present
@@ -223,7 +225,7 @@ impl EvaluationEngine {
         Ok(StructuralValidation {
             is_valid: errors.is_empty(),
             errors,
-            warnings,
+            warnings: Vec::new(),
         })
     }
 
@@ -234,25 +236,22 @@ impl EvaluationEngine {
         router: &ModelRouter,
     ) -> Result<f32> {
         let prompt = format!(
-            "Evaluate the quality of the following work on a scale of 0.0 to 1.0:\n\nTask: {}\n\nOutput: {}\n\nRespond with only a number between 0.0 and 1.0.",
-            context.task,
-            context.output.as_ref().map(|o| o.to_string()).unwrap_or_default()
+            "Evaluate the quality of the following work on a scale of 0.0 to 1.0:\n\nGoal: {}\n\nArtifacts: {}\n\nRespond with only a number between 0.0 and 1.0.",
+            context.goal,
+            serde_json::to_string(&context.artifacts).unwrap_or_default()
         );
 
         let result = router.generate(&prompt).await?;
         
         // Parse the score from the response
-        let score_str = result.content.trim();
-        score_str
-            .parse::<f32>()
-            .unwrap_or(0.5)
-            .clamp(0.0, 1.0)
+        let score_str = result.trim();
+        Ok(score_str.parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0))
     }
 
     /// Evaluate tool consistency
-    fn evaluate_tool_consistency(&self, execution_metadata: &serde_json::Value) -> Result<f32> {
+    pub fn evaluate_tool_consistency(&self, execution_metadata: &serde_json::Value) -> Result<f32> {
         let tool_calls = execution_metadata.get("tool_calls");
-        
+
         if let Some(calls) = tool_calls.and_then(|c| c.as_array()) {
             if calls.is_empty() {
                 return Ok(1.0); // No tools used is OK
@@ -273,7 +272,7 @@ impl EvaluationEngine {
     }
 
     /// Evaluate artifact completeness
-    fn evaluate_artifact_completeness(&self, context: &crate::work::types::WorkContext) -> Result<f32> {
+    pub fn evaluate_artifact_completeness(&self, context: &crate::work::types::WorkContext) -> Result<f32> {
         if context.artifacts.is_empty() {
             return Ok(0.5); // Neutral if no artifacts
         }
@@ -282,7 +281,7 @@ impl EvaluationEngine {
         let complete_count = context
             .artifacts
             .iter()
-            .filter(|a| !a.kind.is_empty() && !a.content.is_empty())
+            .filter(|a| !a.content.as_str().map(|s| s.is_empty()).unwrap_or(true))
             .count();
 
         Ok(complete_count as f32 / context.artifacts.len() as f32)
@@ -317,20 +316,13 @@ mod tests {
     fn test_structural_validation_valid() {
         let engine = EvaluationEngine::default();
         
-        let context = crate::work::types::WorkContext {
-            id: uuid::Uuid::new_v4().to_string(),
-            task: "Test task".to_string(),
-            status: crate::work::types::WorkContextStatus::Completed,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            completed_at: None,
-            input: serde_json::json!({}),
-            output: Some(serde_json::json!({})),
-            artifacts: Vec::new(),
-            playbook_id: None,
-            evaluation_result: None,
-            execution_metadata: None,
-        };
+        let context = crate::work::types::WorkContext::new(
+            uuid::Uuid::new_v4().to_string(),
+            "test-user".to_string(),
+            "Test task".to_string(),
+            crate::work::types::WorkDomain::Software,
+            "Test goal".to_string(),
+        );
 
         let execution_metadata = serde_json::json!({});
         let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
@@ -343,20 +335,13 @@ mod tests {
     fn test_structural_validation_invalid() {
         let engine = EvaluationEngine::default();
         
-        let context = crate::work::types::WorkContext {
-            id: uuid::Uuid::new_v4().to_string(),
-            task: "".to_string(), // Empty task
-            status: crate::work::types::WorkContextStatus::Completed,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            completed_at: None,
-            input: serde_json::json!({}),
-            output: Some(serde_json::json!({})),
-            artifacts: Vec::new(),
-            playbook_id: None,
-            evaluation_result: None,
-            execution_metadata: None,
-        };
+        let mut context = crate::work::types::WorkContext::new(
+            uuid::Uuid::new_v4().to_string(),
+            "test-user".to_string(),
+            "Test task".to_string(),
+            crate::work::types::WorkDomain::Software,
+            "".to_string(), // Empty goal
+        );
 
         let execution_metadata = serde_json::json!({});
         let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
@@ -368,7 +353,7 @@ mod tests {
     #[test]
     fn test_evaluate_tool_consistency() {
         let engine = EvaluationEngine::default();
-        
+
         let metadata = serde_json::json!({
             "tool_calls": [
                 {"success": true},
@@ -385,35 +370,52 @@ mod tests {
     fn test_evaluate_artifact_completeness() {
         let engine = EvaluationEngine::default();
         
-        let context = crate::work::types::WorkContext {
-            id: uuid::Uuid::new_v4().to_string(),
-            task: "Test task".to_string(),
-            status: crate::work::types::WorkContextStatus::Completed,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            completed_at: None,
-            input: serde_json::json!({}),
-            output: Some(serde_json::json!({})),
-            artifacts: vec![
-                crate::work::types::Artifact {
-                    id: "1".to_string(),
-                    kind: "code".to_string(),
-                    content: "test".to_string(),
-                    created_at: Utc::now(),
-                },
-                crate::work::types::Artifact {
-                    id: "2".to_string(),
-                    kind: "".to_string(), // Incomplete
-                    content: "".to_string(),
-                    created_at: Utc::now(),
-                },
-            ],
-            playbook_id: None,
-            evaluation_result: None,
-            execution_metadata: None,
-        };
+        let mut context = crate::work::types::WorkContext::new(
+            uuid::Uuid::new_v4().to_string(),
+            "test-user".to_string(),
+            "Test task".to_string(),
+            crate::work::types::WorkDomain::Software,
+            "Test goal".to_string(),
+        );
+        
+        let context_id = context.id.clone();
+        context.artifacts = vec![
+            crate::work::Artifact::new(
+                "1".to_string(),
+                context_id.clone(),
+                crate::work::ArtifactKind::Code,
+                "test_artifact".to_string(),
+                serde_json::Value::String("test".to_string()),
+                "test-user".to_string(),
+            ),
+            crate::work::Artifact::new(
+                "2".to_string(),
+                context_id,
+                crate::work::ArtifactKind::Code,
+                "incomplete_artifact".to_string(),
+                serde_json::Value::String("".to_string()), // Incomplete
+                "test-user".to_string(),
+            ),
+        ];
 
         let score = engine.evaluate_artifact_completeness(&context).unwrap();
         assert!(score == 0.5); // 1 out of 2 complete
+    }
+
+    #[test]
+    fn test_evaluate_artifact_completeness_no_artifacts() {
+        let engine = EvaluationEngine::default();
+        
+        let context = crate::work::types::WorkContext::new(
+            uuid::Uuid::new_v4().to_string(),
+            "test-user".to_string(),
+            "Test task".to_string(),
+            crate::work::types::WorkDomain::Software,
+            "Test goal".to_string(),
+        );
+        
+        let score = engine.evaluate_artifact_completeness(&context).unwrap();
+        
+        assert_eq!(score, 0.5); // Neutral if no artifacts
     }
 }
