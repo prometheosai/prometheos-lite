@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use tracing;
+
 use crate::flow::budget::{BudgetGuard, ExecutionBudget};
 use crate::flow::execution::{ContinuationEngine, Flow, RunDb};
 use crate::flow::factory::{DefaultNodeFactory, NodeFactory};
@@ -266,20 +268,49 @@ impl FlowExecutionService {
 
         // V1.5.1: Wire memory pruning/compression into execution lifecycle
         let mut memory_ops_count = 0;
+        let mut memory_compression_performed = false;
+        let mut memory_prunes_performed = 0;
+        
         if let Some(ref memory_service) = self.runtime.memory_service {
             // Check memory stats and compress/prune if needed
-            let stats = memory_service.get_memory_stats().await.unwrap_or_default();
-            
-            // Compress if threshold exceeded
-            if stats.total_count > stats.max_count {
-                if memory_service.compress_if_needed().await.unwrap_or(false) {
-                    memory_ops_count += 1;
+            match memory_service.get_memory_stats().await {
+                Ok(stats) => {
+                    // Compress if threshold exceeded
+                    if stats.total_count > stats.max_count {
+                        match memory_service.compress_if_needed().await {
+                            Ok(compressed) => {
+                                if compressed {
+                                    memory_ops_count += 1;
+                                    memory_compression_performed = true;
+                                    tracing::info!("Memory compression performed during flow execution");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Memory compression failed: {}", e);
+                                // Continue execution but record the failure
+                            }
+                        }
+                    }
+                    
+                    // Prune low-importance memories
+                    match memory_service.prune_memories().await {
+                        Ok(pruned_count) => {
+                            if pruned_count > 0 {
+                                memory_ops_count += 1;
+                                memory_prunes_performed = pruned_count;
+                                tracing::info!("Pruned {} low-importance memories", pruned_count);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Memory pruning failed: {}", e);
+                            // Continue execution but record the failure
+                        }
+                    }
                 }
-            }
-            
-            // Prune low-importance memories
-            if memory_service.prune_memories().await.unwrap_or(0) > 0 {
-                memory_ops_count += 1;
+                Err(e) => {
+                    tracing::error!("Failed to get memory stats: {}", e);
+                    // Continue execution without memory optimization
+                }
             }
         }
 
@@ -291,6 +322,14 @@ impl FlowExecutionService {
         state.set_input("task".to_string(), serde_json::json!(message));
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
+        
+        // Store memory operation metadata in state for later inclusion in FinalOutput
+        let memory_metadata = serde_json::json!({
+            "compression_performed": memory_compression_performed,
+            "prunes_performed": memory_prunes_performed,
+            "total_operations": memory_ops_count,
+        });
+        state.set_meta("memory_operations".to_string(), memory_metadata);
 
         if let Some(ref mode) = options.personality_mode {
             state.set_personality_mode(mode);
@@ -411,6 +450,22 @@ impl FlowExecutionService {
                     }
                 }
 
+                // Extract context budget metadata from state if available
+                let context_budget = state.get_meta("context_budget").and_then(|v| {
+                    serde_json::from_value::<crate::flow::output::ContextBudgetMetadata>(v.clone()).ok()
+                });
+                
+                // Extract memory operations metadata from state
+                let memory_operations = state.get_meta("memory_operations").and_then(|v| {
+                    let compression = v.get("compression_performed").and_then(|c| c.as_bool()).unwrap_or(false);
+                    let prunes = v.get("prunes_performed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+                    Some(crate::flow::output::MemoryExecutionMetadata {
+                        compressions_performed: if compression { 1 } else { 0 },
+                        prunes_performed: prunes,
+                        total_memory_count: 0, // Would need to query MemoryService for this
+                    })
+                });
+
                 let mut output = FinalOutput::success(
                     run_id,
                     trace_id,
@@ -419,8 +474,8 @@ impl FlowExecutionService {
                     additional,
                     evaluation,
                     budget_report,
-                    None, // context_budget - to be populated from state
-                    None, // memory_operations - to be populated from state
+                    context_budget,
+                    memory_operations,
                     events_count,
                     duration_ms,
                 );
@@ -571,6 +626,22 @@ impl FlowExecutionService {
                     }
                 }
 
+                // Extract context budget metadata from state if available
+                let context_budget = state.get_meta("context_budget").and_then(|v| {
+                    serde_json::from_value::<crate::flow::output::ContextBudgetMetadata>(v.clone()).ok()
+                });
+                
+                // Extract memory operations metadata from state
+                let memory_operations = state.get_meta("memory_operations").and_then(|v| {
+                    let compression = v.get("compression_performed").and_then(|c| c.as_bool()).unwrap_or(false);
+                    let prunes = v.get("prunes_performed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+                    Some(crate::flow::output::MemoryExecutionMetadata {
+                        compressions_performed: if compression { 1 } else { 0 },
+                        prunes_performed: prunes,
+                        total_memory_count: 0,
+                    })
+                });
+
                 let mut output = FinalOutput::success(
                     run_id,
                     trace_id,
@@ -579,8 +650,8 @@ impl FlowExecutionService {
                     additional,
                     evaluation,
                     budget_report,
-                    None, // context_budget - to be populated from state
-                    None, // memory_operations - to be populated from state
+                    context_budget,
+                    memory_operations,
                     events_count,
                     duration_ms,
                 );

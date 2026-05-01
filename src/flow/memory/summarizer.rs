@@ -93,16 +93,114 @@ impl MemorySummarizer {
         Ok(result)
     }
 
-    /// Heuristic summarization for when LLM is unavailable
+    /// Intelligent heuristic summarization for when LLM is unavailable
+    /// 
+    /// Extracts key sentences rather than blindly truncating:
+    /// 1. Always includes the first sentence (usually contains context)
+    /// 2. Includes sentences with high-information keywords
+    /// 3. Respects sentence boundaries
+    /// 4. Targets ~300 characters but may vary for coherence
     pub fn heuristic_summarize(&self, content: &str) -> String {
-        // Take first 300 characters as a simple summary
-        let truncated = if content.len() > 300 {
-            &content[..300]
-        } else {
-            content
-        };
+        if content.len() <= 300 {
+            return content.to_string();
+        }
 
-        format!("{}...", truncated)
+        // Split into sentences (basic heuristic: periods followed by space or end)
+        let sentences: Vec<&str> = content
+            .split(|c: char| c == '.' || c == '!' || c == '?')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if sentences.is_empty() {
+            // Fallback: split by newlines if no sentence boundaries found
+            let lines: Vec<&str> = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+            if !lines.is_empty() {
+                let first = lines[0];
+                if first.len() >= 280 {
+                    return format!("{}...", &first[..280]);
+                }
+                let summary = lines.join(". ");
+                if summary.len() > 300 {
+                    return format!("{}...", &summary[..300]);
+                }
+                return summary;
+            }
+            return format!("{}...", &content[..300.min(content.len())]);
+        }
+
+        // High-information keywords that indicate important content
+        let important_keywords = [
+            "decided", "decision", "conclusion", "determined", "resolved",
+            "important", "critical", "essential", "key", "main",
+            "result", "outcome", "success", "failed", "error",
+            "requirement", "constraint", "must", "should", "need",
+            "created", "implemented", "fixed", "changed", "updated",
+            "final", "complete", "done", "finished",
+        ];
+
+        let mut summary_parts = Vec::new();
+        let mut current_len = 0;
+        const TARGET_LEN: usize = 280;
+        const MAX_LEN: usize = 350;
+
+        // Always include first sentence if it's not too long
+        if let Some(first) = sentences.first() {
+            let first_with_punct = format!("{}.", first);
+            if first_with_punct.len() <= 150 {
+                summary_parts.push(first_with_punct.clone());
+                current_len += first_with_punct.len();
+            }
+        }
+
+        // Include sentences with important keywords
+        for sentence in sentences.iter().skip(1) {
+            let lower = sentence.to_lowercase();
+            let is_important = important_keywords.iter().any(|kw| lower.contains(kw));
+
+            if is_important {
+                let sentence_with_punct = format!("{}.", sentence);
+                let new_len = current_len + sentence_with_punct.len();
+
+                if new_len <= MAX_LEN {
+                    summary_parts.push(sentence_with_punct);
+                    current_len = new_len;
+                } else if current_len < TARGET_LEN && sentence_with_punct.len() <= (MAX_LEN - current_len) {
+                    // Allow one more short sentence even if slightly over target
+                    summary_parts.push(sentence_with_punct);
+                    current_len = new_len;
+                    break;
+                }
+            }
+
+            if current_len >= TARGET_LEN {
+                break;
+            }
+        }
+
+        // If we didn't get enough content, add more sentences
+        if current_len < 100 && sentences.len() > 1 {
+            for sentence in sentences.iter().skip(1) {
+                let sentence_with_punct = format!("{}.", sentence);
+                let new_len = current_len + sentence_with_punct.len();
+
+                if new_len <= MAX_LEN {
+                    summary_parts.push(sentence_with_punct);
+                    current_len = new_len;
+                }
+
+                if current_len >= TARGET_LEN {
+                    break;
+                }
+            }
+        }
+
+        let summary = summary_parts.join(" ");
+        if summary.len() > MAX_LEN {
+            format!("{}...", &summary[..MAX_LEN])
+        } else {
+            summary
+        }
     }
 
     /// Check if compression should be triggered

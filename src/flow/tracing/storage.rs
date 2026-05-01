@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tracing;
 
 use crate::flow::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 
@@ -64,14 +65,28 @@ impl TraceStorage {
             .unwrap_or(0);
 
         // Apply migrations if needed
+        // V1.5.2: Enhanced migration framework for trace storage versioning
+        let target_version = 2; // Current schema version
+        
         if current_version < 1 {
+            tracing::info!("Migrating trace storage to v1...");
             self.migrate_to_v1(&conn)?;
+        }
+        
+        if current_version < 2 {
+            tracing::info!("Migrating trace storage to v2...");
+            self.migrate_to_v2(&conn)?;
+        }
+
+        // Record final schema version
+        if current_version < target_version {
+            tracing::info!("Trace storage schema migrated from v{} to v{}", current_version, target_version);
         }
 
         Ok(())
     }
 
-    /// Migrate to schema version 1
+    /// Migrate to schema version 1 - Initial trace storage schema
     fn migrate_to_v1(&self, conn: &Connection) -> Result<()> {
         // Execution traces table
         conn.execute(
@@ -176,6 +191,41 @@ impl TraceStorage {
             [Utc::now().to_rfc3339()],
         )
         .context("Failed to record schema version")?;
+
+        Ok(())
+    }
+
+    /// Migrate to schema version 2 - Enhanced trace storage with metadata
+    /// V1.5.2: Adds metadata column and performance indices
+    fn migrate_to_v2(&self, conn: &Connection) -> Result<()> {
+        // Add metadata column to execution_traces for extensibility
+        conn.execute(
+            "ALTER TABLE execution_traces ADD COLUMN metadata TEXT DEFAULT '{}'",
+            [],
+        )
+        .ok(); // Ignore error if column already exists
+
+        // Add performance-related indices
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_execution_traces_completed 
+             ON execution_traces(completed_at) WHERE completed_at IS NOT NULL",
+            [],
+        )
+        .ok();
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_calls_duration 
+             ON llm_calls(latency_ms) WHERE latency_ms > 1000",
+            [],
+        )
+        .ok();
+
+        // Record schema version
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (2, ?)",
+            [Utc::now().to_rfc3339()],
+        )
+        .context("Failed to record schema version v2")?;
 
         Ok(())
     }
