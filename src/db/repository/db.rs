@@ -412,6 +412,53 @@ impl Db {
             )
             .ok(); // Ignore if already exists
 
+        // V1.5.2: Skills table for control panel metrics
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS skills (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                capability_signature TEXT NOT NULL,
+                success_rate REAL NOT NULL,
+                avg_duration_ms INTEGER NOT NULL,
+                usage_count INTEGER NOT NULL DEFAULT 0,
+                tags TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create skills table")?;
+
+        // V1.5.2: Playbook evolutions table for control panel metrics
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS playbook_evolutions (
+                id TEXT PRIMARY KEY,
+                playbook_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                parent_version INTEGER,
+                mutation_strategy TEXT NOT NULL,
+                performance_score REAL NOT NULL,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create playbook_evolutions table")?;
+
+        // Create index for efficient queries by playbook_id
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_evolutions_playbook_id 
+                 ON playbook_evolutions(playbook_id)",
+                [],
+            )
+            .ok(); // Ignore if already exists
+
         Ok(())
     }
 

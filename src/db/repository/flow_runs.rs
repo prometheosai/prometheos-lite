@@ -1,6 +1,6 @@
 //! Flow run operations
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::params;
 
@@ -11,6 +11,8 @@ use crate::db::models::FlowRun;
 pub trait FlowRunOperations {
     fn create_flow_run(&self, conversation_id: &str) -> anyhow::Result<FlowRun>;
     fn update_flow_run_status(&self, id: &str, status: &str) -> anyhow::Result<()>;
+    /// Count active (running) flow runs
+    fn count_active_flow_runs(&self) -> Result<i64>;
 }
 
 impl<T: AsDb> FlowRunOperations for T {
@@ -56,5 +58,17 @@ impl<T: AsDb> FlowRunOperations for T {
         }
 
         Ok(())
+    }
+
+    fn count_active_flow_runs(&self) -> Result<i64> {
+        let conn = self.as_db().conn();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM flow_runs WHERE status = 'running'",
+                [],
+                |row| row.get(0),
+            )
+            .context("Failed to count active flow runs")?;
+        Ok(count)
     }
 }

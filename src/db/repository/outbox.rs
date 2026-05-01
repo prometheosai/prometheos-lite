@@ -42,6 +42,9 @@ pub trait OutboxOperations {
     fn mark_outbox_completed(&self, id: &str, output: &str) -> anyhow::Result<()>;
 
     fn list_pending_outbox(&self, run_id: &str) -> anyhow::Result<Vec<OutboxEntry>>;
+
+    /// List all pending outbox entries across all runs
+    fn list_all_pending_outbox(&self) -> anyhow::Result<Vec<OutboxEntry>>;
 }
 
 impl<T: AsDb> OutboxOperations for T {
@@ -163,6 +166,47 @@ impl<T: AsDb> OutboxOperations for T {
                 })
             })
             .context("Failed to query pending outbox")?;
+
+        let mut result = Vec::new();
+        for entry in entries {
+            result.push(entry.context("Failed to parse outbox entry")?);
+        }
+
+        Ok(result)
+    }
+
+    fn list_all_pending_outbox(&self) -> anyhow::Result<Vec<OutboxEntry>> {
+        let conn = self.as_db().conn();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, trace_id, node_id, tool_name, input_hash, status, created_at, completed_at, result_json
+             FROM tool_outbox
+             WHERE status = 'pending'
+             ORDER BY created_at"
+        ).context("Failed to prepare all pending outbox query")?;
+
+        let entries = stmt
+            .query_map([], |row| {
+                Ok(OutboxEntry {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    trace_id: row.get(2)?,
+                    node_id: row.get(3)?,
+                    tool_name: row.get(4)?,
+                    input_hash: row.get(5)?,
+                    status: row.get(6)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    completed_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .unwrap()
+                            .with_timezone(&chrono::Utc)
+                    }),
+                    output: row.get::<_, Option<String>>(9)?,
+                })
+            })
+            .context("Failed to query all pending outbox")?;
 
         let mut result = Vec::new();
         for entry in entries {
