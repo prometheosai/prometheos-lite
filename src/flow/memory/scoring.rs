@@ -60,7 +60,7 @@ impl MemoryScore {
 /// Rank memories by score
 pub fn rank_memories(memories: Vec<Memory>) -> Vec<(Memory, MemoryScore)> {
     let current_time = Utc::now();
-    
+
     let mut scored: Vec<_> = memories
         .into_iter()
         .map(|memory| {
@@ -96,7 +96,7 @@ pub fn prune(memories: Vec<Memory>, max_count: usize) -> Vec<Memory> {
 /// Prune memories based on score threshold
 pub fn prune_by_threshold(memories: Vec<Memory>, threshold: f32) -> Vec<Memory> {
     let current_time = Utc::now();
-    
+
     memories
         .into_iter()
         .filter(|memory| {
@@ -107,13 +107,9 @@ pub fn prune_by_threshold(memories: Vec<Memory>, threshold: f32) -> Vec<Memory> 
 }
 
 /// Prune memories combining count and threshold
-pub fn prune_combined(
-    memories: Vec<Memory>,
-    max_count: usize,
-    threshold: f32,
-) -> Vec<Memory> {
+pub fn prune_combined(memories: Vec<Memory>, max_count: usize, threshold: f32) -> Vec<Memory> {
     let current_time = Utc::now();
-    
+
     let mut scored: Vec<_> = memories
         .into_iter()
         .map(|memory| {
@@ -143,11 +139,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn create_test_memory(
-        importance: f32,
-        days_old: i64,
-        access_count: u32,
-    ) -> Memory {
+    fn create_test_memory(importance: f32, days_old: i64, access_count: u32) -> Memory {
         let created_at = Utc::now() - Duration::days(days_old);
         Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -164,7 +156,7 @@ mod tests {
             created_at,
             updated_at: created_at,
             last_accessed_at: Some(created_at),
-            access_count,
+            access_count: access_count as i32,
             metadata: serde_json::json!({}),
         }
     }
@@ -173,7 +165,7 @@ mod tests {
     fn test_memory_score_calculation() {
         let memory = create_test_memory(0.8, 5, 10);
         let score = MemoryScore::calculate(&memory, Utc::now());
-        
+
         assert!(score.relevance == 0.8);
         assert!(score.recency > 0.0);
         assert!(score.usage > 0.0);
@@ -184,10 +176,10 @@ mod tests {
     fn test_memory_score_recency_decay() {
         let recent_memory = create_test_memory(0.5, 1, 0);
         let old_memory = create_test_memory(0.5, 60, 0);
-        
+
         let recent_score = MemoryScore::calculate(&recent_memory, Utc::now());
         let old_score = MemoryScore::calculate(&old_memory, Utc::now());
-        
+
         assert!(recent_score.recency > old_score.recency);
     }
 
@@ -195,26 +187,26 @@ mod tests {
     fn test_memory_score_usage_scaling() {
         let low_usage = create_test_memory(0.5, 1, 1);
         let high_usage = create_test_memory(0.5, 1, 100);
-        
+
         let low_score = MemoryScore::calculate(&low_usage, Utc::now());
         let high_score = MemoryScore::calculate(&high_usage, Utc::now());
-        
+
         assert!(high_score.usage > low_score.usage);
     }
 
     #[test]
     fn test_rank_memories() {
         let memories = vec![
-            create_test_memory(0.3, 30, 1), // Low score
+            create_test_memory(0.3, 30, 1),  // Low score
             create_test_memory(0.9, 1, 100), // High score
             create_test_memory(0.5, 10, 10), // Medium score
         ];
 
         let ranked = rank_memories(memories);
-        
+
         // Should be sorted by overall score descending
-        assert!(ranked[0].1.overall >= ranked[1].overall);
-        assert!(ranked[1].overall >= ranked[2].overall);
+        assert!(ranked[0].1.overall >= ranked[1].1.overall);
+        assert!(ranked[1].1.overall >= ranked[2].1.overall);
     }
 
     #[test]
@@ -243,7 +235,7 @@ mod tests {
     #[test]
     fn test_prune_by_threshold() {
         let memories = vec![
-            create_test_memory(0.1, 60, 0), // Very low score
+            create_test_memory(0.1, 60, 0),  // Very low score
             create_test_memory(0.9, 1, 100), // High score
             create_test_memory(0.5, 10, 10), // Medium score
         ];
@@ -269,7 +261,7 @@ mod tests {
     fn test_should_prune() {
         let memory = create_test_memory(0.8, 1, 10);
         let score = MemoryScore::calculate(&memory, Utc::now());
-        
+
         assert!(!score.should_prune(0.5)); // High score should not be pruned
         assert!(score.should_prune(0.95)); // Should be pruned with very high threshold
     }
