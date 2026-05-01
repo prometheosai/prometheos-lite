@@ -31,7 +31,8 @@ impl TraceStorage {
 
     /// Create an in-memory trace database for testing
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("Failed to create in-memory trace database")?;
+        let conn =
+            Connection::open_in_memory().context("Failed to create in-memory trace database")?;
 
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -268,8 +269,8 @@ impl TraceStorage {
             let started_at_str: String = row.get(3)?;
             let completed_at_str: Option<String> = row.get(4)?;
 
-            let trace_id = trace_id_str.parse().unwrap_or_default();
-            let flow_run_id = flow_run_id_str.parse().unwrap_or_default();
+            let trace_id = trace_id_str.clone();
+            let flow_run_id = flow_run_id_str;
             let started_at = DateTime::parse_from_rfc3339(&started_at_str)?.with_timezone(&Utc);
             let completed_at = completed_at_str
                 .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
@@ -345,7 +346,7 @@ impl TraceStorage {
 
             tool_calls.push(ToolCall {
                 tool_name: row.get(0)?,
-                trace_id: trace_id.parse().unwrap_or_default(),
+                trace_id: trace_id.to_string(),
                 args_hash: row.get(1)?,
                 result_hash: row.get(2)?,
                 success: row.get(3)?,
@@ -373,8 +374,8 @@ impl TraceStorage {
             let completed_at_str: Option<String> = row.get(8)?;
 
             llm_calls.push(LlmCall {
-                node_id: node_id_str.parse().unwrap_or_default(),
-                trace_id: trace_id.parse().unwrap_or_default(),
+                node_id: node_id_str,
+                trace_id: trace_id.to_string(),
                 provider: row.get(1)?,
                 model: row.get(2)?,
                 prompt_tokens: row.get(3)?,
@@ -398,9 +399,8 @@ impl TraceStorage {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT trace_id FROM execution_traces WHERE flow_run_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT trace_id FROM execution_traces WHERE flow_run_id = ?1")?;
 
         let mut rows = stmt.query(params![flow_run_id])?;
         let mut traces = Vec::new();
@@ -416,14 +416,14 @@ impl TraceStorage {
     }
 
     /// Delete a trace
-    pub fn delete_trace(&self, trace_id: &str) -> Result<()> {
+    pub fn delete_trace(&self, trace_id: &str) -> Result<bool> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
-        conn.execute("DELETE FROM execution_traces WHERE trace_id = ?1", params![trace_id])?;
-        Ok(())
+        let rows_affected = conn.execute("DELETE FROM execution_traces WHERE trace_id = ?1", params![trace_id])?;
+        Ok(rows_affected > 0)
     }
 
     /// Delete traces older than a given date
@@ -454,35 +454,16 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_get_trace() {
+    fn test_save_and_retrieve_trace() {
         let storage = TraceStorage::in_memory().unwrap();
-
-        let trace = HierarchicalTrace {
-            trace_id: uuid::Uuid::new_v4(),
-            work_context_id: Some("test_context".to_string()),
-            flow_run_id: uuid::Uuid::new_v4(),
-            node_runs: Vec::new(),
-            tool_calls: Vec::new(),
-            llm_calls: Vec::new(),
-            started_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-        };
-
-        storage.save_trace(&trace).unwrap();
-        let retrieved = storage.get_trace(&trace.trace_id.to_string()).unwrap();
         
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().trace_id, trace.trace_id);
-    }
-
-    #[test]
-    fn test_delete_trace() {
-        let storage = TraceStorage::in_memory().unwrap();
-
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let flow_run_id = uuid::Uuid::new_v4().to_string();
+        
         let trace = HierarchicalTrace {
-            trace_id: uuid::Uuid::new_v4(),
-            work_context_id: None,
-            flow_run_id: uuid::Uuid::new_v4(),
+            trace_id: trace_id.clone(),
+            work_context_id: Some("test-context".to_string()),
+            flow_run_id: flow_run_id,
             node_runs: Vec::new(),
             tool_calls: Vec::new(),
             llm_calls: Vec::new(),
@@ -491,9 +472,36 @@ mod tests {
         };
 
         storage.save_trace(&trace).unwrap();
-        storage.delete_trace(&trace.trace_id.to_string()).unwrap();
         
-        let retrieved = storage.get_trace(&trace.trace_id.to_string()).unwrap();
+        let retrieved = storage.get_trace(&trace_id).unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().trace_id, trace.trace_id);
+    }
+
+    #[test]
+    fn test_delete_trace() {
+        let storage = TraceStorage::in_memory().unwrap();
+
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let flow_run_id = uuid::Uuid::new_v4().to_string();
+        
+        let trace = HierarchicalTrace {
+            trace_id: trace_id.clone(),
+            work_context_id: Some("test-context".to_string()),
+            flow_run_id: flow_run_id,
+            node_runs: Vec::new(),
+            tool_calls: Vec::new(),
+            llm_calls: Vec::new(),
+            started_at: Utc::now(),
+            completed_at: None,
+        };
+
+        storage.save_trace(&trace).unwrap();
+        
+        let deleted = storage.delete_trace(&trace_id).unwrap();
+        assert!(deleted);
+        
+        let retrieved = storage.get_trace(&trace_id).unwrap();
         assert!(retrieved.is_none());
     }
 }
