@@ -90,25 +90,57 @@ impl ContextBudgeter {
     /// Build context with priority-based trimming
     ///
     /// Rules:
-    /// - Truncate lowest priority items first
+    /// - System items are NEVER dropped - they are hard-preserved (error if too large)
+    /// - Truncate lowest priority items first (after System)
     /// - Preserve structural integrity (never cut mid-JSON/code block)
     /// - Return dropped items for logging
     pub fn build_context(&self, items: Vec<ContextItem>) -> Result<TrimmedContext> {
         let available_tokens = self.available_input_tokens();
 
-        // Sort items by priority (lower = higher priority)
-        let mut sorted_items: Vec<_> = items.into_iter().enumerate().collect();
-        sorted_items.sort_by_key(|(_, item)| item.priority);
+        // Separate System items (hard-preserved) from other items
+        let (system_items, other_items): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .enumerate()
+            .partition(|(_, item)| item.priority == ContextPriority::System);
 
-        // Calculate total tokens
-        let total_tokens: usize = sorted_items
+        // Calculate System tokens (these MUST fit)
+        let system_tokens: usize = system_items
             .iter()
             .map(|(_, item)| Self::estimate_tokens(&item.content))
             .sum();
 
-        // If within budget, return as-is
-        if total_tokens <= available_tokens {
-            let prompt = sorted_items
+        // HARD PRESERVATION: System items must never be dropped
+        // If System items alone exceed budget, this is a configuration error
+        if system_tokens > available_tokens {
+            anyhow::bail!(
+                "System prompt exceeds available token budget: {} tokens required, {} available. \
+                 Consider increasing max_tokens or reducing system prompt size.",
+                system_tokens,
+                available_tokens
+            );
+        }
+
+        // Calculate remaining budget for non-System items
+        let remaining_tokens = available_tokens - system_tokens;
+
+        // Sort non-System items by priority (lower = higher priority)
+        let mut sorted_items: Vec<_> = other_items;
+        sorted_items.sort_by_key(|(_, item)| item.priority);
+
+        // Calculate non-System tokens
+        let other_tokens: usize = sorted_items
+            .iter()
+            .map(|(_, item)| Self::estimate_tokens(&item.content))
+            .sum();
+
+        // If everything fits, return as-is
+        if system_tokens + other_tokens <= available_tokens {
+            let mut all_items = system_items;
+            all_items.extend(sorted_items);
+            // Restore original order
+            all_items.sort_by_key(|(index, _)| *index);
+
+            let prompt = all_items
                 .into_iter()
                 .map(|(_, item)| item.content)
                 .collect::<Vec<_>>()
@@ -117,16 +149,16 @@ impl ContextBudgeter {
             return Ok(TrimmedContext {
                 prompt,
                 dropped_items: Vec::new(),
-                token_count: total_tokens,
+                token_count: system_tokens + other_tokens,
             });
         }
 
-        // Need to trim - start from highest priority, drop from lowest priority
-        let mut kept_items = Vec::new();
+        // Need to trim non-System items - System items are always kept
+        let mut kept_items = system_items.clone();
         let mut dropped_items = Vec::new();
-        let mut current_tokens = 0;
+        let mut current_tokens = system_tokens;
 
-        // Process items in normal order (highest priority first)
+        // Process non-System items in priority order (highest first)
         for (original_index, item) in sorted_items.into_iter() {
             let item_tokens = Self::estimate_tokens(&item.content);
 
@@ -135,7 +167,7 @@ impl ContextBudgeter {
                 kept_items.push((original_index, item));
                 current_tokens += item_tokens;
             } else {
-                // Budget exceeded - drop this item (it's lower priority than kept items)
+                // Budget exceeded - drop this item
                 dropped_items.push(item.label);
             }
         }
@@ -143,7 +175,7 @@ impl ContextBudgeter {
         // Restore original order
         kept_items.sort_by_key(|(index, _)| *index);
 
-        // Build final prompt
+        // Build final prompt (System items guaranteed to be included)
         let prompt = kept_items
             .into_iter()
             .map(|(_, item)| item.content)

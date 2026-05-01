@@ -195,6 +195,11 @@ impl ContextBuilder {
     }
 
     /// Build context with automatic memory retrieval
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if the memory service is configured but memory retrieval fails.
+    /// This ensures explicit failure rather than silent degradation.
     pub async fn build_with_memory_retrieval(
         &self,
         task: String,
@@ -205,25 +210,21 @@ impl ContextBuilder {
             // Use semantic_search with the provided limit
             // Note: project_id filtering would need to be implemented in MemoryService
             // For now, we pass the query and limit
-            match service.semantic_search(&task, limit).await {
-                Ok(memories) => {
-                    // Filter by project_id if provided
-                    if let Some(ref pid) = project_id {
-                        memories.into_iter()
-                            .filter(|m| m.project_id.as_deref() == Some(pid))
-                            .collect()
-                    } else {
-                        memories
-                    }
-                }
-                Err(e) => {
-                    // Log the error but continue with empty memory
-                    // In production, this should be logged to a proper logging system
-                    eprintln!("Memory search failed: {}", e);
-                    Vec::new()
-                }
+            let memories = service
+                .semantic_search(&task, limit)
+                .await
+                .context("Memory retrieval failed during context building")?;
+            
+            // Filter by project_id if provided
+            if let Some(ref pid) = project_id {
+                memories.into_iter()
+                    .filter(|m| m.project_id.as_deref() == Some(pid))
+                    .collect()
+            } else {
+                memories
             }
         } else {
+            // No memory service configured - proceed without memory
             Vec::new()
         };
 
