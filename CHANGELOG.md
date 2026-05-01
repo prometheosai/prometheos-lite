@@ -853,8 +853,71 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #35: Test failure trace visibility (failures are traceable)
 - [x] Issue #36: Test token budget enforcement (no LLM call exceeds token limit)
 
-**Status:** v1.5 - Complete (36/36 implemented)
-**See:** `docs/prd/prmetheos-lite-V1.5-context.md` for full specification
+**Status:** v1.5 - Partial - Not Production-Ready
+**See:** `docs/prd/prometheos-lite-V1.5-context.md` for full specification
+
+### Critical Audit Findings (Post-Implementation Review)
+
+The following critical issues were identified during code audit:
+
+1. **ContextBudgeter priority logic bug** - `build_context` processes items in reverse order, causing low-priority memory to consume budget before system/task context. The comment claims "truncate lowest priority first" but implementation does the opposite.
+
+2. **Context budget test likely fails** - Test uses `ContextBudgeter::new(100, 20)` with tiny input strings that don't actually exceed the 80-token budget, making the "dropped items not empty" assertion unreliable.
+
+3. **ContextBuilder not wired into DefaultNodeFactory** - While `PlannerNode`, `CoderNode`, `ReviewerNode`, and `LlmNode` support `ContextBuilder`, the factory creates them without passing one, so default execution falls back to direct prompt construction.
+
+4. **Memory retrieval dead parameters and silent failure** - `build_with_memory_retrieval` ignores `limit` and actual `project_id` value, and swallows memory search errors via `unwrap_or_default()`.
+
+5. **Async summarizer tests using wrong test attribute** - Some async tests in `src/flow/memory/summarizer.rs` use `#[test]` instead of `#[tokio::test]`.
+
+6. **Weak heuristic summarization fallback** - `MemorySummarizer` falls back to first-300-char heuristic when no LLM router exists, which can discard important content.
+
+7. **Semantic score not meaningfully integrated** - `EvaluationEngine` computes semantic score but doesn't blend it into the overall score - it's decorative.
+
+8. **Evaluation parsing silent defaults to 0.5** - Malformed evaluator output becomes neutral instead of invalid via `unwrap_or(0.5)`.
+
+9. **Shallow coding harness implementation** - `CodeAnalysisNode`, `DependencyAnalysisNode`, and `SymbolResolutionNode` only do basic metadata checks, not real AST parsing or language-server-backed indexing.
+
+10. **Trace storage lacks migrations/versioning** - Schema initialization uses `CREATE TABLE IF NOT EXISTS` without versioned migrations.
+
+---
+
+## v1.5.1 PRD - Hardening & Context Budget
+
+**Codename:** "V1.5.1 — Hardening & Context Budget"
+
+**Objective:** Fix remaining issues in V1.5 implementation to achieve production-grade state by addressing prototype residue and stub/placeholder behavior.
+
+### Completed Fixes
+- [x] Force all LLM prompt construction through ContextBuilder (removed fallback paths in PlannerNode, CoderNode, ReviewerNode, LlmNode)
+- [x] Add integration test proving context budget enforcement (v151_context_budget_integration_test.rs)
+- [x] Fix compression deletion bug in MemoryService (track original IDs before compression)
+- [x] Wire memory pruning/compression into execution lifecycle (FlowExecutionService::execute_message)
+- [x] Expose V1.5 metadata through API and CLI (ContextBudgetMetadata, MemoryExecutionMetadata in FinalOutput)
+- [x] Replace fake OpenTelemetry endpoint path with real OTLP export (opentelemetry_otlp::new_exporter().tonic())
+- [x] Add real trace propagation test (v151_trace_propagation_test.rs - has Windows file locking issue)
+
+**Status:** v1.5.1 - Partial Complete (7/7 implemented, 1 test has execution issue)
+**See:** `docs/prd/prometheos-lite-v1.5.1-hardening.md` for full specification
+
+---
+
+## v1.5.2 PRD - Critical Production Fixes
+
+**Codename:** "V1.5.2 — Critical Production Fixes"
+
+**Objective:** Address remaining critical issues from V1.5 audit that prevent production readiness.
+
+### Completed Fixes
+- [x] Fix ContextBudgeter::build_context priority logic (iterate high-priority first, drop from lowest-priority side)
+- [x] Rewrite context budget test with real over-budget case (use tiny budget like 10 tokens, assert System/Task preserved)
+- [x] Fix async summarizer test attributes (replace #[test] with #[tokio::test] in src/flow/memory/summarizer.rs)
+- [x] Fix memory retrieval parameters (respect limit and actual project_id, remove unwrap_or_default())
+- [x] Replace silent fallbacks with explicit error handling (evaluation parsing, memory retrieval)
+- [x] Upgrade coding nodes to real repo indexing (AST parsing or language-server-backed indexing)
+- [x] Add trace storage migrations/versioning (schema versioning for observability layer)
+
+**Status:** v1.5.2 - Complete (7/7 implemented)
 
 ---
 
