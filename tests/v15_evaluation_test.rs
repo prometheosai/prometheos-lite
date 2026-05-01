@@ -3,24 +3,18 @@
 //! Tests for enhanced evaluation with structural validation and semantic evaluation.
 
 use chrono::Utc;
-use prometheos::work::evaluation::{EvaluationDimensions, EvaluationEngine, StructuralValidation};
-use prometheos::work::types::{WorkContext, WorkContextStatus};
+use prometheos_lite::work::{Artifact, ArtifactKind, EvaluationEngine};
+use prometheos_lite::work::types::{WorkContext, WorkDomain};
+use prometheos_lite::work::evaluation::EvaluationDimensions;
 
-fn create_test_work_context(task: &str) -> WorkContext {
-    WorkContext {
-        id: uuid::Uuid::new_v4().to_string(),
-        task: task.to_string(),
-        status: WorkContextStatus::Completed,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        completed_at: None,
-        input: serde_json::json!({}),
-        output: Some(serde_json::json!({})),
-        artifacts: Vec::new(),
-        playbook_id: None,
-        evaluation_result: None,
-        execution_metadata: None,
-    }
+fn create_test_work_context(goal: &str) -> WorkContext {
+    WorkContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        "test-user".to_string(),
+        "Test task".to_string(),
+        WorkDomain::Software,
+        goal.to_string(),
+    )
 }
 
 #[test]
@@ -48,11 +42,13 @@ fn test_evaluation_dimensions_default() {
 #[test]
 fn test_structural_validation_valid() {
     let engine = EvaluationEngine::default();
-    
-    let context = create_test_work_context("Test task");
+
+    let context = create_test_work_context("Test goal");
     let execution_metadata = serde_json::json!({});
-    let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
-    
+    let validation = engine
+        .validate_structure(&context, &execution_metadata)
+        .unwrap();
+
     assert!(validation.is_valid);
     assert!(validation.errors.is_empty());
 }
@@ -60,11 +56,13 @@ fn test_structural_validation_valid() {
 #[test]
 fn test_structural_validation_invalid() {
     let engine = EvaluationEngine::default();
-    
-    let context = create_test_work_context(""); // Empty task
+
+    let context = create_test_work_context(""); // Empty goal
     let execution_metadata = serde_json::json!({});
-    let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
-    
+    let validation = engine
+        .validate_structure(&context, &execution_metadata)
+        .unwrap();
+
     assert!(!validation.is_valid);
     assert!(!validation.errors.is_empty());
 }
@@ -72,13 +70,15 @@ fn test_structural_validation_invalid() {
 #[test]
 fn test_structural_validation_invalid_patch() {
     let engine = EvaluationEngine::default();
-    
-    let context = create_test_work_context("Test task");
+
+    let context = create_test_work_context("Test goal");
     let execution_metadata = serde_json::json!({
         "patch": "not an object"
     });
-    let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
-    
+    let validation = engine
+        .validate_structure(&context, &execution_metadata)
+        .unwrap();
+
     assert!(!validation.is_valid);
     assert!(!validation.errors.is_empty());
 }
@@ -86,7 +86,7 @@ fn test_structural_validation_invalid_patch() {
 #[test]
 fn test_evaluate_tool_consistency() {
     let engine = EvaluationEngine::default();
-    
+
     let metadata = serde_json::json!({
         "tool_calls": [
             {"success": true},
@@ -102,7 +102,7 @@ fn test_evaluate_tool_consistency() {
 #[test]
 fn test_evaluate_tool_consistency_all_success() {
     let engine = EvaluationEngine::default();
-    
+
     let metadata = serde_json::json!({
         "tool_calls": [
             {"success": true},
@@ -118,33 +118,26 @@ fn test_evaluate_tool_consistency_all_success() {
 fn test_evaluate_artifact_completeness() {
     let engine = EvaluationEngine::default();
     
-    let context = WorkContext {
-        id: uuid::Uuid::new_v4().to_string(),
-        task: "Test task".to_string(),
-        status: WorkContextStatus::Completed,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        completed_at: None,
-        input: serde_json::json!({}),
-        output: Some(serde_json::json!({})),
-        artifacts: vec![
-            prometheos::work::Artifact {
-                id: "1".to_string(),
-                kind: "code".to_string(),
-                content: "test".to_string(),
-                created_at: Utc::now(),
-            },
-            prometheos::work::Artifact {
-                id: "2".to_string(),
-                kind: "".to_string(), // Incomplete
-                content: "".to_string(),
-                created_at: Utc::now(),
-            },
-        ],
-        playbook_id: None,
-        evaluation_result: None,
-        execution_metadata: None,
-    };
+    let mut context = create_test_work_context("Test goal");
+    let context_id = context.id.clone();
+    context.artifacts = vec![
+        Artifact::new(
+            "1".to_string(),
+            context_id.clone(),
+            ArtifactKind::Code,
+            "test_artifact".to_string(),
+            serde_json::Value::String("test".to_string()),
+            "test-user".to_string(),
+        ),
+        Artifact::new(
+            "2".to_string(),
+            context_id,
+            ArtifactKind::Code,
+            "incomplete_artifact".to_string(),
+            serde_json::Value::String("".to_string()), // Incomplete
+            "test-user".to_string(),
+        ),
+    ];
 
     let score = engine.evaluate_artifact_completeness(&context).unwrap();
     assert!(score == 0.5); // 1 out of 2 complete
@@ -154,7 +147,7 @@ fn test_evaluate_artifact_completeness() {
 fn test_evaluate_artifact_completeness_no_artifacts() {
     let engine = EvaluationEngine::default();
     
-    let context = create_test_work_context("Test task");
+    let context = create_test_work_context("Test goal");
     let score = engine.evaluate_artifact_completeness(&context).unwrap();
     
     assert_eq!(score, 0.5); // Neutral if no artifacts
@@ -166,17 +159,20 @@ fn test_evaluation_engine_default() {
     // Should create without errors
 }
 
-#[test]
-fn test_evaluation_scoring_correctness() {
+#[tokio::test]
+async fn test_evaluation_scoring_correctness() {
     let engine = EvaluationEngine::default();
     
-    let context = create_test_work_context("Test task");
+    let context = create_test_work_context("Test goal");
     let execution_metadata = serde_json::json!({
         "retry_count": 0,
         "test_results": {"failed": 0}
     });
 
-    let result = engine.evaluate(&context, &execution_metadata).await.unwrap();
+    let result = engine
+        .evaluate(&context, &execution_metadata)
+        .await
+        .unwrap();
     
     assert!(result.overall_score > 0.0);
     assert!(result.semantic_score > 0.0);
@@ -185,35 +181,41 @@ fn test_evaluation_scoring_correctness() {
     assert!(result.artifact_completeness_score > 0.0);
 }
 
-#[test]
-fn test_evaluation_with_high_retries() {
+#[tokio::test]
+async fn test_evaluation_with_high_retries() {
     let engine = EvaluationEngine::default();
-    
-    let context = create_test_work_context("Test task");
+
+    let context = create_test_work_context("Test goal");
     let execution_metadata = serde_json::json!({
         "retry_count": 5,
         "test_results": {"failed": 0}
     });
 
-    let result = engine.evaluate(&context, &execution_metadata).await.unwrap();
-    
+    let result = engine
+        .evaluate(&context, &execution_metadata)
+        .await
+        .unwrap();
+
     // Should have penalty for high retries
     assert!(!result.penalties.is_empty());
     assert!(result.overall_score < 1.0);
 }
 
-#[test]
-fn test_evaluation_with_failed_tests() {
+#[tokio::test]
+async fn test_evaluation_with_failed_tests() {
     let engine = EvaluationEngine::default();
-    
-    let context = create_test_work_context("Test task");
+
+    let context = create_test_work_context("Test goal");
     let execution_metadata = serde_json::json!({
         "retry_count": 0,
         "test_results": {"failed": 3}
     });
 
-    let result = engine.evaluate(&context, &execution_metadata).await.unwrap();
-    
+    let result = engine
+        .evaluate(&context, &execution_metadata)
+        .await
+        .unwrap();
+
     // Should have penalty for failed tests
     assert!(!result.penalties.is_empty());
     assert!(result.overall_score < 1.0);
