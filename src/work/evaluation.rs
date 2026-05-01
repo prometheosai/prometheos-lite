@@ -245,7 +245,9 @@ impl EvaluationEngine {
         
         // Parse the score from the response
         let score_str = result.trim();
-        Ok(score_str.parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0))
+        score_str.parse::<f32>()
+            .map(|s| s.clamp(0.0, 1.0))
+            .map_err(|e| anyhow::anyhow!("Failed to parse semantic score '{}': {}", score_str, e))
     }
 
     /// Evaluate tool consistency
