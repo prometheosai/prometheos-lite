@@ -58,21 +58,16 @@ impl Node for IdWrapper {
 pub struct PlannerNode {
     config: NodeConfig,
     model_router: Option<std::sync::Arc<ModelRouter>>,
-    context_builder: Option<ContextBuilder>,
+    context_builder: ContextBuilder,
 }
 
 impl PlannerNode {
-    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>) -> Self {
+    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>, context_builder: ContextBuilder) -> Self {
         Self {
             config,
             model_router,
-            context_builder: None,
+            context_builder,
         }
-    }
-
-    pub fn with_context_builder(mut self, context_builder: ContextBuilder) -> Self {
-        self.context_builder = Some(context_builder);
-        self
     }
 }
 
@@ -117,28 +112,19 @@ impl Node for PlannerNode {
             .as_ref()
             .context("PlannerNode requires ModelRouter to be configured")?;
 
-        // Use ContextBuilder if available, otherwise fall back to direct prompt construction
-        let base_prompt = if let Some(ref builder) = self.context_builder {
-            let context_inputs = ContextInputs {
-                task: task.to_string(),
-                plan: None,
-                memory: Vec::new(),
-                artifacts: Vec::new(),
-                system_prompt: Some("You are a planning assistant. Create a structured plan for the following task. Provide a step-by-step plan as a JSON array of strings.".to_string()),
-            };
-
-            let built_context = builder
-                .build(context_inputs)
-                .context("Failed to build context with ContextBuilder")?;
-
-            built_context.prompt
-        } else {
-            // Fallback to direct prompt construction
-            format!(
-                "You are a planning assistant. Create a structured plan for the following task:\n\nTask: {}\n\nProvide a step-by-step plan as a JSON array of strings.",
-                task
-            )
+        let context_inputs = ContextInputs {
+            task: task.to_string(),
+            plan: None,
+            memory: Vec::new(),
+            artifacts: Vec::new(),
+            system_prompt: Some("You are a planning assistant. Create a structured plan for the following task. Provide a step-by-step plan as a JSON array of strings.".to_string()),
         };
+
+        let built_context = self.context_builder
+            .build(context_inputs)
+            .context("Failed to build context with ContextBuilder")?;
+
+        let base_prompt = built_context.prompt;
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
@@ -183,21 +169,16 @@ impl Node for PlannerNode {
 pub struct CoderNode {
     config: NodeConfig,
     model_router: Option<std::sync::Arc<ModelRouter>>,
-    context_builder: Option<ContextBuilder>,
+    context_builder: ContextBuilder,
 }
 
 impl CoderNode {
-    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>) -> Self {
+    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>, context_builder: ContextBuilder) -> Self {
         Self {
             config,
             model_router,
-            context_builder: None,
+            context_builder,
         }
-    }
-
-    pub fn with_context_builder(mut self, context_builder: ContextBuilder) -> Self {
-        self.context_builder = Some(context_builder);
-        self
     }
 }
 
@@ -248,30 +229,20 @@ impl Node for CoderNode {
             .as_ref()
             .context("CoderNode requires ModelRouter to be configured")?;
 
-        // Use ContextBuilder if available, otherwise fall back to direct prompt construction
-        let base_prompt = if let Some(ref builder) = self.context_builder {
-            let plan_str = serde_json::to_string(plan).unwrap_or_default();
-            let context_inputs = ContextInputs {
-                task: task.to_string(),
-                plan: Some(plan_str),
-                memory: Vec::new(),
-                artifacts: Vec::new(),
-                system_prompt: Some("You are a coding assistant. Generate code for the following task based on the provided plan. Provide the generated code only, without explanations.".to_string()),
-            };
-
-            let built_context = builder
-                .build(context_inputs)
-                .context("Failed to build context with ContextBuilder")?;
-
-            built_context.prompt
-        } else {
-            // Fallback to direct prompt construction
-            format!(
-                "You are a coding assistant. Generate code for the following task based on the provided plan:\n\nTask: {}\n\nPlan: {}\n\nProvide the generated code only, without explanations.",
-                task,
-                serde_json::to_string(plan).unwrap_or_default()
-            )
+        let plan_str = serde_json::to_string(plan).unwrap_or_default();
+        let context_inputs = ContextInputs {
+            task: task.to_string(),
+            plan: Some(plan_str),
+            memory: Vec::new(),
+            artifacts: Vec::new(),
+            system_prompt: Some("You are a coding assistant. Generate code for the following task based on the provided plan. Provide the generated code only, without explanations.".to_string()),
         };
+
+        let built_context = self.context_builder
+            .build(context_inputs)
+            .context("Failed to build context with ContextBuilder")?;
+
+        let base_prompt = built_context.prompt;
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
@@ -326,21 +297,16 @@ impl Node for CoderNode {
 pub struct ReviewerNode {
     config: NodeConfig,
     model_router: Option<std::sync::Arc<ModelRouter>>,
-    context_builder: Option<ContextBuilder>,
+    context_builder: ContextBuilder,
 }
 
 impl ReviewerNode {
-    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>) -> Self {
+    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>, context_builder: ContextBuilder) -> Self {
         Self {
             config,
             model_router,
-            context_builder: None,
+            context_builder,
         }
-    }
-
-    pub fn with_context_builder(mut self, context_builder: ContextBuilder) -> Self {
-        self.context_builder = Some(context_builder);
-        self
     }
 }
 
@@ -382,34 +348,20 @@ impl Node for ReviewerNode {
             .as_ref()
             .context("ReviewerNode requires ModelRouter to be configured")?;
 
-        // Use ContextBuilder if available, otherwise fall back to direct prompt construction
-        let base_prompt = if let Some(ref builder) = self.context_builder {
-            let generated_str = serde_json::to_string(generated).unwrap_or_default();
-            let context_inputs = ContextInputs {
-                task: "Review the following generated code".to_string(),
-                plan: None,
-                memory: Vec::new(),
-                artifacts: vec![crate::context::Artifact {
-                    id: "generated_code".to_string(),
-                    kind: "code".to_string(),
-                    content: generated_str,
-                    created_at: chrono::Utc::now(),
-                }],
-                system_prompt: Some("You are a code reviewer. Provide a brief review with feedback on quality, correctness, and potential improvements.".to_string()),
-            };
-
-            let built_context = builder
-                .build(context_inputs)
-                .context("Failed to build context with ContextBuilder")?;
-
-            built_context.prompt
-        } else {
-            // Fallback to direct prompt construction
-            format!(
-                "You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.",
-                serde_json::to_string(generated).unwrap_or_default()
-            )
+        let generated_str = serde_json::to_string(generated).unwrap_or_default();
+        let context_inputs = ContextInputs {
+            task: "Review the following code".to_string(),
+            plan: None,
+            memory: Vec::new(),
+            artifacts: Vec::new(),
+            system_prompt: Some("You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.".to_string()),
         };
+
+        let built_context = self.context_builder
+            .build(context_inputs)
+            .context("Failed to build context with ContextBuilder")?;
+
+        let base_prompt = built_context.prompt;
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
@@ -465,7 +417,7 @@ pub struct LlmNode {
     config: NodeConfig,
     model_router: Option<std::sync::Arc<ModelRouter>>,
     prompt_template: Option<String>,
-    context_builder: Option<ContextBuilder>,
+    context_builder: ContextBuilder,
 }
 
 impl LlmNode {
@@ -473,6 +425,7 @@ impl LlmNode {
         config: NodeConfig,
         model_router: Option<std::sync::Arc<ModelRouter>>,
         node_config: Option<serde_json::Value>,
+        context_builder: ContextBuilder,
     ) -> Self {
         let prompt_template = node_config
             .as_ref()
@@ -482,13 +435,8 @@ impl LlmNode {
             config,
             model_router,
             prompt_template,
-            context_builder: None,
+            context_builder,
         }
-    }
-
-    pub fn with_context_builder(mut self, context_builder: ContextBuilder) -> Self {
-        self.context_builder = Some(context_builder);
-        self
     }
 }
 
@@ -533,28 +481,22 @@ impl Node for LlmNode {
             .as_ref()
             .context("LlmNode requires ModelRouter to be configured")?;
 
-        // Use ContextBuilder if available, otherwise fall back to direct prompt construction
-        let final_prompt = if let Some(ref builder) = self.context_builder {
-            let context_inputs = ContextInputs {
-                task: prompt.to_string(),
-                plan: None,
-                memory: Vec::new(),
-                artifacts: Vec::new(),
-                system_prompt: None,
-            };
+        let context_inputs = ContextInputs {
+            task: prompt.to_string(),
+            plan: None,
+            memory: Vec::new(),
+            artifacts: Vec::new(),
+            system_prompt: None,
+        };
 
-            let built_context = builder
-                .build(context_inputs)
-                .context("Failed to build context with ContextBuilder")?;
+        let built_context = self.context_builder
+            .build(context_inputs)
+            .context("Failed to build context with ContextBuilder")?;
 
-            built_context.prompt
+        let final_prompt = if let Some(template) = &self.prompt_template {
+            template.replace("{{prompt}}", &built_context.prompt)
         } else {
-            // Use prompt directly or with template
-            if let Some(template) = &self.prompt_template {
-                template.replace("{{prompt}}", prompt)
-            } else {
-                prompt.to_string()
-            }
+            built_context.prompt
         };
 
         // Inject personality context if mode is set

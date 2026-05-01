@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::context::ContextBuilder;
 use crate::flow::{MemoryService, ModelRouter, Node, NodeConfig, ToolRuntime};
 
 /// NodeFactory trait - creates concrete nodes based on node_type
@@ -16,6 +17,7 @@ pub struct DefaultNodeFactory {
     model_router: Option<std::sync::Arc<ModelRouter>>,
     tool_runtime: Option<std::sync::Arc<ToolRuntime>>,
     memory_service: Option<std::sync::Arc<MemoryService>>,
+    context_builder: Option<ContextBuilder>,
 }
 
 impl DefaultNodeFactory {
@@ -24,6 +26,7 @@ impl DefaultNodeFactory {
             model_router: None,
             tool_runtime: None,
             memory_service: None,
+            context_builder: None,
         }
     }
 
@@ -33,6 +36,7 @@ impl DefaultNodeFactory {
             model_router: runtime.model_router,
             tool_runtime: runtime.tool_runtime,
             memory_service: runtime.memory_service,
+            context_builder: Some(ContextBuilder::default()),
         }
     }
 
@@ -48,6 +52,11 @@ impl DefaultNodeFactory {
 
     pub fn with_memory_service(mut self, service: std::sync::Arc<MemoryService>) -> Self {
         self.memory_service = Some(service);
+        self
+    }
+
+    pub fn with_context_builder(mut self, builder: ContextBuilder) -> Self {
+        self.context_builder = Some(builder);
         self
     }
 
@@ -71,24 +80,30 @@ impl DefaultNodeFactory {
 impl NodeFactory for DefaultNodeFactory {
     fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
         let node_config = Self::parse_config(&config)?;
+        let context_builder = self.context_builder.clone()
+            .unwrap_or_else(ContextBuilder::default);
 
         match node_type {
             "planner" => Ok(Arc::new(super::builtin_nodes::PlannerNode::new(
                 node_config,
                 self.model_router.clone(),
+                context_builder,
             ))),
             "coder" => Ok(Arc::new(super::builtin_nodes::CoderNode::new(
                 node_config,
                 self.model_router.clone(),
+                context_builder,
             ))),
             "reviewer" => Ok(Arc::new(super::builtin_nodes::ReviewerNode::new(
                 node_config,
                 self.model_router.clone(),
+                context_builder,
             ))),
             "llm" => Ok(Arc::new(super::builtin_nodes::LlmNode::new(
                 node_config,
                 self.model_router.clone(),
                 config,
+                context_builder,
             ))),
             "tool" => Ok(Arc::new(super::builtin_nodes::ToolNode::new(
                 node_config,

@@ -27,6 +27,10 @@ pub struct FinalOutput {
     pub evaluation: Evaluation,
     /// Budget usage report (if budget was enforced)
     pub budget_report: Option<serde_json::Value>,
+    /// V1.5: Context budget metadata
+    pub context_budget: Option<ContextBudgetMetadata>,
+    /// V1.5: Memory operations metadata
+    pub memory_operations: Option<MemoryExecutionMetadata>,
     /// Number of trace events generated during execution
     pub events_count: usize,
     /// Timestamp when the flow execution started
@@ -41,6 +45,24 @@ pub struct FinalOutput {
     pub execution_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
+/// V1.5: Context budget metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextBudgetMetadata {
+    pub max_tokens: usize,
+    pub used_tokens: usize,
+    pub dropped_items: Vec<String>,
+    pub memory_count: usize,
+    pub artifact_count: usize,
+}
+
+/// V1.5: Memory execution metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryExecutionMetadata {
+    pub compressions_performed: usize,
+    pub prunes_performed: usize,
+    pub total_memory_count: usize,
+}
+
 impl FinalOutput {
     /// Create a new successful FinalOutput
     pub fn success(
@@ -51,6 +73,8 @@ impl FinalOutput {
         additional: HashMap<String, serde_json::Value>,
         evaluation: Evaluation,
         budget_report: Option<serde_json::Value>,
+        context_budget: Option<ContextBudgetMetadata>,
+        memory_operations: Option<MemoryExecutionMetadata>,
         events_count: usize,
         duration_ms: u64,
     ) -> Self {
@@ -62,6 +86,8 @@ impl FinalOutput {
             additional,
             evaluation,
             budget_report,
+            context_budget,
+            memory_operations,
             events_count,
             timestamp: Utc::now(),
             duration_ms,
@@ -87,6 +113,8 @@ impl FinalOutput {
             additional: HashMap::new(),
             evaluation: Evaluation::empty(run_id, flow_name),
             budget_report: None,
+            context_budget: None,
+            memory_operations: None,
             events_count: 0,
             timestamp: Utc::now(),
             duration_ms,
@@ -225,6 +253,8 @@ mod tests {
             serde_json::json!("generated code"),
             additional,
             evaluation,
+            None,
+            None,
             None,
             5,
             1000,

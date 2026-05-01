@@ -7,6 +7,7 @@ use opentelemetry::trace::{
 use opentelemetry::{Key, KeyValue};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
+use opentelemetry_otlp::WithExportConfig;
 
 use super::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 
@@ -75,10 +76,17 @@ impl OtelExporter {
             sdktrace::TracerProvider::builder()
                 .with_simple_exporter(exporter)
                 .build()
-        } else if let Some(_endpoint) = &config.endpoint {
-            // Export to OTLP endpoint - simplified for compatibility
-            // For now, use a basic tracer without OTLP due to API complexity
-            sdktrace::TracerProvider::builder().build()
+        } else if let Some(endpoint) = &config.endpoint {
+            // Export to OTLP endpoint
+            let exporter = opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(endpoint)
+                .with_timeout(std::time::Duration::from_secs(3))
+                .build_span_exporter()?;
+            
+            sdktrace::TracerProvider::builder()
+                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+                .build()
         } else {
             // No export configured, use no-op tracer
             sdktrace::TracerProvider::builder().build()

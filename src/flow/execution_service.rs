@@ -264,6 +264,25 @@ impl FlowExecutionService {
         let flow_file = self.load_flow(&intent, options.tracer.as_ref())?;
         let flow_name = flow_file.name.clone();
 
+        // V1.5.1: Wire memory pruning/compression into execution lifecycle
+        let mut memory_ops_count = 0;
+        if let Some(ref memory_service) = self.runtime.memory_service {
+            // Check memory stats and compress/prune if needed
+            let stats = memory_service.get_memory_stats().await.unwrap_or_default();
+            
+            // Compress if threshold exceeded
+            if stats.total_count > stats.max_count {
+                if memory_service.compress_if_needed().await.unwrap_or(false) {
+                    memory_ops_count += 1;
+                }
+            }
+            
+            // Prune low-importance memories
+            if memory_service.prune_memories().await.unwrap_or(0) > 0 {
+                memory_ops_count += 1;
+            }
+        }
+
         // 4. Build flow
         let mut flow = self.build_flow(&flow_file, &options)?;
 
@@ -400,6 +419,8 @@ impl FlowExecutionService {
                     additional,
                     evaluation,
                     budget_report,
+                    None, // context_budget - to be populated from state
+                    None, // memory_operations - to be populated from state
                     events_count,
                     duration_ms,
                 );
@@ -558,6 +579,8 @@ impl FlowExecutionService {
                     additional,
                     evaluation,
                     budget_report,
+                    None, // context_budget - to be populated from state
+                    None, // memory_operations - to be populated from state
                     events_count,
                     duration_ms,
                 );

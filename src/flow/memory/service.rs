@@ -464,6 +464,9 @@ impl MemoryService {
     pub async fn compress_if_needed(&self) -> Result<bool> {
         let db_guard = self.db.lock().await;
         let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
+        
+        // Track original IDs before compression
+        let original_ids: Vec<String> = all_memories.iter().map(|m| m.id.clone()).collect();
         drop(db_guard);
 
         let summarizer = std::sync::Arc::new(self.summarizer.clone());
@@ -475,10 +478,14 @@ impl MemoryService {
         ) {
             let compressed = summarizer.compress(all_memories, 10).await?;
 
-            // Delete original memories and add compressed ones
+            // Delete original memories by their original IDs
             let db_guard = self.db.lock().await;
+            for id in original_ids {
+                let _ = db_guard.delete_memory(&id);
+            }
+            
+            // Add compressed memories with their new IDs
             for memory in compressed {
-                let _ = db_guard.delete_memory(&memory.id);
                 let _ = db_guard.create_memory(&memory);
             }
 
@@ -514,7 +521,7 @@ impl MemoryService {
 }
 
 /// Memory statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryStats {
     pub total_count: usize,
     pub total_tokens: usize,
