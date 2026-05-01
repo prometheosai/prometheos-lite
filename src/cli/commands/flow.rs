@@ -149,8 +149,17 @@ impl RunFlowCommand {
             checkpoint_dir.display()
         ));
 
-        let mut flow_runner =
-            FlowRunner::from_json_file_with_runtime(self.path.clone(), Some(runtime))?;
+        // Load flow based on file extension
+        let mut flow_runner = if let Some(ext) = self.path.extension() {
+            let ext = ext.to_string_lossy().to_lowercase();
+            if ext == "yaml" || ext == "yml" {
+                FlowRunner::from_yaml_file_with_runtime(self.path.clone(), Some(runtime))?
+            } else {
+                FlowRunner::from_json_file_with_runtime(self.path.clone(), Some(runtime))?
+            }
+        } else {
+            FlowRunner::from_json_file_with_runtime(self.path.clone(), Some(runtime))?
+        };
         logger.info("Flow loaded successfully");
 
         // Create FlowRun
@@ -368,14 +377,25 @@ impl ResumeCommand {
         mut state: prometheos_lite::flow::SharedState,
         logger: &Logger,
     ) -> anyhow::Result<()> {
-        use prometheos_lite::flow::loader::{FlowLoader, YamlLoader};
+        use prometheos_lite::flow::loader::{FlowLoader, JsonLoader, YamlLoader};
         use prometheos_lite::flow::{
             DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState,
         };
 
-        // Load the flow file
-        let loader = YamlLoader::new();
-        let flow_file = loader.load_from_path(flow_path)?;
+        // Load the flow file based on extension
+        let flow_file = if let Some(ext) = flow_path.extension() {
+            let ext = ext.to_string_lossy().to_lowercase();
+            if ext == "yaml" || ext == "yml" {
+                let loader = YamlLoader::new();
+                loader.load_from_path(flow_path)?
+            } else {
+                let loader = JsonLoader::new();
+                loader.load_from_path(flow_path)?
+            }
+        } else {
+            let loader = JsonLoader::new();
+            loader.load_from_path(flow_path)?
+        };
         logger.info(&format!("Loaded flow: {}", flow_file.name));
 
         // Build the flow
