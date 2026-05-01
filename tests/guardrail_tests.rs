@@ -7,9 +7,11 @@
 //! - No untrusted tool can execute without approval
 //! - No flow can loop forever
 
-use prometheos_lite::tools::{ToolContext, ToolPermission, ToolPolicy, TrustLevel, ApprovalPolicy, TrustPolicy, TrustRegistry};
-use prometheos_lite::flow::{FlowSnapshot, IdempotencyKey};
 use prometheos_lite::flow::loop_detection::{LoopDetectionConfig, LoopDetector};
+use prometheos_lite::flow::{FlowSnapshot, IdempotencyKey};
+use prometheos_lite::tools::{
+    ApprovalPolicy, ToolContext, ToolPermission, ToolPolicy, TrustLevel, TrustPolicy, TrustRegistry,
+};
 
 #[test]
 fn test_tool_without_context_fails() {
@@ -291,8 +293,8 @@ fn test_idempotency_key_computation() {
 #[test]
 fn test_interrupt_expiration() {
     // Verify interrupt expiration
-    use prometheos_lite::tools::InterruptContext;
     use chrono::{Duration, Utc};
+    use prometheos_lite::tools::InterruptContext;
 
     let schema = serde_json::json!({});
     let mut context = InterruptContext::new(

@@ -8,8 +8,8 @@
 
 use chrono::Utc;
 use prometheos_lite::work::playbook::{
-    CreativityLevel, FlowPreference, NodePreference, PatternRecord, PatternType,
-    ResearchDepth, WorkContextPlaybook,
+    CreativityLevel, FlowPreference, NodePreference, PatternRecord, PatternType, ResearchDepth,
+    WorkContextPlaybook,
 };
 use prometheos_lite::work::types::ApprovalPolicy;
 
@@ -27,7 +27,10 @@ fn test_playbook_creation_with_patterns_and_preferences() {
     assert_eq!(playbook.user_id, "test-user");
     assert_eq!(playbook.domain_profile_id, "domain-1");
     assert_eq!(playbook.name, "Software Development Playbook");
-    assert_eq!(playbook.description, "Optimized for software development tasks");
+    assert_eq!(
+        playbook.description,
+        "Optimized for software development tasks"
+    );
     assert_eq!(playbook.confidence, 0.5); // Default confidence
     assert_eq!(playbook.usage_count, 0); // Default usage count
 }
@@ -121,7 +124,10 @@ fn test_playbook_with_success_patterns() {
     playbook.success_patterns = success_patterns.clone();
 
     assert_eq!(playbook.success_patterns.len(), 2);
-    assert_eq!(playbook.success_patterns[0].pattern_type, PatternType::Success);
+    assert_eq!(
+        playbook.success_patterns[0].pattern_type,
+        PatternType::Success
+    );
     assert_eq!(playbook.success_patterns[0].signal, "Quick completion");
     assert_eq!(playbook.success_patterns[0].weight, 0.8);
 }
@@ -154,8 +160,14 @@ fn test_playbook_with_failure_patterns() {
     playbook.failure_patterns = failure_patterns.clone();
 
     assert_eq!(playbook.failure_patterns.len(), 2);
-    assert_eq!(playbook.failure_patterns[0].pattern_type, PatternType::Failure);
-    assert_eq!(playbook.failure_patterns[0].signal, "Timeout on large inputs");
+    assert_eq!(
+        playbook.failure_patterns[0].pattern_type,
+        PatternType::Failure
+    );
+    assert_eq!(
+        playbook.failure_patterns[0].signal,
+        "Timeout on large inputs"
+    );
     assert_eq!(playbook.failure_patterns[0].weight, 0.7);
 }
 
@@ -169,35 +181,37 @@ fn test_playbook_serialization() {
         "Tests serialization".to_string(),
     );
 
-    playbook.preferred_flows = vec![
-        FlowPreference {
-            flow_id: "test.flow.yaml".to_string(),
-            weight: 0.5,
-            confidence: 0.8,
-        },
-    ];
+    playbook.preferred_flows = vec![FlowPreference {
+        flow_id: "test.flow.yaml".to_string(),
+        weight: 0.5,
+        confidence: 0.8,
+    }];
 
-    playbook.success_patterns = vec![
-        PatternRecord {
-            pattern_type: PatternType::Success,
-            signal: "Test pattern".to_string(),
-            weight: 0.9,
-            created_at: Utc::now(),
-        },
-    ];
+    playbook.success_patterns = vec![PatternRecord {
+        pattern_type: PatternType::Success,
+        signal: "Test pattern".to_string(),
+        weight: 0.9,
+        created_at: Utc::now(),
+    }];
 
     // Test serialization
     let json = serde_json::to_string(&playbook).expect("Failed to serialize playbook");
     assert!(!json.is_empty());
 
     // Test deserialization
-    let deserialized: WorkContextPlaybook = serde_json::from_str(&json)
-        .expect("Failed to deserialize playbook");
+    let deserialized: WorkContextPlaybook =
+        serde_json::from_str(&json).expect("Failed to deserialize playbook");
 
     assert_eq!(deserialized.id, playbook.id);
     assert_eq!(deserialized.name, playbook.name);
-    assert_eq!(deserialized.preferred_flows.len(), playbook.preferred_flows.len());
-    assert_eq!(deserialized.success_patterns.len(), playbook.success_patterns.len());
+    assert_eq!(
+        deserialized.preferred_flows.len(),
+        playbook.preferred_flows.len()
+    );
+    assert_eq!(
+        deserialized.success_patterns.len(),
+        playbook.success_patterns.len()
+    );
 }
 
 #[test]
@@ -228,8 +242,8 @@ fn test_pattern_record_serialization() {
     assert!(!json.is_empty());
 
     // Test deserialization
-    let deserialized: PatternRecord = serde_json::from_str(&json)
-        .expect("Failed to deserialize pattern");
+    let deserialized: PatternRecord =
+        serde_json::from_str(&json).expect("Failed to deserialize pattern");
 
     assert_eq!(deserialized.pattern_type, PatternType::Failure);
     assert_eq!(deserialized.signal, "Error occurred");
@@ -272,38 +286,30 @@ fn test_node_preference_creation() {
 
 #[test]
 fn test_playbook_with_all_fields() {
-    let flow_preferences = vec![
-        FlowPreference {
-            flow_id: "planning.flow.yaml".to_string(),
-            weight: 0.8,
-            confidence: 0.9,
-        },
-    ];
+    let flow_preferences = vec![FlowPreference {
+        flow_id: "planning.flow.yaml".to_string(),
+        weight: 0.8,
+        confidence: 0.9,
+    }];
 
-    let node_preferences = vec![
-        NodePreference {
-            node_type: "planner".to_string(),
-            params: serde_json::json!({"temperature": 0.7}),
-        },
-    ];
+    let node_preferences = vec![NodePreference {
+        node_type: "planner".to_string(),
+        params: serde_json::json!({"temperature": 0.7}),
+    }];
 
-    let success_patterns = vec![
-        PatternRecord {
-            pattern_type: PatternType::Success,
-            signal: "Quick completion".to_string(),
-            weight: 0.8,
-            created_at: Utc::now(),
-        },
-    ];
+    let success_patterns = vec![PatternRecord {
+        pattern_type: PatternType::Success,
+        signal: "Quick completion".to_string(),
+        weight: 0.8,
+        created_at: Utc::now(),
+    }];
 
-    let failure_patterns = vec![
-        PatternRecord {
-            pattern_type: PatternType::Failure,
-            signal: "Timeout".to_string(),
-            weight: 0.7,
-            created_at: Utc::now(),
-        },
-    ];
+    let failure_patterns = vec![PatternRecord {
+        pattern_type: PatternType::Failure,
+        signal: "Timeout".to_string(),
+        weight: 0.7,
+        created_at: Utc::now(),
+    }];
 
     let mut playbook = WorkContextPlaybook::new(
         "test-playbook-7".to_string(),
@@ -530,7 +536,10 @@ fn test_creativity_level_variants() {
     );
 
     playbook.default_creativity_level = CreativityLevel::Conservative;
-    assert_eq!(playbook.default_creativity_level, CreativityLevel::Conservative);
+    assert_eq!(
+        playbook.default_creativity_level,
+        CreativityLevel::Conservative
+    );
 
     playbook.default_creativity_level = CreativityLevel::Balanced;
     assert_eq!(playbook.default_creativity_level, CreativityLevel::Balanced);
@@ -556,6 +565,8 @@ fn test_approval_policy_variants() {
     assert_eq!(playbook.default_approval_policy, ApprovalPolicy::ManualAll);
 
     playbook.default_approval_policy = ApprovalPolicy::RequireForSideEffects;
-    assert_eq!(playbook.default_approval_policy, ApprovalPolicy::RequireForSideEffects);
+    assert_eq!(
+        playbook.default_approval_policy,
+        ApprovalPolicy::RequireForSideEffects
+    );
 }
-

@@ -3,12 +3,12 @@
 //! This test file validates the vertical slice of WorkContext operations:
 //! create -> execute -> artifact -> phase update -> continue
 
-use std::sync::Arc;
 use prometheos_lite::db::Db;
 use prometheos_lite::work::{
-    types::{WorkDomain, WorkPhase, WorkStatus},
     WorkContextService,
+    types::{WorkDomain, WorkPhase, WorkStatus},
 };
+use std::sync::Arc;
 
 #[test]
 fn test_work_context_create() {
@@ -261,20 +261,21 @@ fn test_phase_controller_can_transition() {
 
 #[test]
 fn test_templates() {
+    use prometheos_lite::work::types::{ApprovalPolicy, AutonomyLevel, WorkPriority};
     use prometheos_lite::work::{
         bug_fix_template, planning_template, research_template, software_development_template,
     };
-    use prometheos_lite::work::types::{ApprovalPolicy, AutonomyLevel, WorkPriority};
 
-    let software_ctx = software_development_template(
-        "Build API".to_string(),
-        "Create a REST API".to_string(),
-    );
+    let software_ctx =
+        software_development_template("Build API".to_string(), "Create a REST API".to_string());
     assert_eq!(software_ctx.domain, WorkDomain::Software);
     assert_eq!(software_ctx.context_type, "feature");
     assert_eq!(software_ctx.priority, WorkPriority::High);
     assert_eq!(software_ctx.autonomy_level, AutonomyLevel::Review);
-    assert_eq!(software_ctx.approval_policy, ApprovalPolicy::RequireForSideEffects);
+    assert_eq!(
+        software_ctx.approval_policy,
+        ApprovalPolicy::RequireForSideEffects
+    );
 
     let research_ctx = research_template("Research AI".to_string(), "Investigate AI".to_string());
     assert_eq!(research_ctx.domain, WorkDomain::Research);
@@ -364,7 +365,7 @@ async fn test_deterministic_flow_execution() {
 
 /// Golden integration test: validates the full WorkContext lifecycle with actual flow execution
 /// create_work_context -> execute_planning_flow -> verify_artifacts -> continue_context
-/// 
+///
 /// This test attempts real flow execution. If the flow execution environment is available
 /// (runtime configured with models), it will execute the flow and validate artifacts.
 /// If runtime dependencies are missing, it simulates artifact creation to validate the
@@ -381,8 +382,7 @@ async fn test_golden_integration_with_flow_execution() {
 
     let runtime = Arc::new(RuntimeContext::default());
     let flow_execution_service = Arc::new(
-        FlowExecutionService::new(runtime)
-            .expect("Failed to create FlowExecutionService")
+        FlowExecutionService::new(runtime).expect("Failed to create FlowExecutionService"),
     );
     let work_execution_service = Arc::new(WorkExecutionService::new(
         work_context_service.clone(),
@@ -413,7 +413,10 @@ async fn test_golden_integration_with_flow_execution() {
 
     if execution_result.is_ok() {
         // Flow execution succeeded with runtime - validate artifacts created by flow
-        assert!(!context.artifacts.is_empty(), "Flow execution should create artifacts");
+        assert!(
+            !context.artifacts.is_empty(),
+            "Flow execution should create artifacts"
+        );
     } else {
         // Flow execution failed (missing runtime dependencies like model API keys)
         // This is expected in CI/test environments without external API access
@@ -558,8 +561,7 @@ async fn test_deterministic_no_api_flow_execution() {
 
     let runtime = Arc::new(RuntimeContext::default());
     let flow_execution_service = Arc::new(
-        FlowExecutionService::new(runtime)
-            .expect("Failed to create FlowExecutionService")
+        FlowExecutionService::new(runtime).expect("Failed to create FlowExecutionService"),
     );
 
     // Execute the deterministic test flow
@@ -567,13 +569,16 @@ async fn test_deterministic_no_api_flow_execution() {
         .execute_message(
             "deterministic_test.flow.yaml",
             "test message",
-            Default::default()
+            Default::default(),
         )
         .await;
 
     // This should succeed without any external dependencies
-    assert!(execution_result.is_ok(), "Deterministic flow should execute without API keys");
-    
+    assert!(
+        execution_result.is_ok(),
+        "Deterministic flow should execute without API keys"
+    );
+
     let output = execution_result.unwrap();
     assert!(!output.primary.is_null(), "Flow should produce output");
 }
@@ -601,7 +606,10 @@ fn test_guardrail_blocked_context_cannot_continue() {
 
     // Verify context is blocked
     assert!(context.is_blocked());
-    assert_eq!(context.blocked_reason, Some("Security violation detected".to_string()));
+    assert_eq!(
+        context.blocked_reason,
+        Some("Security violation detected".to_string())
+    );
 
     // Verify blocked status is persisted
     let retrieved = work_context_service
@@ -610,7 +618,10 @@ fn test_guardrail_blocked_context_cannot_continue() {
         .expect("WorkContext not found");
 
     assert!(retrieved.is_blocked());
-    assert_eq!(retrieved.blocked_reason, Some("Security violation detected".to_string()));
+    assert_eq!(
+        retrieved.blocked_reason,
+        Some("Security violation detected".to_string())
+    );
 }
 
 /// Guardrail integration test: review mode requires approval after execution
@@ -647,7 +658,10 @@ fn test_guardrail_review_mode_requires_approval() {
         .expect("WorkContext not found");
 
     assert_eq!(retrieved.autonomy_level, AutonomyLevel::Review);
-    assert_eq!(retrieved.approval_policy, ApprovalPolicy::RequireForSideEffects);
+    assert_eq!(
+        retrieved.approval_policy,
+        ApprovalPolicy::RequireForSideEffects
+    );
 }
 
 /// Guardrail integration test: autonomous mode allows execution without approval

@@ -5,15 +5,15 @@
 
 use prometheos_lite::db::Db;
 use prometheos_lite::db::repository::PlaybookOperations;
-use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::flow::RuntimeContext;
+use prometheos_lite::flow::execution_service::FlowExecutionService;
+use prometheos_lite::work::evolution_engine::EvolutionEngine;
 use prometheos_lite::work::execution_service::WorkExecutionService;
 use prometheos_lite::work::orchestrator::{ExecutionLimits, WorkOrchestrator};
+use prometheos_lite::work::playbook::{FlowPreference, WorkContextPlaybook};
 use prometheos_lite::work::playbook_resolver::PlaybookResolver;
 use prometheos_lite::work::service::WorkContextService;
 use prometheos_lite::work::types::{CompletionCriterion, WorkPhase, WorkStatus};
-use prometheos_lite::work::playbook::{FlowPreference, WorkContextPlaybook};
-use prometheos_lite::work::evolution_engine::EvolutionEngine;
 use std::sync::Arc;
 
 /// Setup helper to create a WorkOrchestrator with in-memory database
@@ -35,7 +35,8 @@ fn setup_orchestrator() -> WorkOrchestrator {
     let playbook_resolver = Arc::new(PlaybookResolver::new(db_arc.clone()));
 
     let intent_classifier = Arc::new(
-        prometheos_lite::intent::IntentClassifier::new().expect("Failed to create IntentClassifier"),
+        prometheos_lite::intent::IntentClassifier::new()
+            .expect("Failed to create IntentClassifier"),
     );
 
     let evolution_engine = Arc::new(EvolutionEngine::new(db_arc.clone()));
@@ -79,7 +80,10 @@ async fn test_submit_intent_coding_task_sets_review_mode() {
         .expect("submit_user_intent should succeed");
 
     // Coding tasks should set autonomy level to Review
-    assert_eq!(context.autonomy_level, prometheos_lite::work::types::AutonomyLevel::Review);
+    assert_eq!(
+        context.autonomy_level,
+        prometheos_lite::work::types::AutonomyLevel::Review
+    );
 }
 
 #[tokio::test]
@@ -96,7 +100,10 @@ async fn test_submit_intent_general_chat_sets_chat_mode() {
         .expect("submit_user_intent should succeed");
 
     // General chat should set autonomy level to Chat
-    assert_eq!(context.autonomy_level, prometheos_lite::work::types::AutonomyLevel::Chat);
+    assert_eq!(
+        context.autonomy_level,
+        prometheos_lite::work::types::AutonomyLevel::Chat
+    );
 }
 
 #[tokio::test]
@@ -114,7 +121,9 @@ async fn test_continue_context_advances_phase() {
         .expect("continue_context should succeed");
 
     // Phase should advance after continue
-    assert!(context.current_phase == WorkPhase::Planning || context.current_phase == WorkPhase::Intake);
+    assert!(
+        context.current_phase == WorkPhase::Planning || context.current_phase == WorkPhase::Intake
+    );
 }
 
 #[tokio::test]
@@ -202,7 +211,8 @@ async fn test_run_until_blocked_or_complete_triggers_evolution() {
     let playbook_resolver = Arc::new(PlaybookResolver::new(db_arc.clone()));
 
     let intent_classifier = Arc::new(
-        prometheos_lite::intent::IntentClassifier::new().expect("Failed to create IntentClassifier"),
+        prometheos_lite::intent::IntentClassifier::new()
+            .expect("Failed to create IntentClassifier"),
     );
 
     let evolution_engine = Arc::new(EvolutionEngine::new(db_arc.clone()));
@@ -224,32 +234,35 @@ async fn test_run_until_blocked_or_complete_triggers_evolution() {
         "Test Playbook".to_string(),
         "Test playbook for evolution trigger".to_string(),
     );
-    playbook.preferred_flows = vec![
-        FlowPreference {
-            flow_id: "planning.flow.yaml".to_string(),
-            weight: 0.5,
-            confidence: 0.5,
-        },
-    ];
+    playbook.preferred_flows = vec![FlowPreference {
+        flow_id: "planning.flow.yaml".to_string(),
+        weight: 0.5,
+        confidence: 0.5,
+    }];
     PlaybookOperations::create_playbook(&*db_arc, &playbook).expect("Failed to create playbook");
 
     // Create a WorkContext directly with completion criteria and playbook association
-    let mut context = work_context_service.create_context(
-        "ctx-evolution-trigger-test".to_string(),
-        "test-user".to_string(),
-        prometheos_lite::work::types::WorkDomain::Software,
-        "Test evolution trigger".to_string(),
-    ).expect("Failed to create context");
-    
+    let mut context = work_context_service
+        .create_context(
+            "ctx-evolution-trigger-test".to_string(),
+            "test-user".to_string(),
+            prometheos_lite::work::types::WorkDomain::Software,
+            "Test evolution trigger".to_string(),
+        )
+        .expect("Failed to create context");
+
     let context_id = context.id.clone();
-    
+
     context.playbook_id = Some(playbook_id.to_string());
-    context.completion_criteria = vec![
-        CompletionCriterion::new("plan".to_string(), "Plan completed".to_string()),
-    ];
+    context.completion_criteria = vec![CompletionCriterion::new(
+        "plan".to_string(),
+        "Plan completed".to_string(),
+    )];
     context.completion_criteria[0].satisfied = true;
     context.status = WorkStatus::InProgress; // Set to InProgress so run_until_blocked_or_complete can detect completion
-    work_context_service.update_context(&context).expect("Failed to update context");
+    work_context_service
+        .update_context(&context)
+        .expect("Failed to update context");
 
     // Verify initial flow weight
     let initial_playbook = PlaybookOperations::get_playbook(&*db_arc, playbook_id)
@@ -264,14 +277,21 @@ async fn test_run_until_blocked_or_complete_triggers_evolution() {
         .run_until_blocked_or_complete(context_id.clone(), limits)
         .await;
 
-    assert!(result.is_ok(), "run_until_blocked_or_complete should succeed");
+    assert!(
+        result.is_ok(),
+        "run_until_blocked_or_complete should succeed"
+    );
 
     // Reload context to verify it was completed
     let updated_context = work_context_service
         .get_context(&context_id)
         .expect("Failed to get context")
         .expect("Context should exist");
-    assert_eq!(updated_context.status, WorkStatus::Completed, "Context should be completed");
+    assert_eq!(
+        updated_context.status,
+        WorkStatus::Completed,
+        "Context should be completed"
+    );
 
     // Verify evaluation result was set (proves complete_context was called)
     assert!(

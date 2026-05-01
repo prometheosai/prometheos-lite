@@ -3,8 +3,10 @@
 //! Integration tests covering resume/interrupt/outbox scenarios.
 //! These tests ensure guardrails work end-to-end.
 
-use prometheos_lite::tools::{InterruptContext, InterruptStatus, ToolContext, ToolPolicy, TrustLevel};
 use prometheos_lite::flow::{FlowSnapshot, IdempotencyKey};
+use prometheos_lite::tools::{
+    InterruptContext, InterruptStatus, ToolContext, ToolPolicy, TrustLevel,
+};
 use serde_json::json;
 
 #[test]
@@ -100,39 +102,21 @@ fn test_outbox_idempotency() {
     let input = json!({"path": "output.txt", "content": "hello"});
 
     // Generate idempotency key
-    let operation_hash = IdempotencyKey::compute_operation_hash(
-        &tool_name,
-        &input,
-    );
-    let key = IdempotencyKey::new(
-        run_id.clone(),
-        node_id.clone(),
-        operation_hash.clone(),
-    );
+    let operation_hash = IdempotencyKey::compute_operation_hash(&tool_name, &input);
+    let key = IdempotencyKey::new(run_id.clone(), node_id.clone(), operation_hash.clone());
 
     // First execution - should proceed
     let first_key = key.clone();
     assert_eq!(first_key.key, key.key);
 
     // Retry with same input - should detect duplicate
-    let second_key = IdempotencyKey::new(
-        run_id.clone(),
-        node_id.clone(),
-        operation_hash,
-    );
+    let second_key = IdempotencyKey::new(run_id.clone(), node_id.clone(), operation_hash);
     assert!(first_key.matches(&second_key));
 
     // Different input - should proceed
     let different_input = json!({"path": "output.txt", "content": "world"});
-    let different_hash = IdempotencyKey::compute_operation_hash(
-        &tool_name,
-        &different_input,
-    );
-    let different_key = IdempotencyKey::new(
-        run_id,
-        node_id,
-        different_hash,
-    );
+    let different_hash = IdempotencyKey::compute_operation_hash(&tool_name, &different_input);
+    let different_key = IdempotencyKey::new(run_id, node_id, different_hash);
     assert!(!first_key.matches(&different_key));
 }
 
@@ -156,10 +140,8 @@ fn test_guardrail_chain() {
     assert!(!untrusted_context.requires_approval()); // Auto policy by default
 
     // Generate idempotency key for the operation
-    let operation_hash = IdempotencyKey::compute_operation_hash(
-        "file_writer",
-        &json!({"path": "test.txt"}),
-    );
+    let operation_hash =
+        IdempotencyKey::compute_operation_hash("file_writer", &json!({"path": "test.txt"}));
     let key = IdempotencyKey::new(
         context.run_id.clone(),
         context.node_id.clone(),
@@ -178,11 +160,7 @@ fn test_path_guard_integration() {
     let guard = PathGuard::default();
 
     // Safe paths
-    let safe_paths = vec![
-        "output.txt",
-        "subdir/file.txt",
-        "deep/nested/path/file.txt",
-    ];
+    let safe_paths = vec!["output.txt", "subdir/file.txt", "deep/nested/path/file.txt"];
 
     for path in safe_paths {
         assert!(guard.is_safe_path(path), "Path should be safe: {}", path);
@@ -237,8 +215,8 @@ fn test_loop_detection_integration() {
 #[test]
 fn test_tool_context_with_all_fields() {
     // Test ToolContext with all fields populated
-    let policy = ToolPolicy::new()
-        .with_permission(prometheos_lite::tools::ToolPermission::FileWrite);
+    let policy =
+        ToolPolicy::new().with_permission(prometheos_lite::tools::ToolPermission::FileWrite);
 
     let context = ToolContext::new(
         "run_abc123".to_string(),
@@ -255,7 +233,10 @@ fn test_tool_context_with_all_fields() {
     assert_eq!(context.trace_id, "trace_def456");
     assert_eq!(context.node_id, "node_ghi789");
     assert_eq!(context.tool_name, "file_writer");
-    assert_eq!(context.trust_level, prometheos_lite::tools::TrustLevel::Local);
+    assert_eq!(
+        context.trust_level,
+        prometheos_lite::tools::TrustLevel::Local
+    );
     assert_eq!(
         context.approval_policy,
         prometheos_lite::tools::ApprovalPolicy::Auto
@@ -329,12 +310,22 @@ fn test_denied_write_via_path_guard() {
     // Attempt to validate an absolute path - should fail
     let result = guard.validate_path("/etc/passwd");
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Absolute paths not allowed"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Absolute paths not allowed")
+    );
 
     // Attempt to validate a path with traversal - should fail
     let result = guard.validate_path("../../secret");
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Parent directory traversal"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Parent directory traversal")
+    );
 
     // Safe path check (quick check without filesystem)
     assert!(guard.is_safe_path("safe/output.txt"));
@@ -343,7 +334,7 @@ fn test_denied_write_via_path_guard() {
 #[test]
 fn test_denied_shell_via_tool_policy() {
     // Test that ToolPolicy prevents shell execution when not allowed
-    use prometheos_lite::tools::{ToolContext, ToolPolicy, ToolPermission};
+    use prometheos_lite::tools::{ToolContext, ToolPermission, ToolPolicy};
 
     // Create a policy that does NOT allow shell execution
     let policy = ToolPolicy::new(); // Conservative policy by default
@@ -447,47 +438,52 @@ nodes:
 fn test_trust_policy_persistence() {
     // Test that trust policies can be persisted and retrieved
     use std::fs;
-    
+
     // Create a temporary database
     let db_path = ".prometheos/test_trust.db";
     let _ = fs::remove_file(db_path);
-    
+
     let db = prometheos_lite::db::repository::Db::new(db_path).unwrap();
-    
+
     // Create a trust policy
-    let policy = prometheos_lite::db::repository::TrustPolicyOperations::create_or_update_trust_policy(
-        &db,
-        "test_source",
-        "Trusted",
-        false,
-    ).unwrap();
-    
+    let policy =
+        prometheos_lite::db::repository::TrustPolicyOperations::create_or_update_trust_policy(
+            &db,
+            "test_source",
+            "Trusted",
+            false,
+        )
+        .unwrap();
+
     assert_eq!(policy.source, "test_source");
     assert_eq!(policy.trust_level, "Trusted");
     assert!(!policy.require_approval);
-    
+
     // Retrieve the policy
     let retrieved = prometheos_lite::db::repository::TrustPolicyOperations::get_trust_policy(
         &db,
         "test_source",
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.source, "test_source");
     assert_eq!(retrieved.trust_level, "Trusted");
-    
+
     // Update the policy
-    let updated = prometheos_lite::db::repository::TrustPolicyOperations::create_or_update_trust_policy(
-        &db,
-        "test_source",
-        "Untrusted",
-        true,
-    ).unwrap();
-    
+    let updated =
+        prometheos_lite::db::repository::TrustPolicyOperations::create_or_update_trust_policy(
+            &db,
+            "test_source",
+            "Untrusted",
+            true,
+        )
+        .unwrap();
+
     assert_eq!(updated.trust_level, "Untrusted");
     assert!(updated.require_approval);
-    
+
     // Clean up
     let _ = fs::remove_file(db_path);
 }
@@ -496,20 +492,20 @@ fn test_trust_policy_persistence() {
 fn test_flow_snapshot_persistence() {
     // Test that flow snapshots can be persisted and retrieved
     use std::fs;
-    
+
     let db_path = ".prometheos/test_snapshot.db";
     let _ = fs::remove_file(db_path);
-    
+
     let db = prometheos_lite::db::repository::Db::new(db_path).unwrap();
-    
+
     let flow_source = r#"
 nodes:
   - id: test
     type: llm
 "#;
-    
+
     let source_hash = prometheos_lite::flow::FlowSnapshot::compute_hash(flow_source);
-    
+
     // Create a snapshot
     let snapshot = prometheos_lite::db::repository::FlowSnapshotOperations::create_flow_snapshot(
         &db,
@@ -517,32 +513,36 @@ nodes:
         "1.0",
         &source_hash,
         flow_source,
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert_eq!(snapshot.flow_name, "test_flow");
     assert_eq!(snapshot.source_hash, source_hash);
-    
+
     // Retrieve by hash
-    let retrieved = prometheos_lite::db::repository::FlowSnapshotOperations::get_flow_snapshot_by_hash(
-        &db,
-        &source_hash,
-    ).unwrap();
-    
+    let retrieved =
+        prometheos_lite::db::repository::FlowSnapshotOperations::get_flow_snapshot_by_hash(
+            &db,
+            &source_hash,
+        )
+        .unwrap();
+
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.flow_name, "test_flow");
     assert_eq!(retrieved.source_hash, source_hash);
-    
+
     // Retrieve latest by name
     let latest = prometheos_lite::db::repository::FlowSnapshotOperations::get_latest_flow_snapshot(
         &db,
         "test_flow",
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert!(latest.is_some());
     let latest = latest.unwrap();
     assert_eq!(latest.flow_name, "test_flow");
-    
+
     // Clean up
     let _ = fs::remove_file(db_path);
 }
@@ -551,14 +551,14 @@ nodes:
 fn test_interrupt_persistence() {
     // Test that interrupts can be persisted and retrieved
     use std::fs;
-    
+
     let db_path = ".prometheos/test_interrupt.db";
     let _ = fs::remove_file(db_path);
-    
+
     let db = prometheos_lite::db::repository::Db::new(db_path).unwrap();
-    
+
     let schema = json!({"approved": true});
-    
+
     // Create an interrupt
     let interrupt = prometheos_lite::db::repository::InterruptOperations::create_interrupt(
         &db,
@@ -568,36 +568,37 @@ fn test_interrupt_persistence() {
         "Test interrupt",
         &schema.to_string(),
         None,
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert_eq!(interrupt.run_id, "run_123");
     assert_eq!(interrupt.status, "pending");
-    
+
     // Retrieve the interrupt
-    let retrieved = prometheos_lite::db::repository::InterruptOperations::get_interrupt(
-        &db,
-        &interrupt.id,
-    ).unwrap();
-    
+    let retrieved =
+        prometheos_lite::db::repository::InterruptOperations::get_interrupt(&db, &interrupt.id)
+            .unwrap();
+
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.run_id, "run_123");
     assert_eq!(retrieved.status, "pending");
-    
+
     // Approve the interrupt
     prometheos_lite::db::repository::InterruptOperations::approve_interrupt(
         &db,
         &interrupt.id,
         &json!({"approved": true}).to_string(),
-    ).unwrap();
-    
-    let approved = prometheos_lite::db::repository::InterruptOperations::get_interrupt(
-        &db,
-        &interrupt.id,
-    ).unwrap().unwrap();
-    
+    )
+    .unwrap();
+
+    let approved =
+        prometheos_lite::db::repository::InterruptOperations::get_interrupt(&db, &interrupt.id)
+            .unwrap()
+            .unwrap();
+
     assert_eq!(approved.status, "approved");
-    
+
     // Clean up
     let _ = fs::remove_file(db_path);
 }
@@ -606,12 +607,12 @@ fn test_interrupt_persistence() {
 fn test_outbox_persistence() {
     // Test that outbox entries can be persisted and marked completed
     use std::fs;
-    
+
     let db_path = ".prometheos/test_outbox.db";
     let _ = fs::remove_file(db_path);
-    
+
     let db = prometheos_lite::db::repository::Db::new(db_path).unwrap();
-    
+
     // Create an outbox entry
     let entry = prometheos_lite::db::repository::OutboxOperations::create_outbox_entry(
         &db,
@@ -620,47 +621,51 @@ fn test_outbox_persistence() {
         "node_789",
         "file_writer",
         "hash_abc123",
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert_eq!(entry.run_id, "run_123");
     assert_eq!(entry.status, "pending");
-    
+
     // Retrieve by hash
     let retrieved = prometheos_lite::db::repository::OutboxOperations::get_outbox_entry_by_hash(
         &db,
         "run_123",
         "node_789",
         "hash_abc123",
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.status, "pending");
-    
+
     // Mark as completed
     prometheos_lite::db::repository::OutboxOperations::mark_outbox_completed(
         &db,
         &entry.id,
         &json!({"success": true}).to_string(),
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     let completed = prometheos_lite::db::repository::OutboxOperations::get_outbox_entry_by_hash(
         &db,
         "run_123",
         "node_789",
         "hash_abc123",
-    ).unwrap().unwrap();
-    
+    )
+    .unwrap()
+    .unwrap();
+
     assert_eq!(completed.status, "completed");
-    
+
     // List pending outbox
-    let pending = prometheos_lite::db::repository::OutboxOperations::list_pending_outbox(
-        &db,
-        "run_123",
-    ).unwrap();
-    
+    let pending =
+        prometheos_lite::db::repository::OutboxOperations::list_pending_outbox(&db, "run_123")
+            .unwrap();
+
     assert_eq!(pending.len(), 0);
-    
+
     // Clean up
     let _ = fs::remove_file(db_path);
 }

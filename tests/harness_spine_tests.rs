@@ -3,8 +3,8 @@
 //! Tests for WorkOrchestrator, PlaybookResolver, and ContextLoaderNode fix
 
 use prometheos_lite::db::Db;
-use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::flow::RuntimeContext;
+use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::{
     ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
@@ -73,7 +73,9 @@ fn test_work_orchestrator_route_to_context() {
     assert!(result.is_none());
 
     // Test routing with explicit context ID (should return None if context doesn't exist)
-    let result = orchestrator.route_to_context("user-1", None, Some("nonexistent")).unwrap();
+    let result = orchestrator
+        .route_to_context("user-1", None, Some("nonexistent"))
+        .unwrap();
     assert!(result.is_none());
 }
 
@@ -118,10 +120,16 @@ fn test_work_context_service_update_status() {
         .update_status(&mut context, prometheos_lite::work::WorkStatus::InProgress)
         .unwrap();
 
-    assert_eq!(context.status, prometheos_lite::work::WorkStatus::InProgress);
+    assert_eq!(
+        context.status,
+        prometheos_lite::work::WorkStatus::InProgress
+    );
 
     let retrieved = service.get_context(&context.id).unwrap().unwrap();
-    assert_eq!(retrieved.status, prometheos_lite::work::WorkStatus::InProgress);
+    assert_eq!(
+        retrieved.status,
+        prometheos_lite::work::WorkStatus::InProgress
+    );
 }
 
 #[test]
@@ -135,12 +143,18 @@ fn test_playbook_repository_increment_usage() {
         "For software work".to_string(),
     );
 
-    let created = prometheos_lite::db::repository::PlaybookOperations::create_playbook(&db, &playbook).unwrap();
+    let created =
+        prometheos_lite::db::repository::PlaybookOperations::create_playbook(&db, &playbook)
+            .unwrap();
     assert_eq!(created.usage_count, 0);
 
-    prometheos_lite::db::repository::PlaybookOperations::increment_usage_count(&db, &created.id).unwrap();
+    prometheos_lite::db::repository::PlaybookOperations::increment_usage_count(&db, &created.id)
+        .unwrap();
 
-    let updated = prometheos_lite::db::repository::PlaybookOperations::get_playbook(&db, &created.id).unwrap().unwrap();
+    let updated =
+        prometheos_lite::db::repository::PlaybookOperations::get_playbook(&db, &created.id)
+            .unwrap()
+            .unwrap();
     assert_eq!(updated.usage_count, 1);
 }
 
@@ -155,11 +169,17 @@ fn test_playbook_repository_update_confidence() {
         "For software work".to_string(),
     );
 
-    let created = prometheos_lite::db::repository::PlaybookOperations::create_playbook(&db, &playbook).unwrap();
+    let created =
+        prometheos_lite::db::repository::PlaybookOperations::create_playbook(&db, &playbook)
+            .unwrap();
     assert_eq!(created.confidence, 0.5);
 
-    prometheos_lite::db::repository::PlaybookOperations::update_confidence(&db, &created.id, 0.8).unwrap();
+    prometheos_lite::db::repository::PlaybookOperations::update_confidence(&db, &created.id, 0.8)
+        .unwrap();
 
-    let updated = prometheos_lite::db::repository::PlaybookOperations::get_playbook(&db, &created.id).unwrap().unwrap();
+    let updated =
+        prometheos_lite::db::repository::PlaybookOperations::get_playbook(&db, &created.id)
+            .unwrap()
+            .unwrap();
     assert_eq!(updated.confidence, 0.8);
 }

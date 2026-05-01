@@ -26,14 +26,19 @@ async fn test_read_file_works() {
         .unwrap();
 
     assert!(result["success"].as_bool().unwrap());
-    assert!(result["content"].as_str().unwrap().contains("Sample Repository"));
+    assert!(
+        result["content"]
+            .as_str()
+            .unwrap()
+            .contains("Sample Repository")
+    );
 }
 
 #[tokio::test]
 async fn test_patch_file_applies_valid_diff() {
     let temp_dir = tempfile::tempdir().unwrap();
     let repo_path = temp_dir.path();
-    
+
     // Use fallback mode on Windows where patch command may not be available
     let tool = if cfg!(windows) {
         PatchFileTool::with_fallback_allowed(repo_path.to_path_buf())
@@ -106,7 +111,7 @@ async fn test_run_tests_returns_failure_correctly() {
     // This should fail because the sample repo has a failing test
     assert!(result.is_ok());
     let result = result.unwrap();
-    
+
     // The test should execute (even if it fails)
     assert!(result["success"].is_boolean() || result["test_results"].is_object());
 }
@@ -117,7 +122,7 @@ async fn test_full_loop_failing_test_to_fix_to_pass() {
     // 1. Run tests (fail)
     // 2. Fix the failing test
     // 3. Run tests again (pass)
-    
+
     let temp_dir = tempfile::tempdir().unwrap();
     let repo_path = temp_dir.path();
 
@@ -129,7 +134,8 @@ name = "test_repo"
 version = "0.1.0"
 edition = "2021"
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Create src directory
     std::fs::create_dir_all(repo_path.join("src")).unwrap();
@@ -147,7 +153,8 @@ mod tests {
     }
 }
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let tool = RunTestsTool::new();
 
@@ -161,7 +168,7 @@ mod tests {
 
     assert!(result1.is_ok());
     let _result1 = result1.unwrap();
-    
+
     // Fix the test
     std::fs::write(
         repo_path.join("src/main.rs"),
@@ -175,7 +182,8 @@ mod tests {
     }
 }
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Second run - should pass
     let result2 = tool
@@ -187,7 +195,7 @@ mod tests {
 
     assert!(result2.is_ok());
     let result2 = result2.unwrap();
-    
+
     // The second run should succeed (or at least execute without error)
     // Cargo test may still have warnings, so we just check it didn't error out
     assert!(result2["success"].is_boolean());
@@ -204,23 +212,47 @@ async fn test_default_tool_registration() {
 
     // Verify all repo tools are registered
     let tool_names = registry.list_tools();
-    
-    assert!(tool_names.contains(&"list_tree".to_string()), "list_tree should be registered");
-    assert!(tool_names.contains(&"read_file".to_string()), "read_file should be registered");
-    assert!(tool_names.contains(&"search_files".to_string()), "search_files should be registered");
-    assert!(tool_names.contains(&"write_file".to_string()), "write_file should be registered");
-    assert!(tool_names.contains(&"patch_file".to_string()), "patch_file should be registered");
-    assert!(tool_names.contains(&"git_diff".to_string()), "git_diff should be registered");
-    
+
+    assert!(
+        tool_names.contains(&"list_tree".to_string()),
+        "list_tree should be registered"
+    );
+    assert!(
+        tool_names.contains(&"read_file".to_string()),
+        "read_file should be registered"
+    );
+    assert!(
+        tool_names.contains(&"search_files".to_string()),
+        "search_files should be registered"
+    );
+    assert!(
+        tool_names.contains(&"write_file".to_string()),
+        "write_file should be registered"
+    );
+    assert!(
+        tool_names.contains(&"patch_file".to_string()),
+        "patch_file should be registered"
+    );
+    assert!(
+        tool_names.contains(&"git_diff".to_string()),
+        "git_diff should be registered"
+    );
+
     // Verify command tools are registered
-    assert!(tool_names.contains(&"run_command".to_string()), "run_command should be registered");
-    assert!(tool_names.contains(&"run_tests".to_string()), "run_tests should be registered");
+    assert!(
+        tool_names.contains(&"run_command".to_string()),
+        "run_command should be registered"
+    );
+    assert!(
+        tool_names.contains(&"run_tests".to_string()),
+        "run_tests should be registered"
+    );
 }
 
 #[tokio::test]
 async fn test_patch_file_to_git_diff_workflow() {
-    use tempfile::TempDir;
     use std::process::Command;
+    use tempfile::TempDir;
 
     // Create a temporary git repository
     let temp_dir = TempDir::new().unwrap();
@@ -274,43 +306,70 @@ async fn test_patch_file_to_git_diff_workflow() {
 
     // Get git diff to verify the change
     let git_diff_tool = GitDiffTool::new(repo_path.to_path_buf());
-    let diff_result = git_diff_tool
-        .call(serde_json::json!({}))
-        .await
-        .unwrap();
+    let diff_result = git_diff_tool.call(serde_json::json!({})).await.unwrap();
 
     assert!(diff_result["success"].as_bool().unwrap());
-    
+
     // Verify diff contains the change
-    let diff_output = diff_result.get("diff").and_then(|d| d.as_str()).unwrap_or("");
+    let diff_output = diff_result
+        .get("diff")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
     assert!(diff_output.contains("modified content") || diff_output.contains("original content"));
 }
 
 #[tokio::test]
 async fn test_software_dev_flow_tool_references() {
-    use std::path::PathBuf;
     use std::fs;
+    use std::path::PathBuf;
 
     // Load the software_dev flow YAML
     let flow_path = PathBuf::from("flows/software_dev.yaml");
     let flow_content = fs::read_to_string(&flow_path).expect("Failed to read software_dev flow");
 
     // Verify the flow exists
-    assert!(flow_content.contains("name: \"software_dev\""), "Flow should have name software_dev");
-    
+    assert!(
+        flow_content.contains("name: \"software_dev\""),
+        "Flow should have name software_dev"
+    );
+
     // Verify the flow has separate task and file_path inputs
-    assert!(flow_content.contains("task:"), "Flow should have task input");
-    assert!(flow_content.contains("file_path:"), "Flow should have file_path input");
-    
+    assert!(
+        flow_content.contains("task:"),
+        "Flow should have task input"
+    );
+    assert!(
+        flow_content.contains("file_path:"),
+        "Flow should have file_path input"
+    );
+
     // Verify the flow references the correct tools
-    assert!(flow_content.contains("tool: list_tree"), "Flow should reference list_tree tool");
-    assert!(flow_content.contains("tool: read_file"), "Flow should reference read_file tool");
-    assert!(flow_content.contains("tool: patch_file"), "Flow should reference patch_file tool");
-    assert!(flow_content.contains("tool: run_tests"), "Flow should reference run_tests tool");
-    
+    assert!(
+        flow_content.contains("tool: list_tree"),
+        "Flow should reference list_tree tool"
+    );
+    assert!(
+        flow_content.contains("tool: read_file"),
+        "Flow should reference read_file tool"
+    );
+    assert!(
+        flow_content.contains("tool: patch_file"),
+        "Flow should reference patch_file tool"
+    );
+    assert!(
+        flow_content.contains("tool: run_tests"),
+        "Flow should reference run_tests tool"
+    );
+
     // Verify coder outputs unified_diff
-    assert!(flow_content.contains("unified_diff:"), "Flow should output unified_diff from coder");
-    assert!(flow_content.contains("from: implement.unified_diff"), "Patch should use unified_diff from implement");
+    assert!(
+        flow_content.contains("unified_diff:"),
+        "Flow should output unified_diff from coder"
+    );
+    assert!(
+        flow_content.contains("from: implement.unified_diff"),
+        "Patch should use unified_diff from implement"
+    );
 }
 
 #[tokio::test]
@@ -320,28 +379,49 @@ async fn test_runtime_builder_registers_default_tools() {
 
     // Create tool runtime with default tools
     let repo_path = PathBuf::from(".");
-    let tool_runtime = ToolRuntime::with_default_tools(
-        ToolSandboxProfile::new(),
-        repo_path,
-    );
+    let tool_runtime = ToolRuntime::with_default_tools(ToolSandboxProfile::new(), repo_path);
 
     // Verify the tool_runtime has tools registered
     let tool_names = tool_runtime.registry().list_tools();
-    
-    assert!(tool_names.contains(&"list_tree".to_string()), "list_tree should be registered");
-    assert!(tool_names.contains(&"read_file".to_string()), "read_file should be registered");
-    assert!(tool_names.contains(&"search_files".to_string()), "search_files should be registered");
-    assert!(tool_names.contains(&"write_file".to_string()), "write_file should be registered");
-    assert!(tool_names.contains(&"patch_file".to_string()), "patch_file should be registered");
-    assert!(tool_names.contains(&"git_diff".to_string()), "git_diff should be registered");
-    assert!(tool_names.contains(&"run_command".to_string()), "run_command should be registered");
-    assert!(tool_names.contains(&"run_tests".to_string()), "run_tests should be registered");
+
+    assert!(
+        tool_names.contains(&"list_tree".to_string()),
+        "list_tree should be registered"
+    );
+    assert!(
+        tool_names.contains(&"read_file".to_string()),
+        "read_file should be registered"
+    );
+    assert!(
+        tool_names.contains(&"search_files".to_string()),
+        "search_files should be registered"
+    );
+    assert!(
+        tool_names.contains(&"write_file".to_string()),
+        "write_file should be registered"
+    );
+    assert!(
+        tool_names.contains(&"patch_file".to_string()),
+        "patch_file should be registered"
+    );
+    assert!(
+        tool_names.contains(&"git_diff".to_string()),
+        "git_diff should be registered"
+    );
+    assert!(
+        tool_names.contains(&"run_command".to_string()),
+        "run_command should be registered"
+    );
+    assert!(
+        tool_names.contains(&"run_tests".to_string()),
+        "run_tests should be registered"
+    );
 }
 
 #[tokio::test]
 async fn test_software_dev_flow_end_to_end() {
-    use tempfile::TempDir;
     use std::process::Command;
+    use tempfile::TempDir;
 
     // Create a temporary git repository
     let temp_dir = TempDir::new().unwrap();
@@ -417,15 +497,15 @@ async fn test_software_dev_flow_end_to_end() {
 
     // 4. git_diff (to verify the change)
     let git_diff_tool = GitDiffTool::new(repo_path.to_path_buf());
-    let diff_result = git_diff_tool
-        .call(serde_json::json!({}))
-        .await
-        .unwrap();
+    let diff_result = git_diff_tool.call(serde_json::json!({})).await.unwrap();
 
     assert!(diff_result["success"].as_bool().unwrap());
-    
+
     // Verify diff contains the change
-    let diff_output = diff_result.get("diff").and_then(|d| d.as_str()).unwrap_or("");
+    let diff_output = diff_result
+        .get("diff")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
     assert!(diff_output.contains("modified content") || diff_output.contains("original content"));
 }
 
@@ -499,10 +579,10 @@ async fn test_path_traversal_protection_write_file() {
 async fn test_path_traversal_protection_patch_file() {
     let temp_dir = tempfile::tempdir().unwrap();
     let repo_path = temp_dir.path();
-    
+
     // Create a test file
     std::fs::write(repo_path.join("test.txt"), "original content").unwrap();
-    
+
     let tool = PatchFileTool::new(repo_path.to_path_buf());
 
     // Test path traversal attacks
