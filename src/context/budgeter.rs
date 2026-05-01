@@ -121,13 +121,13 @@ impl ContextBudgeter {
             });
         }
 
-        // Need to trim - start from lowest priority
+        // Need to trim - start from highest priority, drop from lowest priority
         let mut kept_items = Vec::new();
         let mut dropped_items = Vec::new();
         let mut current_tokens = 0;
 
-        // Process items in reverse order (lowest priority first)
-        for (original_index, item) in sorted_items.into_iter().rev() {
+        // Process items in normal order (highest priority first)
+        for (original_index, item) in sorted_items.into_iter() {
             let item_tokens = Self::estimate_tokens(&item.content);
 
             if current_tokens + item_tokens <= available_tokens {
@@ -135,24 +135,8 @@ impl ContextBudgeter {
                 kept_items.push((original_index, item));
                 current_tokens += item_tokens;
             } else {
-                // Try to partially trim this item
-                let remaining_tokens = available_tokens - current_tokens;
-                if remaining_tokens > 0 {
-                    let trimmed_content = self.trim_content(&item.content, remaining_tokens)?;
-                    let trimmed_tokens = Self::estimate_tokens(&trimmed_content);
-                    kept_items.push((
-                        original_index,
-                        ContextItem {
-                            content: trimmed_content,
-                            priority: item.priority,
-                            label: item.label.clone(),
-                        },
-                    ));
-                    current_tokens += trimmed_tokens;
-                    dropped_items.push(format!("{} (partially trimmed)", item.label));
-                } else {
-                    dropped_items.push(item.label);
-                }
+                // Budget exceeded - drop this item (it's lower priority than kept items)
+                dropped_items.push(item.label);
             }
         }
 
@@ -304,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_build_context_exceeds_budget() {
-        let budgeter = ContextBudgeter::new(100, 20); // Very small budget
+        let budgeter = ContextBudgeter::new(10, 5); // Very small budget - only 5 tokens available
 
         let items = vec![
             ContextItem {
@@ -318,7 +302,7 @@ mod tests {
                 label: "task".to_string(),
             },
             ContextItem {
-                content: "Long tail memory that should be dropped".to_string(),
+                content: "Long tail memory that should be dropped first".to_string(),
                 priority: ContextPriority::LongTailMemory,
                 label: "memory".to_string(),
             },
@@ -333,6 +317,8 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("memory"))
         );
+        // System and task should be preserved (they're higher priority)
+        assert!(result.prompt.contains("System prompt") || result.prompt.contains("Task description"));
     }
 
     #[test]
