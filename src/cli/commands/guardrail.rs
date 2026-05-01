@@ -256,7 +256,7 @@ impl GuardrailCmd {
         let entries = if let Some(run_id) = run_id_filter {
             db.list_pending_outbox(&run_id)?
         } else {
-            vec![]
+            db.list_all_pending_outbox()?
         };
 
         let result = json!({
