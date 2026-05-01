@@ -80,12 +80,15 @@ impl RunBenchCommand {
                 let duration_ms = start.elapsed().as_millis();
 
                 let benchmark_result = match &result {
-                    Ok(_) => BenchmarkResult {
+                    Ok(test_result) => BenchmarkResult {
                         task: task.to_string(),
                         iteration: i + 1,
                         success: true,
                         duration_ms,
                         error: None,
+                        llm_calls: test_result.metrics.llm_calls,
+                        tool_calls: test_result.metrics.tool_calls,
+                        budget_exceeded: false, // TODO: Detect from test_result
                     },
                     Err(e) => BenchmarkResult {
                         task: task.to_string(),
@@ -93,6 +96,9 @@ impl RunBenchCommand {
                         success: false,
                         duration_ms,
                         error: Some(e.to_string()),
+                        llm_calls: 0,
+                        tool_calls: 0,
+                        budget_exceeded: e.to_string().contains("budget"),
                     },
                 };
 
@@ -131,8 +137,13 @@ impl RunBenchCommand {
             if result.success {
                 stats.successful_runs += 1;
                 stats.total_duration_ms += result.duration_ms;
+                stats.total_llm_calls += result.llm_calls;
+                stats.total_tool_calls += result.tool_calls;
             } else {
                 stats.failed_runs += 1;
+            }
+            if result.budget_exceeded {
+                stats.budget_exceeded_count += 1;
             }
         }
 
@@ -150,13 +161,31 @@ impl RunBenchCommand {
                 0
             };
 
+            let llm_calls_per_run = if stats.successful_runs > 0 {
+                stats.total_llm_calls / stats.successful_runs
+            } else {
+                0
+            };
+
+            let tool_calls_per_run = if stats.successful_runs > 0 {
+                stats.total_tool_calls / stats.successful_runs
+            } else {
+                0
+            };
+
+            let budget_exceeded_rate = if stats.total_runs > 0 {
+                stats.budget_exceeded_count as f64 / stats.total_runs as f64
+            } else {
+                0.0
+            };
+
             task_reports.push(TaskReport {
                 task,
                 task_success_rate: success_rate,
                 median_runtime_ms,
-                llm_calls_per_run: 0,      // TODO: Track LLM calls
-                tool_calls_per_run: 0,     // TODO: Track tool calls
-                budget_exceeded_rate: 0.0, // TODO: Track budget exceeded
+                llm_calls_per_run,
+                tool_calls_per_run,
+                budget_exceeded_rate,
                 flow_failure_rate: if stats.total_runs > 0 {
                     stats.failed_runs as f64 / stats.total_runs as f64
                 } else {
@@ -179,6 +208,9 @@ struct BenchmarkResult {
     success: bool,
     duration_ms: u128,
     error: Option<String>,
+    llm_calls: u32,
+    tool_calls: u32,
+    budget_exceeded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +219,9 @@ struct TaskStats {
     successful_runs: u32,
     failed_runs: u32,
     total_duration_ms: u128,
+    total_llm_calls: u32,
+    total_tool_calls: u32,
+    budget_exceeded_count: u32,
 }
 
 impl TaskStats {
@@ -196,6 +231,9 @@ impl TaskStats {
             successful_runs: 0,
             failed_runs: 0,
             total_duration_ms: 0,
+            total_llm_calls: 0,
+            total_tool_calls: 0,
+            budget_exceeded_count: 0,
         }
     }
 }

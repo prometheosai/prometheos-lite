@@ -405,6 +405,14 @@ pub struct TimelineEvent {
     pub details: serde_json::Value,
 }
 
+/// Execution metrics from tracing
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TraceMetrics {
+    pub llm_calls: u32,
+    pub tool_calls: u32,
+    pub node_runs: u32,
+}
+
 /// Tracer for structured logging and event timeline
 #[derive(Debug)]
 pub struct Tracer {
@@ -606,6 +614,23 @@ impl Tracer {
     pub fn add_llm_call(&mut self, llm_call: LlmCall) {
         if let Some(ref mut trace) = self.hierarchical_trace {
             trace.llm_calls.push(llm_call);
+        }
+    }
+
+    /// Get execution metrics from hierarchical trace
+    pub fn get_metrics(&self) -> TraceMetrics {
+        if let Some(ref trace) = self.hierarchical_trace {
+            TraceMetrics {
+                llm_calls: trace.llm_calls.len() as u32,
+                tool_calls: trace.tool_calls.len() as u32,
+                node_runs: trace.node_runs.len() as u32,
+            }
+        } else {
+            TraceMetrics {
+                llm_calls: 0,
+                tool_calls: 0,
+                node_runs: 0,
+            }
         }
     }
 

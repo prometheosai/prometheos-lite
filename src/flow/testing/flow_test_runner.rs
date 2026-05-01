@@ -2,7 +2,7 @@
 
 use super::fixtures::{TestExpectation, TestFixture};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
-use crate::flow::{DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState, Tracer};
+use crate::flow::{DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState, Tracer, TraceMetrics};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -106,14 +106,16 @@ impl FlowTestRunner {
         let execution_result = flow.run(&mut state).await;
 
         let outputs = state.get_all_outputs();
-        let events = if let Some(tracer) = &self.tracer {
+        let (events, metrics) = if let Some(tracer) = &self.tracer {
             if let Ok(tracer) = tracer.lock() {
-                tracer.export_timeline()?
+                let events = tracer.export_timeline()?;
+                let metrics = tracer.get_metrics();
+                (events, metrics)
             } else {
-                String::new()
+                (String::new(), TraceMetrics::default())
             }
         } else {
-            String::new()
+            (String::new(), TraceMetrics::default())
         };
 
         Ok(TestResult {
@@ -121,6 +123,7 @@ impl FlowTestRunner {
             outputs,
             events,
             error: execution_result.err().map(|e| e.to_string()),
+            metrics,
         })
     }
 
@@ -185,4 +188,6 @@ pub struct TestResult {
     pub events: String,
     /// Error message if failed
     pub error: Option<String>,
+    /// Execution metrics (LLM calls, tool calls, etc.)
+    pub metrics: TraceMetrics,
 }
