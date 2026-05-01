@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use prometheos_lite::{
     config::AppConfig,
+    flow::intelligence::OpenAiProvider,
     flow::{
         EmbeddingProvider, LocalEmbeddingProvider, MemoryDb, MemoryService, ModelRouter,
         RuntimeContext, ToolRuntime, ToolSandboxProfile,
     },
-    flow::intelligence::OpenAiProvider,
     llm::LlmClient,
 };
 
@@ -54,11 +54,17 @@ impl RuntimeBuilder {
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
                 .context("Failed to create memory database")?;
         let memory_service = Arc::new(MemoryService::new(persistent_db, embedding));
+        
+        let trace_storage = Arc::new(
+            prometheos_lite::flow::tracing::TraceStorage::in_memory()
+                .context("Failed to create trace storage")?
+        );
 
         Ok(RuntimeContext::full(
             model_router,
             tool_runtime,
             memory_service,
+            trace_storage,
         ))
     }
 
