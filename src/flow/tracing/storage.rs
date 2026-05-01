@@ -48,6 +48,31 @@ impl TraceStorage {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
+        // Schema version table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+            [],
+        )
+        .context("Failed to create schema_version table")?;
+
+        // Get current schema version
+        let current_version: i32 = conn
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        // Apply migrations if needed
+        if current_version < 1 {
+            self.migrate_to_v1(&conn)?;
+        }
+
+        Ok(())
+    }
+
+    /// Migrate to schema version 1
+    fn migrate_to_v1(&self, conn: &Connection) -> Result<()> {
         // Execution traces table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS execution_traces (
@@ -122,21 +147,35 @@ impl TraceStorage {
 
         // Create indexes for performance
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_node_runs_trace_id ON node_runs(trace_id)",
+            "CREATE INDEX IF NOT EXISTS idx_execution_traces_work_context ON execution_traces(work_context_id)",
             [],
-        )?;
+        )
+        .context("Failed to create work_context index")?;
+
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tool_calls_trace_id ON tool_calls(trace_id)",
+            "CREATE INDEX IF NOT EXISTS idx_node_runs_trace ON node_runs(trace_id)",
             [],
-        )?;
+        )
+        .context("Failed to create node_runs trace index")?;
+
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_llm_calls_trace_id ON llm_calls(trace_id)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_trace ON tool_calls(trace_id)",
             [],
-        )?;
+        )
+        .context("Failed to create tool_calls trace index")?;
+
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_execution_traces_flow_run ON execution_traces(flow_run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_llm_calls_trace ON llm_calls(trace_id)",
             [],
-        )?;
+        )
+        .context("Failed to create llm_calls trace index")?;
+
+        // Record schema version
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)",
+            [Utc::now().to_rfc3339()],
+        )
+        .context("Failed to record schema version")?;
 
         Ok(())
     }
