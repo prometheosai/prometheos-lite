@@ -14,11 +14,9 @@
 
 use anyhow::Result;
 
-use crate::{
-    agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent},
-    llm::LlmClient,
-    logger::{AgentRole, Logger},
-};
+use crate::legacy::agents::{Agent, CoderAgent, PlannerAgent, ReviewerAgent};
+use crate::llm::LlmClient;
+use crate::logger::{AgentRole, Logger};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {

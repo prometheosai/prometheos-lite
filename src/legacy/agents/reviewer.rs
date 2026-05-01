@@ -1,10 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::{
-    agents::{Agent, AgentRole},
-    llm::LlmClient,
-};
+use crate::legacy::agents::{Agent, AgentRole};
+use crate::llm::LlmClient;
 
 #[derive(Debug, Clone)]
 pub struct ReviewerAgent {
