@@ -567,7 +567,6 @@ async fn test_deterministic_no_api_flow_execution() {
     // Execute the deterministic test flow
     let execution_result = flow_execution_service
         .execute_message(
-            "deterministic_test.flow.yaml",
             "test message",
             Default::default(),
         )

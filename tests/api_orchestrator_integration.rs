@@ -6,7 +6,7 @@ use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::types::{WorkDomain, WorkStatus};
 use prometheos_lite::work::{
-    PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator,
+    EvolutionEngine, PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator,
 };
 use std::sync::Arc;
 
@@ -26,12 +26,14 @@ async fn test_api_continue_calls_orchestrator() {
 
     let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
     let intent_classifier = Arc::new(IntentClassifier::new().unwrap());
+    let evolution_engine = Arc::new(EvolutionEngine::new(db.clone()));
 
     let orchestrator = WorkOrchestrator::new(
         work_context_service.clone(),
         playbook_resolver,
         work_execution_service,
         intent_classifier,
+        evolution_engine,
     );
 
     // Create a WorkContext
@@ -74,12 +76,14 @@ async fn test_api_run_until_complete_calls_orchestrator() {
 
     let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
     let intent_classifier = Arc::new(IntentClassifier::new().unwrap());
+    let evolution_engine = Arc::new(EvolutionEngine::new(db.clone()));
 
     let orchestrator = WorkOrchestrator::new(
         work_context_service.clone(),
         playbook_resolver,
         work_execution_service,
         intent_classifier,
+        evolution_engine,
     );
 
     // Create a WorkContext
@@ -126,12 +130,14 @@ async fn test_submit_intent_creates_context() {
 
     let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
     let intent_classifier = Arc::new(IntentClassifier::new().unwrap());
+    let evolution_engine = Arc::new(EvolutionEngine::new(db.clone()));
 
     let orchestrator = WorkOrchestrator::new(
         work_context_service.clone(),
         playbook_resolver,
         work_execution_service,
         intent_classifier,
+        evolution_engine,
     );
 
     // Test submit_intent

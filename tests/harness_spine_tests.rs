@@ -7,7 +7,7 @@ use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::{
-    ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
+    EvolutionEngine, ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
 };
 use std::sync::Arc;
 
@@ -60,12 +60,18 @@ fn test_work_orchestrator_route_to_context() {
     let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
     let runtime = Arc::new(RuntimeContext::default());
     let flow_execution_service = Arc::new(FlowExecutionService::new(runtime).unwrap());
+    let work_execution_service = Arc::new(WorkExecutionService::new(
+        work_context_service.clone(),
+        flow_execution_service.clone(),
+    ));
     let intent_classifier = IntentClassifier::new().unwrap();
+    let evolution_engine = Arc::new(EvolutionEngine::new(db.clone()));
     let orchestrator = WorkOrchestrator::new(
         work_context_service,
         playbook_resolver,
-        flow_execution_service,
+        work_execution_service,
         intent_classifier,
+        evolution_engine,
     );
 
     // Test routing with no existing context
