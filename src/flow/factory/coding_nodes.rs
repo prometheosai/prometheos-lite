@@ -71,12 +71,20 @@ impl Node for CodeAnalysisNode {
 
         let line_count = content.lines().count();
         let language = self.detect_language(extension);
+        
+        // Enhanced analysis: detect functions, classes, imports
+        let functions = self.extract_functions(&content, language);
+        let imports = self.extract_imports(&content, language);
+        let classes = self.extract_classes(&content, language);
 
         Ok(json!({
             "file_path": file_path,
             "language": language,
             "line_count": line_count,
             "size_bytes": content.len(),
+            "functions": functions,
+            "classes": classes,
+            "imports": imports,
             "status": "success"
         }))
     }
@@ -106,6 +114,183 @@ impl CodeAnalysisNode {
             "c" => "c",
             _ => "unknown",
         }
+    }
+
+    fn extract_functions(&self, content: &str, language: &str) -> Vec<String> {
+        let mut functions = Vec::new();
+        
+        match language {
+            "rust" => {
+                // Match fn function_name
+                for line in content.lines() {
+                    if line.trim().starts_with("pub fn ") || line.trim().starts_with("fn ") {
+                        if let Some(name) = line.split('(').next() {
+                            let name = name.split("fn ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                functions.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "python" => {
+                // Match def function_name
+                for line in content.lines() {
+                    if line.trim().starts_with("def ") {
+                        if let Some(name) = line.split('(').next() {
+                            let name = name.split("def ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                functions.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "javascript" => {
+                // Match function function_name or const function_name = or const function_name = () =>
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("function ") {
+                        if let Some(name) = trimmed.split('(').next() {
+                            let name = name.split("function ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                functions.push(name.to_string());
+                            }
+                        }
+                    } else if trimmed.contains("= (") || trimmed.contains("= async (") {
+                        // Arrow functions: const name = (args) =>
+                        if let Some(name) = trimmed.split('=').next() {
+                            let name = name.split("const ").last().unwrap_or(name).split("let ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                functions.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        functions
+    }
+
+    fn extract_classes(&self, content: &str, language: &str) -> Vec<String> {
+        let mut classes = Vec::new();
+        
+        match language {
+            "rust" => {
+                // Match struct Name or enum Name
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ") {
+                        if let Some(name) = trimmed.split('{').next() {
+                            let name = name.split("struct ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                classes.push(name.to_string());
+                            }
+                        }
+                    } else if trimmed.starts_with("pub enum ") || trimmed.starts_with("enum ") {
+                        if let Some(name) = trimmed.split('{').next() {
+                            let name = name.split("enum ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                classes.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "python" => {
+                // Match class Name
+                for line in content.lines() {
+                    if line.trim().starts_with("class ") {
+                        if let Some(name) = line.split('(').next().or_else(|| line.split(':').next()) {
+                            let name = name.split("class ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                classes.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "javascript" => {
+                // Match class Name
+                for line in content.lines() {
+                    if line.trim().starts_with("class ") {
+                        if let Some(name) = line.split('{').next() {
+                            let name = name.split("class ").last().unwrap_or(name).trim();
+                            if !name.is_empty() {
+                                classes.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        classes
+    }
+
+    fn extract_imports(&self, content: &str, language: &str) -> Vec<String> {
+        let mut imports = Vec::new();
+        
+        match language {
+            "rust" => {
+                // Match use ...;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("use ") {
+                        let import = trimmed.split(';').next().unwrap_or(trimmed);
+                        let import = import.split("use ").last().unwrap_or(import).trim();
+                        if !import.is_empty() {
+                            imports.push(import.to_string());
+                        }
+                    }
+                }
+            }
+            "python" => {
+                // Match import ... or from ... import ...
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("import ") {
+                        let import = trimmed.split("import ").last().unwrap_or(trimmed).trim();
+                        if !import.is_empty() {
+                            imports.push(import.to_string());
+                        }
+                    } else if trimmed.starts_with("from ") {
+                        let import = trimmed.split(';').next().unwrap_or(trimmed);
+                        if !import.is_empty() {
+                            imports.push(import.to_string());
+                        }
+                    }
+                }
+            }
+            "javascript" => {
+                // Match import ... from ... or require(...)
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("import ") {
+                        let import = trimmed.split(';').next().unwrap_or(trimmed);
+                        if !import.is_empty() {
+                            imports.push(import.to_string());
+                        }
+                    } else if trimmed.contains("require(") {
+                        if let Some(start) = trimmed.find("require(") {
+                            let rest = &trimmed[start + 8..];
+                            if let Some(end) = rest.find(')') {
+                                let import = &rest[..end];
+                                if !import.is_empty() {
+                                    imports.push(import.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        imports
     }
 }
 
