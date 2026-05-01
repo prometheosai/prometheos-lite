@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::db::repository::{DomainProfileOperations, PlaybookOperations};
+use tracing;
+
+use crate::db::repository::{DomainProfileOperations, FlowPerformanceOperations, PlaybookOperations};
 use crate::flow::StrictModeEnforcer;
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
@@ -290,11 +292,18 @@ impl WorkExecutionService {
             executed_at: chrono::Utc::now(),
         };
 
-        // Store performance record in context metadata for now
-        // TODO: Add dedicated database table for FlowPerformanceRecord
-        let performance_key = format!("flow_perf_{}", next_flow);
-        context.metadata[performance_key] =
-            serde_json::to_value(&performance_record).unwrap_or(serde_json::Value::Null);
+        // Store performance record in database using FlowPerformanceOperations
+        // V1.5.2: Using dedicated database table instead of metadata storage
+        let db = self.work_context_service.get_db();
+        if let Err(e) = db.as_ref().create_flow_performance(&performance_record) {
+            tracing::error!("Failed to store flow performance record: {}", e);
+            // Fallback: store in metadata for debugging if DB fails
+            let performance_key = format!("flow_perf_{}", next_flow);
+            context.metadata[performance_key] =
+                serde_json::to_value(&performance_record).unwrap_or(serde_json::Value::Null);
+        } else {
+            tracing::debug!("Stored flow performance record: {}", performance_record.id);
+        }
 
         // Update status
         if context.current_phase == WorkPhase::Finalization {

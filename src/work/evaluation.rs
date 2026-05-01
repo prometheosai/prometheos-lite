@@ -177,13 +177,31 @@ impl EvaluationEngine {
             }
         }
 
-        // Apply penalties to overall score
+        // Calculate weighted combination of structural and semantic scores
+        // V1.5.2: Semantic score is now integrated into overall evaluation
+        let structural_score = dimensions.overall_score();
+        
+        // Weight: 60% structural (dimensions), 40% semantic (LLM-based evaluation)
+        // This balances objective metrics with subjective quality assessment
+        let combined_score = if semantic_score > 0.0 && semantic_score != 0.5 {
+            // LLM provided a meaningful semantic score (not just default)
+            (structural_score * 0.6) + (semantic_score * 0.4)
+        } else {
+            // No semantic score available, use structural only
+            structural_score
+        };
+        
+        // Apply penalties to combined score
         let penalty_severity: f32 = penalties.iter().map(|p| p.severity).sum();
-        let overall_score = dimensions.overall_score() * (1.0 - penalty_severity.min(0.8));
+        let overall_score = combined_score * (1.0 - penalty_severity.min(0.8));
 
         details.push_str(&format!(
             "Dimensions: correctness={:.2}, completeness={:.2}, efficiency={:.2}, reliability={:.2}\n",
             dimensions.correctness, dimensions.completeness, dimensions.efficiency, dimensions.reliability
+        ));
+        details.push_str(&format!(
+            "Semantic: {:.2}, Structural: {:.2}, Combined: {:.2}, Penalty: {:.2}\n",
+            semantic_score, structural_score, combined_score, penalty_severity
         ));
 
         Ok(EnhancedEvaluationResult {
