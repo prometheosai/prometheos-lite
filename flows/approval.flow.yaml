@@ -18,6 +18,9 @@ nodes:
     config:
       model: "gpt-4"
 
+  - id: "end"
+    node_type: "terminal"
+
 transitions:
   - from: "reviewer"
     action: "continue"

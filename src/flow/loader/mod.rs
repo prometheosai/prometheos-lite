@@ -48,6 +48,7 @@ pub struct FlowOutputs {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NodeDefinition {
     pub id: String,
+    #[serde(alias = "type")]
     pub node_type: String,
     pub config: Option<serde_json::Value>,
 }

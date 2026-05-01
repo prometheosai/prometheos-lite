@@ -19,6 +19,9 @@ nodes:
       prompt: "You are a helpful AI assistant."
       temperature: 0.7
 
+  - id: "end"
+    node_type: "terminal"
+
 transitions:
   - from: "llm"
     action: "continue"

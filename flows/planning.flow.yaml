@@ -19,6 +19,9 @@ nodes:
       model: "gpt-4"
       max_steps: 5
 
+  - id: "end"
+    node_type: "terminal"
+
 transitions:
   - from: "planner"
     action: "continue"
