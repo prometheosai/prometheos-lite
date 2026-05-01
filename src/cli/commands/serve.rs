@@ -43,12 +43,15 @@ impl ServeCommand {
         let memory_service = runtime_builder.build_memory_service()?;
 
         // Create AppState
-        let app_state = std::sync::Arc::new(prometheos_lite::api::AppState::new(
-            db_path,
-            std::sync::Arc::new(runtime),
-            api_embedding,
-            memory_service,
-        ).map_err(|e| anyhow::anyhow!("Failed to create AppState: {}", e))?);
+        let app_state = std::sync::Arc::new(
+            prometheos_lite::api::AppState::new(
+                db_path,
+                std::sync::Arc::new(runtime),
+                api_embedding,
+                memory_service,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create AppState: {}", e))?,
+        );
 
         // Parse address
         let addr: std::net::SocketAddr = format!("{}:{}", self.host, self.port)

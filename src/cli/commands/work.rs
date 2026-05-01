@@ -5,16 +5,16 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 
 use prometheos_lite::db::Db;
-use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::flow::RuntimeContext;
+use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::work::{
+    ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
     artifact::Artifact,
     evolution_engine::EvolutionEngine,
     execution_service::WorkExecutionService,
     template_loader::TemplateLoader,
     types::{WorkDomain, WorkStatus},
-    ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
 };
 
 #[derive(Debug, Parser)]
@@ -108,7 +108,11 @@ impl WorkCommand {
         ));
 
         match self.command {
-            WorkSubcommand::Create { title, domain, goal } => {
+            WorkSubcommand::Create {
+                title,
+                domain,
+                goal,
+            } => {
                 let domain = match domain.to_lowercase().as_str() {
                     "software" => WorkDomain::Software,
                     "business" => WorkDomain::Business,
@@ -157,8 +161,11 @@ impl WorkCommand {
                 println!("  Autonomy: {:?}", context.autonomy_level);
                 println!("  Approval Policy: {:?}", context.approval_policy);
                 println!("  Artifacts: {}", context.artifacts.len());
-                println!("  Completion Criteria: {}", context.completion_criteria.len());
-                
+                println!(
+                    "  Completion Criteria: {}",
+                    context.completion_criteria.len()
+                );
+
                 if let Some(due) = &context.due_at {
                     println!("  Due At: {}", due);
                 }
@@ -171,19 +178,28 @@ impl WorkCommand {
                     .get_context(&id)?
                     .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
 
-                println!("Artifacts for WorkContext {} ({}):", context.id, context.title);
+                println!(
+                    "Artifacts for WorkContext {} ({}):",
+                    context.id, context.title
+                );
                 if context.artifacts.is_empty() {
                     println!("  No artifacts");
                 } else {
                     for artifact in &context.artifacts {
-                        println!("  {} - {} ({:?})", artifact.id, artifact.name, artifact.kind);
+                        println!(
+                            "  {} - {} ({:?})",
+                            artifact.id, artifact.name, artifact.kind
+                        );
                         println!("    Created by: {}", artifact.created_by);
                         println!("    Storage: {:?}", artifact.storage);
                         println!("    Created at: {}", artifact.created_at);
                     }
                 }
             }
-            WorkSubcommand::Submit { message, conversation_id } => {
+            WorkSubcommand::Submit {
+                message,
+                conversation_id,
+            } => {
                 let context = work_orchestrator
                     .submit_user_intent("cli-user".to_string(), message, conversation_id)
                     .await?;
@@ -238,7 +254,7 @@ impl WorkCommand {
                 };
 
                 work_context_service.update_status(&mut context, new_status)?;
-                
+
                 println!("Updated WorkContext status to {:?}", new_status);
             }
         }

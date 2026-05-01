@@ -303,17 +303,26 @@ impl ResumeCommand {
         // Validate flow snapshot if available
         if let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str()) {
             let db = prometheos_lite::db::repository::Db::new(&db_path.to_string_lossy())?;
-            if let Ok(snapshot) = prometheos_lite::db::repository::FlowSnapshotOperations::get_latest_flow_snapshot(&db, flow_name) {
+            if let Ok(snapshot) =
+                prometheos_lite::db::repository::FlowSnapshotOperations::get_latest_flow_snapshot(
+                    &db, flow_name,
+                )
+            {
                 if let Some(stored_snapshot) = snapshot {
                     // Get current flow source from state
-                    if let Some(current_source) = state.get_input("flow_source").and_then(|v| v.as_str()) {
-                        let current_hash = prometheos_lite::flow::FlowSnapshot::compute_hash(current_source);
-                        
+                    if let Some(current_source) =
+                        state.get_input("flow_source").and_then(|v| v.as_str())
+                    {
+                        let current_hash =
+                            prometheos_lite::flow::FlowSnapshot::compute_hash(current_source);
+
                         if current_hash != stored_snapshot.source_hash {
                             logger.error("Flow source hash mismatch!");
                             logger.error(&format!("Stored hash: {}", stored_snapshot.source_hash));
                             logger.error(&format!("Current hash: {}", current_hash));
-                            anyhow::bail!("Cannot resume: flow definition has changed since run started");
+                            anyhow::bail!(
+                                "Cannot resume: flow definition has changed since run started"
+                            );
                         }
                         logger.info("Flow snapshot validation passed");
                     }

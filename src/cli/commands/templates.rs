@@ -80,7 +80,10 @@ impl TemplatesCommand {
         println!();
         println!("Lifecycle Template:");
         println!("  Phases: {:?}", profile.lifecycle_template.phases);
-        println!("  Transitions: {:?}", profile.lifecycle_template.transitions);
+        println!(
+            "  Transitions: {:?}",
+            profile.lifecycle_template.transitions
+        );
 
         Ok(())
     }
