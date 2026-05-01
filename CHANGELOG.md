@@ -908,16 +908,64 @@ The following critical issues were identified during code audit:
 
 **Objective:** Address remaining critical issues from V1.5 audit that prevent production readiness.
 
-### Completed Fixes
-- [x] Fix ContextBudgeter::build_context priority logic (iterate high-priority first, drop from lowest-priority side)
-- [x] Rewrite context budget test with real over-budget case (use tiny budget like 10 tokens, assert System/Task preserved)
-- [x] Fix async summarizer test attributes (replace #[test] with #[tokio::test] in src/flow/memory/summarizer.rs)
-- [x] Fix memory retrieval parameters (respect limit and actual project_id, remove unwrap_or_default())
-- [x] Replace silent fallbacks with explicit error handling (evaluation parsing, memory retrieval)
-- [x] Upgrade coding nodes to real repo indexing (AST parsing or language-server-backed indexing)
-- [x] Add trace storage migrations/versioning (schema versioning for observability layer)
+### Completed Fixes (All 10 Issues Resolved)
 
-**Status:** v1.5.2 - Complete (7/7 implemented)
+1. **[x] System Prompt Hard Preservation**  
+   Fixed `ContextBudgeter::build_context()` to guarantee System items are NEVER dropped. Now explicitly errors if System prompt exceeds budget instead of silently dropping.  
+   `@src/context/budgeter.rs:97-121`
+
+2. **[x] ContextBuilder Memory-Aware by Default**  
+   `DefaultNodeFactory::from_runtime()` now properly wires `ContextBuilder` with `memory_service` when available. All LLM nodes (Planner, Coder, Reviewer, LLM) now use `build_with_memory_retrieval()` for automatic memory integration.  
+   `@src/flow/factory/node_factory.rs:37-78`, `@src/flow/factory/builtin_nodes.rs`
+
+3. **[x] Memory Retrieval Explicit Error Handling**  
+   Replaced silent `eprintln!` with explicit error propagation in `build_with_memory_retrieval()`. Memory retrieval failures now properly bubble up instead of continuing with empty memory.  
+   `@src/context/builder.rs:197-239`
+
+4. **[x] Memory Pruning/Compression Error Handling**  
+   Replaced `unwrap_or_default()`, `unwrap_or(false)`, `unwrap_or(0)` with proper `match` blocks and `tracing::error!` logs. Memory operations are now tracked in state metadata for FinalOutput.  
+   `@src/flow/execution_service.rs:267-321`
+
+5. **[x] FinalOutput Metadata Population**  
+   `FinalOutput::success()` now properly populates `context_budget` and `memory_operations` from SharedState metadata. Both execution paths (`execute_flow` and `execute_flow_file`) updated.  
+   `@src/flow/execution_service.rs:451-465`, `@src/flow/execution_service.rs:627-641`
+
+6. **[x] Intelligent Heuristic Summarization**  
+   Replaced naive "first 300 chars" truncation with sentence-based extraction. New algorithm extracts: (1) first sentence for context, (2) high-information sentences with keywords, (3) respects sentence boundaries.  
+   `@src/flow/memory/summarizer.rs:96-203`
+
+7. **[x] AST-Based Coding Harness**  
+   Complete rewrite using tree-sitter for real AST parsing:
+   - Added tree-sitter dependencies for Rust, JavaScript, Python, Go, C++, Java
+   - `AstParser` with language-specific queries for functions, classes, imports
+   - `SymbolResolutionNode` uses AST-based symbol search with tree walking
+   - `DependencyAnalysisNode` actually parses Cargo.toml, package.json, requirements.txt, go.mod
+   - All three coding nodes wired into `DefaultNodeFactory` with new node types: `code_analysis`, `symbol_resolution`, `dependency_analysis`  
+   `@src/flow/factory/coding_nodes.rs` (complete rewrite), `@src/flow/factory/node_factory.rs:167-191`
+
+8. **[x] Trace Storage Migrations/Versioning**  
+   Enhanced migration framework supporting multiple schema versions:
+   - v1: Initial trace storage schema (execution_traces, node_runs, tool_calls, llm_calls)
+   - v2: Added metadata column and performance indices for slow query detection  
+   `@src/flow/tracing/storage.rs:66-230`
+
+9. **[x] FlowPerformanceRecord Database Table**  
+   Removed TODO and implemented proper database storage:
+   - Created `flow_performance_records` table with indexes
+   - Implemented `FlowPerformanceOperations` trait with CRUD operations
+   - `WorkExecutionService` now stores records via `create_flow_performance()`  
+   `@src/db/repository/flow_performance.rs` (new), `@src/work/execution_service.rs:293-304`
+
+10. **[x] Semantic Score Integration**  
+    Semantic score is now properly integrated into overall evaluation:
+    - Weighted combination: 60% structural (dimensions) + 40% semantic (LLM-based)
+    - Only applies semantic weight when meaningful score is available (> 0 and != default 0.5)
+    - Added detailed scoring breakdown to evaluation details  
+    `@src/work/evaluation.rs:180-205`
+
+**Status:** v1.5.2 - Complete (10/10 implemented - all audit findings resolved)
+
+**Verification:** All previously-identified stub/placeholder/mock-grade implementations have been replaced with production-ready code.
 
 ---
 
