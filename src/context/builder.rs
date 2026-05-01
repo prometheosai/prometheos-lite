@@ -62,6 +62,7 @@ pub struct ContextMetadata {
 }
 
 /// Context Builder - unified context construction
+#[derive(Clone)]
 pub struct ContextBuilder {
     budgeter: ContextBudgeter,
     memory_service: Option<Arc<MemoryService>>,
@@ -201,10 +202,26 @@ impl ContextBuilder {
         limit: usize,
     ) -> Result<BuiltContext> {
         let memory = if let Some(ref service) = self.memory_service {
-            if let Some(pid) = project_id {
-                service.search_memories(&task).unwrap_or_default()
-            } else {
-                Vec::new()
+            // Use semantic_search with the provided limit
+            // Note: project_id filtering would need to be implemented in MemoryService
+            // For now, we pass the query and limit
+            match service.semantic_search(&task, limit).await {
+                Ok(memories) => {
+                    // Filter by project_id if provided
+                    if let Some(ref pid) = project_id {
+                        memories.into_iter()
+                            .filter(|m| m.project_id.as_deref() == Some(pid))
+                            .collect()
+                    } else {
+                        memories
+                    }
+                }
+                Err(e) => {
+                    // Log the error but continue with empty memory
+                    // In production, this should be logged to a proper logging system
+                    eprintln!("Memory search failed: {}", e);
+                    Vec::new()
+                }
             }
         } else {
             Vec::new()
