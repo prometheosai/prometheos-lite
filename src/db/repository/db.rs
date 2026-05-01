@@ -376,6 +376,42 @@ impl Db {
             )
             .context("Failed to create playbook_usage_log table")?;
 
+        // V1.5.2: Flow performance records table
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS flow_performance_records (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                work_context_id TEXT NOT NULL,
+                success_score REAL NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                token_cost REAL NOT NULL,
+                revision_count INTEGER NOT NULL,
+                executed_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create flow_performance_records table")?;
+
+        // Create index for efficient queries by work_context_id
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_flow_perf_work_context 
+                 ON flow_performance_records(work_context_id)",
+                [],
+            )
+            .ok(); // Ignore if already exists
+
+        // Create index for efficient queries by flow_id
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_flow_perf_flow_id 
+                 ON flow_performance_records(flow_id)",
+                [],
+            )
+            .ok(); // Ignore if already exists
+
         Ok(())
     }
 

@@ -38,6 +38,9 @@ pub trait InterruptOperations {
 
     fn list_pending_interrupts(&self, run_id: &str) -> anyhow::Result<Vec<InterruptEntry>>;
 
+    /// List all pending interrupts across all runs
+    fn list_all_pending_interrupts(&self) -> anyhow::Result<Vec<InterruptEntry>>;
+
     fn approve_interrupt(&self, id: &str, decision: &str) -> anyhow::Result<()>;
 
     fn deny_interrupt(&self, id: &str) -> anyhow::Result<()>;
@@ -101,12 +104,12 @@ impl<T: AsDb> InterruptOperations for T {
                     decision: row.get(7)?,
                     expires_at: row.get::<_, Option<String>>(8)?.map(|s| {
                         chrono::DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
+                            .unwrap_or_else(|_| chrono::Utc::now().into())
                             .with_timezone(&chrono::Utc)
                     }),
                     work_context_id: row.get(9)?,
                     created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                        .unwrap()
+                        .unwrap_or_else(|_| chrono::Utc::now().into())
                         .with_timezone(&chrono::Utc),
                 })
             })
@@ -124,9 +127,9 @@ impl<T: AsDb> InterruptOperations for T {
         let mut stmt = conn.prepare(
             "SELECT id, run_id, trace_id, node_id, reason, expected_schema, status, decision, expires_at, work_context_id, created_at
              FROM interrupts
-             WHERE run_id = ?1 AND status = 'pending'
-             ORDER BY created_at"
-        ).context("Failed to prepare pending interrupts query")?;
+             WHERE run_id = ?1 AND status = 'pending' AND (expires_at > datetime('now') OR expires_at IS NULL)
+             ORDER BY created_at DESC"
+        )?;
 
         let entries = stmt
             .query_map(params![run_id], |row| {
@@ -139,18 +142,60 @@ impl<T: AsDb> InterruptOperations for T {
                     expected_schema: row.get(5)?,
                     status: row.get(6)?,
                     decision: row.get(7)?,
-                    expires_at: row.get::<_, Option<String>>(8)?.map(|s| {
-                        chrono::DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
-                            .with_timezone(&chrono::Utc)
-                    }),
+                    expires_at: row
+                        .get::<_, Option<String>>(8)?
+                        .map(|s| chrono::DateTime::parse_from_rfc3339(&s)
+                            .unwrap_or_else(|_| chrono::Utc::now().into())
+                            .with_timezone(&chrono::Utc)),
                     work_context_id: row.get(9)?,
                     created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                        .unwrap()
+                        .unwrap_or_else(|_| chrono::Utc::now().into())
                         .with_timezone(&chrono::Utc),
                 })
             })
             .context("Failed to query pending interrupts")?;
+
+        let mut result = Vec::new();
+        for entry in entries {
+            result.push(entry.context("Failed to parse interrupt entry")?);
+        }
+
+        Ok(result)
+    }
+
+    fn list_all_pending_interrupts(&self) -> anyhow::Result<Vec<InterruptEntry>> {
+        let conn = self.as_db().conn();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, trace_id, node_id, reason, expected_schema, status, decision, expires_at, work_context_id, created_at
+             FROM interrupts
+             WHERE status = 'pending' AND (expires_at > datetime('now') OR expires_at IS NULL)
+             ORDER BY created_at DESC"
+        )?;
+
+        let entries = stmt
+            .query_map([], |row| {
+                Ok(InterruptEntry {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    trace_id: row.get(2)?,
+                    node_id: row.get(3)?,
+                    reason: row.get(4)?,
+                    expected_schema: row.get(5)?,
+                    status: row.get(6)?,
+                    decision: row.get(7)?,
+                    expires_at: row
+                        .get::<_, Option<String>>(8)?
+                        .map(|s| chrono::DateTime::parse_from_rfc3339(&s)
+                            .unwrap_or_else(|_| chrono::Utc::now().into())
+                            .with_timezone(&chrono::Utc)),
+                    work_context_id: row.get(9)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                        .unwrap_or_else(|_| chrono::Utc::now().into())
+                        .with_timezone(&chrono::Utc),
+                })
+            })
+            .context("Failed to query all pending interrupts")?;
 
         let mut result = Vec::new();
         for entry in entries {
