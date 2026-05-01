@@ -183,7 +183,11 @@ impl Flow {
                                 loop_type: "node_repetition".to_string(),
                             },
                             Some(current.clone()),
-                            format!("Loop check: node {} count {}", current, detector.get_node_count(&current)),
+                            format!(
+                                "Loop check: node {} count {}",
+                                current,
+                                detector.get_node_count(&current)
+                            ),
                         );
                     }
                 }
@@ -283,7 +287,8 @@ impl Flow {
             // Log node completion (reuse same run_id and trace_id)
             if let Some(tracer) = &self.tracer {
                 if let Ok(mut t) = tracer.lock() {
-                    let output_summary = crate::flow::tracing::Tracer::summarize_value(&output, 200);
+                    let output_summary =
+                        crate::flow::tracing::Tracer::summarize_value(&output, 200);
                     t.log_flow_event(
                         crate::flow::tracing::TraceEvent::NodeCompleted {
                             run_id: run_id.clone(),

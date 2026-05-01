@@ -75,7 +75,12 @@ impl ModelRouter {
                     }
                     Err(e) => {
                         if i > 0 {
-                            fallback_from = Some(self.providers.get(*provider_idx).map(|p| p.name().to_string()).unwrap_or_else(|| "unknown".to_string()));
+                            fallback_from = Some(
+                                self.providers
+                                    .get(*provider_idx)
+                                    .map(|p| p.name().to_string())
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                            );
                         }
                         last_error = Some(e);
                         continue;
@@ -149,7 +154,12 @@ impl ModelRouter {
                     }
                     Err(e) => {
                         if i > 0 {
-                            fallback_from = Some(self.providers.get(*provider_idx).map(|p| p.name().to_string()).unwrap_or_else(|| "unknown".to_string()));
+                            fallback_from = Some(
+                                self.providers
+                                    .get(*provider_idx)
+                                    .map(|p| p.name().to_string())
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                            );
                         }
                         last_error = Some(e);
                         continue;

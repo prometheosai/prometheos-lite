@@ -1,10 +1,12 @@
 //! OpenTelemetry integration for trace export
 
 use anyhow::Result;
-use opentelemetry::trace::{Span as SpanTrait, SpanKind, Status, Tracer as OtelTracer, TracerProvider as OtelTracerProvider};
+use opentelemetry::trace::{
+    Span as SpanTrait, SpanKind, Status, Tracer as OtelTracer, TracerProvider as OtelTracerProvider,
+};
 use opentelemetry::{Key, KeyValue};
-use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
 
 use super::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 
@@ -76,12 +78,10 @@ impl OtelExporter {
         } else if let Some(_endpoint) = &config.endpoint {
             // Export to OTLP endpoint - simplified for compatibility
             // For now, use a basic tracer without OTLP due to API complexity
-            sdktrace::TracerProvider::builder()
-                .build()
+            sdktrace::TracerProvider::builder().build()
         } else {
             // No export configured, use no-op tracer
-            sdktrace::TracerProvider::builder()
-                .build()
+            sdktrace::TracerProvider::builder().build()
         };
 
         let tracer = tracer_provider.tracer(config.service_name.clone());
@@ -91,7 +91,8 @@ impl OtelExporter {
 
     /// Export a hierarchical trace to OpenTelemetry
     pub fn export_trace(&self, trace: &HierarchicalTrace) -> Result<()> {
-        let mut root_span = self.tracer
+        let mut root_span = self
+            .tracer
             .span_builder("flow_execution")
             .with_kind(SpanKind::Server)
             .start(&self.tracer);
@@ -127,7 +128,8 @@ impl OtelExporter {
 
     /// Export a node run as a span
     fn export_node_run(&self, node_run: &NodeRun) -> Result<()> {
-        let mut span = self.tracer
+        let mut span = self
+            .tracer
             .span_builder("node_execution")
             .with_kind(SpanKind::Internal)
             .start(&self.tracer);
@@ -159,7 +161,8 @@ impl OtelExporter {
 
     /// Export a tool call as a span
     fn export_tool_call(&self, tool_call: &ToolCall) -> Result<()> {
-        let mut span = self.tracer
+        let mut span = self
+            .tracer
             .span_builder("tool_call")
             .with_kind(SpanKind::Client)
             .start(&self.tracer);
@@ -184,7 +187,8 @@ impl OtelExporter {
 
     /// Export an LLM call as a span
     fn export_llm_call(&self, llm_call: &LlmCall) -> Result<()> {
-        let mut span = self.tracer
+        let mut span = self
+            .tracer
             .span_builder("llm_call")
             .with_kind(SpanKind::Client)
             .start(&self.tracer);
@@ -218,8 +222,8 @@ impl OtelExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flow::tracing::{RunId, TraceId};
     use chrono::Utc;
-    use crate::flow::tracing::{TraceId, RunId};
 
     #[test]
     fn test_otel_config_default() {
@@ -494,7 +498,7 @@ mod tests {
             tool_calls: vec![],
             llm_calls: vec![],
             started_at: Utc::now(),
-            completed_at: None,  // Incomplete trace
+            completed_at: None, // Incomplete trace
         };
 
         let result = exporter.export_trace(&trace);
@@ -510,7 +514,7 @@ mod tests {
             node_id: "planner".to_string(),
             trace_id: TraceId::from("trace-123"),
             input_summary: Some("input".to_string()),
-            output_summary: None,  // No output
+            output_summary: None, // No output
             status: "in_progress".to_string(),
             duration_ms: 100,
             error: None,

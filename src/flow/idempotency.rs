@@ -40,7 +40,11 @@ impl IdempotencyKey {
 
     /// Compute an operation hash from content and parameters
     pub fn compute_operation_hash(content: &str, parameters: &serde_json::Value) -> String {
-        let combined = format!("{}:{}", content, serde_json::to_string(parameters).unwrap_or_default());
+        let combined = format!(
+            "{}:{}",
+            content,
+            serde_json::to_string(parameters).unwrap_or_default()
+        );
         let mut hasher = DefaultHasher::new();
         combined.hash(&mut hasher);
         format!("{:x}", hasher.finish())

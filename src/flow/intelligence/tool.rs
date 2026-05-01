@@ -314,7 +314,10 @@ impl ToolRuntime {
         let mut registry = ToolRegistry::new();
 
         // Register repo tools
-        use crate::tools::{ListTreeTool, RepoReadFileTool, SearchFilesTool, WriteFileTool, PatchFileTool, GitDiffTool};
+        use crate::tools::{
+            GitDiffTool, ListTreeTool, PatchFileTool, RepoReadFileTool, SearchFilesTool,
+            WriteFileTool,
+        };
         registry.register(Arc::new(ListTreeTool::new(repo_path.clone())));
         registry.register(Arc::new(RepoReadFileTool::new(repo_path.clone())));
         registry.register(Arc::new(SearchFilesTool::new(repo_path.clone())));
@@ -365,7 +368,11 @@ impl ToolRuntime {
         let registry = TrustRegistry::new();
         let trust_level = registry.get_trust_level(&context.tool_name);
         if registry.requires_approval(&context.tool_name) && context.requires_approval() {
-            anyhow::bail!("Tool '{}' requires approval (trust level: {:?})", context.tool_name, trust_level);
+            anyhow::bail!(
+                "Tool '{}' requires approval (trust level: {:?})",
+                context.tool_name,
+                trust_level
+            );
         }
 
         // Check if command is allowed by sandbox profile
@@ -404,7 +411,11 @@ impl ToolRuntime {
         // Check tool whitelist if strict mode is enabled
         if self.strict_mode {
             if !self.registry.is_tool_allowed(&context.run_id, &tool.name()) {
-                anyhow::bail!("Tool '{}' is not in the whitelist for context '{}'", tool.name(), context.run_id);
+                anyhow::bail!(
+                    "Tool '{}' is not in the whitelist for context '{}'",
+                    tool.name(),
+                    context.run_id
+                );
             }
         }
 
@@ -412,8 +423,13 @@ impl ToolRuntime {
 
         // In strict mode, check for empty outputs
         if self.strict_mode {
-            if result.is_null() || (result.is_object() && result.as_object().map(|o| o.is_empty()).unwrap_or(false)) {
-                anyhow::bail!("Tool '{}' returned empty output in strict mode", tool.name());
+            if result.is_null()
+                || (result.is_object() && result.as_object().map(|o| o.is_empty()).unwrap_or(false))
+            {
+                anyhow::bail!(
+                    "Tool '{}' returned empty output in strict mode",
+                    tool.name()
+                );
             }
         }
 

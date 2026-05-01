@@ -90,11 +90,17 @@ impl LlmUtilities {
     }
 
     /// Streaming call with metadata
-    pub async fn call_stream_with_metadata<F>(&self, prompt: &str, callback: F) -> Result<GenerateResult>
+    pub async fn call_stream_with_metadata<F>(
+        &self,
+        prompt: &str,
+        callback: F,
+    ) -> Result<GenerateResult>
     where
         F: Fn(&str) + Send + Sync + 'static,
     {
         let callback = Arc::new(callback);
-        self.router.generate_stream_with_metadata(prompt, callback).await
+        self.router
+            .generate_stream_with_metadata(prompt, callback)
+            .await
     }
 }

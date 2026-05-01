@@ -3,7 +3,7 @@
 //! - Tool idempotency checks
 //! - No silent failures
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -156,12 +156,10 @@ impl StrictModeEnforcer {
                 .context(format!("Value '{}' is None", value_name));
         }
 
-        value
-            .cloned()
-            .context(format!(
-                "Strict mode violation: Value '{}' is None. Silent None propagation is not allowed.",
-                value_name
-            ))
+        value.cloned().context(format!(
+            "Strict mode violation: Value '{}' is None. Silent None propagation is not allowed.",
+            value_name
+        ))
     }
 
     /// Check tool idempotency - same args should produce same result
@@ -180,7 +178,7 @@ impl StrictModeEnforcer {
         let cache_key = format!("{}:{}", tool_name, args_hash);
 
         let mut cache = self.tool_call_cache.lock().unwrap();
-        
+
         if let Some(cached) = cache.get(&cache_key) {
             // Check if result is consistent with previous call
             if cached.result_hash != result_hash {
@@ -215,7 +213,7 @@ impl StrictModeEnforcer {
         let outbox_key = format!("{}:{}", tool_name, args_hash);
 
         let mut outbox = self.tool_outbox.lock().unwrap();
-        
+
         if outbox.contains_key(&outbox_key) {
             return Ok(true); // Already executed
         }
@@ -260,11 +258,13 @@ impl StrictModeEnforcer {
     /// V1.4: Validate patch result in strict mode
     pub fn validate_patch_result(&self, patch_result: &Value) -> Result<()> {
         if self.should_stop_on_invalid_patch() {
-            let success = patch_result.get("success")
+            let success = patch_result
+                .get("success")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let validation = patch_result.get("validation")
+            let validation = patch_result
+                .get("validation")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
@@ -281,7 +281,8 @@ impl StrictModeEnforcer {
 
     /// V1.4: Validate test result in strict mode
     pub fn validate_test_result(&self, test_result: &Value) -> Result<bool> {
-        let success = test_result.get("success")
+        let success = test_result
+            .get("success")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -295,7 +296,8 @@ impl StrictModeEnforcer {
     /// V1.5: Enforce no silent failures - any error should be propagated
     pub fn enforce_no_silent_failure(&self, result: Result<()>, operation: &str) -> Result<()> {
         if self.config.enforce_empty_outputs {
-            result.with_context(|| format!("Strict mode violation: Operation '{}' failed", operation))
+            result
+                .with_context(|| format!("Strict mode violation: Operation '{}' failed", operation))
         } else {
             result
         }
@@ -340,7 +342,11 @@ mod tests {
 
         // Valid input
         assert!(enforcer.validate_input(&json!("test"), "field").is_ok());
-        assert!(enforcer.validate_input(&json!({"key": "value"}), "field").is_ok());
+        assert!(
+            enforcer
+                .validate_input(&json!({"key": "value"}), "field")
+                .is_ok()
+        );
         assert!(enforcer.validate_input(&json!(["item"]), "field").is_ok());
 
         // Invalid input
@@ -366,7 +372,11 @@ mod tests {
 
         let service = "test_service";
         assert!(enforcer.validate_service(Some(&service), "service").is_ok());
-        assert!(enforcer.validate_service::<String>(None, "service").is_err());
+        assert!(
+            enforcer
+                .validate_service::<String>(None, "service")
+                .is_err()
+        );
     }
 
     #[test]
@@ -402,25 +412,33 @@ mod tests {
         let result1 = json!({"output": "result1"});
 
         // First call should succeed
-        assert!(enforcer
-            .check_tool_idempotency("test_tool", &args, &result1)
-            .is_ok());
+        assert!(
+            enforcer
+                .check_tool_idempotency("test_tool", &args, &result1)
+                .is_ok()
+        );
 
         // Same args, same result should succeed
-        assert!(enforcer
-            .check_tool_idempotency("test_tool", &args, &result1)
-            .is_ok());
+        assert!(
+            enforcer
+                .check_tool_idempotency("test_tool", &args, &result1)
+                .is_ok()
+        );
 
         // Same args, different result should fail
         let result2 = json!({"output": "result2"});
-        assert!(enforcer
-            .check_tool_idempotency("test_tool", &args, &result2)
-            .is_err());
+        assert!(
+            enforcer
+                .check_tool_idempotency("test_tool", &args, &result2)
+                .is_err()
+        );
 
         // Clear cache and retry
         enforcer.clear_tool_cache();
-        assert!(enforcer
-            .check_tool_idempotency("test_tool", &args, &result2)
-            .is_ok());
+        assert!(
+            enforcer
+                .check_tool_idempotency("test_tool", &args, &result2)
+                .is_ok()
+        );
     }
 }

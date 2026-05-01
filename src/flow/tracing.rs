@@ -436,7 +436,11 @@ impl Tracer {
         }
     }
 
-    pub fn with_hierarchical_trace(trace_id: TraceId, flow_run_id: RunId, work_context_id: Option<String>) -> Self {
+    pub fn with_hierarchical_trace(
+        trace_id: TraceId,
+        flow_run_id: RunId,
+        work_context_id: Option<String>,
+    ) -> Self {
         Self {
             logs: Vec::new(),
             timeline: Vec::new(),
@@ -914,7 +918,8 @@ mod tests {
         let run_id = Tracer::generate_run_id();
         let work_context_id = Some("ctx-123".to_string());
 
-        let mut tracer = Tracer::with_hierarchical_trace(trace_id.clone(), run_id.clone(), work_context_id);
+        let mut tracer =
+            Tracer::with_hierarchical_trace(trace_id.clone(), run_id.clone(), work_context_id);
 
         let hierarchical = tracer.get_hierarchical_trace();
         assert!(hierarchical.is_some());
@@ -1015,11 +1020,23 @@ mod tests {
             None,
         );
 
-        assert!(tracer.get_hierarchical_trace().unwrap().completed_at.is_none());
+        assert!(
+            tracer
+                .get_hierarchical_trace()
+                .unwrap()
+                .completed_at
+                .is_none()
+        );
 
         tracer.complete_hierarchical_trace();
 
-        assert!(tracer.get_hierarchical_trace().unwrap().completed_at.is_some());
+        assert!(
+            tracer
+                .get_hierarchical_trace()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
     }
 
     #[test]

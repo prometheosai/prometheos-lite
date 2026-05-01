@@ -74,7 +74,10 @@ impl LoopDetector {
     /// Record a transition
     pub fn record_transition(&mut self, from: &str, to: &str) -> Result<(), String> {
         let transition_key = format!("{}->{}", from, to);
-        let count = self.transition_counts.entry(transition_key.clone()).or_insert(0);
+        let count = self
+            .transition_counts
+            .entry(transition_key.clone())
+            .or_insert(0);
         *count += 1;
 
         if *count > self.config.max_repeated_transition {

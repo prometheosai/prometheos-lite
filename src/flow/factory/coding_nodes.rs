@@ -3,8 +3,8 @@
 //! This module provides flow nodes that are aware of repository structure
 //! and can perform code analysis, navigation, and manipulation operations.
 
-use crate::flow::node::{Node, NodeConfig};
 use crate::flow::SharedState;
+use crate::flow::node::{Node, NodeConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::json;
@@ -46,12 +46,13 @@ impl Node for CodeAnalysisNode {
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let file_path = input.get("file_path")
+        let file_path = input
+            .get("file_path")
             .and_then(|v| v.as_str())
             .context("Missing file_path in input")?;
 
         let full_path = self.repo_path.join(file_path);
-        
+
         if !full_path.exists() {
             return Ok(json!({
                 "error": format!("File not found: {}", full_path.display()),
@@ -59,10 +60,12 @@ impl Node for CodeAnalysisNode {
             }));
         }
 
-        let content = tokio::fs::read_to_string(&full_path).await
+        let content = tokio::fs::read_to_string(&full_path)
+            .await
             .context("Failed to read file")?;
 
-        let extension = full_path.extension()
+        let extension = full_path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("unknown");
 
@@ -149,15 +152,15 @@ impl Node for SymbolResolutionNode {
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        let symbol = input.get("symbol")
+        let symbol = input
+            .get("symbol")
             .and_then(|v| v.as_str())
             .context("Missing symbol in input")?;
-        
-        let file_path = input.get("file_path")
-            .and_then(|v| v.as_str());
+
+        let file_path = input.get("file_path").and_then(|v| v.as_str());
 
         let mut definitions = Vec::new();
-        
+
         if let Some(fp) = file_path {
             let full_path = self.repo_path.join(fp);
             if full_path.exists() {
@@ -184,23 +187,33 @@ impl Node for SymbolResolutionNode {
 }
 
 impl SymbolResolutionNode {
-    async fn search_file_for_symbol(&self, path: &Path, symbol: &str) -> Result<Option<serde_json::Value>> {
-        let content = tokio::fs::read_to_string(path).await
+    async fn search_file_for_symbol(
+        &self,
+        path: &Path,
+        symbol: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let content = tokio::fs::read_to_string(path)
+            .await
             .context("Failed to read file")?;
-        
-        let extension = path.extension()
+
+        let extension = path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("unknown");
 
         for (line_num, line) in content.lines().enumerate() {
             let line = line.trim();
-            
-            if line.contains(symbol) && (
-                line.starts_with("fn ") || line.starts_with("pub fn ") ||
-                line.starts_with("struct ") || line.starts_with("pub struct ") ||
-                line.starts_with("type ") || line.starts_with("def ") ||
-                line.starts_with("class ") || line.starts_with("function ")
-            ) {
+
+            if line.contains(symbol)
+                && (line.starts_with("fn ")
+                    || line.starts_with("pub fn ")
+                    || line.starts_with("struct ")
+                    || line.starts_with("pub struct ")
+                    || line.starts_with("type ")
+                    || line.starts_with("def ")
+                    || line.starts_with("class ")
+                    || line.starts_with("function "))
+            {
                 return Ok(Some(json!({
                     "file": path.to_string_lossy(),
                     "line": line_num + 1,
@@ -209,7 +222,7 @@ impl SymbolResolutionNode {
                 })));
             }
         }
-        
+
         Ok(None)
     }
 }

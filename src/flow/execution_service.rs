@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::flow::budget::{BudgetGuard, ExecutionBudget};
-use crate::flow::execution::{Flow, RunDb, ContinuationEngine};
+use crate::flow::execution::{ContinuationEngine, Flow, RunDb};
 use crate::flow::factory::{DefaultNodeFactory, NodeFactory};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::flow::output::{Evaluation, FinalOutput};
@@ -111,7 +111,9 @@ impl FlowExecutionService {
         let db_path = PathBuf::from(".prometheos/runs.db");
         let run_db = RunDb::new(db_path).ok().map(|db| Arc::new(Mutex::new(db)));
         let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
-        let continuation_engine = Some(Arc::new(Mutex::new(ContinuationEngine::new(checkpoint_dir))));
+        let continuation_engine = Some(Arc::new(Mutex::new(ContinuationEngine::new(
+            checkpoint_dir,
+        ))));
 
         Ok(Self {
             runtime,
@@ -133,7 +135,9 @@ impl FlowExecutionService {
         let db_path = PathBuf::from(".prometheos/runs.db");
         let run_db = RunDb::new(db_path).ok().map(|db| Arc::new(Mutex::new(db)));
         let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
-        let continuation_engine = Some(Arc::new(Mutex::new(ContinuationEngine::new(checkpoint_dir))));
+        let continuation_engine = Some(Arc::new(Mutex::new(ContinuationEngine::new(
+            checkpoint_dir,
+        ))));
 
         Ok(Self {
             runtime,
@@ -282,7 +286,7 @@ impl FlowExecutionService {
         // Set strict mode enforcer in state for runtime enforcement
         if let Some(ref strict_mode) = options.strict_mode {
             state.set_strict_mode_enforcer(Arc::new(strict_mode.clone()));
-            
+
             // V1.5: Enforce no silent failures - validate input
             strict_mode.validate_input(&serde_json::json!(message), "task")?;
         }
@@ -343,10 +347,8 @@ impl FlowExecutionService {
         }
 
         // 11. Extract execution metadata from state
-        let execution_metadata: std::collections::HashMap<String, serde_json::Value> = state
-            .get_execution_metadata()
-            .into_iter()
-            .collect();
+        let execution_metadata: std::collections::HashMap<String, serde_json::Value> =
+            state.get_execution_metadata().into_iter().collect();
 
         // 12. Save checkpoint if continuation engine is available
         if let Some(ref continuation_engine) = self.continuation_engine {
@@ -405,13 +407,8 @@ impl FlowExecutionService {
                 output
             }
             Err(e) => {
-                let mut output = FinalOutput::failure(
-                    run_id,
-                    trace_id,
-                    flow_name,
-                    e.to_string(),
-                    duration_ms,
-                );
+                let mut output =
+                    FinalOutput::failure(run_id, trace_id, flow_name, e.to_string(), duration_ms);
                 output.execution_metadata = execution_metadata;
                 output
             }
@@ -509,10 +506,8 @@ impl FlowExecutionService {
         }
 
         // Extract execution metadata from state
-        let execution_metadata: std::collections::HashMap<String, serde_json::Value> = state
-            .get_execution_metadata()
-            .into_iter()
-            .collect();
+        let execution_metadata: std::collections::HashMap<String, serde_json::Value> =
+            state.get_execution_metadata().into_iter().collect();
 
         // Save checkpoint if continuation engine is available
         if let Some(ref continuation_engine) = self.continuation_engine {
@@ -570,13 +565,8 @@ impl FlowExecutionService {
                 Ok(output)
             }
             Err(e) => {
-                let mut output = FinalOutput::failure(
-                    run_id,
-                    trace_id,
-                    flow_name,
-                    e.to_string(),
-                    duration_ms,
-                );
+                let mut output =
+                    FinalOutput::failure(run_id, trace_id, flow_name, e.to_string(), duration_ms);
                 output.execution_metadata = execution_metadata;
                 Ok(output)
             }

@@ -1,7 +1,7 @@
 //! Built-in node implementations
 
-use crate::flow::node::{Node, NodeConfig};
 use crate::flow::SharedState;
+use crate::flow::node::{Node, NodeConfig};
 use crate::tools::PathGuard;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,11 +11,9 @@ use std::sync::Arc;
 // Import guardrail database operations
 use crate::db::repository::{InterruptOperations, OutboxOperations};
 
-use crate::flow::{
-    MemoryService, MemoryType, ModelRouter, ToolRuntime,
-};
-use crate::personality::{ConstitutionalFilter, PersonalityMode, PromptContext};
 use crate::context::{ContextBuilder, ContextInputs};
+use crate::flow::{MemoryService, MemoryType, ModelRouter, ToolRuntime};
+use crate::personality::{ConstitutionalFilter, PersonalityMode, PromptContext};
 
 /// IdWrapper - wraps a node to override its id
 pub struct IdWrapper {
@@ -114,7 +112,9 @@ impl Node for PlannerNode {
             .as_str()
             .context("Missing task in planner node input")?;
 
-        let router = self.model_router.as_ref()
+        let router = self
+            .model_router
+            .as_ref()
             .context("PlannerNode requires ModelRouter to be configured")?;
 
         // Use ContextBuilder if available, otherwise fall back to direct prompt construction
@@ -126,10 +126,11 @@ impl Node for PlannerNode {
                 artifacts: Vec::new(),
                 system_prompt: Some("You are a planning assistant. Create a structured plan for the following task. Provide a step-by-step plan as a JSON array of strings.".to_string()),
             };
-            
-            let built_context = builder.build(context_inputs)
+
+            let built_context = builder
+                .build(context_inputs)
                 .context("Failed to build context with ContextBuilder")?;
-            
+
             built_context.prompt
         } else {
             // Fallback to direct prompt construction
@@ -242,7 +243,9 @@ impl Node for CoderNode {
             .context("Missing task in coder node input")?;
         let plan = &input["plan"];
 
-        let router = self.model_router.as_ref()
+        let router = self
+            .model_router
+            .as_ref()
             .context("CoderNode requires ModelRouter to be configured")?;
 
         // Use ContextBuilder if available, otherwise fall back to direct prompt construction
@@ -255,10 +258,11 @@ impl Node for CoderNode {
                 artifacts: Vec::new(),
                 system_prompt: Some("You are a coding assistant. Generate code for the following task based on the provided plan. Provide the generated code only, without explanations.".to_string()),
             };
-            
-            let built_context = builder.build(context_inputs)
+
+            let built_context = builder
+                .build(context_inputs)
                 .context("Failed to build context with ContextBuilder")?;
-            
+
             built_context.prompt
         } else {
             // Fallback to direct prompt construction
@@ -373,7 +377,9 @@ impl Node for ReviewerNode {
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
         let generated = &input["generated"];
 
-        let router = self.model_router.as_ref()
+        let router = self
+            .model_router
+            .as_ref()
             .context("ReviewerNode requires ModelRouter to be configured")?;
 
         // Use ContextBuilder if available, otherwise fall back to direct prompt construction
@@ -391,10 +397,11 @@ impl Node for ReviewerNode {
                 }],
                 system_prompt: Some("You are a code reviewer. Provide a brief review with feedback on quality, correctness, and potential improvements.".to_string()),
             };
-            
-            let built_context = builder.build(context_inputs)
+
+            let built_context = builder
+                .build(context_inputs)
                 .context("Failed to build context with ContextBuilder")?;
-            
+
             built_context.prompt
         } else {
             // Fallback to direct prompt construction
@@ -521,7 +528,9 @@ impl Node for LlmNode {
             .as_str()
             .context("Missing prompt in LLM node input")?;
 
-        let router = self.model_router.as_ref()
+        let router = self
+            .model_router
+            .as_ref()
             .context("LlmNode requires ModelRouter to be configured")?;
 
         // Use ContextBuilder if available, otherwise fall back to direct prompt construction
@@ -533,10 +542,11 @@ impl Node for LlmNode {
                 artifacts: Vec::new(),
                 system_prompt: None,
             };
-            
-            let built_context = builder.build(context_inputs)
+
+            let built_context = builder
+                .build(context_inputs)
                 .context("Failed to build context with ContextBuilder")?;
-            
+
             built_context.prompt
         } else {
             // Use prompt directly or with template
@@ -655,13 +665,8 @@ impl Node for ToolNode {
             })
             .unwrap_or_else(crate::tools::ToolPolicy::conservative);
 
-        let context = crate::tools::ToolContext::new(
-            run_id,
-            trace_id,
-            node_id,
-            tool_name.clone(),
-            policy,
-        );
+        let context =
+            crate::tools::ToolContext::new(run_id, trace_id, node_id, tool_name.clone(), policy);
 
         Ok(serde_json::json!({
             "tool_name": tool_name,
@@ -677,11 +682,13 @@ impl Node for ToolNode {
         let tool_args = &input["tool_args"];
 
         // Extract ToolContext from input
-        let context: crate::tools::ToolContext = serde_json::from_value(
-            input["tool_context"].clone()
-        ).context("Missing or invalid tool_context in tool node input")?;
+        let context: crate::tools::ToolContext =
+            serde_json::from_value(input["tool_context"].clone())
+                .context("Missing or invalid tool_context in tool node input")?;
 
-        let runtime = self.tool_runtime.as_ref()
+        let runtime = self
+            .tool_runtime
+            .as_ref()
             .context("ToolNode requires ToolRuntime to be configured")?;
 
         // Parse tool_args as a command and arguments
@@ -774,13 +781,11 @@ impl Node for FileWriterNode {
         let path_guard = crate::tools::PathGuard::default();
         let canonical_path = path_guard.validate_path(&file_path)?;
 
-        Ok(
-            serde_json::json!({
-                "content": content,
-                "file_path": canonical_path,
-                "tool_context": context
-            }),
-        )
+        Ok(serde_json::json!({
+            "content": content,
+            "file_path": canonical_path,
+            "tool_context": context
+        }))
     }
 
     async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
@@ -792,9 +797,9 @@ impl Node for FileWriterNode {
             .context("Missing file_path in file writer node input")?;
 
         // Extract ToolContext for idempotency
-        let context: crate::tools::ToolContext = serde_json::from_value(
-            input["tool_context"].clone()
-        ).context("Missing or invalid tool_context in file writer node input")?;
+        let context: crate::tools::ToolContext =
+            serde_json::from_value(input["tool_context"].clone())
+                .context("Missing or invalid tool_context in file writer node input")?;
 
         // Generate idempotency key for this operation
         let operation_hash = crate::flow::IdempotencyKey::compute_operation_hash(
@@ -865,7 +870,8 @@ impl Node for FileWriterNode {
                                 "success": true,
                                 "file_path": file_path,
                                 "bytes_written": content.len()
-                            }).to_string()
+                            })
+                            .to_string(),
                         );
                     }
                 }
@@ -938,7 +944,9 @@ impl Node for ContextLoaderNode {
             .as_str()
             .context("Missing query in context loader node input")?;
 
-        let service = self.memory_service.as_ref()
+        let service = self
+            .memory_service
+            .as_ref()
             .context("ContextLoaderNode requires MemoryService to be configured")?;
 
         // Use MemoryService for actual retrieval
@@ -1003,7 +1011,9 @@ impl Node for MemoryWriteNode {
             .as_str()
             .context("Missing task in memory write node input")?;
 
-        let service = self.memory_service.as_ref()
+        let service = self
+            .memory_service
+            .as_ref()
             .context("MemoryWriteNode requires MemoryService to be configured")?;
 
         // Use MemoryService for actual write - fail on embedding server errors
@@ -1015,7 +1025,7 @@ impl Node for MemoryWriteNode {
             )
             .await
             .context("Memory write failed - embedding server may be unavailable")?;
-        
+
         Ok(serde_json::json!({ "memory_id": memory_id, "status": "success" }))
     }
 
@@ -1072,7 +1082,8 @@ impl Node for ConditionalNode {
             "false" => false,
             _ => {
                 // Try to parse as boolean
-                condition.parse::<bool>()
+                condition
+                    .parse::<bool>()
                     .context("Failed to parse condition as boolean")?
             }
         };
@@ -1084,7 +1095,7 @@ impl Node for ConditionalNode {
         let result = output["result"]
             .as_bool()
             .context("ConditionalNode post requires boolean result");
-        
+
         match result {
             Ok(true) => "true".to_string(),
             Ok(false) => "false".to_string(),
