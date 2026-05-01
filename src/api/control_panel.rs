@@ -4,6 +4,7 @@
 //! including system metrics, job queue status, and skill/evolution management.
 
 use crate::api::state::AppState;
+use crate::db::repository::{EvolutionsOperations, SkillsOperations, FlowRunOperations};
 use crate::queue::JobQueueStats;
 use axum::{Router, extract::State, http::StatusCode, response::Json, routing::get};
 use serde::{Deserialize, Serialize};
@@ -66,7 +67,7 @@ pub fn create_control_panel_router() -> Router<Arc<AppState>> {
 
 /// Get comprehensive control panel statistics
 async fn get_stats(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ControlPanelStats>, StatusCode> {
     let system_metrics = get_system_metrics().await;
 
@@ -80,9 +81,17 @@ async fn get_stats(
         cancelled: 0,
     };
 
-    let skills_count = 0;
-    let evolutions_count = 0;
-    let active_flows = 0;
+    // V1.5.2: Real database counts for skills, evolutions, and active flows
+    let (skills_count, evolutions_count, active_flows) =
+        if let Ok(db) = crate::db::repository::Db::new(&state.db_path) {
+            (
+                db.count_skills().unwrap_or(0) as usize,
+                db.count_evolutions().unwrap_or(0) as usize,
+                db.count_active_flow_runs().unwrap_or(0) as usize,
+            )
+        } else {
+            (0, 0, 0)
+        };
 
     let stats = ControlPanelStats {
         system: system_metrics,
