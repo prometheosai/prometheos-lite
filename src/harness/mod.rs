@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod adversarial_validation;
 pub mod artifacts;
+pub mod benchmark;
 pub mod completion;
 pub mod confidence;
 pub mod edit_protocol;
@@ -9,6 +10,7 @@ pub mod execution_loop;
 pub mod failure;
 pub mod file_control;
 pub mod git_checkpoint;
+pub mod golden_paths;
 pub mod knowledge_cache;
 pub mod minimality;
 pub mod model_strategy;

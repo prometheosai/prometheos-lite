@@ -10,6 +10,7 @@ axum = { version = "0.7", features = ["ws"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+dirs = "5"
 # Tree-sitter for AST-based code analysis
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcceptanceCriterion {
     pub id: String,
     pub description: String,
@@ -48,7 +48,7 @@ pub enum CriterionPriority {
     Low,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompiledAcceptanceCriteria {
     pub criteria: Vec<AcceptanceCriterion>,
     pub test_commands: Vec<String>,

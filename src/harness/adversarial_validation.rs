@@ -1,4 +1,4 @@
-use crate::harness::repo_intelligence::SymbolInfo;
+use crate::harness::repo_intelligence::CodeSymbol;
 use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -86,13 +86,13 @@ pub enum Property {
     TotalOrder,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ValueGenerator {
     pub gen_type: GeneratorType,
     pub constraints: Vec<Constraint>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum GeneratorType {
     IntegerRange { min: i64, max: i64 },
     StringPattern { pattern: String, min_len: usize, max_len: usize },
@@ -293,7 +293,7 @@ impl AdversarialTestGenerator {
 
     pub fn generate_complete_suite(
         &self,
-        symbols: &[SymbolInfo],
+        symbols: &[CodeSymbol],
         language: &str,
     ) -> AdversarialTestSuite {
         let mut all_edge_cases = vec![];
@@ -439,7 +439,7 @@ impl AdversarialTestGenerator {
 }
 
 pub fn generate_adversarial_tests(
-    symbols: &[SymbolInfo],
+    symbols: &[CodeSymbol],
     language: &str,
 ) -> AdversarialTestSuite {
     let generator = AdversarialTestGenerator::new();
