@@ -444,16 +444,24 @@ impl EvolutionEngine {
                     }
                 }
             } else if pattern.signal.starts_with("model_usage_") {
-                // Extract flow_id from signal: "model_usage_{flow_id}_{model_name}"
-                // Target only the specific flow that used this model
+                // Extract flow_id from signal: "model_usage_{flow_id}_{model_name}".
+                // If the signal is not flow-scoped, apply a global adjustment.
                 let parts: Vec<&str> = pattern.signal.split('_').collect();
+                let mut matched_specific_flow = false;
                 if parts.len() >= 3 {
                     let flow_id = parts[2]; // "model_usage_{flow_id}_{model_name}"
                     for flow_pref in &mut playbook.preferred_flows {
                         if flow_pref.flow_id == flow_id {
                             flow_pref.weight = (flow_pref.weight + 0.1).min(1.0);
                             flow_pref.confidence = (flow_pref.confidence + 0.05).min(1.0);
+                            matched_specific_flow = true;
                         }
+                    }
+                }
+                if !matched_specific_flow {
+                    for flow_pref in &mut playbook.preferred_flows {
+                        flow_pref.weight = (flow_pref.weight + 0.05).min(1.0);
+                        flow_pref.confidence = (flow_pref.confidence + 0.02).min(1.0);
                     }
                 }
             }
@@ -476,16 +484,24 @@ impl EvolutionEngine {
                     }
                 }
             } else if pattern.signal.starts_with("model_usage_") {
-                // Extract flow_id from signal: "model_usage_{flow_id}_{model_name}"
-                // Target only the specific flow that used this model
+                // Extract flow_id from signal: "model_usage_{flow_id}_{model_name}".
+                // If the signal is not flow-scoped, apply a global adjustment.
                 let parts: Vec<&str> = pattern.signal.split('_').collect();
+                let mut matched_specific_flow = false;
                 if parts.len() >= 3 {
                     let flow_id = parts[2]; // "model_usage_{flow_id}_{model_name}"
                     for flow_pref in &mut playbook.preferred_flows {
                         if flow_pref.flow_id == flow_id {
                             flow_pref.weight = (flow_pref.weight - 0.1).max(0.0);
                             flow_pref.confidence = (flow_pref.confidence - 0.05).max(0.0);
+                            matched_specific_flow = true;
                         }
+                    }
+                }
+                if !matched_specific_flow {
+                    for flow_pref in &mut playbook.preferred_flows {
+                        flow_pref.weight = (flow_pref.weight - 0.05).max(0.0);
+                        flow_pref.confidence = (flow_pref.confidence - 0.02).max(0.0);
                     }
                 }
             }
@@ -595,6 +611,65 @@ impl EvolutionEngine {
             )
             .context("Failed to create ab_tests table")?;
 
+        // Schema compatibility for older deployments that created a reduced
+        // playbook_evolutions table.
+        self.ensure_column("playbook_evolutions", "performance", "TEXT NOT NULL DEFAULT '{}'")?;
+        self.ensure_column(
+            "playbook_evolutions",
+            "execution_count",
+            "TEXT NOT NULL DEFAULT '0'",
+        )?;
+        self.ensure_column(
+            "playbook_evolutions",
+            "success_rate",
+            "TEXT NOT NULL DEFAULT '0.0'",
+        )?;
+        self.ensure_column(
+            "playbook_evolutions",
+            "avg_duration_ms",
+            "TEXT NOT NULL DEFAULT '0'",
+        )?;
+        self.ensure_column(
+            "playbook_evolutions",
+            "status",
+            "TEXT NOT NULL DEFAULT 'testing'",
+        )?;
+        self.ensure_column(
+            "playbook_evolutions",
+            "updated_at",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, column_def: &str) -> Result<()> {
+        let pragma = format!("PRAGMA table_info({})", table);
+        let has_column = {
+            let mut stmt = self
+                .db
+                .conn()
+                .prepare(&pragma)
+                .with_context(|| format!("Failed to inspect schema for table '{}'", table))?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for row in rows {
+                if row? == column {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+
+        if !has_column {
+            let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_def);
+            self.db
+                .conn()
+                .execute(&alter, [])
+                .with_context(|| format!("Failed to add column '{}' to '{}'", column, table))?;
+        }
+
         Ok(())
     }
 
@@ -656,9 +731,9 @@ impl EvolutionEngine {
             .execute(
                 "INSERT OR REPLACE INTO playbook_evolutions (
                 id, playbook_id, version, parent_version, mutation_strategy,
-                performance, execution_count, success_rate, avg_duration_ms,
+                performance, performance_score, execution_count, success_rate, avg_duration_ms,
                 status, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 [
                     &evolution.id,
                     &evolution.playbook_id,
@@ -670,6 +745,7 @@ impl EvolutionEngine {
                         .unwrap_or_default(),
                     &strategy_json,
                     &performance_json,
+                    &evolution.success_rate.to_string(),
                     &(evolution.execution_count.to_string()),
                     &evolution.success_rate.to_string(),
                     &(evolution.avg_duration_ms.to_string()),
@@ -732,8 +808,8 @@ impl EvolutionEngine {
         self.init_tables()?;
 
         let mut stmt = self.db.conn().prepare(
-            "SELECT id, playbook_id, version, parent_version, mutation_strategy,
-                    performance, execution_count, success_rate, avg_duration_ms,
+            "SELECT id, playbook_id, CAST(version AS TEXT), CAST(parent_version AS TEXT), mutation_strategy,
+                    performance, CAST(execution_count AS TEXT), CAST(success_rate AS TEXT), CAST(avg_duration_ms AS TEXT),
                     status, created_at, updated_at
              FROM playbook_evolutions WHERE id = ?1",
         )?;
@@ -816,8 +892,8 @@ impl EvolutionEngine {
         self.init_tables()?;
 
         let mut stmt = self.db.conn().prepare(
-            "SELECT id, playbook_id, version, parent_version, mutation_strategy,
-                    performance, execution_count, success_rate, avg_duration_ms,
+            "SELECT id, playbook_id, CAST(version AS TEXT), CAST(parent_version AS TEXT), mutation_strategy,
+                    performance, CAST(execution_count AS TEXT), CAST(success_rate AS TEXT), CAST(avg_duration_ms AS TEXT),
                     status, created_at, updated_at
              FROM playbook_evolutions WHERE playbook_id = ?1 ORDER BY version DESC",
         )?;
@@ -1560,7 +1636,16 @@ mod tests {
     #[test]
     fn test_create_evolution() {
         let db = Arc::new(Db::in_memory().unwrap());
-        let engine = EvolutionEngine::new(db);
+        let engine = EvolutionEngine::new(db.clone());
+
+        let playbook = crate::work::playbook::WorkContextPlaybook::new(
+            "pb-1".to_string(),
+            "user-1".to_string(),
+            "software".to_string(),
+            "Test Playbook".to_string(),
+            "Test playbook".to_string(),
+        );
+        db.create_playbook(&playbook).unwrap();
 
         let strategy = MutationStrategy::AddNode {
             node_id: "new_node".to_string(),
@@ -1581,7 +1666,16 @@ mod tests {
     #[test]
     fn test_record_execution() {
         let db = Arc::new(Db::in_memory().unwrap());
-        let engine = EvolutionEngine::new(db);
+        let engine = EvolutionEngine::new(db.clone());
+
+        let playbook = crate::work::playbook::WorkContextPlaybook::new(
+            "pb-1".to_string(),
+            "user-1".to_string(),
+            "software".to_string(),
+            "Test Playbook".to_string(),
+            "Test playbook".to_string(),
+        );
+        db.create_playbook(&playbook).unwrap();
 
         let strategy = MutationStrategy::RemoveNode {
             node_id: "old_node".to_string(),
@@ -1604,7 +1698,16 @@ mod tests {
     #[test]
     fn test_promotion_threshold() {
         let db = Arc::new(Db::in_memory().unwrap());
-        let engine = EvolutionEngine::new(db);
+        let engine = EvolutionEngine::new(db.clone());
+
+        let playbook = crate::work::playbook::WorkContextPlaybook::new(
+            "pb-1".to_string(),
+            "user-1".to_string(),
+            "software".to_string(),
+            "Test Playbook".to_string(),
+            "Test playbook".to_string(),
+        );
+        db.create_playbook(&playbook).unwrap();
 
         let strategy = MutationStrategy::AddNode {
             node_id: "new_node".to_string(),

@@ -440,15 +440,49 @@ impl Db {
                 version INTEGER NOT NULL,
                 parent_version INTEGER,
                 mutation_strategy TEXT NOT NULL,
-                performance_score REAL NOT NULL,
+                performance TEXT NOT NULL DEFAULT '{}',
+                performance_score REAL NOT NULL DEFAULT 0.0,
+                execution_count INTEGER NOT NULL DEFAULT 0,
+                success_rate REAL NOT NULL DEFAULT 0.0,
+                avg_duration_ms INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
                 failure_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'testing',
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE
             )",
                 [],
             )
             .context("Failed to create playbook_evolutions table")?;
+
+        // Backward-compatible schema migration for existing databases.
+        let _ = self
+            .conn
+            .execute(
+                "ALTER TABLE playbook_evolutions ADD COLUMN performance TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+        let _ = self.conn.execute(
+            "ALTER TABLE playbook_evolutions ADD COLUMN execution_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE playbook_evolutions ADD COLUMN success_rate REAL NOT NULL DEFAULT 0.0",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE playbook_evolutions ADD COLUMN avg_duration_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE playbook_evolutions ADD COLUMN status TEXT NOT NULL DEFAULT 'testing'",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE playbook_evolutions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+            [],
+        );
 
         // Create index for efficient queries by playbook_id
         self.conn
