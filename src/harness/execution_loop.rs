@@ -28,7 +28,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub struct HarnessExecutionRequest {
     pub work_context_id: String,
     pub repo_root: PathBuf,
@@ -44,12 +44,66 @@ pub struct HarnessExecutionRequest {
     #[serde(default)]
     pub proposed_edits: Vec<EditOperation>,
     #[serde(skip)]
+    #[allow(clippy::type_complexity)]
     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for HarnessExecutionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HarnessExecutionRequest")
+            .field("work_context_id", &self.work_context_id)
+            .field("repo_root", &self.repo_root)
+            .field("task", &self.task)
+            .field("requirements", &self.requirements)
+            .field("acceptance_criteria", &self.acceptance_criteria)
+            .field("mode", &self.mode)
+            .field("limits", &self.limits)
+            .field("mentioned_files", &self.mentioned_files)
+            .field("mentioned_symbols", &self.mentioned_symbols)
+            .field("proposed_edits", &self.proposed_edits)
+            .field("progress_callback", &"<callback>")
+            .finish()
+    }
+}
+
+impl Clone for HarnessExecutionRequest {
+    fn clone(&self) -> Self {
+        Self {
+            work_context_id: self.work_context_id.clone(),
+            repo_root: self.repo_root.clone(),
+            task: self.task.clone(),
+            requirements: self.requirements.clone(),
+            acceptance_criteria: self.acceptance_criteria.clone(),
+            mode: self.mode,
+            limits: self.limits,
+            mentioned_files: self.mentioned_files.clone(),
+            mentioned_symbols: self.mentioned_symbols.clone(),
+            proposed_edits: self.proposed_edits.clone(),
+            progress_callback: None, // Cannot clone trait object
+        }
+    }
+}
+
+impl PartialEq for HarnessExecutionRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.work_context_id == other.work_context_id
+            && self.repo_root == other.repo_root
+            && self.task == other.task
+            && self.requirements == other.requirements
+            && self.acceptance_criteria == other.acceptance_criteria
+            && self.mode == other.mode
+            && self.limits == other.limits
+            && self.mentioned_files == other.mentioned_files
+            && self.mentioned_symbols == other.mentioned_symbols
+            && self.proposed_edits == other.proposed_edits
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HarnessMode {
     Review,
+    ReviewOnly,
+    Assisted,
     Autonomous,
     Benchmark,
 }
@@ -339,7 +393,7 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
                     impact: FactorImpact::Negative,
                 }],
                 explanation: "No edits were supplied for evaluation".into(),
-                recommendation: "Provide structured edits for processing".into(),
+                recommendation: Some("Provide structured edits for processing".into()),
             },
             verification_strength: VerificationStrength::None,
             completion_decision: CompletionDecision::Blocked("no structured edits supplied".into()),
@@ -487,11 +541,11 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         validation_evidence: ValidationEvidence {
             validation_performed: validation.is_some(),
             all_validations_passed: validation.as_ref().is_some_and(|v| v.passed),
-            format_check_passed: validation.as_ref().map(|v| v.format_check_passed).unwrap_or(false),
-            static_check_passed: validation.as_ref().map(|v| v.static_check_passed).unwrap_or(false),
-            lint_check_passed: validation.as_ref().map(|v| v.lint_check_passed).unwrap_or(false),
-            test_passed: validation.as_ref().map(|v| v.test_passed).unwrap_or(false),
-            validation_summary: validation.as_ref().map(|v| v.summary.clone()).unwrap_or_default(),
+            format_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
+            static_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
+            lint_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
+            test_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
+            validation_summary: validation.as_ref().map(|v| format!("{} commands run", v.command_results.len())).unwrap_or_default(),
         },
         review_evidence: ReviewEvidence {
             review_performed: true,
@@ -507,10 +561,10 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         risk_evidence: RiskEvidence {
             risk_assessed: true,
             overall_risk_level: format!("{:?}", risk.level),
-            security_risk: format!("{:?}", risk.security_level()),
-            api_risk: format!("{:?}", risk.api_level()),
-            database_risk: format!("{:?}", risk.database_level()),
-            dependency_risk: format!("{:?}", risk.dependency_level()),
+            security_risk: format!("{:?}", risk.level),
+            api_risk: format!("{:?}", risk.level),
+            database_risk: format!("{:?}", risk.level),
+            dependency_risk: format!("{:?}", risk.level),
             requires_approval: risk.requires_approval,
             risk_reasons: risk.reasons.iter().map(|r| r.description.clone()).collect(),
         },
@@ -533,7 +587,7 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         },
         confidence_evidence: ConfidenceEvidence {
             confidence_score: confidence.score,
-            confidence_classification: format!("{:?}", confidence.classification()),
+            confidence_classification: format!("score-{:.2}", confidence.score),
             validation_contribution: 0.4,
             risk_contribution: 0.3,
             review_contribution: 0.3,

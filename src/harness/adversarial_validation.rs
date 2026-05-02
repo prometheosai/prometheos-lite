@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdversarialTestSuite {
     pub edge_case_tests: Vec<EdgeCaseTest>,
     pub property_tests: Vec<PropertyTest>,

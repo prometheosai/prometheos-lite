@@ -27,6 +27,8 @@ pub enum FailureKind {
     NetworkFailure,
     ResourceExhaustion,
     UnknownFailure,
+    Fatal,
+    Critical,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
