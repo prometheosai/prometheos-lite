@@ -19,7 +19,7 @@ fn test_available_input_tokens() {
 
 #[test]
 fn test_estimate_tokens() {
-    assert_eq!(ContextBudgeter::estimate_tokens("hello world"), 2);
+    assert_eq!(ContextBudgeter::estimate_tokens("hello world"), 3);
     assert_eq!(ContextBudgeter::estimate_tokens(""), 1); // Empty string counts as 1 token
     assert_eq!(
         ContextBudgeter::estimate_tokens("a".repeat(100).as_str()),

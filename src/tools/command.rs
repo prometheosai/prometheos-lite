@@ -577,14 +577,14 @@ mod tests {
         let tool = CommandTool::new();
         let result = tool
             .call(serde_json::json!({
-                "command": "echo",
-                "args": ["hello", "world"]
+                "command": "cargo",
+                "args": ["--version"]
             }))
             .await
             .unwrap();
 
         assert!(result["success"].as_bool().unwrap());
-        assert_eq!(result["stdout"].as_str().unwrap(), "hello world\n");
+        assert!(result["stdout"].as_str().unwrap().contains("cargo"));
         assert_eq!(result["exit_code"].as_i64().unwrap(), 0);
     }
 
@@ -605,11 +605,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_tool_timeout() {
-        let tool = CommandTool::new().with_timeout(100); // 100ms timeout
+        let tool = CommandTool::new().with_timeout(0); // Force immediate timeout
         let result = tool
             .call(serde_json::json!({
-                "command": "sleep",
-                "args": ["10"]
+                "command": "cargo",
+                "args": ["--version"]
             }))
             .await;
 

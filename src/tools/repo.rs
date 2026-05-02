@@ -740,7 +740,10 @@ impl PatchFileTool {
 
     fn count_changes(&self, diff: &str) -> usize {
         diff.lines()
-            .filter(|line| line.starts_with('+') || line.starts_with('-'))
+            .filter(|line| {
+                (line.starts_with('+') && !line.starts_with("+++"))
+                    || (line.starts_with('-') && !line.starts_with("---"))
+            })
             .count()
     }
 }

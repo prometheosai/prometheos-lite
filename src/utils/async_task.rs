@@ -89,10 +89,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_with_timeout_failure() {
         let result = spawn_with_timeout(
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                Ok::<(), anyhow::Error>(())
-            },
+            std::future::pending::<Result<(), anyhow::Error>>(),
             1,
             "test",
         )
@@ -102,7 +99,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_concurrent() {
-        // Skip this test for now - async block type mismatch issue
-        // Will be fixed in Phase 1 when we refactor the flow loader
+        let tasks = vec![
+            futures::future::ready(Ok::<u32, anyhow::Error>(1)),
+            futures::future::ready(Ok::<u32, anyhow::Error>(2)),
+        ];
+
+        let results = run_concurrent(tasks).await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().ok().copied(), Some(1));
+        assert_eq!(results[1].as_ref().ok().copied(), Some(2));
     }
 }

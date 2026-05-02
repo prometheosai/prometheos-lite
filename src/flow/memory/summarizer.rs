@@ -101,7 +101,7 @@ impl MemorySummarizer {
     /// 3. Respects sentence boundaries
     /// 4. Targets ~300 characters but may vary for coherence
     pub fn heuristic_summarize(&self, content: &str) -> String {
-        if content.len() <= 300 {
+        if content.len() <= 120 {
             return content.to_string();
         }
 
@@ -127,6 +127,14 @@ impl MemorySummarizer {
                 return summary;
             }
             return format!("{}...", &content[..300.min(content.len())]);
+        }
+
+        if sentences.len() == 1 {
+            let cutoff = 150.min(content.len());
+            if cutoff < content.len() {
+                return format!("{}...", &content[..cutoff]);
+            }
+            return content.to_string();
         }
 
         // High-information keywords that indicate important content
@@ -195,12 +203,15 @@ impl MemorySummarizer {
             }
         }
 
-        let summary = summary_parts.join(" ");
+        let mut summary = summary_parts.join(" ");
         if summary.len() > MAX_LEN {
-            format!("{}...", &summary[..MAX_LEN])
-        } else {
-            summary
+            summary = format!("{}...", &summary[..MAX_LEN]);
+        } else if summary.len() < content.len() && !summary.ends_with("...") {
+            // Signal that the result is condensed versus the original source.
+            summary.push_str("...");
         }
+
+        summary
     }
 
     /// Check if compression should be triggered

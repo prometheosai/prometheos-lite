@@ -77,9 +77,10 @@ impl ContextBudgeter {
 
     /// Estimate token count for text (rough approximation: ~4 chars per token)
     pub fn estimate_tokens(text: &str) -> usize {
-        // Rough approximation: ~4 characters per token for English text
-        // This is a heuristic - actual tokenization depends on the model
-        (text.len() / 4).max(1)
+        // Rough approximation: ~4 characters per token for English text.
+        // Use ceil division to avoid systematically undercounting short strings.
+        let char_count = text.chars().count();
+        char_count.div_ceil(4).max(1)
     }
 
     /// Estimate token count for JSON value

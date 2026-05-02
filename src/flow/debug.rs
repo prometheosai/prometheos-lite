@@ -78,9 +78,8 @@ impl FlowLifecycleHooks for DebugHooks {
         }
     }
 
-    fn on_flow_complete(&self, state: &SharedState) {
-        let mut session = self.session.lock().unwrap();
-        session.paused = false;
+    fn on_flow_complete(&self, _state: &SharedState) {
+        let _session = self.session.lock().unwrap();
     }
 
     fn on_flow_error(&self, error: &anyhow::Error) {

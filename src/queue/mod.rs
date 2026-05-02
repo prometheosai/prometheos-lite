@@ -366,11 +366,11 @@ mod tests {
         );
 
         queue.submit(job1).await.unwrap();
-        queue.submit(job2).await.unwrap();
+        let high_job_id = queue.submit(job2).await.unwrap();
 
         let pending = queue.pending_jobs.lock().await;
         // High priority should be first
-        assert_eq!(pending[0], "high_priority");
+        assert_eq!(pending[0], high_job_id);
     }
 
     #[tokio::test]

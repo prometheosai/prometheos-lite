@@ -126,8 +126,10 @@ mod tests {
     #[test]
     fn test_node_factory_unknown_type() {
         let factory: Box<dyn NodeFactory> = Box::new(DefaultNodeFactory::new());
-        let node = factory.create("unknown_type", None).unwrap();
-        assert_eq!(node.id(), "passthrough");
+        match factory.create("unknown_type", None) {
+            Ok(_) => panic!("expected unknown node type to return error"),
+            Err(err) => assert!(err.to_string().contains("Unknown node type")),
+        }
     }
 
     #[test]
