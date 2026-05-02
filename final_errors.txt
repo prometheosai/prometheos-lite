@@ -1,0 +1,941 @@
+    Checking prometheos-lite v0.1.0 (E:\Projects\PrometheOS-Lite)
+warning: unused imports: `WorkContextService` and `WorkContext`
+  --> src\api\work_contexts.rs:17:5
+   |
+17 |     WorkContextService,
+   |     ^^^^^^^^^^^^^^^^^^
+18 |     types::{WorkContext, WorkDomain, WorkStatus},
+   |             ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TrimmedContext`
+  --> src\context\builder.rs:10:70
+   |
+10 | use super::budgeter::{ContextBudgeter, ContextItem, ContextPriority, TrimmedContext};
+   |                                                                      ^^^^^^^^^^^^^^
+
+warning: unused import: `uuid::Uuid`
+ --> src\db\models.rs:8:5
+  |
+8 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+
+warning: unused import: `super::interrupts::InterruptOperations`
+ --> src\db\repository\db.rs:9:5
+  |
+9 | use super::interrupts::InterruptOperations;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::outbox::OutboxOperations`
+  --> src\db\repository\db.rs:11:5
+   |
+11 | use super::outbox::OutboxOperations;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::snapshots::FlowSnapshotOperations`
+  --> src\db\repository\db.rs:13:5
+   |
+13 | use super::snapshots::FlowSnapshotOperations;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::trust_policies::TrustPolicyOperations`
+  --> src\db\repository\db.rs:15:5
+   |
+15 | use super::trust_policies::TrustPolicyOperations;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StepStatus`
+ --> src\db\repository\execution_plans.rs:7:44
+  |
+7 | use crate::work::{ExecutionPlan, PlanStep, StepStatus};
+  |                                            ^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\flow\budget\budget_guard.rs:3:14
+  |
+3 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `ExecutionBudget`
+ --> src\flow\execution\flow.rs:4:26
+  |
+4 |     Action, BudgetGuard, ExecutionBudget, Input, Node, NodeConfig, NodeId, Output, SharedState,
+  |                          ^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\execution\flow_types.rs:4:5
+  |
+4 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\execution\rate_limit.rs:4:5
+  |
+4 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src\flow\execution\rate_limit.rs:8:5
+  |
+8 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NodeConfig`
+  --> src\flow\execution\rate_limit.rs:10:25
+   |
+10 | use crate::flow::{Node, NodeConfig, NodeId, SharedState};
+   |                         ^^^^^^^^^^
+
+warning: unused imports: `RunId` and `Tracer`
+  --> src\flow\execution_service.rs:20:28
+   |
+20 | use crate::flow::tracing::{RunId, SharedTracer, TraceEvent, Tracer};
+   |                            ^^^^^                            ^^^^^^
+
+warning: unused import: `RunStatus`
+   --> src\flow\execution_service.rs:483:55
+    |
+483 |                 use crate::flow::execution::{FlowRun, RunStatus};
+    |                                                       ^^^^^^^^^
+
+warning: unused import: `RunStatus`
+   --> src\flow\execution_service.rs:662:55
+    |
+662 |                 use crate::flow::execution::{FlowRun, RunStatus};
+    |                                                       ^^^^^^^^^
+
+warning: unused import: `crate::tools::PathGuard`
+ --> src\flow\factory\builtin_nodes.rs:5:5
+  |
+5 | use crate::tools::PathGuard;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\factory\builtin_nodes.rs:7:5
+  |
+7 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::json`
+ --> src\flow\factory\builtin_nodes.rs:8:5
+  |
+8 | use serde_json::json;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `InterruptOperations`
+  --> src\flow\factory\builtin_nodes.rs:12:29
+   |
+12 | use crate::db::repository::{InterruptOperations, OutboxOperations};
+   |                             ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+  --> src\flow\factory\coding_nodes.rs:10:5
+   |
+10 | use async_trait::async_trait;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing`
+  --> src\flow\factory\coding_nodes.rs:13:5
+   |
+13 | use tracing;
+   |     ^^^^^^^
+
+warning: unused import: `Duration`
+ --> src\flow\memory\scoring.rs:6:14
+  |
+6 | use chrono::{Duration, Utc};
+  |              ^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\memory\service.rs:4:5
+  |
+4 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ContextBundle`
+  --> src\flow\memory\service.rs:15:20
+   |
+15 | use super::types::{ContextBundle, Memory, MemoryKind, MemoryType, MemoryWriteTask};
+   |                    ^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\flow\memory\summarizer.rs:6:14
+  |
+6 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused imports: `Deserialize` and `Serialize`
+ --> src\flow\memory\summarizer.rs:7:13
+  |
+7 | use serde::{Deserialize, Serialize};
+  |             ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `Key`
+ --> src\flow\opentelemetry.rs:7:21
+  |
+7 | use opentelemetry::{Key, KeyValue};
+  |                     ^^^
+
+warning: unused import: `opentelemetry_sdk::Resource`
+ --> src\flow\opentelemetry.rs:9:5
+  |
+9 | use opentelemetry_sdk::Resource;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TracerProvider`
+  --> src\flow\opentelemetry.rs:10:50
+   |
+10 | use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
+   |                                                  ^^^^^^^^^^^^^^
+
+warning: unused import: `uuid::Uuid`
+  --> src\flow\strict_mode.rs:10:5
+   |
+10 | use uuid::Uuid;
+   |     ^^^^^^^^^^
+
+warning: unused import: `SharedState`
+ --> src\flow\tracing.rs:9:27
+  |
+9 | use crate::flow::{NodeId, SharedState};
+  |                           ^^^^^^^^^^^
+
+warning: unused import: `BudgetUsage`
+ --> src\flow\types.rs:6:34
+  |
+6 | use super::budget::{BudgetGuard, BudgetUsage, ExecutionBudget};
+  |                                  ^^^^^^^^^^^
+
+warning: unused import: `adapter::*`
+  --> src\flow\mod.rs:28:9
+   |
+28 | pub use adapter::*;
+   |         ^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\acceptance.rs:2:5
+  |
+2 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `Path` and `collections::HashMap`
+ --> src\harness\acceptance.rs:6:5
+  |
+6 |     collections::HashMap,
+  |     ^^^^^^^^^^^^^^^^^^^^
+7 |     path::{Path, PathBuf},
+  |            ^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\adversarial_validation.rs:2:5
+  |
+2 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+ --> src\harness\adversarial_validation.rs:6:5
+  |
+6 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `Path`
+ --> src\harness\benchmark.rs:7:17
+  |
+7 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `Duration`
+ --> src\harness\benchmark.rs:8:17
+  |
+8 | use std::time::{Duration, Instant};
+  |                 ^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\harness\completion.rs:12:5
+   |
+12 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\environment.rs:1:22
+  |
+1 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: unused import: `process::Command`
+ --> src\harness\environment.rs:7:5
+  |
+7 |     process::Command,
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\harness\execution_loop.rs:27:12
+   |
+27 |     time::{Duration, Instant},
+   |            ^^^^^^^^
+
+warning: unused imports: `PatchResult` and `edit_protocol::EditOperation`
+ --> src\harness\failure.rs:2:35
+  |
+2 |     patch_applier::{PatchFailure, PatchResult},
+  |                                   ^^^^^^^^^^^
+3 |     validation::{CommandResult, ValidationResult, ValidationCategory},
+4 |     edit_protocol::EditOperation,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\failure.rs:6:5
+  |
+6 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `self`
+ --> src\harness\file_control.rs:7:10
+  |
+7 |     io::{self, Read},
+  |          ^^^^
+
+warning: unused import: `std::collections::HashSet`
+ --> src\harness\git_checkpoint.rs:5:5
+  |
+5 | use std::collections::HashSet;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\knowledge_cache.rs:1:22
+  |
+1 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: unused import: `Instant`
+ --> src\harness\knowledge_cache.rs:8:22
+  |
+8 |     time::{Duration, Instant},
+  |                      ^^^^^^^
+
+warning: unused import: `HashMap`
+ --> src\harness\minimality.rs:6:24
+  |
+6 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^
+
+warning: unused import: `Path`
+ --> src\harness\minimality.rs:7:17
+  |
+7 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\observability.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+ --> src\harness\observability.rs:7:17
+  |
+7 | use std::time::{Duration, Instant};
+  |                 ^^^^^^^^
+
+warning: unused imports: `assert_delete_allowed` and `assert_rename_allowed`
+ --> src\harness\patch_applier.rs:3:57
+  |
+3 |     file_control::{FilePolicy, FileSet, normalize_path, assert_delete_allowed, assert_rename_allowed},
+  |                                                         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `io::Write`
+  --> src\harness\patch_applier.rs:11:5
+   |
+11 |     io::Write,
+   |     ^^^^^^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+ --> src\harness\permissions.rs:6:24
+  |
+6 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^  ^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\regression_memory.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `HashSet`
+ --> src\harness\regression_memory.rs:6:33
+  |
+6 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+
+warning: unused imports: `Duration` and `SystemTime`
+ --> src\harness\regression_memory.rs:8:17
+  |
+8 | use std::time::{Duration, SystemTime};
+  |                 ^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\repo_intelligence.rs:1:22
+  |
+1 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: unused import: `sync::Arc`
+ --> src\harness\repo_intelligence.rs:7:5
+  |
+7 |     sync::Arc,
+  |     ^^^^^^^^^
+
+warning: unused imports: `QueryCursor`, `Query`, and `Tree`
+ --> src\harness\repo_intelligence.rs:9:33
+  |
+9 | use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
+  |                                 ^^^^^  ^^^^^^^^^^^  ^^^^
+
+warning: unused imports: `PatchFailure` and `SearchReplaceEdit`
+ --> src\harness\repair_loop.rs:2:36
+  |
+2 |     edit_protocol::{EditOperation, SearchReplaceEdit, WholeFileEdit},
+  |                                    ^^^^^^^^^^^^^^^^^
+3 |     failure::{FailureDetails, FailureKind, FailureContext, classify_patch_failure, classify_validation_failure},
+4 |     patch_applier::{PatchResult, PatchFailure, apply_patch, dry_run_patch},
+  |                                  ^^^^^^^^^^^^
+
+warning: unused imports: `Context` and `bail`
+ --> src\harness\repair_loop.rs:9:22
+  |
+9 | use anyhow::{Result, Context, bail};
+  |                      ^^^^^^^  ^^^^
+
+warning: unused import: `Duration`
+  --> src\harness\repair_loop.rs:14:12
+   |
+14 |     time::{Duration, Instant},
+   |            ^^^^^^^^
+
+warning: unused import: `edit_protocol::EditOperation`
+ --> src\harness\reproduction.rs:2:5
+  |
+2 |     edit_protocol::EditOperation,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Context` and `bail`
+ --> src\harness\reproduction.rs:7:22
+  |
+7 | use anyhow::{Result, Context, bail};
+  |                      ^^^^^^^  ^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+  --> src\harness\reproduction.rs:10:19
+   |
+10 |     collections::{HashMap, HashSet},
+   |                   ^^^^^^^  ^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\review.rs:1:5
+  |
+1 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `has_breaking_changes` and `requires_approval`
+ --> src\harness\risk.rs:3:67
+  |
+3 |     semantic_diff::{SemanticDiff, RiskLevel as SemanticRiskLevel, requires_approval, has_breaking_changes},
+  |                                                                   ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\risk.rs:5:5
+  |
+5 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\harness\risk.rs:7:5
+  |
+7 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bail`
+ --> src\harness\runtime_tools.rs:4:22
+  |
+4 | use anyhow::{Result, bail};
+  |                      ^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\scaling.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src\harness\scaling.rs:6:5
+  |
+6 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HashMap`
+ --> src\harness\semantic_diff.rs:3:24
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^
+
+warning: unused import: `Path`
+ --> src\harness\time_travel.rs:7:17
+  |
+7 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `PathBuf`
+ --> src\harness\validation.rs:6:18
+  |
+6 |     path::{Path, PathBuf},
+  |                  ^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\verification.rs:2:5
+  |
+2 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\queue\mod.rs:6:14
+  |
+6 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused imports: `ToolContext` and `ToolMetadata`
+ --> src\tools\coding.rs:7:20
+  |
+7 | use crate::tools::{ToolContext, ToolMetadata};
+  |                    ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `ToolContext` and `ToolMetadata`
+ --> src\tools\command.rs:8:20
+  |
+8 | use crate::tools::{ToolContext, ToolMetadata};
+  |                    ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `ToolContext` and `ToolMetadata`
+  --> src\tools\repo.rs:12:31
+   |
+12 | use crate::tools::{PathGuard, ToolContext, ToolMetadata};
+   |                               ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `Datelike`
+ --> src\utils\time.rs:3:24
+  |
+3 | use chrono::{DateTime, Datelike, Duration, Utc};
+  |                        ^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\work\evaluation.rs:6:14
+  |
+6 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\work\evaluation.rs:8:5
+  |
+8 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `WorkContextPlaybook`
+  --> src\work\evolution_engine.rs:14:57
+   |
+14 | use crate::work::playbook::{PatternRecord, PatternType, WorkContextPlaybook};
+   |                                                         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `domain::WorkDomainProfile` and `playbook::WorkContextPlaybook`
+  --> src\work\execution_service.rs:17:5
+   |
+17 |     domain::WorkDomainProfile,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+18 |     playbook::WorkContextPlaybook,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `WorkPhase`
+  --> src\work\orchestrator.rs:12:69
+   |
+12 | use super::types::{AutonomyLevel, TestExecutionResult, WorkContext, WorkPhase, WorkStatus};
+   |                                                                     ^^^^^^^^^
+
+warning: unused import: `crate::flow::execution_service::FlowExecutionService`
+  --> src\work\orchestrator.rs:13:5
+   |
+13 | use crate::flow::execution_service::FlowExecutionService;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\work\phase_controller.rs:3:5
+  |
+3 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `LifecycleTemplate`
+ --> src\work\template_loader.rs:7:21
+  |
+7 | use super::domain::{LifecycleTemplate, WorkDomainProfile};
+  |                     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::types::ApprovalPolicy`
+ --> src\work\template_loader.rs:8:5
+  |
+8 | use super::types::ApprovalPolicy;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0382]: borrow of moved value: `dry`
+   --> src\harness\execution_loop.rs:539:29
+    |
+423 |     let dry = dry_run_patch(&req.proposed_edits, &files, &policy)
+    |         --- move occurs because `dry` has type `PatchResult`, which does not implement the `Copy` trait
+...
+448 |         Some(dry)
+    |              --- value moved here
+...
+539 |             dry_run_passed: dry.failures.is_empty(),
+    |                             ^^^^^^^^^^^^ value borrowed here after move
+    |
+help: consider cloning the value if the performance cost is acceptable
+    |
+448 |         Some(dry.clone())
+    |                 ++++++++
+
+error[E0521]: borrowed data escapes outside of function
+   --> src\harness\validation.rs:241:22
+    |
+230 |       sandbox: &dyn SandboxRuntime,
+    |       -------  - let's call the lifetime of this reference `'1`
+    |       |
+    |       `sandbox` is a reference that is only valid in the function body
+...
+241 |           let handle = tokio::spawn(async move {
+    |  ______________________^
+242 | |             if let Some(cached) = cache.get(&cache_key).await {
+243 | |                 return (cmd, cached);
+...   |
+274 | |             (cmd, cmd_result)
+275 | |         });
+    | |          ^
+    | |          |
+    | |__________`sandbox` escapes the function body here
+    |            argument requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of function
+   --> src\harness\validation.rs:241:22
+    |
+231 |       cache: &ValidationCache,
+    |       -----  - let's call the lifetime of this reference `'2`
+    |       |
+    |       `cache` is a reference that is only valid in the function body
+...
+241 |           let handle = tokio::spawn(async move {
+    |  ______________________^
+242 | |             if let Some(cached) = cache.get(&cache_key).await {
+243 | |                 return (cmd, cached);
+...   |
+274 | |             (cmd, cmd_result)
+275 | |         });
+    | |          ^
+    | |          |
+    | |__________`cache` escapes the function body here
+    |            argument requires that `'2` must outlive `'static`
+
+error[E0063]: missing field `progress_callback` in initializer of `HarnessExecutionRequest`
+  --> src\harness\work_integration.rs:37:19
+   |
+37 |         let req = HarnessExecutionRequest {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^ missing `progress_callback`
+
+error[E0277]: `harness::artifacts::ArtifactKind` doesn't implement `std::fmt::Display`
+  --> src\harness\work_integration.rs:63:39
+   |
+63 |                 format!("harness-{}", h.kind),
+   |                                  --   ^^^^^^ `harness::artifacts::ArtifactKind` cannot be formatted with the default formatter
+   |                                  |
+   |                                  required by this formatting parameter
+   |
+help: the trait `std::fmt::Display` is not implemented for `harness::artifacts::ArtifactKind`
+  --> src\harness\artifacts.rs:23:1
+   |
+23 | pub enum ArtifactKind {
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+
+error[E0308]: mismatched types
+   --> src\harness\acceptance.rs:186:26
+    |
+186 |             description: req.clone(),
+    |                          ^^^^^^^^^^^ expected `String`, found `&str`
+    |
+help: try using a conversion method
+    |
+186 -             description: req.clone(),
+186 +             description: req.to_string(),
+    |
+
+error[E0689]: can't call method `min` on ambiguous numeric type `{float}`
+   --> src\harness\acceptance.rs:339:20
+    |
+339 |         confidence.min(1.0)
+    |                    ^^^
+    |
+help: you must specify a type for this binding, like `f32`
+    |
+327 |         let mut confidence: f32 = 0.5;
+    |                           +++++
+
+error[E0308]: mismatched types
+   --> src\harness\golden_paths.rs:557:34
+    |
+557 |                     match_score: score,
+    |                                  ^^^^^ expected `f64`, found `f32`
+
+error[E0308]: mismatched types
+   --> src\harness\review.rs:453:28
+    |
+453 |                 file: Some(file_str.clone()),
+    |                       ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+    |                       |
+    |                       arguments to this enum variant are incorrect
+    |
+help: the type constructed contains `&str` due to the type of the argument passed
+   --> src\harness\review.rs:453:23
+    |
+453 |                 file: Some(file_str.clone()),
+    |                       ^^^^^----------------^
+    |                            |
+    |                            this argument influences the type of `Some`
+note: tuple variant defined here
+   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
+    |
+608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ^^^^
+help: try using a conversion method
+    |
+453 -                 file: Some(file_str.clone()),
+453 +                 file: Some(file_str.to_string()),
+    |
+
+warning: unused variable: `remaining_tokens`
+   --> src\context\budgeter.rs:125:13
+    |
+125 |         let remaining_tokens = available_tokens - system_tokens;
+    |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_remaining_tokens`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `state`
+  --> src\flow\debug.rs:54:47
+   |
+54 |     fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input) {
+   |                                               ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `input`
+  --> src\flow\debug.rs:54:68
+   |
+54 |     fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input) {
+   |                                                                    ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `from`
+  --> src\flow\debug.rs:74:29
+   |
+74 |     fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId) {
+   |                             ^^^^ help: if this is intentional, prefix it with an underscore: `_from`
+
+warning: unused variable: `to`
+  --> src\flow\debug.rs:74:61
+   |
+74 |     fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId) {
+   |                                                             ^^ help: if this is intentional, prefix it with an underscore: `_to`
+
+warning: unused variable: `output`
+   --> src\flow\factory\coding_nodes.rs:548:46
+    |
+548 |     fn post(&self, _state: &mut SharedState, output: serde_json::Value) -> String {
+    |                                              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `count`
+   --> src\flow\memory\nodes.rs:124:21
+    |
+124 |         if let Some(count) = output["extracted_count"].as_u64() {
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+
+error[E0507]: cannot move out of `*property` which is behind a shared reference
+   --> src\harness\adversarial_validation.rs:247:27
+    |
+247 |                 property: *property,
+    |                           ^^^^^^^^^ move occurs because `*property` has type `Property`, which does not implement the `Copy` trait
+    |
+help: consider cloning the value if the performance cost is acceptable
+    |
+247 -                 property: *property,
+247 +                 property: property.clone(),
+    |
+
+warning: unused variable: `filtered`
+   --> src\harness\benchmark.rs:297:13
+    |
+297 |         let filtered: Vec<_> = values.iter()
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_filtered`
+
+warning: unused variable: `num_runs`
+   --> src\harness\benchmark.rs:410:58
+    |
+410 |     pub fn check_anti_overfitting(&self, suite_id: &str, num_runs: u32) -> Result<AntiOverfittingReport> {
+    |                                                          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_runs`
+
+error[E0004]: non-exhaustive patterns: `execution_loop::HarnessMode::Review` not covered
+   --> src\harness\completion.rs:176:30
+    |
+176 |         let decision = match mode {
+    |                              ^^^^ pattern `execution_loop::HarnessMode::Review` not covered
+    |
+note: `execution_loop::HarnessMode` defined here
+   --> src\harness\execution_loop.rs:103:10
+    |
+103 | pub enum HarnessMode {
+    |          ^^^^^^^^^^^
+104 |     Review,
+    |     ------ not covered
+    = note: the matched value is of type `execution_loop::HarnessMode`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+180 ~             HarnessMode::Benchmark => self.evaluate_benchmark(evidence, &mut decision_factors),
+181 ~             execution_loop::HarnessMode::Review => todo!(),
+    |
+
+warning: unused variable: `factors`
+   --> src\harness\completion.rs:267:65
+    |
+267 |     fn evaluate_benchmark(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
+    |                                                                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_factors`
+
+warning: unused variable: `file`
+   --> src\harness\edit_protocol.rs:543:10
+    |
+543 |     for (file, file_edits) in by_file {
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_file`
+
+warning: value assigned to `detected_pm` is never read
+   --> src\harness\environment.rs:123:31
+    |
+123 |         let mut detected_pm = None;
+    |                               ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `has_gemspec`
+   --> src\harness\environment.rs:381:9
+    |
+381 |     let has_gemspec = root.join("*.gemspec").exists();
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_gemspec`
+
+error[E0004]: non-exhaustive patterns: `&FailureKind::Fatal` and `&FailureKind::Critical` not covered
+   --> src\harness\failure.rs:89:15
+    |
+ 89 |         match self {
+    |               ^^^^ patterns `&FailureKind::Fatal` and `&FailureKind::Critical` not covered
+    |
+note: `FailureKind` defined here
+   --> src\harness\failure.rs:14:10
+    |
+ 14 | pub enum FailureKind {
+    |          ^^^^^^^^^^^
+...
+ 30 |     Fatal,
+    |     ----- not covered
+ 31 |     Critical,
+    |     -------- not covered
+    = note: the matched value is of type `&FailureKind`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
+    |
+104 ~             FailureKind::UnknownFailure => FailureCategory::Tooling,
+105 ~             &FailureKind::Fatal | &FailureKind::Critical => todo!(),
+    |
+
+error: cannot explicitly borrow within an implicitly-borrowing pattern
+   --> src\harness\file_control.rs:221:21
+    |
+221 |         if let Some(ref gi) = gitignore {
+    |                     ^^^ explicit `ref` binding modifier not allowed when implicitly borrowing
+    |
+    = note: for more information, see <https://doc.rust-lang.org/reference/patterns.html#binding-modes>
+note: matching on a reference type with a non-reference pattern implicitly borrows the contents
+   --> src\harness\file_control.rs:221:16
+    |
+221 |         if let Some(ref gi) = gitignore {
+    |                ^^^^^^^^^^^^ this non-reference pattern matches on a reference type `&mut _`
+help: match on the reference with a reference pattern to avoid implicitly borrowing
+    |
+221 |         if let &mut Some(ref gi) = gitignore {
+    |                ++++
+
+warning: unused variable: `task_id`
+   --> src\harness\knowledge_cache.rs:388:14
+    |
+388 |         for (task_id, cache) in caches.iter() {
+    |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
+
+warning: unused variable: `edit_index`
+   --> src\harness\patch_applier.rs:161:5
+    |
+161 |     edit_index: usize,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edit_index`
+
+warning: unused variable: `policy`
+   --> src\harness\patch_applier.rs:338:56
+    |
+338 | async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
+    |                                                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
+
+warning: unused variable: `new_content`
+   --> src\harness\patch_applier.rs:341:16
+    |
+341 |     for (path, new_content) in changes.iter().rev() {
+    |                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_content`
+
+warning: unused variable: `now`
+   --> src\harness\regression_memory.rs:225:13
+    |
+225 |         let now = chrono::Utc::now();
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+
+warning: unused variable: `patch`
+   --> src\harness\repair_loop.rs:106:21
+    |
+106 |                 let patch = apply_patch(&repair_edits, file_set, policy).await?;
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_patch`
+
+warning: unused variable: `repo`
+   --> src\harness\reproduction.rs:581:63
+    |
+581 | async fn analyze_failure_signature(req: &ReproductionRequest, repo: &RepoContext) -> Result<Vec<ReproductionDiagnostic>> {
+    |                                                               ^^^^ help: if this is intentional, prefix it with an underscore: `_repo`
+
+warning: unused variable: `diff_lower`
+   --> src\harness\semantic_diff.rs:360:13
+    |
+360 |         let diff_lower = diff.to_lowercase();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_diff_lower`
+
+warning: unused variable: `artifact_data`
+   --> src\work\orchestrator.rs:740:13
+    |
+740 |         let artifact_data = serde_json::json!({
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_artifact_data`
+
+warning: variable does not need to be mutable
+  --> src\work\service.rs:42:13
+   |
+42 |         let mut context = WorkContext::new(id, user_id, title, domain, goal);
+   |             ----^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0004, E0063, E0277, E0308, E0382, E0507, E0521, E0689.
+For more information about an error, try `rustc --explain E0004`.
+warning: `prometheos-lite` (lib) generated 118 warnings
+error: could not compile `prometheos-lite` (lib) due to 13 previous errors; 118 warnings emitted

@@ -49,6 +49,7 @@ impl HarnessWorkContextService {
             mentioned_files: vec![],
             mentioned_symbols: vec![],
             proposed_edits,
+            progress_callback: None,
         };
         self.work_context_service
             .update_phase(&mut ctx, WorkPhase::Execution)?;
@@ -60,7 +61,7 @@ impl HarnessWorkContextService {
                 uuid::Uuid::new_v4().to_string(),
                 context_id,
                 ArtifactKind::Report,
-                format!("harness-{}", h.kind),
+                format!("harness-{:?}", h.kind),
                 serde_json::to_value(h)?,
                 "harness".into(),
             );

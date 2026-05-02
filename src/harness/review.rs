@@ -450,7 +450,7 @@ impl ReviewEngine {
             issues.push(ReviewIssue {
                 issue_type: ReviewIssueType::Documentation,
                 severity: ReviewSeverity::Low,
-                file: Some(file_str.clone()),
+                file: Some(file_str.to_string()),
                 line: None,
                 message: "Public items lack documentation comments".to_string(),
                 suggestion: Some("Add rustdoc comments (///) for public APIs".to_string()),

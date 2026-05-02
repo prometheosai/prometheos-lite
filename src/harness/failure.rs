@@ -102,6 +102,8 @@ impl FailureKind {
             FailureKind::NetworkFailure => FailureCategory::Environmental,
             FailureKind::ResourceExhaustion => FailureCategory::Resource,
             FailureKind::UnknownFailure => FailureCategory::Tooling,
+            FailureKind::Fatal => FailureCategory::Tooling,
+            FailureKind::Critical => FailureCategory::Tooling,
         }
     }
     

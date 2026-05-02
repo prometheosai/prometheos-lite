@@ -183,7 +183,7 @@ impl AcceptanceCompiler {
         
         let criterion = AcceptanceCriterion {
             id: format!("AC-{:03}", index + 1),
-            description: req.clone(),
+            description: req.to_string(),
             verification_method,
             status: CriterionStatus::Pending,
             priority,
@@ -324,7 +324,7 @@ impl AcceptanceCompiler {
     }
     
     fn calculate_detection_confidence(&self, req: &str, tests: &[String], checks: &[String]) -> f32 {
-        let mut confidence = 0.5;
+        let mut confidence: f32 = 0.5;
         
         if !tests.is_empty() {
             confidence += 0.25;

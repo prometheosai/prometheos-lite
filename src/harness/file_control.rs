@@ -218,7 +218,7 @@ fn classify_file(
     let is_generated = is_generated_file(path, policy);
     
     let is_gitignored = if policy.respect_gitignore {
-        if let Some(ref gi) = gitignore {
+        if let Some(gi) = gitignore.as_ref() {
             gi.matched(path, metadata.is_dir()).is_ignore()
         } else {
             false

@@ -512,7 +512,7 @@ impl GoldenPathRegistry {
             }
 
             // Calculate match score
-            let mut score: f32 = 0.0;
+            let mut score: f64 = 0.0;
             let mut reasons = Vec::new();
 
             // Check keywords in context

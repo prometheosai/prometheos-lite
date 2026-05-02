@@ -445,8 +445,9 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
     let patch = if dry.failures.is_empty() {
         Some(apply_patch(&req.proposed_edits, &files, &policy).await?)
     } else {
-        Some(dry)
+        Some(dry.clone())
     };
+    let dry_failures = dry.failures.clone();
     
     metrics.patch_generation_ms = patch_start.elapsed().as_millis() as u64;
     metrics.files_modified = patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0);
