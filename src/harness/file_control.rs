@@ -214,8 +214,8 @@ fn classify_file(
     
     let size = metadata.len();
     let is_binary = is_binary_file(path)?;
-    let is_sensitive = is_sensitive_file(path, policy)?;
-    let is_generated = is_generated_file(path, policy)?;
+    let is_sensitive = is_sensitive_file(path, policy);
+    let is_generated = is_generated_file(path, policy);
     
     let is_gitignored = if policy.respect_gitignore {
         if let Some(ref gi) = gitignore {
@@ -278,14 +278,14 @@ fn build_gitignore(repo_root: &Path) -> Result<Option<ignore::gitignore::Gitigno
     
     let mut builder = GitignoreBuilder::new(repo_root);
     
-    if let Err(e) = builder.add(&gitignore_path) {
+    if let Some(e) = builder.add(&gitignore_path) {
         eprintln!("Warning: Failed to parse .gitignore: {}", e);
     }
     
     let global_gitignore = dirs::home_dir().map(|h| h.join(".gitignore_global"));
     if let Some(ref global) = global_gitignore {
         if global.exists() {
-            if let Err(e) = builder.add(global) {
+            if let Some(e) = builder.add(global) {
                 eprintln!("Warning: Failed to parse global .gitignore: {}", e);
             }
         }

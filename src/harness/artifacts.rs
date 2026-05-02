@@ -174,7 +174,7 @@ impl ArtifactGenerator {
             tags: vec!["log".to_string(), "debug".to_string()],
             custom_fields: HashMap::new(),
         };
-        let log_content = format!("Execution log for run {}\nErrors: {:?}", run_id, result.errors);
+        let log_content = format!("Execution log for run {}\nFailures: {:?}", run_id, result.failures);
         artifacts.push(self.generate_log_artifact(&log_content, log_metadata)?);
 
         // 6. Metrics artifact
@@ -185,9 +185,8 @@ impl ArtifactGenerator {
             custom_fields: HashMap::new(),
         };
         let metrics_content = serde_json::json!({
-            "duration_ms": result.duration_ms,
             "step_count": result.step_count,
-            "total_cost": result.total_cost,
+            "execution_metrics": result.execution_metrics,
         }).to_string();
         artifacts.push(self.generate_metrics_artifact(&metrics_content, metrics_metadata)?);
 

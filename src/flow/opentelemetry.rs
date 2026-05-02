@@ -105,8 +105,9 @@ impl OtelExporter {
     /// Shutdown the exporter and flush remaining spans
     pub fn shutdown(&mut self) -> Result<()> {
         if let Some(provider) = self.provider.take() {
-            // Shutdown the provider to flush any remaining spans
-            provider.shutdown()?;
+            // Flush any remaining spans before dropping
+            let _ = provider.force_flush();
+            // Provider will be dropped here, which should clean up resources
             tracing::debug!("OpenTelemetry exporter shut down successfully");
         }
         Ok(())
@@ -115,7 +116,12 @@ impl OtelExporter {
     /// Force flush all pending spans immediately
     pub fn force_flush(&self) -> Result<()> {
         if let Some(ref provider) = self.provider {
-            provider.force_flush()?;
+            let results = provider.force_flush();
+            for result in results {
+                if let Err(e) = result {
+                    tracing::warn!("Failed to flush span: {:?}", e);
+                }
+            }
             tracing::debug!("OpenTelemetry exporter force flush completed");
         }
         Ok(())
