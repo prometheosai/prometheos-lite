@@ -3,11 +3,11 @@
 //! This module defines the shared application state that is passed to all route handlers.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::ConnectionManager;
 use crate::db::Db;
 use crate::flow::EmbeddingProvider;
-use crate::flow::LocalEmbeddingProvider;
 use crate::flow::MemoryService;
 use crate::flow::RuntimeContext;
 use crate::flow::execution_service::FlowExecutionService;
@@ -34,6 +34,8 @@ pub struct AppState {
     pub flow_execution_service: Arc<FlowExecutionService>,
     /// IntentClassifier for intent classification (shared across requests)
     pub intent_classifier: Arc<IntentClassifier>,
+    /// Monotonic request counter for server metrics
+    pub request_count: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -56,7 +58,16 @@ impl AppState {
             memory_service,
             flow_execution_service,
             intent_classifier,
+            request_count: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    pub fn increment_request_count(&self) {
+        self.request_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn total_requests(&self) -> u64 {
+        self.request_count.load(Ordering::Relaxed)
     }
 
     /// Create a WorkOrchestrator instance for this request

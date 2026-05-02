@@ -1,9 +1,14 @@
 //! Route registration for the API server
 
 use axum::{
+    extract::State,
+    middleware::{self, Next},
+    response::Response,
     Router,
     routing::{get, post},
 };
+use axum::body::Body;
+use axum::http::Request;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
@@ -19,6 +24,15 @@ use crate::api::work_contexts::{
     continue_work_context, create_work_context, get_work_context, get_work_context_artifacts,
     list_work_contexts, run_until_complete, submit_intent, update_work_context_status,
 };
+
+async fn count_requests_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    state.increment_request_count();
+    next.run(req).await
+}
 
 /// Create the API router with all routes
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -56,6 +70,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(run_until_complete),
         )
         .nest("/control-panel", create_control_panel_router())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            count_requests_middleware,
+        ))
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http())

@@ -135,6 +135,12 @@ impl ConnectionManager {
         let mut channels = self.channels.write().await;
         channels.remove(run_id);
     }
+
+    /// Count active WebSocket subscribers across all run channels.
+    pub async fn active_connections(&self) -> usize {
+        let channels = self.channels.read().await;
+        channels.values().map(|sender| sender.receiver_count()).sum()
+    }
 }
 
 impl Default for ConnectionManager {
