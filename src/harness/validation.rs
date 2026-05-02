@@ -299,49 +299,69 @@ async fn run_parallel(
     // Compute file hashes once for all commands
     let file_hashes = compute_repo_file_hashes(root).await.unwrap_or_default();
     
-    // Run sequentially to avoid lifetime issues with borrowed references
-    let mut results = vec![];
+    // Check cache for all commands first
+    let mut tasks = Vec::new();
+    let mut cached_results = Vec::new();
     
     for (cmd, _cat) in commands {
         let cmd = cmd.clone();
         let root = root.to_path_buf();
         let cache_key = create_cache_key(&root, &cmd, &file_hashes);
         
-        let result = if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
-            (cmd, cached)
+        if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
+            cached_results.push((cmd, cached));
         } else {
-            let start = Instant::now();
-            let result = sandbox.run_command(&root, &cmd, timeout).await;
-            let duration = start.elapsed().as_millis() as u64;
+            // This command needs to run - create a task for it
+            let root_clone = root.clone();
+            let file_hashes_clone = file_hashes.clone();
+            let cache_key_clone = cache_key.clone();
+            let cmd_clone = cmd.clone();
             
-            let cmd_result = match result {
-                Ok(r) => CommandResult {
-                    command: cmd.clone(),
-                    exit_code: r.exit_code,
-                    stdout: r.stdout,
-                    stderr: r.stderr,
-                    duration_ms: duration,
-                    cached: false,
-                    cache_key: Some(cache_key.clone()),
-                    timed_out: r.exit_code.is_none(),
-                },
-                Err(e) => CommandResult {
-                    command: cmd.clone(),
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: e.to_string(),
-                    duration_ms: duration,
-                    cached: false,
-                    cache_key: None,
-                    timed_out: true,
-                },
-            };
+            // Cloneable wrapper for sandbox execution
+            let task = tokio::spawn(async move {
+                let start = Instant::now();
+                // Note: We need to create a new sandbox instance for each task
+                // since we can't share the trait object across threads
+                let local_sandbox = crate::harness::sandbox::LocalSandboxRuntime::default();
+                let result = local_sandbox.run_command(&root_clone, &cmd_clone, timeout).await;
+                let duration = start.elapsed().as_millis() as u64;
+                
+                let cmd_result = match result {
+                    Ok(r) => CommandResult {
+                        command: cmd_clone.clone(),
+                        exit_code: r.exit_code,
+                        stdout: r.stdout,
+                        stderr: r.stderr,
+                        duration_ms: duration,
+                        cached: false,
+                        cache_key: Some(cache_key_clone.clone()),
+                        timed_out: r.exit_code.is_none(),
+                    },
+                    Err(e) => CommandResult {
+                        command: cmd_clone.clone(),
+                        exit_code: None,
+                        stdout: String::new(),
+                        stderr: e.to_string(),
+                        duration_ms: duration,
+                        cached: false,
+                        cache_key: None,
+                        timed_out: true,
+                    },
+                };
+                
+                (cmd_clone, cache_key_clone, cmd_result, file_hashes_clone)
+            });
             
-            cache.set(cache_key, cmd_result.clone(), file_hashes.clone()).await;
-            (cmd, cmd_result)
-        };
-        
-        results.push(result);
+            tasks.push(task);
+        }
+    }
+    
+    // Wait for all tasks to complete in parallel
+    let mut results = cached_results;
+    for task in tasks {
+        let (cmd, cache_key, cmd_result, file_hashes) = task.await?;
+        cache.set(cache_key, cmd_result.clone(), file_hashes).await;
+        results.push((cmd, cmd_result));
     }
     
     Ok(results)
