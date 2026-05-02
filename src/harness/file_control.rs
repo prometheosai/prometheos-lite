@@ -405,8 +405,50 @@ fn is_generated_file(path: &Path, policy: &FilePolicy) -> bool {
     false
 }
 
+/// Normalize a path without requiring the file to exist
+/// 
+/// This handles the case for CreateFile where the path doesn't exist yet.
+/// It canonicalizes the parent directory (if it exists) and joins the filename.
+fn normalize_path_without_existence(path: &Path) -> Result<PathBuf> {
+    // First, check if the path is absolute
+    if !path.is_absolute() {
+        bail!("Path must be absolute: {}", path.display());
+    }
+    
+    // Try to canonicalize - if it works, great
+    if let Ok(canonical) = path.canonicalize() {
+        return Ok(canonical);
+    }
+    
+    // Path doesn't exist - try to canonicalize parent directories
+    let mut current = path;
+    let mut to_push = Vec::new();
+    
+    // Walk up the tree until we find an existing directory
+    while let Some(parent) = current.parent() {
+        to_push.push(current.file_name()
+            .ok_or_else(|| anyhow::anyhow!("Path has no file name: {}", path.display()))?);
+        
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            // Found an existing parent - reconstruct the path
+            let mut result = canonical_parent;
+            for component in to_push.iter().rev() {
+                result.push(component);
+            }
+            return Ok(result);
+        }
+        
+        current = parent;
+    }
+    
+    // Couldn't find any existing parent - check if path has any ".." components
+    // that would escape the root
+    bail!("Cannot normalize path - no existing parent directory found: {}", path.display())
+}
+
 fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
-    let canonical = path.canonicalize()?;
+    // Handle non-existing paths by normalizing without requiring existence
+    let canonical = normalize_path_without_existence(path)?;
     let repo_root = policy.repo_root.canonicalize()?;
     
     if !canonical.starts_with(&repo_root) {

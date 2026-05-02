@@ -326,53 +326,101 @@ fn render_hunks(diff: &ParsedDiff) -> String {
     output
 }
 
+/// Apply a unified diff to original content
+/// 
+/// This function correctly handles context lines - they are verified but not modified.
+/// Only Removed lines are deleted and Added lines are inserted.
 pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
     let original_lines: Vec<&str> = original.lines().collect();
     let mut result: Vec<String> = original_lines.iter().map(|s| s.to_string()).collect();
     let mut offset: i64 = 0;
     
-    for hunk in &diff.hunks {
+    for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
         let insert_pos = (hunk.old_start as i64 - 1 + offset) as usize;
         
         if insert_pos > result.len() {
-            bail!("Hunk offset out of bounds: trying to insert at line {}, but file only has {} lines",
-                  insert_pos + 1, result.len());
+            bail!(
+                "Hunk {} offset out of bounds: trying to insert at line {}, but file only has {} lines",
+                hunk_idx + 1,
+                insert_pos + 1,
+                result.len()
+            );
         }
         
-        let mut lines_to_remove = 0;
-        let mut lines_to_add = Vec::new();
+        // Verify context lines match before applying
+        let mut verify_pos = insert_pos;
+        for line in &hunk.lines {
+            if let DiffLine::Context(expected) = line {
+                if verify_pos < result.len() {
+                    let actual = &result[verify_pos];
+                    // Allow fuzzy matching - context might have slight differences
+                    if actual.trim() != expected.trim() {
+                        bail!(
+                            "Hunk {} context mismatch at line {}: expected '{}', found '{}'",
+                            hunk_idx + 1,
+                            verify_pos + 1,
+                            expected,
+                            actual
+                        );
+                    }
+                }
+                verify_pos += 1;
+            }
+        }
+        
+        // Collect operations: (position, operation, content)
+        // We process in reverse order to maintain correct indices
+        let mut operations: Vec<(usize, char, Option<String>)> = Vec::new();
+        let mut line_idx = insert_pos;
         
         for line in &hunk.lines {
             match line {
                 DiffLine::Context(_) => {
-                    lines_to_remove += 1;
-                    lines_to_add.push(None);
+                    // Context lines: keep as-is, just advance
+                    line_idx += 1;
                 }
                 DiffLine::Removed(_) => {
-                    lines_to_remove += 1;
+                    // Mark for removal
+                    operations.push((line_idx, '-', None));
                 }
                 DiffLine::Added(text) => {
-                    lines_to_add.push(Some(text.clone()));
+                    // Mark for insertion
+                    operations.push((line_idx, '+', Some(text.clone())));
+                    // For added lines, we don't advance line_idx since we're inserting
                 }
             }
         }
         
-        let actual_pos = insert_pos;
+        // Sort operations: first by position (descending), then removals before insertions
+        operations.sort_by(|a, b| {
+            let pos_cmp = b.0.cmp(&a.0); // Reverse position order
+            if pos_cmp != std::cmp::Ordering::Equal {
+                return pos_cmp;
+            }
+            // At same position, removals ('-') come before insertions ('+')
+            b.1.cmp(&a.1)
+        });
         
-        for _ in 0..lines_to_remove {
-            if actual_pos < result.len() {
-                result.remove(actual_pos);
+        // Apply operations
+        for (pos, op, content) in operations {
+            match op {
+                '-' => {
+                    // Remove line
+                    if pos < result.len() {
+                        result.remove(pos);
+                    }
+                }
+                '+' => {
+                    // Insert line
+                    if let Some(text) = content {
+                        result.insert(pos, text);
+                    }
+                }
+                _ => {}
             }
         }
         
-        let mut add_pos = actual_pos;
-        for opt_line in lines_to_add.iter().rev() {
-            if let Some(line) = opt_line {
-                result.insert(add_pos, line.clone());
-                add_pos += 1;
-            }
-        }
-        
+        // Update offset for next hunk
         offset += (hunk.new_lines as i64) - (hunk.old_lines as i64);
     }
     
