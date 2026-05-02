@@ -92,8 +92,9 @@ impl Node for MemoryExtractorNode {
         // Simple heuristic extraction (in production, use LLM for better extraction)
         let extracted_memories = self.extract_semantic_memories(user_message, assistant_response);
 
+        let mut failed_queues = 0usize;
         for memory in &extracted_memories {
-            let _ = self.memory_service.queue_semantic(
+            if let Err(e) = self.memory_service.queue_semantic(
                 memory.content.clone(),
                 memory.kind.clone(),
                 None, // user_id
@@ -103,11 +104,19 @@ impl Node for MemoryExtractorNode {
                 memory.importance_score,
                 memory.confidence_score,
                 memory.metadata.clone(),
-            );
+            ) {
+                tracing::error!("Failed to queue semantic memory: {}", e);
+                failed_queues += 1;
+            }
+        }
+
+        if failed_queues > 0 && failed_queues == extracted_memories.len() {
+            anyhow::bail!("All {} memory queue operations failed", failed_queues);
         }
 
         Ok(serde_json::json!({
-            "extracted_count": extracted_memories.len(),
+            "extracted_count": extracted_memories.len() - failed_queues,
+            "failed_count": failed_queues,
         }))
     }
 

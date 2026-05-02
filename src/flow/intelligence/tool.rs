@@ -132,10 +132,77 @@ impl ToolSandboxProfile {
         }
     }
 
+    /// Tokenize command string into executable and arguments
+    /// Returns (executable_name, full_command)
+    fn tokenize_command(&self, command: &str) -> (String, String) {
+        // Handle command with arguments - split on whitespace
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return (String::new(), String::new());
+        }
+
+        // Split into tokens
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        if tokens.is_empty() {
+            return (String::new(), String::new());
+        }
+
+        // First token is the executable
+        let executable = tokens[0].to_lowercase();
+
+        // Remove path prefix to get base command name (e.g., /bin/rm -> rm)
+        let base_executable = std::path::Path::new(&executable)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or(executable);
+
+        (base_executable, trimmed.to_string())
+    }
+
+    /// Check if an executable name matches a pattern (exact match or path-based)
+    fn command_matches(&self, executable: &str, pattern: &str) -> bool {
+        let pattern_lower = pattern.to_lowercase();
+        let exec_lower = executable.to_lowercase();
+
+        // Exact match
+        if exec_lower == pattern_lower {
+            return true;
+        }
+
+        // Pattern might include path - check if executable ends with pattern
+        if pattern_lower.contains('/') || pattern_lower.contains('\\') {
+            return exec_lower.ends_with(&pattern_lower) || pattern_lower.ends_with(&exec_lower);
+        }
+
+        // Check if pattern is a substring that matches the whole name
+        // This prevents "rm" from matching "rmfile" but allows "rm" to match "/bin/rm"
+        if exec_lower == pattern_lower {
+            return true;
+        }
+
+        // Check if pattern with common extensions matches
+        for ext in [".exe", ".cmd", ".bat", ".sh"] {
+            let with_ext = format!("{}{}", exec_lower, ext);
+            if with_ext == pattern_lower {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub fn is_command_allowed(&self, command: &str) -> bool {
-        // Check blocked commands first
+        let (executable, _full_command) = self.tokenize_command(command);
+
+        if executable.is_empty() {
+            return false; // Reject empty commands
+        }
+
+        // Check blocked commands first using proper tokenization
         for blocked in &self.blocked_commands {
-            if command.starts_with(blocked) {
+            let (blocked_exec, _) = self.tokenize_command(blocked);
+            if self.command_matches(&executable, &blocked_exec) {
                 return false;
             }
         }
@@ -145,9 +212,10 @@ impl ToolSandboxProfile {
             return true;
         }
 
-        // Check allowed commands
+        // Check allowed commands using proper tokenization
         for allowed in &self.allowed_commands {
-            if command.starts_with(allowed) {
+            let (allowed_exec, _) = self.tokenize_command(allowed);
+            if self.command_matches(&executable, &allowed_exec) {
                 return true;
             }
         }

@@ -64,13 +64,14 @@ impl OtelConfig {
 /// OpenTelemetry exporter for hierarchical traces
 pub struct OtelExporter {
     tracer: sdktrace::Tracer,
+    provider: Option<sdktrace::TracerProvider>,
     config: OtelConfig,
 }
 
 impl OtelExporter {
     /// Create a new OpenTelemetry exporter
     pub fn new(config: OtelConfig) -> Result<Self> {
-        let tracer_provider = if config.export_to_stdout {
+        let provider = if config.export_to_stdout {
             // Export to stdout for debugging
             let exporter = opentelemetry_stdout::SpanExporter::default();
             sdktrace::TracerProvider::builder()
@@ -92,9 +93,32 @@ impl OtelExporter {
             sdktrace::TracerProvider::builder().build()
         };
 
-        let tracer = tracer_provider.tracer(config.service_name.clone());
+        let tracer = provider.tracer(config.service_name.clone());
 
-        Ok(Self { tracer, config })
+        Ok(Self {
+            tracer,
+            provider: Some(provider),
+            config,
+        })
+    }
+
+    /// Shutdown the exporter and flush remaining spans
+    pub fn shutdown(&mut self) -> Result<()> {
+        if let Some(provider) = self.provider.take() {
+            // Shutdown the provider to flush any remaining spans
+            provider.shutdown()?;
+            tracing::debug!("OpenTelemetry exporter shut down successfully");
+        }
+        Ok(())
+    }
+
+    /// Force flush all pending spans immediately
+    pub fn force_flush(&self) -> Result<()> {
+        if let Some(ref provider) = self.provider {
+            provider.force_flush()?;
+            tracing::debug!("OpenTelemetry exporter force flush completed");
+        }
+        Ok(())
     }
 
     /// Export a hierarchical trace to OpenTelemetry

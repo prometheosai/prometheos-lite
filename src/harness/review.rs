@@ -133,10 +133,10 @@ impl ReviewEngine {
     pub fn new() -> Self {
         Self {
             security_patterns: vec![
-                (Regex::new(r"(?i)password\s*=\s*['\"][^'\"]+['\"]").unwrap(), ReviewSeverity::Critical, "SEC001"),
-                (Regex::new(r"(?i)secret\s*=\s*['\"][^'\"]+['\"]").unwrap(), ReviewSeverity::Critical, "SEC002"),
-                (Regex::new(r"(?i)token\s*=\s*['\"][^'\"]+['\"]").unwrap(), ReviewSeverity::High, "SEC003"),
-                (Regex::new(r"(?i)api_key\s*=\s*['\"][^'\"]+['\"]").unwrap(), ReviewSeverity::Critical, "SEC004"),
+                (Regex::new(r"(?i)password\s*=\s*['\x22][^'\x22]+['\x22]").unwrap(), ReviewSeverity::Critical, "SEC001"),
+                (Regex::new(r"(?i)secret\s*=\s*['\x22][^'\x22]+['\x22]").unwrap(), ReviewSeverity::Critical, "SEC002"),
+                (Regex::new(r"(?i)token\s*=\s*['\x22][^'\x22]+['\x22]").unwrap(), ReviewSeverity::High, "SEC003"),
+                (Regex::new(r"(?i)api_key\s*=\s*['\x22][^'\x22]+['\x22]").unwrap(), ReviewSeverity::Critical, "SEC004"),
                 (Regex::new(r"(?i)private_key").unwrap(), ReviewSeverity::Critical, "SEC005"),
                 (Regex::new(r"(?i)unsafe\s*\{").unwrap(), ReviewSeverity::High, "SEC006"),
                 (Regex::new(r"(?i)eval\s*\(").unwrap(), ReviewSeverity::Critical, "SEC007"),
@@ -148,7 +148,7 @@ impl ReviewEngine {
             ],
             bug_patterns: vec![
                 (Regex::new(r"(?i)unwrap\(\)").unwrap(), ReviewSeverity::Medium, "BUG001"),
-                (Regex::new(r"(?i)expect\(['\"]").unwrap(), ReviewSeverity::Medium, "BUG002"),
+                (Regex::new(r"(?i)expect\(['\x22]").unwrap(), ReviewSeverity::Medium, "BUG002"),
                 (Regex::new(r"(?i)panic!\s*\(").unwrap(), ReviewSeverity::High, "BUG003"),
                 (Regex::new(r"(?i)unimplemented!").unwrap(), ReviewSeverity::High, "BUG004"),
                 (Regex::new(r"(?i)todo!").unwrap(), ReviewSeverity::Medium, "BUG005"),
