@@ -30,6 +30,9 @@ Thumbs.db
 
 # PrometheOS output
 prometheos-output/
+.prometheos/checkpoints/
+.prometheos/runs.db-wal
+.prometheos/runs.db-shm
 
 # Database files
 *.db
