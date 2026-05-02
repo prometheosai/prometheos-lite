@@ -636,13 +636,15 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
             verification_summary: format!("Verification strength: {:?}", strength),
         },
         semantic_evidence: SemanticEvidence {
-            api_changes_detected: false,
-            auth_changes_detected: false,
-            database_changes_detected: false,
-            dependency_changes_detected: false,
-            config_changes_detected: false,
-            breaking_changes_count: 0,
-            security_relevant_changes: false,
+            api_changes_detected: !semantic.api_changes.is_empty(),
+            auth_changes_detected: !semantic.auth_changes.is_empty(),
+            database_changes_detected: !semantic.database_changes.is_empty(),
+            dependency_changes_detected: !semantic.dependency_changes.is_empty(),
+            config_changes_detected: !semantic.config_changes.is_empty(),
+            breaking_changes_count: semantic.api_changes.iter().filter(|c| c.breaking).count()
+                + semantic.dependency_changes.iter().filter(|c| c.breaking).count(),
+            security_relevant_changes: !semantic.auth_changes.is_empty() 
+                || semantic.api_changes.iter().any(|c| c.change_type == crate::harness::semantic_diff::ApiChangeType::VisibilityChanged),
         },
         confidence_evidence: ConfidenceEvidence {
             confidence_score: confidence.score,
