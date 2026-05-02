@@ -14,6 +14,18 @@
 
 **Blocker 5 - Pre-Apply Review/Risk Gate**: Restructured execution loop to perform review and risk assessment BEFORE applying patches. Added proper approval gate based on `HarnessMode` (ReviewOnly never applies, Assisted requires approval, Autonomous applies if acceptable risk).
 
+**Blocker 1 - Sandbox Command Safety**: Replaced shell-based command execution with structured command parsing. Commands are now executed directly without shell wrapper, preventing injection attacks. Added `SandboxSecurityPolicy` with blocked/allowed command lists and shell feature detection.
+
+**Blocker 6 - Validation Cache with File Hashes**: Fixed validation cache to compute and store SHA256 hashes of source files. Cache entries are now invalidated when files change, preventing stale cache hits.
+
+**Blocker 7 - Parallel Validation**: Fixed `run_parallel()` to actually execute commands concurrently using `tokio::spawn()`. Commands now run in parallel as intended.
+
+**Blocker 8 - Semantic Evidence**: Fixed hardcoded `false` values in `SemanticEvidence`. Now properly wired to actual semantic analysis results from `analyze_semantic_diff()`.
+
+**Blocker 9 - Progress Callback Wiring**: Fixed `execute_harness_task()` to properly forward progress updates to the provided callback function via channel-based communication.
+
+**Blocker 10 - Observability Duration Bug**: Fixed subtraction order in `end_span()` - now correctly computes `end_time - start_time` instead of `start_time - end_time`.
+
 # PrometheOS Lite Issue Tracker
 
 This document tracks all issues from the PRDs organized by milestone, with implementation status.
