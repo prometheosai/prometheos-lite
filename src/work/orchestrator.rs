@@ -174,6 +174,10 @@ impl WorkOrchestrator {
             self.playbook_resolver.update_playbook_usage(&playbook.id)?;
         }
 
+        // Persist context mutations (autonomy level, conversation binding, playbook settings)
+        // before any execution path that reloads context from storage.
+        self.work_context_service.update_context(&context)?;
+
         // 5. Execute flow based on autonomy level
         // Chat mode: create + set AwaitingApproval (no execution)
         // Review mode: execute planning → Await approval
@@ -285,6 +289,13 @@ impl WorkOrchestrator {
                 .clear_blocked_reason(&mut context)?;
         }
 
+        // Explicit user continuation acts as approval for chat-mode contexts.
+        // Promote to Review so execution can proceed through guarded flows.
+        if context.autonomy_level == AutonomyLevel::Chat {
+            context.autonomy_level = AutonomyLevel::Review;
+            self.work_context_service.update_context(&context)?;
+        }
+
         let context = self
             .work_execution_service
             .continue_context(&context_id)
@@ -303,6 +314,12 @@ impl WorkOrchestrator {
             .work_context_service
             .get_context(&context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
+
+        // Explicit run request is also a human approval signal.
+        if context.autonomy_level == AutonomyLevel::Chat {
+            context.autonomy_level = AutonomyLevel::Review;
+            self.work_context_service.update_context(&context)?;
+        }
 
         let mut iterations = 0;
         let start = std::time::Instant::now();

@@ -62,12 +62,12 @@ impl PhaseController {
         if let Some(profile) = domain_profile {
             // Try to get flow from domain profile's default_flows
             let phase_key = match phase {
-                WorkPhase::Intake => "intake",
+                WorkPhase::Intake => "planning",
                 WorkPhase::Planning => "planning",
-                WorkPhase::Execution => "execution",
-                WorkPhase::Review => "review",
+                WorkPhase::Execution => "codegen",
+                WorkPhase::Review => "approval",
                 WorkPhase::Iteration => "planning",
-                WorkPhase::Finalization => "finalization",
+                WorkPhase::Finalization => "approval",
             };
 
             // Look for a flow matching the phase in the domain profile
@@ -80,12 +80,12 @@ impl PhaseController {
 
         // Fallback to generic flows
         match phase {
-            WorkPhase::Intake => "intake.flow.yaml".to_string(),
-            WorkPhase::Planning => "planning.flow.yaml".to_string(),
-            WorkPhase::Execution => "execution.flow.yaml".to_string(),
-            WorkPhase::Review => "review.flow.yaml".to_string(),
+            WorkPhase::Intake => "planning.flow.yaml".to_string(),
+            WorkPhase::Planning => "codegen.flow.yaml".to_string(),
+            WorkPhase::Execution => "codegen.flow.yaml".to_string(),
+            WorkPhase::Review => "approval.flow.yaml".to_string(),
             WorkPhase::Iteration => "planning.flow.yaml".to_string(),
-            WorkPhase::Finalization => "finalization.flow.yaml".to_string(),
+            WorkPhase::Finalization => "approval.flow.yaml".to_string(),
         }
     }
 
@@ -103,12 +103,12 @@ impl PhaseController {
 
         // Filter flows that match the current phase
         let phase_key = match phase {
-            WorkPhase::Intake => "intake",
+            WorkPhase::Intake => "planning",
             WorkPhase::Planning => "planning",
-            WorkPhase::Execution => "execution",
-            WorkPhase::Review => "review",
+            WorkPhase::Execution => "codegen",
+            WorkPhase::Review => "approval",
             WorkPhase::Iteration => "planning",
-            WorkPhase::Finalization => "finalization",
+            WorkPhase::Finalization => "approval",
         };
 
         let matching_flows: Vec<&FlowPreference> = preferred_flows
@@ -223,11 +223,11 @@ mod tests {
     fn test_flow_for_phase() {
         assert_eq!(
             PhaseController::flow_for_phase(WorkPhase::Planning, None),
-            "planning.flow.yaml"
+            "codegen.flow.yaml"
         );
         assert_eq!(
             PhaseController::flow_for_phase(WorkPhase::Execution, None),
-            "execution.flow.yaml"
+            "codegen.flow.yaml"
         );
     }
 
