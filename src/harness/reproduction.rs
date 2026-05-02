@@ -1,7 +1,7 @@
 use crate::harness::{
     edit_protocol::EditOperation,
     file_control::FilePolicy,
-    repo_intelligence::{RepoContext, SymbolInfo},
+    repo_intelligence::{RepoContext, CodeSymbol},
     environment::EnvironmentProfile,
 };
 use anyhow::{Result, Context, bail};
@@ -30,7 +30,7 @@ pub enum ReproductionMode {
     EdgeCaseExplorer,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReproductionResult {
     pub success: bool,
     pub test_files: Vec<PathBuf>,
@@ -41,7 +41,7 @@ pub struct ReproductionResult {
     pub diagnostics: Vec<ReproductionDiagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SuggestedFix {
     pub description: String,
     pub confidence: f32,

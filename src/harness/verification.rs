@@ -51,7 +51,7 @@ impl VerificationStrength {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VerificationAssessment {
     pub strength: VerificationStrength,
     pub achieved_levels: Vec<VerificationLevel>,

@@ -51,7 +51,7 @@ pub enum AttemptResult {
     Failure { reason: String, failure: FailureDetails },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RepairStrategy {
     FixSearchReplace,
     FixSyntaxError,

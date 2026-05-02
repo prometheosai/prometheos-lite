@@ -39,7 +39,7 @@ pub enum TestType {
     CorrectnessTest,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum MetricType {
     Duration,
     Memory,
