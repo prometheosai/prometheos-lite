@@ -186,6 +186,7 @@ pub enum SemanticCategory {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum RiskLevel {
+    #[default]
     None,
     Low,
     Medium,
@@ -826,8 +827,8 @@ impl SemanticDiffAnalyzer {
             overall_risk,
             api_risk,
             auth_risk,
-            database_risk,
-            dependency_risk,
+            database_risk: RiskLevel::None,
+            dependency_risk: RiskLevel::None,
             config_risk,
             requires_review,
             requires_approval,

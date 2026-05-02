@@ -210,12 +210,12 @@ impl TestGenerator {
         Ok(tests)
     }
     
-    fn find_symbol(&self, name: &str) -> Option<&SymbolInfo> {
-        self.repo.symbols.iter().find(|s| s.name == name || s.full_path.contains(name))
+    fn find_symbol(&self, name: &str) -> Option<&CodeSymbol> {
+        self.repo.symbols.iter().find(|s| s.name == name || s.file.to_string_lossy().contains(name))
     }
     
-    async fn create_unit_test_for_symbol(&self, symbol: &SymbolInfo, req: &ReproductionRequest) -> Result<TestContent> {
-        let language = detect_language(&symbol.file_path);
+    async fn create_unit_test_for_symbol(&self, symbol: &CodeSymbol, req: &ReproductionRequest) -> Result<TestContent> {
+        let language = detect_language(&symbol.file);
         
         let test_code = match language.as_str() {
             "rust" => generate_rust_unit_test(symbol, req),
@@ -227,7 +227,7 @@ impl TestGenerator {
         Ok(TestContent {
             language,
             code: test_code,
-            target_file: symbol.file_path.clone(),
+            target_file: symbol.file.clone(),
             test_name: format!("test_repro_{}", sanitize_name(&symbol.name)),
         })
     }
@@ -277,7 +277,7 @@ fn test_integration_reproduction() {{
         })
     }
     
-    async fn create_property_test(&self, symbol: &SymbolInfo, req: &ReproductionRequest) -> Result<TestContent> {
+    async fn create_property_test(&self, symbol: &CodeSymbol, req: &ReproductionRequest) -> Result<TestContent> {
         let test_code = format!(
             r#"// Property-based test for: {}
 // Generated to find edge cases causing: {}
@@ -300,14 +300,14 @@ proptest! {{
             symbol.name,
             req.failure_description,
             sanitize_name(&symbol.name),
-            symbol.module.as_deref().unwrap_or("module"),
+            "module",
             symbol.name
         );
         
         Ok(TestContent {
             language: "rust".to_string(),
             code: test_code,
-            target_file: symbol.file_path.clone(),
+            target_file: symbol.file.clone(),
             test_name: format!("test_{}_property", sanitize_name(&symbol.name)),
         })
     }
@@ -422,7 +422,7 @@ fn detect_language(file: &Path) -> String {
     }.to_string()
 }
 
-fn generate_rust_unit_test(symbol: &SymbolInfo, req: &ReproductionRequest) -> String {
+fn generate_rust_unit_test(symbol: &CodeSymbol, req: &ReproductionRequest) -> String {
     format!(
         r#"#[cfg(test)]
 mod {}_tests {{
@@ -442,14 +442,14 @@ mod {}_tests {{
     }}
 }}
 "#,
-        symbol.module.as_deref().unwrap_or("module"),
+        symbol.file.file_stem().and_then(|s| s.to_str()).unwrap_or("module"),
         req.task,
         req.failure_description,
         symbol.name
     )
 }
 
-fn generate_python_unit_test(symbol: &SymbolInfo, req: &ReproductionRequest) -> String {
+fn generate_python_unit_test(symbol: &CodeSymbol, req: &ReproductionRequest) -> String {
     format!(
         r#"import unittest
 
@@ -478,7 +478,7 @@ if __name__ == '__main__':
     )
 }
 
-fn generate_js_unit_test(symbol: &SymbolInfo, req: &ReproductionRequest) -> String {
+fn generate_js_unit_test(symbol: &CodeSymbol, req: &ReproductionRequest) -> String {
     format!(
         r#"// Regression test for: {}
 // Failure: {}
@@ -502,7 +502,7 @@ describe('{} reproduction', () => {{
     )
 }
 
-fn generate_generic_unit_test(symbol: &SymbolInfo, req: &ReproductionRequest) -> String {
+fn generate_generic_unit_test(symbol: &CodeSymbol, req: &ReproductionRequest) -> String {
     format!(
         r#"// Test for: {}
 // Failure: {}
@@ -510,13 +510,13 @@ fn generate_generic_unit_test(symbol: &SymbolInfo, req: &ReproductionRequest) ->
 
 fn test_reproduction() {{
     // TODO: Implement test
-    println!("Testing {}", "{}");
+    println!("Testing {{}}", "{}");
 }}
 "#,
         req.task,
         req.failure_description,
         symbol.name,
-        symbol.file_path,
+        symbol.file,
         symbol.name
     )
 }

@@ -425,7 +425,7 @@ fn extract_from_node(
     }
 }
 
-fn find_child_by_kind(node: &Node, kind: &str) -> Option<Node> {
+fn find_child_by_kind<'a>(node: &'a Node<'a>, kind: &str) -> Option<Node<'a>> {
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             if child.kind() == kind {

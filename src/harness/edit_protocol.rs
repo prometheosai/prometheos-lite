@@ -1,10 +1,8 @@
 use crate::harness::file_control::{FilePolicy, FileSet, assert_edit_allowed, normalize_path};
 use anyhow::{Result, bail, Context};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
