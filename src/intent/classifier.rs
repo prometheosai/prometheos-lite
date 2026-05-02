@@ -140,13 +140,30 @@ impl IntentClassifier {
 
         // Rule-based didn't match, try LLM fallback
         if let Some(ref llm_client) = self.llm_client {
-            let result = self.llm_classify(llm_client, message).await?;
-            println!(
-                "[INTENT] {} (confidence: {:.2}, routing: llm_fallback)",
-                result.intent.display_name(),
-                result.confidence
-            );
-            Ok(result)
+            match self.llm_classify(llm_client, message).await {
+                Ok(result) => {
+                    println!(
+                        "[INTENT] {} (confidence: {:.2}, routing: llm_fallback)",
+                        result.intent.display_name(),
+                        result.confidence
+                    );
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = IntentClassificationResult {
+                        intent: Intent::Ambiguous,
+                        confidence: 0.0,
+                        reason: format!("LLM fallback failed: {}", e),
+                        override_: false,
+                    };
+                    println!(
+                        "[INTENT] {} (confidence: {:.2}, routing: fallback_after_llm_error)",
+                        result.intent.display_name(),
+                        result.confidence
+                    );
+                    Ok(result)
+                }
+            }
         } else {
             // No LLM client available, return ambiguous
             let result = IntentClassificationResult {

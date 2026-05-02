@@ -109,7 +109,10 @@ impl FinalOutput {
             run_id: run_id.clone(),
             trace_id: trace_id.clone(),
             flow_name: flow_name.clone(),
-            primary: serde_json::Value::Null,
+            primary: serde_json::json!({
+                "status": "failed",
+                "error": error.clone()
+            }),
             additional: HashMap::new(),
             evaluation: Evaluation::empty(run_id, flow_name),
             budget_report: None,

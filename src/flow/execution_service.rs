@@ -104,6 +104,62 @@ pub struct FlowExecutionService {
 }
 
 impl FlowExecutionService {
+    fn select_primary_output(
+        state: &SharedState,
+    ) -> (serde_json::Value, Option<String>) {
+        let preferred_keys = [
+            "llm_response",
+            "generated",
+            "review",
+            "plan",
+            "steps",
+            "response",
+            "tool_result",
+            "written_file",
+            "memory_id",
+        ];
+
+        for key in preferred_keys {
+            if let Some(value) = state.get_output(key) {
+                if !value.is_null() {
+                    return (value.clone(), Some(key.to_string()));
+                }
+            }
+        }
+
+        let mut keys: Vec<String> = state.output.keys().cloned().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(value) = state.get_output(&key) {
+                if !value.is_null() {
+                    return (value.clone(), Some(key));
+                }
+            }
+        }
+
+        (
+            serde_json::json!({
+                "status": "no_primary_output",
+                "outputs": state.get_all_outputs()
+            }),
+            None,
+        )
+    }
+
+    fn select_additional_outputs(
+        state: &SharedState,
+        primary_key: Option<&str>,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        let mut additional = std::collections::HashMap::new();
+        for (key, value) in &state.output {
+            if primary_key.is_some_and(|k| k == key) {
+                continue;
+            }
+            additional.insert(key.clone(), value.clone());
+        }
+        additional
+    }
+
     /// Create a new FlowExecutionService with default components
     pub fn new(runtime: Arc<RuntimeContext>) -> Result<Self> {
         let flow_selector = Arc::new(DefaultFlowSelector::with_default_dir());
@@ -323,6 +379,8 @@ impl FlowExecutionService {
         // 5. Prepare state with IDs pre-set
         let mut state = SharedState::new();
         state.set_input("task".to_string(), serde_json::json!(message));
+        state.set_input("message".to_string(), serde_json::json!(message));
+        state.set_input("prompt".to_string(), serde_json::json!(message));
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
         
@@ -440,19 +498,8 @@ impl FlowExecutionService {
         // 14. Produce FinalOutput
         let final_output = match result {
             Ok(()) => {
-                let primary = state
-                    .get_output("llm_response")
-                    .or_else(|| state.get_output("generated"))
-                    .or_else(|| state.get_output("review"))
-                    .cloned()
-                    .unwrap_or(serde_json::json!(null));
-
-                let mut additional = std::collections::HashMap::new();
-                for (key, value) in &state.output {
-                    if key != "llm_response" && key != "generated" {
-                        additional.insert(key.clone(), value.clone());
-                    }
-                }
+                let (primary, primary_key) = Self::select_primary_output(&state);
+                let additional = Self::select_additional_outputs(&state, primary_key.as_deref());
 
                 // Extract context budget metadata from state if available
                 let context_budget = state.get_meta("context_budget").and_then(|v| {
@@ -523,6 +570,8 @@ impl FlowExecutionService {
 
         let mut state = SharedState::new();
         state.set_input("task".to_string(), serde_json::json!(message));
+        state.set_input("message".to_string(), serde_json::json!(message));
+        state.set_input("prompt".to_string(), serde_json::json!(message));
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
 
@@ -617,19 +666,8 @@ impl FlowExecutionService {
 
         match result {
             Ok(()) => {
-                let primary = state
-                    .get_output("llm_response")
-                    .or_else(|| state.get_output("generated"))
-                    .or_else(|| state.get_output("review"))
-                    .cloned()
-                    .unwrap_or(serde_json::json!(null));
-
-                let mut additional = std::collections::HashMap::new();
-                for (key, value) in &state.output {
-                    if key != "llm_response" && key != "generated" {
-                        additional.insert(key.clone(), value.clone());
-                    }
-                }
+                let (primary, primary_key) = Self::select_primary_output(&state);
+                let additional = Self::select_additional_outputs(&state, primary_key.as_deref());
 
                 // Extract context budget metadata from state if available
                 let context_budget = state.get_meta("context_budget").and_then(|v| {

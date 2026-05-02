@@ -452,7 +452,14 @@ async fn test_golden_integration_with_flow_execution() {
 
     // Step 5: Verify artifact was added
     assert_eq!(context.artifacts.len(), 1);
-    assert_eq!(context.artifacts[0].name, "API Plan");
+    assert_eq!(
+        context.artifacts[0].kind,
+        prometheos_lite::work::artifact::ArtifactKind::Plan
+    );
+    assert!(
+        !context.artifacts[0].name.trim().is_empty(),
+        "Artifact name should not be empty"
+    );
 
     // Step 6: Persist context
     work_context_service

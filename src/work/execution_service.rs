@@ -168,6 +168,19 @@ impl WorkExecutionService {
             .execute_flow_file(&flow_file, &context.goal, options)
             .await?;
 
+        if !final_output.success {
+            let error_message = final_output
+                .error
+                .clone()
+                .unwrap_or_else(|| "Unknown flow execution failure".to_string());
+            anyhow::bail!(
+                "Flow '{}' failed for work context '{}': {}",
+                flow_ref,
+                context.id,
+                error_message
+            );
+        }
+
         // Convert execution metadata to ExecutionRecords and add to WorkContext
         for (node_id, metadata_json) in &final_output.execution_metadata {
             if let Ok(generate_result) = serde_json::from_value::<

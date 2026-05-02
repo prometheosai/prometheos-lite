@@ -30,6 +30,16 @@ impl RuleClassifier {
             return Some(Intent::CodingTask);
         }
 
+        // Planning patterns (PRD, spec, design)
+        if Self::is_planning_request(trimmed) {
+            return Some(Intent::Planning);
+        }
+
+        // Approval commands (to continue with implementation after plan review)
+        if Self::is_approval_command(trimmed) {
+            return Some(Intent::Approval);
+        }
+
         // File edit patterns
         if Self::is_file_edit(trimmed) {
             return Some(Intent::FileEdit);
@@ -45,54 +55,44 @@ impl RuleClassifier {
             return Some(Intent::ProjectAction);
         }
 
-        // Planning patterns (PRD, spec, design)
-        if Self::is_planning_request(trimmed) {
-            return Some(Intent::Planning);
-        }
-
-        // Approval commands (to continue with implementation after plan review)
-        if Self::is_approval_command(trimmed) {
-            return Some(Intent::Approval);
-        }
-
         // No rule matched - ambiguous
         None
     }
 
     /// Check if message is a conversation
     fn is_conversation(message: &str, is_short: bool) -> bool {
-        let conversation_patterns = [
-            "hi",
-            "hello",
-            "hey",
+        let single_word_patterns = [
+            "hi", "hello", "hey", "thanks", "ok", "okay", "sure", "alright", "bye", "goodbye",
+            "later",
+        ];
+        let phrase_patterns = [
             "how are you",
             "how's it going",
-            "thanks",
             "thank you",
-            "ok",
-            "okay",
-            "sure",
-            "alright",
             "what can you do",
             "what are you",
             "who are you",
             "good morning",
             "good afternoon",
             "good evening",
-            "bye",
-            "goodbye",
             "see you",
-            "later",
         ];
 
-        // Short messages without action verbs are likely conversation
-        if is_short && !Self::has_action_verb(message) {
-            return true;
-        }
+        let words: Vec<&str> = message
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|w| !w.is_empty())
+            .collect();
 
-        conversation_patterns
+        let has_single_word_match = single_word_patterns
             .iter()
-            .any(|&pattern| message.contains(pattern))
+            .any(|pattern| words.iter().any(|word| word == pattern));
+        let has_phrase_match = phrase_patterns
+            .iter()
+            .any(|pattern| message.contains(pattern));
+
+        // Only treat short non-action messages as conversation when they match
+        // explicit conversational patterns.
+        (is_short && !Self::has_action_verb(message)) && (has_single_word_match || has_phrase_match)
     }
 
     /// Check if message is a question
@@ -125,6 +125,11 @@ impl RuleClassifier {
 
     /// Check if message is a coding task
     fn is_coding_task(message: &str) -> bool {
+        // Tool-oriented command requests should route to ToolAction, not CodingTask.
+        if Self::is_tool_action(message) {
+            return false;
+        }
+
         // First check if it's a planning request (PRD, design, spec)
         let planning_patterns = [
             "prd",
@@ -146,6 +151,7 @@ impl RuleClassifier {
         let coding_verbs = [
             "build",
             "create",
+            "add",
             "implement",
             "generate",
             "make",
@@ -186,6 +192,8 @@ impl RuleClassifier {
             "model",
             "schema",
             "migration",
+            "feature",
+            "bug",
             "test",
             "spec",
             "test case",
@@ -232,14 +240,54 @@ impl RuleClassifier {
 
     /// Check if message is a tool action
     fn is_tool_action(message: &str) -> bool {
-        let tool_patterns = [
-            "run", "execute", "build", "test", "check", "compile", "deploy", "install", "cargo",
-            "npm", "yarn", "pip", "gradle", "docker", "kubectl", "git",
+        let words: Vec<&str> = message
+            .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        if words.is_empty() {
+            return false;
+        }
+
+        let command_verbs = [
+            "run", "execute", "build", "test", "check", "compile", "deploy", "install",
+        ];
+        let tool_nouns = [
+            "cargo", "npm", "yarn", "pnpm", "pip", "gradle", "docker", "kubectl", "git", "mvn",
+            "make", "cmake", "pytest", "jest", "vitest", "go", "rustc",
+        ];
+        let explicit_tool_phrases = [
+            "run tests",
+            "run the tests",
+            "execute tests",
+            "execute command",
+            "run command",
+            "build project",
+            "compile project",
+            "cargo test",
+            "cargo build",
+            "cargo check",
+            "npm test",
+            "npm run",
+            "pip install",
+            "docker build",
+            "git status",
         ];
 
-        tool_patterns
+        if explicit_tool_phrases
             .iter()
-            .any(|&pattern| message.contains(pattern))
+            .any(|phrase| message.contains(phrase))
+        {
+            return true;
+        }
+
+        let starts_with_command = words
+            .first()
+            .map(|word| command_verbs.contains(word))
+            .unwrap_or(false);
+        let has_tool_noun = words.iter().any(|word| tool_nouns.contains(word));
+
+        starts_with_command && has_tool_noun
     }
 
     /// Check if message is a project action
@@ -387,5 +435,18 @@ mod tests {
     fn test_ambiguous_classification() {
         assert_eq!(RuleClassifier::classify("something random"), None);
         assert_eq!(RuleClassifier::classify("xyz"), None);
+        assert_eq!(RuleClassifier::classify("test message"), None);
+    }
+
+    #[test]
+    fn test_tool_action_classification() {
+        assert_eq!(
+            RuleClassifier::classify("run cargo test"),
+            Some(Intent::ToolAction)
+        );
+        assert_eq!(
+            RuleClassifier::classify("execute command git status"),
+            Some(Intent::ToolAction)
+        );
     }
 }

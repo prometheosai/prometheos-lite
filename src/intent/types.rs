@@ -44,10 +44,17 @@ impl Intent {
 
     /// Parse intent from override command
     pub fn from_override(command: &str) -> Option<Self> {
-        match command.to_lowercase().as_str() {
-            "/run" | "/run flow" | "/flow" => Some(Intent::CodingTask),
+        let first_token = command
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+
+        match first_token.as_str() {
+            "/run" | "/flow" | "/code" => Some(Intent::CodingTask),
             "/ask" | "/question" => Some(Intent::Question),
             "/chat" | "/conversation" => Some(Intent::Conversation),
+            "/plan" => Some(Intent::Planning),
             _ => None,
         }
     }
