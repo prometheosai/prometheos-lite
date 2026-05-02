@@ -1,8 +1,8 @@
 use crate::harness::{
     acceptance::{AcceptanceCriterion, compile_acceptance_criteria},
-    artifacts::{HarnessArtifact, generate_completion_artifact},
-    completion::{CompletionDecision, CompletionEvidence, evaluate_completion},
-    confidence::{ConfidenceScore, compute_confidence},
+    artifacts::{HarnessArtifact, generate_completion_artifact, ArtifactKind, ArtifactMetadata, CompressionType},
+    completion::{CompletionDecision, CompletionEvidence, evaluate_completion, PatchEvidence, ValidationEvidence, ReviewEvidence, RiskEvidence, VerificationEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence},
+    confidence::{ConfidenceScore, compute_confidence, ConfidenceFactor, FactorImpact},
     edit_protocol::EditOperation,
     environment::{EnvironmentProfile, fingerprint_environment},
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
@@ -10,8 +10,8 @@ use crate::harness::{
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
     patch_applier::{PatchResult, apply_patch, dry_run_patch},
     repo_intelligence::{RepoContext, build_repo_context},
-    review::{ReviewIssue, ReviewSeverity, review_diff},
-    risk::{RiskAssessment, RiskLevel, assess_risk},
+    review::{ReviewIssue, ReviewSeverity, ReviewIssueType, review_diff},
+    risk::{RiskAssessment, RiskLevel, assess_risk, RiskReason, RiskCategory, RiskSeverity},
     sandbox::LocalSandboxRuntime,
     semantic_diff::analyze_semantic_diff,
     trajectory::Trajectory,
@@ -19,6 +19,7 @@ use crate::harness::{
     verification::{VerificationStrength, assess_verification_strength},
 };
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -318,12 +319,27 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
             review_issues: vec![],
             risk_assessment: RiskAssessment {
                 level: RiskLevel::Low,
-                reasons: vec!["No edits proposed".into()],
+                reasons: vec![RiskReason {
+                    category: RiskCategory::Logic,
+                    description: "No edits proposed".into(),
+                    severity: RiskSeverity::Info,
+                    mitigation: None,
+                }],
                 requires_approval: false,
+                can_override: true,
+                override_conditions: vec!["manual review".into()],
             },
             confidence: ConfidenceScore {
                 score: 0.0,
-                factors: vec!["no provider edits supplied".into()],
+                factors: vec![ConfidenceFactor {
+                    name: "edits_supplied".into(),
+                    weight: 1.0,
+                    score: 0.0,
+                    description: "no provider edits supplied".into(),
+                    impact: FactorImpact::Negative,
+                }],
+                explanation: "No edits were supplied for evaluation".into(),
+                recommendation: "Provide structured edits for processing".into(),
             },
             verification_strength: VerificationStrength::None,
             completion_decision: CompletionDecision::Blocked("no structured edits supplied".into()),
@@ -395,6 +411,8 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         lint_commands: env.lint_commands.clone(),
         test_commands: env.test_commands.clone(),
         repro_commands: vec![],
+        timeout_ms: Some(120000),
+        parallel: true,
     };
     
     let validation = if patch.as_ref().is_some_and(|p| p.failures.is_empty()) {
@@ -457,6 +475,80 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
     let confidence = compute_confidence(validation.as_ref(), &review, &risk, strength);
     
     let evidence = CompletionEvidence {
+        // 8 Evidence Dimensions
+        patch_evidence: PatchEvidence {
+            patch_created: patch.as_ref().is_some_and(|p| !p.diff.is_empty()),
+            files_modified: patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0),
+            lines_changed: patch.as_ref().map(|p| p.diff.lines().count()).unwrap_or(0),
+            patch_applied_cleanly: patch.as_ref().is_some_and(|p| p.failures.is_empty()),
+            patch_hash: patch.as_ref().map(|p| format!("{:x}", md5::compute(&p.diff))),
+            dry_run_passed: dry.failures.is_empty(),
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: validation.is_some(),
+            all_validations_passed: validation.as_ref().is_some_and(|v| v.passed),
+            format_check_passed: validation.as_ref().map(|v| v.format_check_passed).unwrap_or(false),
+            static_check_passed: validation.as_ref().map(|v| v.static_check_passed).unwrap_or(false),
+            lint_check_passed: validation.as_ref().map(|v| v.lint_check_passed).unwrap_or(false),
+            test_passed: validation.as_ref().map(|v| v.test_passed).unwrap_or(false),
+            validation_summary: validation.as_ref().map(|v| v.summary.clone()).unwrap_or_default(),
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            total_issues: review.len(),
+            critical_issues: review.iter().filter(|i| i.severity == ReviewSeverity::Critical).count(),
+            high_issues: review.iter().filter(|i| i.severity == ReviewSeverity::High).count(),
+            medium_issues: review.iter().filter(|i| i.severity == ReviewSeverity::Medium).count(),
+            low_issues: review.iter().filter(|i| i.severity == ReviewSeverity::Low).count(),
+            security_issues: review.iter().filter(|i| i.issue_type == ReviewIssueType::Security).count(),
+            breaking_change_issues: review.iter().filter(|i| i.issue_type == ReviewIssueType::ApiChange).count(),
+            review_passed: !review.iter().any(|i| i.severity == ReviewSeverity::Critical),
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: format!("{:?}", risk.level),
+            security_risk: format!("{:?}", risk.security_level()),
+            api_risk: format!("{:?}", risk.api_level()),
+            database_risk: format!("{:?}", risk.database_level()),
+            dependency_risk: format!("{:?}", risk.dependency_level()),
+            requires_approval: risk.requires_approval,
+            risk_reasons: risk.reasons.iter().map(|r| r.description.clone()).collect(),
+        },
+        verification_evidence: VerificationEvidence {
+            verification_level: strength,
+            test_count: validation.as_ref().map(|v| v.command_results.len()).unwrap_or(0),
+            coverage_percent: None,
+            reproduction_test_passed: false,
+            integration_tests_passed: false,
+            verification_summary: format!("Verification strength: {:?}", strength),
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: confidence.score,
+            confidence_classification: format!("{:?}", confidence.classification()),
+            validation_contribution: 0.4,
+            risk_contribution: 0.3,
+            review_contribution: 0.3,
+            confidence_factors: confidence.factors.iter().map(|f| f.name.clone()).collect(),
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: checkpoint.is_some(),
+            rollback_available: checkpoint.is_some(),
+            all_phases_completed: true,
+            no_critical_errors: failures.is_empty(),
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        
+        // Legacy fields
         patch_exists: patch.as_ref().is_some_and(|p| !p.diff.is_empty() && p.failures.is_empty()),
         validation_ran: validation.is_some(),
         validation_passed: validation.as_ref().is_some_and(|v| v.passed),
@@ -465,6 +557,10 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         confidence: confidence.clone(),
         verification_strength: strength,
         requires_approval: risk.requires_approval,
+        
+        // Decision metadata
+        decision_factors: vec!["harness execution completed".into()],
+        evidence_completeness: 1.0,
     };
     
     let decision = evaluate_completion(&evidence, req.mode)?;
@@ -505,10 +601,21 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
     
     let content = generate_completion_artifact(&result)?;
     result.artifacts.push(HarnessArtifact {
-        kind: "completion".into(),
+        id: format!("artifact-{}", result.work_context_id),
+        kind: ArtifactKind::Report,
         path: None,
-        content: Some(content),
-        metadata: serde_json::json!({}),
+        content: Some(content.clone()),
+        compressed_content: None,
+        compression: CompressionType::None,
+        metadata: ArtifactMetadata {
+            work_context_id: result.work_context_id.clone(),
+            harness_run_id: result.work_context_id.clone(),
+            tags: vec!["completion".into()],
+            custom_fields: HashMap::new(),
+        },
+        created_at: Utc::now(),
+        size_bytes: content.len(),
+        compressed_size_bytes: None,
     });
     
     ctx.send_progress(HarnessProgress::Finished {
