@@ -21,9 +21,8 @@ use crate::api::messages::{create_message, get_messages};
 use crate::api::projects::{create_project, get_projects};
 use crate::api::websocket::websocket_handler;
 use crate::api::work_contexts::{
-    continue_work_context, create_work_context, get_harness_metadata, get_work_context,
-    get_work_context_artifacts, list_work_contexts, run_harness, run_until_complete,
-    submit_intent, update_work_context_status,
+    continue_work_context, create_work_context, get_work_context, get_work_context_artifacts,
+    list_work_contexts, run_until_complete, submit_intent, update_work_context_status,
 };
 
 async fn count_requests_middleware(
@@ -69,11 +68,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/work-contexts/:id/run-until-complete",
             post(run_until_complete),
-        )
-        .route("/work-contexts/:id/harness/run", post(run_harness))
-        .route(
-            "/work-contexts/:id/harness/:view",
-            get(get_harness_metadata),
         )
         .nest("/control-panel", create_control_panel_router())
         .layer(middleware::from_fn_with_state(
