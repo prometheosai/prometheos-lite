@@ -22,6 +22,8 @@ pub struct PatchResult {
     pub dry_run: bool,
     pub transaction_id: Option<String>,
     pub content_hashes: HashMap<PathBuf, String>,
+    /// Snapshots of files before patch was applied - used for rollback
+    pub snapshots: Vec<FileSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,12 +35,16 @@ pub struct PatchFailure {
     pub line_number: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
-struct FileSnapshot {
-    path: PathBuf,
-    content: Option<String>,
-    hash: Option<String>,
-    exists: bool,
+/// Snapshot of a file before patch application for rollback support
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileSnapshot {
+    pub path: PathBuf,
+    /// Original file content before patch. None if file didn't exist.
+    pub content: Option<String>,
+    /// SHA256 hash of original content
+    pub hash: Option<String>,
+    /// Whether the file existed before patching
+    pub existed_before: bool,
 }
 
 #[derive(Debug)]
@@ -57,13 +63,13 @@ impl Transaction {
         }
     }
 
-    fn record_snapshot(&mut self, path: PathBuf, content: Option<String>, exists: bool) {
+    fn record_snapshot(&mut self, path: PathBuf, content: Option<String>, existed_before: bool) {
         let hash = content.as_ref().map(|c| compute_hash(c));
         self.snapshots.insert(path.clone(), FileSnapshot {
             path,
             content,
             hash,
-            exists,
+            existed_before,
         });
     }
 
@@ -88,20 +94,106 @@ pub async fn apply_patch(
     run_with_transaction(edits, set, policy, false).await
 }
 
+/// Apply a patch with full rollback support
+/// 
+/// This function captures file snapshots BEFORE applying changes,
+/// ensuring that rollback can properly restore original content.
 pub async fn apply_patch_with_rollback(
     edits: &[EditOperation],
     set: &FileSet,
     policy: &FilePolicy,
 ) -> Result<(PatchResult, RollbackHandle)> {
+    // Validate edits first
+    validate_edit_operations(edits, set, policy)?;
+    
+    // STEP 1: Capture snapshots BEFORE applying any changes
+    let affected_files = extract_affected_files(edits);
+    let snapshots = capture_file_snapshots(&affected_files, policy).await?;
+    
+    // STEP 2: Apply the patch
     let result = run_with_transaction(edits, set, policy, false).await?;
     
-    let rollback = RollbackHandle {
-        transaction_id: result.transaction_id.clone().unwrap_or_default(),
-        snapshots: result.content_hashes.clone(),
-        repo_root: policy.repo_root.clone(),
-    };
+    // STEP 3: Create rollback handle with pre-patch snapshots
+    let rollback = RollbackHandle::new(
+        result.transaction_id.clone().unwrap_or_default(),
+        snapshots,
+        policy.repo_root.clone(),
+    );
     
-    Ok((result, rollback))
+    // Return result with snapshots for potential rollback
+    let mut result_with_snapshots = result;
+    result_with_snapshots.snapshots = rollback.snapshots.clone();
+    
+    Ok((result_with_snapshots, rollback))
+}
+
+/// Extract all file paths that will be affected by the edits
+fn extract_affected_files(edits: &[EditOperation]) -> BTreeSet<PathBuf> {
+    let mut files = BTreeSet::new();
+    
+    for edit in edits {
+        match edit {
+            EditOperation::SearchReplace(op) => {
+                files.insert(op.file.clone());
+            }
+            EditOperation::UnifiedDiff(op) => {
+                if let Some(target) = &op.target_file {
+                    files.insert(target.clone());
+                }
+            }
+            EditOperation::WholeFile(op) => {
+                files.insert(op.file.clone());
+            }
+            EditOperation::CreateFile(op) => {
+                files.insert(op.file.clone());
+            }
+            EditOperation::DeleteFile(op) => {
+                files.insert(op.file.clone());
+            }
+            EditOperation::RenameFile(op) => {
+                files.insert(op.from.clone());
+                files.insert(op.to.clone());
+            }
+        }
+    }
+    
+    files
+}
+
+/// Capture snapshots of files before they are modified
+async fn capture_file_snapshots(
+    paths: &BTreeSet<PathBuf>,
+    policy: &FilePolicy,
+) -> Result<Vec<FileSnapshot>> {
+    let mut snapshots = Vec::new();
+    
+    for path in paths {
+        // Normalize path relative to repo root
+        let full_path = policy.repo_root.join(path);
+        
+        let snapshot = if full_path.exists() {
+            let content = fs::read_to_string(&full_path).await.ok();
+            let hash = content.as_ref().map(|c| compute_hash(c));
+            
+            FileSnapshot {
+                path: path.clone(),
+                content,
+                hash,
+                existed_before: true,
+            }
+        } else {
+            FileSnapshot {
+                path: path.clone(),
+                content: None,
+                hash: None,
+                existed_before: false,
+            }
+        };
+        
+        snapshots.push(snapshot);
+    }
+    
+    Ok(snapshots)
 }
 
 async fn run_with_transaction(
@@ -133,6 +225,7 @@ async fn run_with_transaction(
             dry_run: true,
             transaction_id: Some(tx_id),
             content_hashes: compute_content_hashes(&transaction),
+            snapshots: vec![],
         });
     }
     
@@ -151,6 +244,7 @@ async fn run_with_transaction(
         dry_run,
         transaction_id: Some(transaction.id),
         content_hashes,
+        snapshots: vec![], // Will be populated by apply_patch_with_rollback
     })
 }
 
@@ -437,32 +531,221 @@ fn reconstruct_new_file_content(diff: &ParsedDiff) -> Result<String> {
     Ok(content.join("\n"))
 }
 
+/// Handle for rolling back patch operations
 #[derive(Debug, Clone)]
 pub struct RollbackHandle {
-    transaction_id: String,
-    snapshots: HashMap<PathBuf, String>,
-    repo_root: PathBuf,
+    pub transaction_id: String,
+    pub snapshots: Vec<FileSnapshot>,
+    pub repo_root: PathBuf,
 }
 
 impl RollbackHandle {
-    pub async fn rollback(self) -> Result<()> {
-        for (path, original_hash) in &self.snapshots {
-            if path.exists() {
-                let current_content = fs::read_to_string(path).await.ok();
-                let current_hash = current_content.as_ref().map(|c| compute_hash(c));
-                
-                if current_hash.as_ref() != Some(original_hash) {
-                    fs::remove_file(path).await.ok();
+    /// Create a new rollback handle from a list of file snapshots
+    pub fn new(transaction_id: String, snapshots: Vec<FileSnapshot>, repo_root: PathBuf) -> Self {
+        Self {
+            transaction_id,
+            snapshots,
+            repo_root,
+        }
+    }
+
+    /// Rollback all changes, restoring files to their original state
+    pub async fn rollback(self) -> Result<RollbackResult> {
+        let mut restored = Vec::new();
+        let mut deleted = Vec::new();
+        let mut recreated = Vec::new();
+        let mut errors = Vec::new();
+
+        for snapshot in &self.snapshots {
+            match self.restore_file(snapshot).await {
+                Ok(action) => {
+                    match action {
+                        RollbackAction::Restored => restored.push(snapshot.path.clone()),
+                        RollbackAction::Deleted => deleted.push(snapshot.path.clone()),
+                        RollbackAction::Recreated => recreated.push(snapshot.path.clone()),
+                    }
+                }
+                Err(e) => {
+                    errors.push((snapshot.path.clone(), e.to_string()));
                 }
             }
         }
-        
-        Ok(())
+
+        let success = errors.is_empty();
+        Ok(RollbackResult {
+            transaction_id: self.transaction_id,
+            restored,
+            deleted,
+            recreated,
+            errors,
+            success,
+        })
     }
-    
+
+    /// Restore a single file based on its snapshot
+    async fn restore_file(&self, snapshot: &FileSnapshot) -> Result<RollbackAction> {
+        let path = &snapshot.path;
+        let full_path = self.repo_root.join(path);
+
+        if !snapshot.existed_before {
+            // File was created by the patch - delete it
+            if full_path.exists() {
+                fs::remove_file(&full_path).await?;
+                return Ok(RollbackAction::Deleted);
+            }
+            return Ok(RollbackAction::Deleted); // Already gone
+        }
+
+        // File existed before - restore original content
+        if let Some(original_content) = &snapshot.content {
+            if full_path.exists() {
+                // Check if file was modified since patch (conflict detection)
+                let current_content = fs::read_to_string(&full_path).await?;
+                let current_hash = compute_hash(&current_content);
+                
+                // If someone else modified the file, we have a conflict
+                let expected_hash = snapshot.hash.as_deref().unwrap_or("");
+                if current_hash != expected_hash && !expected_hash.is_empty() {
+                    // File was modified after our patch - this is a conflict
+                    bail!(
+                        "File {} was modified after patch application (hash mismatch). Cannot safely rollback without overwriting external changes.",
+                        path.display()
+                    );
+                }
+
+                // Restore original content
+                fs::write(&full_path, original_content).await?;
+                Ok(RollbackAction::Restored)
+            } else {
+                // File was deleted after patch - recreate it
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::write(&full_path, original_content).await?;
+                Ok(RollbackAction::Recreated)
+            }
+        } else {
+            // Should not happen - existed_before=true but no content
+            bail!("Invalid snapshot: file existed but content not captured");
+        }
+    }
+
     pub fn get_transaction_id(&self) -> &str {
         &self.transaction_id
     }
+}
+
+impl RollbackHandle {
+    /// Create a new rollback handle from a list of file snapshots
+    pub fn new(transaction_id: String, snapshots: Vec<FileSnapshot>, repo_root: PathBuf) -> Self {
+        Self {
+            transaction_id,
+            snapshots,
+            repo_root,
+        }
+    }
+
+    /// Rollback all changes, restoring files to their original state
+    pub async fn rollback(self) -> Result<RollbackResult> {
+        let mut restored = Vec::new();
+        let mut deleted = Vec::new();
+        let mut recreated = Vec::new();
+        let mut errors = Vec::new();
+
+        for snapshot in &self.snapshots {
+            match self.restore_file(snapshot).await {
+                Ok(action) => {
+                    match action {
+                        RollbackAction::Restored => restored.push(snapshot.path.clone()),
+                        RollbackAction::Deleted => deleted.push(snapshot.path.clone()),
+                        RollbackAction::Recreated => recreated.push(snapshot.path.clone()),
+                    }
+                }
+                Err(e) => {
+                    errors.push((snapshot.path.clone(), e.to_string()));
+                }
+            }
+        }
+
+        let success = errors.is_empty();
+        Ok(RollbackResult {
+            transaction_id: self.transaction_id,
+            restored,
+            deleted,
+            recreated,
+            errors,
+            success,
+        })
+    }
+
+    /// Restore a single file based on its snapshot
+    async fn restore_file(&self, snapshot: &FileSnapshot) -> Result<RollbackAction> {
+        let path = &snapshot.path;
+
+        if !snapshot.existed_before {
+            // File was created by the patch - delete it
+            if path.exists() {
+                fs::remove_file(path).await?;
+                return Ok(RollbackAction::Deleted);
+            }
+            return Ok(RollbackAction::Deleted); // Already gone
+        }
+
+        // File existed before - restore original content
+        if let Some(original_content) = &snapshot.content {
+            if path.exists() {
+                // Check if file was modified since patch (conflict detection)
+                let current_content = fs::read_to_string(path).await?;
+                let current_hash = compute_hash(&current_content);
+                
+                // If someone else modified the file, we have a conflict
+                let expected_hash = snapshot.hash.as_deref().unwrap_or("");
+                if current_hash != expected_hash && !expected_hash.is_empty() {
+                    // File was modified after our patch - this is a conflict
+                    bail!(
+                        "File {} was modified after patch application (hash mismatch). Cannot safely rollback without overwriting external changes.",
+                        path.display()
+                    );
+                }
+
+                // Restore original content
+                fs::write(path, original_content).await?;
+                Ok(RollbackAction::Restored)
+            } else {
+                // File was deleted after patch - recreate it
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::write(path, original_content).await?;
+                Ok(RollbackAction::Recreated)
+            }
+        } else {
+            // Should not happen - existed_before=true but no content
+            bail!("Invalid snapshot: file existed but content not captured");
+        }
+    }
+
+    pub fn get_transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+}
+
+/// Result of a rollback operation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RollbackResult {
+    pub transaction_id: String,
+    pub restored: Vec<PathBuf>,
+    pub deleted: Vec<PathBuf>,
+    pub recreated: Vec<PathBuf>,
+    pub errors: Vec<(PathBuf, String)>,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackAction {
+    Restored,
+    Deleted,
+    Recreated,
 }
 
 pub async fn verify_file_integrity(path: &Path, expected_hash: &str) -> Result<bool> {

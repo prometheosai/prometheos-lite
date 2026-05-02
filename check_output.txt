@@ -473,6 +473,12 @@ warning: unused import: `std::time::Duration`
 6 | use std::time::Duration;
   |     ^^^^^^^^^^^^^^^^^^^
 
+warning: unused import: `ValidationCategory`
+ --> src\harness\selection.rs:9:18
+  |
+9 |     validation::{ValidationCategory, ValidationResult},
+  |                  ^^^^^^^^^^^^^^^^^^
+
 warning: unused import: `HashMap`
  --> src\harness\semantic_diff.rs:3:24
   |
@@ -485,10 +491,16 @@ warning: unused import: `Path`
 7 | use std::path::{Path, PathBuf};
   |                 ^^^^
 
-warning: unused import: `PathBuf`
- --> src\harness\validation.rs:6:18
+warning: unused import: `Context`
+ --> src\harness\validation.rs:2:22
   |
-6 |     path::{Path, PathBuf},
+2 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\harness\validation.rs:7:18
+  |
+7 |     path::{Path, PathBuf},
   |                  ^^^^^^^
 
 warning: unused import: `anyhow::Result`
@@ -583,637 +595,37 @@ warning: unused import: `super::types::ApprovalPolicy`
 8 | use super::types::ApprovalPolicy;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0382]: borrow of moved value: `dry`
-   --> src\harness\execution_loop.rs:539:29
+warning: unused variable: `dry_failures`
+   --> src\harness\execution_loop.rs:427:9
     |
-423 |     let dry = dry_run_patch(&req.proposed_edits, &files, &policy)
-    |         --- move occurs because `dry` has type `PatchResult`, which does not implement the `Copy` trait
-...
-448 |         Some(dry)
-    |              --- value moved here
-...
-539 |             dry_run_passed: dry.failures.is_empty(),
-    |                             ^^^^^^^^^^^^ value borrowed here after move
+427 |     let dry_failures: Vec<FailureKind> = dry.failures
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dry_failures`
     |
-help: consider cloning the value if the performance cost is acceptable
-    |
-448 |         Some(dry.clone())
-    |                 ++++++++
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
-error[E0521]: borrowed data escapes outside of function
-   --> src\harness\validation.rs:241:22
+warning: unused variable: `edit_index`
+   --> src\harness\patch_applier.rs:255:5
     |
-230 |       sandbox: &dyn SandboxRuntime,
-    |       -------  - let's call the lifetime of this reference `'1`
-    |       |
-    |       `sandbox` is a reference that is only valid in the function body
-...
-241 |           let handle = tokio::spawn(async move {
-    |  ______________________^
-242 | |             if let Some(cached) = cache.get(&cache_key).await {
-243 | |                 return (cmd, cached);
-...   |
-274 | |             (cmd, cmd_result)
-275 | |         });
-    | |          ^
-    | |          |
-    | |__________`sandbox` escapes the function body here
-    |            argument requires that `'1` must outlive `'static`
+255 |     edit_index: usize,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edit_index`
 
-error[E0521]: borrowed data escapes outside of function
-   --> src\harness\validation.rs:241:22
+warning: unused variable: `policy`
+   --> src\harness\patch_applier.rs:432:56
     |
-231 |       cache: &ValidationCache,
-    |       -----  - let's call the lifetime of this reference `'2`
-    |       |
-    |       `cache` is a reference that is only valid in the function body
-...
-241 |           let handle = tokio::spawn(async move {
-    |  ______________________^
-242 | |             if let Some(cached) = cache.get(&cache_key).await {
-243 | |                 return (cmd, cached);
-...   |
-274 | |             (cmd, cmd_result)
-275 | |         });
-    | |          ^
-    | |          |
-    | |__________`cache` escapes the function body here
-    |            argument requires that `'2` must outlive `'static`
+432 | async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
+    |                                                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
 
-error[E0063]: missing field `progress_callback` in initializer of `HarnessExecutionRequest`
-  --> src\harness\work_integration.rs:37:19
-   |
-37 |         let req = HarnessExecutionRequest {
-   |                   ^^^^^^^^^^^^^^^^^^^^^^^ missing `progress_callback`
-
-error[E0277]: `harness::artifacts::ArtifactKind` doesn't implement `std::fmt::Display`
-  --> src\harness\work_integration.rs:63:39
-   |
-63 |                 format!("harness-{}", h.kind),
-   |                                  --   ^^^^^^ `harness::artifacts::ArtifactKind` cannot be formatted with the default formatter
-   |                                  |
-   |                                  required by this formatting parameter
-   |
-help: the trait `std::fmt::Display` is not implemented for `harness::artifacts::ArtifactKind`
-  --> src\harness\artifacts.rs:23:1
-   |
-23 | pub enum ArtifactKind {
-   | ^^^^^^^^^^^^^^^^^^^^^
-   = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
-
-error[E0599]: no method named `shutdown` found for struct `opentelemetry_sdk::trace::TracerProvider` in the current scope
-   --> src\flow\opentelemetry.rs:109:22
-    |
-109 |             provider.shutdown()?;
-    |                      ^^^^^^^^ method not found in `opentelemetry_sdk::trace::TracerProvider`
-
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
-   --> src\flow\opentelemetry.rs:118:13
-    |
-118 |             provider.force_flush()?;
-    |             ^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `Vec<Result<(), TraceError>>`
-    |
-    = help: the nightly-only, unstable trait `Try` is not implemented for `Vec<Result<(), TraceError>>`
-
-error[E0308]: mismatched types
-   --> src\harness\acceptance.rs:186:26
-    |
-186 |             description: req.clone(),
-    |                          ^^^^^^^^^^^ expected `String`, found `&str`
-    |
-help: try using a conversion method
-    |
-186 -             description: req.clone(),
-186 +             description: req.to_string(),
-    |
-
-error[E0689]: can't call method `min` on ambiguous numeric type `{float}`
-   --> src\harness\acceptance.rs:339:20
-    |
-339 |         confidence.min(1.0)
-    |                    ^^^
-    |
-help: you must specify a type for this binding, like `f32`
-    |
-327 |         let mut confidence: f32 = 0.5;
-    |                           +++++
-
-error[E0308]: mismatched types
-   --> src\harness\adversarial_validation.rs:305:31
-    |
-305 |             if symbol.kind == "function" {
-    |                -----------    ^^^^^^^^^^ expected `SymbolKind`, found `&str`
-    |                |
-    |                expected because this is `SymbolKind`
-
-error[E0308]: mismatched types
-   --> src\harness\adversarial_validation.rs:309:80
-    |
-309 |                 all_edge_cases.extend(self.generate_edge_case_tests(func_name, signature, language));
-    |                                            ------------------------            ^^^^^^^^^ expected `&str`, found `&Option<String>`
-    |                                            |
-    |                                            arguments to this method are incorrect
-    |
-    = note: expected reference `&str`
-               found reference `&std::option::Option<std::string::String>`
-note: method defined here
-   --> src\harness\adversarial_validation.rs:193:12
-    |
-193 |     pub fn generate_edge_case_tests(
-    |            ^^^^^^^^^^^^^^^^^^^^^^^^
-...
-196 |         signature: &str,
-    |         ---------------
-
-error[E0308]: mismatched types
-   --> src\harness\adversarial_validation.rs:310:79
-    |
-310 |                 all_properties.extend(self.generate_property_tests(func_name, signature, language));
-    |                                            -----------------------            ^^^^^^^^^ expected `&str`, found `&Option<String>`
-    |                                            |
-    |                                            arguments to this method are incorrect
-    |
-    = note: expected reference `&str`
-               found reference `&std::option::Option<std::string::String>`
-note: method defined here
-   --> src\harness\adversarial_validation.rs:231:12
-    |
-231 |     pub fn generate_property_tests(
-    |            ^^^^^^^^^^^^^^^^^^^^^^^
-...
-234 |         signature: &str,
-    |         ---------------
-
-error[E0609]: no field `errors` on type `&HarnessExecutionResult`
-   --> src\harness\artifacts.rs:177:92
-    |
-177 |         let log_content = format!("Execution log for run {}\nErrors: {:?}", run_id, result.errors);
-    |                                                                                            ^^^^^^ unknown field
-    |
-    = note: available fields are: `work_context_id`, `repo_context`, `environment`, `file_set`, `acceptance` ... and 16 others
-
-error[E0609]: no field `duration_ms` on type `&HarnessExecutionResult`
-   --> src\harness\artifacts.rs:188:35
-    |
-188 |             "duration_ms": result.duration_ms,
-    |                                   ^^^^^^^^^^^ unknown field
-    |
-    = note: available fields are: `work_context_id`, `repo_context`, `environment`, `file_set`, `acceptance` ... and 16 others
-
-error[E0609]: no field `total_cost` on type `&HarnessExecutionResult`
-   --> src\harness\artifacts.rs:190:34
-    |
-190 |             "total_cost": result.total_cost,
-    |                                  ^^^^^^^^^^ unknown field
-    |
-    = note: available fields are: `work_context_id`, `repo_context`, `environment`, `file_set`, `acceptance` ... and 16 others
-
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
-   --> src\harness\file_control.rs:217:24
-    |
-217 |     let is_sensitive = is_sensitive_file(path, policy)?;
-    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `bool`
-    |
-    = help: the nightly-only, unstable trait `Try` is not implemented for `bool`
-
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
-   --> src\harness\file_control.rs:218:24
-    |
-218 |     let is_generated = is_generated_file(path, policy)?;
-    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `bool`
-    |
-    = help: the nightly-only, unstable trait `Try` is not implemented for `bool`
-
-error[E0308]: mismatched types
-   --> src\harness\file_control.rs:281:12
-    |
-281 |     if let Err(e) = builder.add(&gitignore_path) {
-    |            ^^^^^^   ---------------------------- this expression has type `std::option::Option<ignore::Error>`
-    |            |
-    |            expected `Option<Error>`, found `Result<_, _>`
-    |
-    = note: expected enum `std::option::Option<ignore::Error>`
-               found enum `Result<_, _>`
-
-error[E0308]: mismatched types
-   --> src\harness\file_control.rs:288:20
-    |
-288 |             if let Err(e) = builder.add(global) {
-    |                    ^^^^^^   ------------------- this expression has type `std::option::Option<ignore::Error>`
-    |                    |
-    |                    expected `Option<Error>`, found `Result<_, _>`
-    |
-    = note: expected enum `std::option::Option<ignore::Error>`
-               found enum `Result<_, _>`
-
-error[E0308]: mismatched types
-   --> src\harness\git_checkpoint.rs:208:9
-    |
-207 |     pub fn stage_file(&self, file: &Path) -> Result<()> {
-    |                                              ---------- expected `Result<(), anyhow::Error>` because of return type
-208 |         self.run_git(&["add", &file.to_string_lossy()])
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<(), Error>`, found `Result<String, Error>`
-    |
-    = note: expected enum `Result<(), _>`
-               found enum `Result<std::string::String, _>`
-
-error[E0308]: mismatched types
-   --> src\harness\git_checkpoint.rs:212:9
-    |
-211 |     pub fn unstage_file(&self, file: &Path) -> Result<()> {
-    |                                                ---------- expected `Result<(), anyhow::Error>` because of return type
-212 |         self.run_git(&["reset", "HEAD", &file.to_string_lossy()])
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<(), Error>`, found `Result<String, Error>`
-    |
-    = note: expected enum `Result<(), _>`
-               found enum `Result<std::string::String, _>`
-
-error[E0689]: can't call method `min` on ambiguous numeric type `{float}`
-   --> src\harness\golden_paths.rs:552:27
-    |
-552 |             score = score.min(1.0);
-    |                           ^^^
-    |
-help: you must specify a type for this binding, like `f32`
-    |
-515 |             let mut score: f32 = 0.0;
-    |                          +++++
-
-error[E0658]: use of unstable library feature `str_as_str`
-   --> src\harness\repo_intelligence.rs:217:57
-    |
-217 |     let ts_lang: tree_sitter::Language = match language.as_str() {
-    |                                                         ^^^^^^
-    |
-    = note: see issue #130366 <https://github.com/rust-lang/rust/issues/130366> for more information
-
-error[E0308]: mismatched types
-    --> src\harness\repo_intelligence.rs:297:57
-     |
- 297 |                         if let Some(child) = body.child(i) {
-     |                                                   ----- ^ expected `u32`, found `usize`
-     |                                                   |
-     |                                                   arguments to this method are incorrect
-     |
-note: method defined here
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-0.26.8\binding_rust\lib.rs:1713:12
-     |
-1713 |     pub fn child(&self, i: u32) -> Option<Self> {
-     |            ^^^^^
-help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
-     |
- 297 |                         if let Some(child) = body.child(i.try_into().unwrap()) {
-     |                                                          ++++++++++++++++++++
-
-error[E0308]: mismatched types
-    --> src\harness\repo_intelligence.rs:423:41
-     |
- 423 |         if let Some(child) = node.child(i) {
-     |                                   ----- ^ expected `u32`, found `usize`
-     |                                   |
-     |                                   arguments to this method are incorrect
-     |
-note: method defined here
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-0.26.8\binding_rust\lib.rs:1713:12
-     |
-1713 |     pub fn child(&self, i: u32) -> Option<Self> {
-     |            ^^^^^
-help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
-     |
- 423 |         if let Some(child) = node.child(i.try_into().unwrap()) {
-     |                                          ++++++++++++++++++++
-
-error[E0308]: mismatched types
-    --> src\harness\repo_intelligence.rs:431:41
-     |
- 431 |         if let Some(child) = node.child(i) {
-     |                                   ----- ^ expected `u32`, found `usize`
-     |                                   |
-     |                                   arguments to this method are incorrect
-     |
-note: method defined here
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-0.26.8\binding_rust\lib.rs:1713:12
-     |
-1713 |     pub fn child(&self, i: u32) -> Option<Self> {
-     |            ^^^^^
-help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
-     |
- 431 |         if let Some(child) = node.child(i.try_into().unwrap()) {
-     |                                          ++++++++++++++++++++
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:295:32
-    |
-295 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:295:27
-    |
-295 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-295 -                     file: Some(file_str.clone()),
-295 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:317:32
-    |
-317 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:317:27
-    |
-317 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-317 -                     file: Some(file_str.clone()),
-317 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:339:32
-    |
-339 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:339:27
-    |
-339 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-339 -                     file: Some(file_str.clone()),
-339 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:361:32
-    |
-361 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:361:27
-    |
-361 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-361 -                     file: Some(file_str.clone()),
-361 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:391:32
-    |
-391 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:391:27
-    |
-391 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-391 -                     file: Some(file_str.clone()),
-391 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:406:32
-    |
-406 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:406:27
-    |
-406 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-406 -                     file: Some(file_str.clone()),
-406 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:428:32
-    |
-428 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:428:27
-    |
-428 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-428 -                     file: Some(file_str.clone()),
-428 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:453:28
-    |
-453 |                 file: Some(file_str.clone()),
-    |                       ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                       |
-    |                       arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:453:23
-    |
-453 |                 file: Some(file_str.clone()),
-    |                       ^^^^^----------------^
-    |                            |
-    |                            this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-453 -                 file: Some(file_str.clone()),
-453 +                 file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:467:32
-    |
-467 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:467:27
-    |
-467 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-467 -                     file: Some(file_str.clone()),
-467 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:567:36
-    |
-567 |                         file: Some(file_str.clone()),
-    |                               ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                               |
-    |                               arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:567:31
-    |
-567 |                         file: Some(file_str.clone()),
-    |                               ^^^^^----------------^
-    |                                    |
-    |                                    this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-567 -                         file: Some(file_str.clone()),
-567 +                         file: Some(file_str.to_string()),
-    |
-
-error[E0277]: `ReviewIssueType` doesn't implement `std::fmt::Display`
-   --> src\harness\review.rs:853:17
-    |
-849 |             output.push_str(&format!("\n{}. [{}] {:?}: {}\n", 
-    |                                                        -- required by this formatting parameter
-...
-853 |                 issue.issue_type
-    |                 ^^^^^^^^^^^^^^^^ `ReviewIssueType` cannot be formatted with the default formatter
-    |
-help: the trait `std::fmt::Display` is not implemented for `ReviewIssueType`
-   --> src\harness\review.rs:18:1
-    |
- 18 | pub enum ReviewIssueType {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^
-    = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
-
-error[E0063]: missing fields `cache_key`, `cached` and `timed_out` in initializer of `CommandResult`
-  --> src\harness\sandbox.rs:81:27
-   |
-81 |                 return Ok(CommandResult {
-   |                           ^^^^^^^^^^^^^ missing `cache_key`, `cached` and `timed_out`
-
-error[E0063]: missing fields `cache_key`, `cached` and `timed_out` in initializer of `CommandResult`
-  --> src\harness\sandbox.rs:90:12
-   |
-90 |         Ok(CommandResult {
-   |            ^^^^^^^^^^^^^ missing `cache_key`, `cached` and `timed_out`
-
-error[E0599]: no method named `start` found for struct `regex::Captures<'h>` in the current scope
-   --> src\harness\semantic_diff.rs:502:84
-    |
-502 |                         let change_type = self.infer_config_change_type(&diff, cap.start());
-    |                                                                                    ^^^^^ method not found in `regex::Captures<'_>`
-
-error[E0308]: mismatched types
-   --> src\harness\validation.rs:386:28
-    |
-386 |         .unwrap_or_else(|| command.clone())
-    |                            ^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |
-help: try using a conversion method
-    |
-386 -         .unwrap_or_else(|| command.clone())
-386 +         .unwrap_or_else(|| command.to_string())
-    |
+warning: unused variable: `new_content`
+   --> src\harness\patch_applier.rs:435:16
+    |
+435 |     for (path, new_content) in changes.iter().rev() {
+    |                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_content`
 
 warning: unused variable: `remaining_tokens`
    --> src\context\budgeter.rs:125:13
     |
 125 |         let remaining_tokens = available_tokens - system_tokens;
     |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_remaining_tokens`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `state`
   --> src\flow\debug.rs:54:47
@@ -1251,18 +663,6 @@ warning: unused variable: `count`
 124 |         if let Some(count) = output["extracted_count"].as_u64() {
     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
 
-error[E0507]: cannot move out of `*property` which is behind a shared reference
-   --> src\harness\adversarial_validation.rs:247:27
-    |
-247 |                 property: *property,
-    |                           ^^^^^^^^^ move occurs because `*property` has type `Property`, which does not implement the `Copy` trait
-    |
-help: consider cloning the value if the performance cost is acceptable
-    |
-247 -                 property: *property,
-247 +                 property: property.clone(),
-    |
-
 warning: unused variable: `filtered`
    --> src\harness\benchmark.rs:297:13
     |
@@ -1275,30 +675,16 @@ warning: unused variable: `num_runs`
 410 |     pub fn check_anti_overfitting(&self, suite_id: &str, num_runs: u32) -> Result<AntiOverfittingReport> {
     |                                                          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_runs`
 
-error[E0004]: non-exhaustive patterns: `execution_loop::HarnessMode::Review` not covered
-   --> src\harness\completion.rs:176:30
+warning: unused variable: `completeness`
+   --> src\harness\completion.rs:173:13
     |
-176 |         let decision = match mode {
-    |                              ^^^^ pattern `execution_loop::HarnessMode::Review` not covered
-    |
-note: `execution_loop::HarnessMode` defined here
-   --> src\harness\execution_loop.rs:103:10
-    |
-103 | pub enum HarnessMode {
-    |          ^^^^^^^^^^^
-104 |     Review,
-    |     ------ not covered
-    = note: the matched value is of type `execution_loop::HarnessMode`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
-    |
-180 ~             HarnessMode::Benchmark => self.evaluate_benchmark(evidence, &mut decision_factors),
-181 ~             execution_loop::HarnessMode::Review => todo!(),
-    |
+173 |         let completeness = self.calculate_completeness(evidence);
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_completeness`
 
 warning: unused variable: `factors`
-   --> src\harness\completion.rs:267:65
+   --> src\harness\completion.rs:268:65
     |
-267 |     fn evaluate_benchmark(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
+268 |     fn evaluate_benchmark(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
     |                                                                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_factors`
 
 warning: unused variable: `file`
@@ -1322,112 +708,17 @@ warning: unused variable: `has_gemspec`
 381 |     let has_gemspec = root.join("*.gemspec").exists();
     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_gemspec`
 
-error[E0004]: non-exhaustive patterns: `&FailureKind::Fatal` and `&FailureKind::Critical` not covered
-   --> src\harness\failure.rs:89:15
-    |
- 89 |         match self {
-    |               ^^^^ patterns `&FailureKind::Fatal` and `&FailureKind::Critical` not covered
-    |
-note: `FailureKind` defined here
-   --> src\harness\failure.rs:14:10
-    |
- 14 | pub enum FailureKind {
-    |          ^^^^^^^^^^^
-...
- 30 |     Fatal,
-    |     ----- not covered
- 31 |     Critical,
-    |     -------- not covered
-    = note: the matched value is of type `&FailureKind`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
-    |
-104 ~             FailureKind::UnknownFailure => FailureCategory::Tooling,
-105 ~             &FailureKind::Fatal | &FailureKind::Critical => todo!(),
-    |
-
 warning: unused variable: `task_id`
    --> src\harness\knowledge_cache.rs:388:14
     |
 388 |         for (task_id, cache) in caches.iter() {
     |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
 
-warning: unused variable: `edit_index`
-   --> src\harness\patch_applier.rs:161:5
-    |
-161 |     edit_index: usize,
-    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edit_index`
-
-warning: unused variable: `policy`
-   --> src\harness\patch_applier.rs:338:56
-    |
-338 | async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
-    |                                                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
-
-warning: unused variable: `new_content`
-   --> src\harness\patch_applier.rs:341:16
-    |
-341 |     for (path, new_content) in changes.iter().rev() {
-    |                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_content`
-
-error: cannot explicitly borrow within an implicitly-borrowing pattern
-   --> src\harness\patch_applier.rs:401:21
-    |
-401 |         if let Some(ref c) = content {
-    |                     ^^^ explicit `ref` binding modifier not allowed when implicitly borrowing
-    |
-    = note: for more information, see <https://doc.rust-lang.org/reference/patterns.html#binding-modes>
-note: matching on a reference type with a non-reference pattern implicitly borrows the contents
-   --> src\harness\patch_applier.rs:401:16
-    |
-401 |         if let Some(ref c) = content {
-    |                ^^^^^^^^^^^ this non-reference pattern matches on a reference type `&_`
-help: remove the unnecessary binding modifier
-    |
-401 -         if let Some(ref c) = content {
-401 +         if let Some(c) = content {
-    |
-
 warning: unused variable: `now`
    --> src\harness\regression_memory.rs:225:13
     |
 225 |         let now = chrono::Utc::now();
     |             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
-
-error[E0382]: borrow of moved value: `file`
-    --> src\harness\repo_intelligence.rs:581:39
-     |
- 527 |     for file in files {
-     |         ---- move occurs because `file` has type `PathBuf`, which does not implement the `Copy` trait
-...
- 577 |             path: file,
-     |                   ---- value moved here
-...
- 581 |             language: detect_language(&file),
-     |                                       ^^^^^ value borrowed here after move
-     |
-     = note: borrow occurs due to deref coercion to `std::path::Path`
-note: deref defined here
-    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\path.rs:2064:5
-     |
-2064 |     type Target = Path;
-     |     ^^^^^^^^^^^
-help: consider cloning the value if the performance cost is acceptable
-     |
- 577 |             path: file.clone(),
-     |                       ++++++++
-
-error[E0716]: temporary value dropped while borrowed
-   --> src\harness\repo_intelligence.rs:554:39
-    |
-554 |                         reasons.push(&format!("symbol match: {}", sym.name));
-    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ - temporary value is freed at the end of this statement
-    |                                       |
-    |                                       creates a temporary value which is freed while still in use
-...
-558 |                             reasons.push("explicitly mentioned symbol");
-    |                             ------- borrow later used here
-    |
-    = note: consider using a `let` binding to create a longer lived value
 
 warning: unused variable: `patch`
    --> src\harness\repair_loop.rs:106:21
@@ -1463,7 +754,488 @@ warning: variable does not need to be mutable
    |
    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-Some errors have detailed explanations: E0004, E0063, E0277, E0308, E0382, E0507, E0521, E0599, E0609...
-For more information about an error, try `rustc --explain E0004`.
-warning: `prometheos-lite` (lib) generated 118 warnings
-error: could not compile `prometheos-lite` (lib) due to 47 previous errors; 118 warnings emitted
+warning: type `DeniedOperation` is more private than the item `PermissionLedger::get_denied_operations`
+   --> src\harness\permissions.rs:220:5
+    |
+220 |     pub fn get_denied_operations(&self) -> &[DeniedOperation] {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `PermissionLedger::get_denied_operations` is reachable at visibility `pub`
+    |
+note: but type `DeniedOperation` is only usable at visibility `pub(self)`
+   --> src\harness\permissions.rs:48:1
+    |
+ 48 | struct DeniedOperation {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `AttemptRecord` is more private than the item `ScalingEngine::get_attempt_history`
+   --> src\harness\scaling.rs:235:5
+    |
+235 |     pub fn get_attempt_history(&self) -> &[AttemptRecord] {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `ScalingEngine::get_attempt_history` is reachable at visibility `pub`
+    |
+note: but type `AttemptRecord` is only usable at visibility `pub(self)`
+   --> src\harness\scaling.rs:35:1
+    |
+ 35 | struct AttemptRecord {
+    | ^^^^^^^^^^^^^^^^^^^^
+
+warning: type `SelectionRecord` is more private than the item `SelectionEngine::get_selection_history`
+   --> src\harness\selection.rs:319:5
+    |
+319 |     pub fn get_selection_history(&self) -> &[SelectionRecord] {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `SelectionEngine::get_selection_history` is reachable at visibility `pub`
+    |
+note: but type `SelectionRecord` is only usable at visibility `pub(self)`
+   --> src\harness\selection.rs:83:1
+    |
+ 83 | struct SelectionRecord {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ValidationCache` is more private than the item `run_validation_with_cache`
+   --> src\harness\validation.rs:158:1
+    |
+158 | / pub async fn run_validation_with_cache(
+159 | |     root: &Path,
+160 | |     plan: &ValidationPlan,
+161 | |     sandbox: &dyn SandboxRuntime,
+162 | |     cache: &ValidationCache,
+163 | | ) -> Result<ValidationResult> {
+    | |_____________________________^ function `run_validation_with_cache` is reachable at visibility `pub`
+    |
+note: but type `ValidationCache` is only usable at visibility `pub(self)`
+   --> src\harness\validation.rs:101:1
+    |
+101 | struct ValidationCache {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `flow` is never read
+   --> src\flow\debug.rs:245:5
+    |
+244 | pub struct DebugFlow {
+    |            --------- field in this struct
+245 |     flow: Flow,
+    |     ^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `kind` is never read
+   --> src\flow\memory\nodes.rs:301:5
+    |
+296 | pub struct MemoryWriteNode {
+    |            --------------- field in this struct
+...
+301 |     kind: MemoryKind,
+    |     ^^^^
+
+warning: type alias `Span` is never used
+  --> src\flow\opentelemetry.rs:15:6
+   |
+15 | type Span = sdktrace::Span;
+   |      ^^^^
+
+warning: field `config` is never read
+  --> src\flow\opentelemetry.rs:68:5
+   |
+65 | pub struct OtelExporter {
+   |            ------------ field in this struct
+...
+68 |     config: OtelConfig,
+   |     ^^^^^^
+
+warning: field `timestamp` is never read
+  --> src\flow\strict_mode.rs:27:5
+   |
+25 | struct ToolCallResult {
+   |        -------------- field in this struct
+26 |     result_hash: String,
+27 |     timestamp: chrono::DateTime<chrono::Utc>,
+   |     ^^^^^^^^^
+   |
+   = note: `ToolCallResult` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `require_risk_assessment` is never read
+   --> src\harness\completion.rs:141:5
+    |
+137 | pub struct CompletionEvaluator {
+    |            ------------------- field in this struct
+...
+141 |     require_risk_assessment: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `CompletionEvaluator` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `tokens_used` is never read
+   --> src\harness\execution_loop.rs:240:5
+    |
+235 | struct ExecutionContext {
+    |        ---------------- field in this struct
+...
+240 |     tokens_used: u64,
+    |     ^^^^^^^^^^^
+    |
+    = note: `ExecutionContext` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `add_cost` and `add_tokens` are never used
+   --> src\harness\execution_loop.rs:281:8
+    |
+244 | impl ExecutionContext {
+    | --------------------- methods in this implementation
+...
+281 |     fn add_cost(&mut self, cost: f64) {
+    |        ^^^^^^^^
+...
+285 |     fn add_tokens(&mut self, tokens: u64) {
+    |        ^^^^^^^^^^
+
+warning: field `path` is never read
+   --> src\harness\file_control.rs:143:5
+    |
+142 | struct FileClassification {
+    |        ------------------ field in this struct
+143 |     path: PathBuf,
+    |     ^^^^
+    |
+    = note: `FileClassification` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `LanguageParser` is never constructed
+  --> src\harness\repo_intelligence.rs:82:8
+   |
+82 | struct LanguageParser {
+   |        ^^^^^^^^^^^^^^
+
+warning: fields `language` and `target_file` are never read
+   --> src\harness\reproduction.rs:675:5
+    |
+674 | struct TestContent {
+    |        ----------- fields in this struct
+675 |     language: String,
+    |     ^^^^^^^^
+676 |     code: String,
+677 |     target_file: PathBuf,
+    |     ^^^^^^^^^^^
+    |
+    = note: `TestContent` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `file_hashes` is never read
+   --> src\harness\validation.rs:110:5
+    |
+107 | struct CachedResult {
+    |        ------------ field in this struct
+...
+110 |     file_hashes: Vec<String>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `CachedResult` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+   --> src\harness\validation.rs:142:14
+    |
+113 | impl ValidationCache {
+    | -------------------- method in this implementation
+...
+142 |     async fn clear(&self) {
+    |              ^^^^^
+
+warning: struct `CommandOutput` is never constructed
+  --> src\tools\command.rs:16:12
+   |
+16 | pub struct CommandOutput {
+   |            ^^^^^^^^^^^^^
+
+warning: field `path_guard` is never read
+   --> src\tools\repo.rs:231:5
+    |
+229 | pub struct SearchFilesTool {
+    |            --------------- field in this struct
+230 |     repo_path: PathBuf,
+231 |     path_guard: PathGuard,
+    |     ^^^^^^^^^^
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+   --> src\harness\time_travel.rs:262:9
+    |
+262 |         drop(session); // Release borrow
+    |         ^^^^^-------^
+    |              |
+    |              argument has type `&TimeTravelSession`
+    |
+    = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+    |
+262 -         drop(session); // Release borrow
+262 +         let _ = session; // Release borrow
+    |
+
+warning: `prometheos-lite` (lib) generated 142 warnings (run `cargo fix --lib -p prometheos-lite` to apply 121 suggestions)
+warning: unused import: `anyhow::Context`
+ --> src\cli\commands\bench.rs:3:5
+  |
+3 | use anyhow::Context;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Flow` and `SharedState`
+   --> src\cli\commands\flow.rs:384:33
+    |
+384 |             DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState,
+    |                                 ^^^^                            ^^^^^^^^^^^
+
+warning: unused import: `anyhow::Context`
+ --> src\cli\commands\run.rs:3:5
+  |
+3 | use anyhow::Context;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `artifact::Artifact`
+  --> src\cli\commands\work.rs:13:5
+   |
+13 |     artifact::Artifact,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bench::*`
+  --> src\cli\commands\mod.rs:10:9
+   |
+10 | pub use bench::*;
+   |         ^^^^^^^^
+
+warning: unused import: `flow::*`
+  --> src\cli\commands\mod.rs:11:9
+   |
+11 | pub use flow::*;
+   |         ^^^^^^^
+
+warning: unused import: `run::*`
+  --> src\cli\commands\mod.rs:12:9
+   |
+12 | pub use run::*;
+   |         ^^^^^^
+
+warning: unused import: `serve::*`
+  --> src\cli\commands\mod.rs:13:9
+   |
+13 | pub use serve::*;
+   |         ^^^^^^^^
+
+warning: unused import: `templates::*`
+  --> src\cli\commands\mod.rs:14:9
+   |
+14 | pub use templates::*;
+   |         ^^^^^^^^^^^^
+
+warning: unused import: `work::*`
+  --> src\cli\commands\mod.rs:15:9
+   |
+15 | pub use work::*;
+   |         ^^^^^^^
+
+warning: unused import: `tracing`
+ --> src\cli\runner\runner.rs:5:5
+  |
+5 | use tracing;
+  |     ^^^^^^^
+
+warning: unused imports: `DefaultNodeFactory` and `NodeFactory`
+ --> src\cli\runner\mod.rs:7:33
+  |
+7 | pub use prometheos_lite::flow::{DefaultNodeFactory, NodeFactory};
+  |                                 ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `types::*`
+ --> src\cli\runner\mod.rs:9:9
+  |
+9 | pub use types::*;
+  |         ^^^^^^^^
+
+warning: unused import: `tracing`
+ --> src\cli\runtime_builder.rs:5:5
+  |
+5 | use tracing;
+  |     ^^^^^^^
+
+warning: use of deprecated struct `cli::commands::run::RunCommand`: Use 'flow' command instead
+  --> src\cli\mod.rs:22:24
+   |
+22 |     Run(commands::run::RunCommand),
+   |                        ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated tuple variant `cli::Commands::Run`: Use 'flow' command instead
+  --> src\cli\mod.rs:39:19
+   |
+39 |         Commands::Run(cmd) => cmd.execute().await,
+   |                   ^^^
+
+warning: use of deprecated struct `cli::commands::run::RunCommand`: Use 'flow' command instead
+  --> src\cli\mod.rs:22:24
+   |
+22 |     Run(commands::run::RunCommand),
+   |                        ^^^^^^^^^^
+
+warning: use of deprecated struct `cli::commands::run::RunCommand`: Use 'flow' command instead
+  --> src\cli\commands\run.rs:10:12
+   |
+10 | pub struct RunCommand {
+   |            ^^^^^^^^^^
+
+warning: use of deprecated struct `cli::commands::run::RunCommand`: Use 'flow' command instead
+  --> src\cli\commands\run.rs:18:6
+   |
+18 | impl RunCommand {
+   |      ^^^^^^^^^^
+
+warning: use of deprecated field `cli::commands::run::RunCommand::verbose`: Use 'flow' command instead
+  --> src\cli\commands\run.rs:25:34
+   |
+25 |         let logger = Logger::new(self.verbose);
+   |                                  ^^^^^^^^^^^^
+
+warning: use of deprecated field `cli::commands::run::RunCommand::task`: Use 'flow' command instead
+  --> src\cli\commands\run.rs:27:42
+   |
+27 |         logger.info(&format!("Task: {}", self.task));
+   |                                          ^^^^^^^^^
+
+warning: use of deprecated field `cli::Commands::Run::0`: Use 'flow' command instead
+  --> src\cli\mod.rs:39:23
+   |
+39 |         Commands::Run(cmd) => cmd.execute().await,
+   |                       ^^^
+
+warning: unused variable: `run_db`
+   --> src\cli\commands\flow.rs:293:13
+    |
+293 |         let run_db = RunDb::new(db_path.clone())?;
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_db`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `llm`
+  --> src\cli\commands\run.rs:32:13
+   |
+32 |         let llm = LlmClient::from_config(&config)?;
+   |             ^^^ help: if this is intentional, prefix it with an underscore: `_llm`
+
+warning: fields `iteration` and `error` are never read
+   --> src\cli\commands\bench.rs:207:5
+    |
+205 | struct BenchmarkResult {
+    |        --------------- fields in this struct
+206 |     task: String,
+207 |     iteration: u32,
+    |     ^^^^^^^^^
+...
+210 |     error: Option<String>,
+    |     ^^^^^
+    |
+    = note: `BenchmarkResult` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `runtime` is never read
+  --> src\cli\runner\runner.rs:18:5
+   |
+14 | pub struct FlowRunner {
+   |            ---------- field in this struct
+...
+18 |     runtime: Option<prometheos_lite::flow::RuntimeContext>,
+   |     ^^^^^^^
+
+warning: associated items `new`, `get_flow`, `with_runtime`, `from_json_file`, `from_yaml_file`, and `run` are never used
+   --> src\cli\runner\runner.rs:23:12
+    |
+ 21 | impl FlowRunner {
+    | --------------- associated items in this implementation
+ 22 |     /// Create a new FlowRunner from a Flow
+ 23 |     pub fn new(flow: Flow) -> Self {
+    |            ^^^
+...
+ 43 |     pub fn get_flow(&self) -> &Flow {
+    |            ^^^^^^^^
+...
+ 48 |     pub fn with_runtime(mut self, runtime: prometheos_lite::flow::RuntimeContext) -> Self {
+    |            ^^^^^^^^^^^^
+...
+ 54 |     pub fn from_json_file(path: std::path::PathBuf) -> Result<Self> {
+    |            ^^^^^^^^^^^^^^
+...
+ 59 |     pub fn from_yaml_file(path: std::path::PathBuf) -> Result<Self> {
+    |            ^^^^^^^^^^^^^^
+...
+143 |     pub async fn run(&mut self, state: &mut SharedState) -> Result<()> {
+    |                  ^^^
+
+warning: struct `FlowInputs` is never constructed
+ --> src\cli\runner\types.rs:8:12
+  |
+8 | pub struct FlowInputs {
+  |            ^^^^^^^^^^
+
+warning: struct `FlowOutputs` is never constructed
+  --> src\cli\runner\types.rs:14:12
+   |
+14 | pub struct FlowOutputs {
+   |            ^^^^^^^^^^^
+
+warning: struct `FlowFile` is never constructed
+  --> src\cli\runner\types.rs:21:12
+   |
+21 | pub struct FlowFile {
+   |            ^^^^^^^^
+
+warning: method `validate` is never used
+  --> src\cli\runner\types.rs:34:12
+   |
+32 | impl FlowFile {
+   | ------------- method in this implementation
+33 |     /// Validate the flow file structure according to Flow JSON Schema v1
+34 |     pub fn validate(&self) -> Result<()> {
+   |            ^^^^^^^^
+
+warning: struct `NodeDefinition` is never constructed
+   --> src\cli\runner\types.rs:100:12
+    |
+100 | pub struct NodeDefinition {
+    |            ^^^^^^^^^^^^^^
+
+warning: method `validate` is never used
+   --> src\cli\runner\types.rs:108:12
+    |
+106 | impl NodeDefinition {
+    | ------------------- method in this implementation
+107 |     /// Validate node definition according to Flow JSON Schema v1
+108 |     pub fn validate(&self) -> Result<()> {
+    |            ^^^^^^^^
+
+warning: struct `TransitionDefinition` is never constructed
+   --> src\cli\runner\types.rs:152:12
+    |
+152 | pub struct TransitionDefinition {
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `validate` is never used
+   --> src\cli\runner\types.rs:160:12
+    |
+158 | impl TransitionDefinition {
+    | ------------------------- method in this implementation
+159 |     /// Validate transition definition
+160 |     pub fn validate(&self) -> Result<()> {
+    |            ^^^^^^^^
+
+warning: methods `build_minimal`, `build_model_router`, and `build_tool_runtime` are never used
+   --> src\cli\runtime_builder.rs:73:12
+    |
+ 22 | impl RuntimeBuilder {
+    | ------------------- methods in this implementation
+...
+ 73 |     pub fn build_minimal(&self) -> anyhow::Result<RuntimeContext> {
+    |            ^^^^^^^^^^^^^
+...
+ 92 |     pub fn build_model_router(&self) -> anyhow::Result<Arc<ModelRouter>> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+100 |     pub fn build_tool_runtime(&self) -> Arc<ToolRuntime> {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: `prometheos-lite` (bin "prometheos-lite") generated 40 warnings (4 duplicates) (run `cargo fix --bin "prometheos-lite" -p prometheos-lite` to apply 16 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.60s
