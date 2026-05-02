@@ -538,7 +538,7 @@ impl SemanticDiffAnalyzer {
     
     fn parse_cargo_toml_changes(&self, diff: &str) -> Vec<DependencyChange> {
         let mut changes = vec![];
-        let dep_pattern = Regex::new(r"(?i)^[+-]\s*(\w+)\s*=\s*['\"]?([^'\"\n]+)['\"]?").unwrap();
+        let dep_pattern = Regex::new(r"(?i)^[+-]\s*(\w+)\s*=\s*['\x22]?([^'\x22\n]+)['\x22]?").unwrap();
         
         for cap in dep_pattern.captures_iter(diff) {
             if let (Some(name), Some(version)) = (cap.get(1), cap.get(2)) {
@@ -871,7 +871,7 @@ impl SemanticDiffAnalyzer {
             if line.contains(&format!("--- a/{}", file_str)) || 
                line.contains(&format!("+++ b/{}", file_str)) {
                 in_file_section = true;
-            } else if line.starts_with("---") || line.starts_with("+++")) {
+            } else if line.starts_with("---") || line.starts_with("+++") {
                 in_file_section = false;
             }
             
