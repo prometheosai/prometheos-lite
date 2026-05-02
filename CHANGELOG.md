@@ -4,6 +4,16 @@
 - Added WorkContext harness integration and API endpoints for run, trajectory, artifacts, confidence, replay, risk, and completion.
 - Added V1.6 harness documentation and issue-level test files.
 
+### Critical Fixes (Audit Blockers)
+
+**Blocker 4 - Real Rollback**: Fixed `RollbackHandle` to store actual file content and properly restore on rollback instead of deleting files. Added conflict detection and comprehensive `RollbackResult` tracking.
+
+**Blocker 2 - Unified Diff Context**: Fixed `apply_unified_diff()` to preserve context lines. Context is now verified but not modified, with proper hunk processing and error reporting for mismatches.
+
+**Blocker 3 - CreateFile Path Validation**: Fixed `is_path_denied()` to handle non-existing paths via `normalize_path_without_existence()`. CreateFile operations now work correctly.
+
+**Blocker 5 - Pre-Apply Review/Risk Gate**: Restructured execution loop to perform review and risk assessment BEFORE applying patches. Added proper approval gate based on `HarnessMode` (ReviewOnly never applies, Assisted requires approval, Autonomous applies if acceptable risk).
+
 # PrometheOS Lite Issue Tracker
 
 This document tracks all issues from the PRDs organized by milestone, with implementation status.
