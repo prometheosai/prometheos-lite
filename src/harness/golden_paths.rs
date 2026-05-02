@@ -516,7 +516,8 @@ impl GoldenPathRegistry {
             let mut reasons = Vec::new();
 
             // Check keywords in context
-            let keywords: Vec<_> = path.description.to_lowercase()
+            let description_lower = path.description.to_lowercase();
+            let keywords: Vec<_> = description_lower
                 .split_whitespace()
                 .filter(|w| w.len() > 4)
                 .collect();

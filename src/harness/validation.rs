@@ -231,18 +231,17 @@ async fn run_parallel(
     cache: &ValidationCache,
     timeout: u64,
 ) -> Result<Vec<(String, CommandResult)>> {
-    let mut handles = vec![];
+    // Run sequentially to avoid lifetime issues with borrowed references
+    let mut results = vec![];
     
     for (cmd, _cat) in commands {
         let cmd = cmd.clone();
         let root = root.to_path_buf();
         let cache_key = format!("{}:{}", root.display(), cmd);
         
-        let handle = tokio::spawn(async move {
-            if let Some(cached) = cache.get(&cache_key).await {
-                return (cmd, cached);
-            }
-            
+        let result = if let Some(cached) = cache.get(&cache_key).await {
+            (cmd, cached)
+        } else {
             let start = Instant::now();
             let result = sandbox.run_command(&root, &cmd, timeout).await;
             let duration = start.elapsed().as_millis() as u64;
@@ -272,14 +271,8 @@ async fn run_parallel(
             
             cache.set(cache_key, cmd_result.clone(), vec![]).await;
             (cmd, cmd_result)
-        });
+        };
         
-        handles.push(handle);
-    }
-    
-    let mut results = vec![];
-    for handle in handles {
-        let result = handle.await.context("Parallel validation task panicked")?;
         results.push(result);
     }
     
