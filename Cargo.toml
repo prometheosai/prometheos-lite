@@ -39,6 +39,7 @@ reqwest = { version = "0.12", features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 serde_yaml = "0.9"
 tokio = { version = "1.35", features = ["full"] }
 tower = "0.4"
@@ -48,7 +49,6 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 diffy = "0.4"
 git2 = "0.20"
 ignore = "0.4"
-sha2 = "0.10"
 tracing-opentelemetry = "0.24"
 tiktoken-rs = "0.5"
 walkdir = "2.5"

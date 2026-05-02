@@ -2,6 +2,7 @@ use crate::harness::sandbox::SandboxRuntime;
 use anyhow::{Result, Context};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -9,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+use tokio::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ValidationPlan {
@@ -97,6 +99,64 @@ pub struct TestAttempt {
     pub exit_code: Option<i32>,
 }
 
+/// Compute a hash for a file's content
+async fn compute_file_hash(path: &Path) -> Result<String> {
+    let content = fs::read_to_string(path).await?;
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let result = hasher.finalize();
+    Ok(format!("{:x}", result))
+}
+
+/// Compute hashes for all relevant files in the repository
+async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String>> {
+    let mut hashes = HashMap::new();
+    
+    // Find all source files that might affect validation
+    let extensions = ["rs", "js", "ts", "py", "go", "java", "cpp", "c", "h", "hpp"];
+    
+    let mut entries = fs::read_dir(root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                if extensions.iter().any(|e| ext == *e) {
+                    if let Ok(hash) = compute_file_hash(&path).await {
+                        hashes.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf(), hash);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Also include config files that affect validation
+    let config_files = ["Cargo.toml", "package.json", "Makefile", "pytest.ini", ".eslintrc", "tsconfig.json"];
+    for config in &config_files {
+        let config_path = root.join(config);
+        if config_path.exists() {
+            if let Ok(hash) = compute_file_hash(&config_path).await {
+                hashes.insert(PathBuf::from(config), hash);
+            }
+        }
+    }
+    
+    Ok(hashes)
+}
+
+/// Create a cache key that includes file hashes
+fn create_cache_key(root: &Path, command: &str, file_hashes: &HashMap<PathBuf, String>) -> String {
+    // Sort hashes for consistent key generation
+    let mut hash_entries: Vec<_> = file_hashes.iter().collect();
+    hash_entries.sort_by(|a, b| a.0.cmp(b.0));
+    
+    let hash_str = hash_entries.iter()
+        .map(|(path, hash)| format!("{}:{}", path.display(), hash))
+        .collect::<Vec<_>>()
+        .join("|");
+    
+    format!("{}:{}:{}", root.display(), command, hash_str)
+}
+
 #[derive(Debug, Clone)]
 struct ValidationCache {
     entries: Arc<Mutex<HashMap<String, CachedResult>>>,
@@ -107,7 +167,7 @@ struct ValidationCache {
 struct CachedResult {
     result: CommandResult,
     timestamp: Instant,
-    file_hashes: Vec<String>,
+    file_hashes: HashMap<PathBuf, String>,
 }
 
 impl ValidationCache {
@@ -118,10 +178,16 @@ impl ValidationCache {
         }
     }
     
-    async fn get(&self, key: &str) -> Option<CommandResult> {
+    async fn get(&self, key: &str, current_hashes: &HashMap<PathBuf, String>) -> Option<CommandResult> {
         let entries = self.entries.lock().await;
         if let Some(cached) = entries.get(key) {
-            if cached.timestamp.elapsed().as_millis() < self.ttl_ms as u128 {
+            // Check TTL
+            if cached.timestamp.elapsed().as_millis() >= self.ttl_ms as u128 {
+                return None;
+            }
+            
+            // Validate file hashes match
+            if &cached.file_hashes == current_hashes {
                 let mut result = cached.result.clone();
                 result.cached = true;
                 return Some(result);
@@ -130,12 +196,12 @@ impl ValidationCache {
         None
     }
     
-    async fn set(&self, key: String, result: CommandResult, _file_hashes: Vec<String>) {
+    async fn set(&self, key: String, result: CommandResult, file_hashes: HashMap<PathBuf, String>) {
         let mut entries = self.entries.lock().await;
         entries.insert(key, CachedResult {
             result,
             timestamp: Instant::now(),
-            file_hashes: vec![],
+            file_hashes,
         });
     }
     
@@ -230,15 +296,18 @@ async fn run_parallel(
     cache: &ValidationCache,
     timeout: u64,
 ) -> Result<Vec<(String, CommandResult)>> {
+    // Compute file hashes once for all commands
+    let file_hashes = compute_repo_file_hashes(root).await.unwrap_or_default();
+    
     // Run sequentially to avoid lifetime issues with borrowed references
     let mut results = vec![];
     
     for (cmd, _cat) in commands {
         let cmd = cmd.clone();
         let root = root.to_path_buf();
-        let cache_key = format!("{}:{}", root.display(), cmd);
+        let cache_key = create_cache_key(&root, &cmd, &file_hashes);
         
-        let result = if let Some(cached) = cache.get(&cache_key).await {
+        let result = if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
             (cmd, cached)
         } else {
             let start = Instant::now();
@@ -268,7 +337,7 @@ async fn run_parallel(
                 },
             };
             
-            cache.set(cache_key, cmd_result.clone(), vec![]).await;
+            cache.set(cache_key, cmd_result.clone(), file_hashes.clone()).await;
             (cmd, cmd_result)
         };
         
@@ -287,10 +356,13 @@ async fn run_sequential(
 ) -> Result<Vec<(String, CommandResult)>> {
     let mut results = vec![];
     
+    // Compute file hashes once at the start
+    let file_hashes = compute_repo_file_hashes(root).await.unwrap_or_default();
+    
     for (cmd, _cat) in commands {
-        let cache_key = format!("{}:{}", root.display(), cmd);
+        let cache_key = create_cache_key(root, cmd, &file_hashes);
         
-        if let Some(cached) = cache.get(&cache_key).await {
+        if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
             results.push((cmd.clone(), cached));
             continue;
         }
@@ -322,7 +394,7 @@ async fn run_sequential(
             },
         };
         
-        cache.set(cache_key, cmd_result.clone(), vec![]).await;
+        cache.set(cache_key, cmd_result.clone(), file_hashes.clone()).await;
         results.push((cmd.clone(), cmd_result));
     }
     
