@@ -179,6 +179,7 @@ impl SelectionEngine {
     fn calculate_risk_score(&self, candidate: &PatchCandidate) -> f32 {
         // Higher score for lower risk
         match candidate.risk.level {
+            RiskLevel::None => 1.0,
             RiskLevel::Critical => 0.0,
             RiskLevel::High => 0.4,
             RiskLevel::Medium => 0.7,
@@ -251,12 +252,14 @@ impl SelectionEngine {
 
         // Check risk level
         let risk_level_value = match candidate.risk.level {
+            RiskLevel::None => 0,
             RiskLevel::Low => 1,
             RiskLevel::Medium => 2,
             RiskLevel::High => 3,
             RiskLevel::Critical => 4,
         };
         let max_risk_value = match self.criteria.max_risk_level {
+            RiskLevel::None => 0,
             RiskLevel::Low => 1,
             RiskLevel::Medium => 2,
             RiskLevel::High => 3,
