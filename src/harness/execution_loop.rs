@@ -298,8 +298,25 @@ impl ExecutionContext {
 }
 
 pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<HarnessExecutionResult> {
-    let (mut ctx, mut _progress_rx) = ExecutionContext::new(req.limits);
+    let (mut ctx, mut progress_rx) = ExecutionContext::new(req.limits);
     let started = Instant::now();
+    
+    // Spawn progress forwarding task if callback is provided
+    let _progress_handle = if let Some(callback) = req.progress_callback {
+        Some(tokio::spawn(async move {
+            while let Some(progress) = progress_rx.recv().await {
+                callback(progress);
+            }
+        }))
+    } else {
+        // Drain the channel to prevent blocking
+        tokio::spawn(async move {
+            while let Some(_progress) = progress_rx.recv().await {
+                // Drop progress if no callback is registered
+            }
+        });
+        None
+    };
     
     ctx.send_progress(HarnessProgress::Started {
         work_context_id: req.work_context_id.clone(),
