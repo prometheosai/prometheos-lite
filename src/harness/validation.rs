@@ -1,5 +1,6 @@
 use crate::harness::sandbox::SandboxRuntime;
 use anyhow::{Result, Context};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -144,9 +145,7 @@ impl ValidationCache {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref GLOBAL_CACHE: ValidationCache = ValidationCache::new(300_000); // 5 minute TTL
-}
+static GLOBAL_CACHE: Lazy<ValidationCache> = Lazy::new(|| ValidationCache::new(300_000)); // 5 minute TTL
 
 pub async fn run_validation(
     root: &Path,
