@@ -292,7 +292,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::Security,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: format!("Security concern: {}", self.get_security_description(rule_id)),
                     suggestion: self.get_security_suggestion(rule_id),
@@ -314,7 +314,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::Bug,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: format!("Potential bug: {}", self.get_bug_description(rule_id)),
                     suggestion: self.get_bug_suggestion(rule_id),
@@ -336,7 +336,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::Performance,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: format!("Performance concern: {}", self.get_performance_description(rule_id)),
                     suggestion: self.get_performance_suggestion(rule_id),
@@ -358,7 +358,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::Maintainability,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: format!("Maintainability: {}", self.get_maintainability_description(rule_id)),
                     suggestion: self.get_maintainability_suggestion(rule_id),
@@ -388,7 +388,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::TestGap,
                     severity: ReviewSeverity::Medium,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: None,
                     message: format!("File has {} public function(s) but no test module", pub_fn_count),
                     suggestion: Some("Consider adding unit tests for public functions".to_string()),
@@ -403,7 +403,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::TestGap,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: "Test code detected".to_string(),
                     suggestion: None,
@@ -425,7 +425,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::Style,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: format!("Style: {}", self.get_style_description(rule_id)),
                     suggestion: self.get_style_suggestion(rule_id),
@@ -464,7 +464,7 @@ impl ReviewEngine {
                 issues.push(ReviewIssue {
                     issue_type: ReviewIssueType::Documentation,
                     severity: *severity,
-                    file: Some(file_str.clone()),
+                    file: Some(file_str.to_string()),
                     line: Some(line),
                     message: "Documentation found".to_string(),
                     suggestion: None,
@@ -564,7 +564,7 @@ impl ReviewEngine {
                     issues.push(ReviewIssue {
                         issue_type: ReviewIssueType::Maintainability,
                         severity: ReviewSeverity::Medium,
-                        file: Some(file_str.clone()),
+                        file: Some(file_str.to_string()),
                         line: Some(child.line_start),
                         message: format!("Function '{}' is {} lines long (consider splitting)", 
                                         child.name.as_deref().unwrap_or("unknown"), fn_lines),
@@ -846,7 +846,7 @@ pub fn format_review_report(report: &ReviewReport) -> String {
         
         output.push_str("\nDetailed Issues:\n");
         for (i, issue) in report.issues.iter().enumerate() {
-            output.push_str(&format!("\n{}. [{}] {:?}: {}\n", 
+            output.push_str(&format!("\n{}. [{}] {:?}: {:?}\n", 
                 i + 1, 
                 issue.rule_id, 
                 issue.severity,

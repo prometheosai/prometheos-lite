@@ -383,7 +383,7 @@ fn extract_test_name(command: &str) -> String {
     command.split_whitespace()
         .last()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| command.clone())
+        .unwrap_or_else(|| command.to_string())
 }
 
 pub async fn validate_with_retry(

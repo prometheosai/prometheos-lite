@@ -499,7 +499,7 @@ impl SemanticDiffAnalyzer {
                 let key_pattern = Regex::new(r"(?i)([a-z_][a-z0-9_]*)\s*=\s*([^\n]+)").unwrap();
                 for cap in key_pattern.captures_iter(&diff) {
                     if let (Some(key), Some(value)) = (cap.get(1), cap.get(2)) {
-                        let change_type = self.infer_config_change_type(&diff, cap.start());
+                        let change_type = self.infer_config_change_type(&diff, key.start());
                         
                         changes.push(ConfigChange {
                             file: file.clone(),

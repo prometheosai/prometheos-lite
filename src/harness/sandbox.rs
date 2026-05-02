@@ -84,6 +84,9 @@ impl SandboxRuntime for LocalSandboxRuntime {
                     stdout: String::new(),
                     stderr: "timeout".into(),
                     duration_ms: start.elapsed().as_millis() as u64,
+                    cached: false,
+                    cache_key: None,
+                    timed_out: true,
                 });
             }
         };
@@ -93,6 +96,9 @@ impl SandboxRuntime for LocalSandboxRuntime {
             stdout: String::from_utf8_lossy(&out.stdout).into(),
             stderr: String::from_utf8_lossy(&out.stderr).into(),
             duration_ms: start.elapsed().as_millis() as u64,
+            cached: false,
+            cache_key: None,
+            timed_out: false,
         })
     }
 }
