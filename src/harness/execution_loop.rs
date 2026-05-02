@@ -420,6 +420,8 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
     });
     
     let patch_start = Instant::now();
+    
+    // STEP 1: Dry-run patch to verify it applies cleanly
     let dry = dry_run_patch(&req.proposed_edits, &files, &policy)
         .await
         .context("patch dry-run failed")?;
@@ -440,11 +442,68 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
     
-    let checkpoint = create_pre_task_checkpoint(&req.repo_root).await.ok();
+    // STEP 2: Generate diff for review and semantic analysis
+    let diff = generate_diff_from_edits(&req.proposed_edits, &files);
     
-    let patch = if dry.failures.is_empty() {
+    // STEP 3: Review the patch BEFORE applying
+    let review = if dry.failures.is_empty() {
+        review_diff(&diff)
+    } else {
+        ReviewEvidence {
+            review_performed: false,
+            issues_found: vec![],
+            security_concerns: vec![],
+            quality_score: 0.0,
+        }
+    };
+    
+    // STEP 4: Semantic diff analysis
+    let semantic = analyze_semantic_diff(&diff);
+    
+    // STEP 5: Risk assessment BEFORE applying
+    let risk = assess_risk(&semantic, &review);
+    
+    // STEP 6: Approval gate - determine if patch should be applied
+    let should_apply = match req.mode {
+        HarnessMode::ReviewOnly => {
+            // ReviewOnly mode: NEVER apply patches
+            false
+        }
+        HarnessMode::Assisted => {
+            // Assisted mode: apply only if dry-run passed and no critical issues
+            let critical_review_issues = review.issues_found.iter()
+                .any(|i| matches!(i.severity, ReviewSeverity::Critical));
+            let high_risk = matches!(risk.level, RiskLevel::High | RiskLevel::Critical);
+            
+            dry.failures.is_empty() && !critical_review_issues && !high_risk
+        }
+        HarnessMode::Autonomous => {
+            // Autonomous mode: apply if dry-run passed and risk is acceptable
+            let unacceptable_risk = matches!(risk.level, RiskLevel::Critical);
+            dry.failures.is_empty() && !unacceptable_risk
+        }
+        HarnessMode::Benchmark => {
+            // Benchmark mode: apply if dry-run passed
+            dry.failures.is_empty()
+        }
+        _ => {
+            // Default: require approval for any patch
+            dry.failures.is_empty()
+        }
+    };
+    
+    // STEP 7: Create git checkpoint ONLY if we're going to apply
+    let checkpoint = if should_apply {
+        create_pre_task_checkpoint(&req.repo_root).await.ok()
+    } else {
+        None
+    };
+    
+    // STEP 8: Apply patch only if approved
+    let patch = if should_apply && dry.failures.is_empty() {
         Some(apply_patch(&req.proposed_edits, &files, &policy).await?)
     } else {
+        // Return dry-run result (patch not actually applied)
         Some(dry.clone())
     };
     let dry_failures = dry.failures.clone();
@@ -505,27 +564,26 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
     
-    let diff = patch.as_ref().map(|p| p.diff.as_str()).unwrap_or("");
+    ctx.increment_step();
+    if let Err(reason) = ctx.check_limits() {
+        return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
+    }
     
-    let review_start = Instant::now();
-    let review = review_diff(diff);
-    metrics.review_ms = review_start.elapsed().as_millis() as u64;
+    // Use the review and risk from pre-apply phase
+    let review_for_evidence = if dry.failures.is_empty() {
+        review_diff(&diff)
+    } else {
+        ReviewEvidence {
+            review_performed: false,
+            issues_found: vec![],
+            security_concerns: vec![],
+            quality_score: 0.0,
+        }
+    };
     
-    let critical_count = review.iter().filter(|i| i.severity == ReviewSeverity::Critical).count();
-    let max_severity = review.iter().map(|i| &i.severity).max();
+    let risk_for_evidence = assess_risk(&semantic, &review_for_evidence);
     
-    ctx.send_progress(HarnessProgress::Reviewing {
-        issues_found: review.len(),
-        max_severity: max_severity.map(|s| format!("{:?}", s)),
-    });
-    
-    let risk = assess_risk(&analyze_semantic_diff(diff), &review);
-    
-    ctx.send_progress(HarnessProgress::RiskAssessment {
-        level: format!("{:?}", risk.level),
-        requires_approval: risk.requires_approval,
-    });
-    
+    // Build completion evidence
     let strength = assess_verification_strength(validation.as_ref());
     let confidence = compute_confidence(validation.as_ref(), &review, &risk, strength);
     
