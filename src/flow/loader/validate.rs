@@ -85,6 +85,7 @@ fn validate_node_definition(node: &NodeDefinition) -> Result<()> {
         "planner",
         "coder",
         "reviewer",
+        "terminal",
         "llm",
         "tool",
         "file_writer",

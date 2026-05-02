@@ -137,6 +137,9 @@ impl NodeFactory for DefaultNodeFactory {
                 self.model_router.clone(),
                 context_builder,
             ))),
+            "terminal" => Ok(Arc::new(super::builtin_nodes::TerminalNode::new(
+                node_config,
+            ))),
             "llm" => Ok(Arc::new(super::builtin_nodes::LlmNode::new(
                 node_config,
                 self.model_router.clone(),
@@ -191,7 +194,7 @@ impl NodeFactory for DefaultNodeFactory {
             }
             _ => {
                 anyhow::bail!(
-                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough, code_analysis, symbol_resolution, dependency_analysis",
+                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, terminal, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough, code_analysis, symbol_resolution, dependency_analysis",
                     node_type
                 )
             }

@@ -301,6 +301,10 @@ impl Node for CoderNode {
             };
 
             state.set_output("generated".to_string(), serde_json::json!(filtered_code));
+
+            if filtered_code.trim().is_empty() {
+                return "needs_revision".to_string();
+            }
         }
 
         // Store execution metadata if available
@@ -308,7 +312,7 @@ impl Node for CoderNode {
             state.add_execution_metadata(self.id(), metadata.clone());
         }
 
-        "continue".to_string()
+        "complete".to_string()
     }
 
     fn config(&self) -> NodeConfig {
@@ -372,12 +376,16 @@ impl Node for ReviewerNode {
             .context("ReviewerNode requires ModelRouter to be configured")?;
 
         let generated_str = serde_json::to_string(generated).unwrap_or_default();
+        let review_task = format!(
+            "Review the following generated code for quality and correctness:\n\n{}",
+            generated_str
+        );
         
         // Use memory-aware context building if memory service is available
         let built_context = if self.context_builder.memory_service().is_some() {
             self.context_builder
                 .build_with_memory_retrieval(
-                    "Review the following code".to_string(),
+                    review_task.clone(),
                     None, // project_id - could be passed from state in future
                     3,    // Retrieve top 3 relevant memories for review context
                 )
@@ -385,11 +393,11 @@ impl Node for ReviewerNode {
                 .context("Failed to build context with memory retrieval")?
         } else {
             let context_inputs = ContextInputs {
-                task: "Review the following code".to_string(),
+                task: review_task,
                 plan: None,
                 memory: Vec::new(),
                 artifacts: Vec::new(),
-                system_prompt: Some("You are a code reviewer. Review the following generated code:\n\nCode:\n{}\n\nProvide a brief review with feedback on quality, correctness, and potential improvements.".to_string()),
+                system_prompt: Some("You are a code reviewer. Provide a concise review with correctness checks and concrete improvements.".to_string()),
             };
             self.context_builder
                 .build(context_inputs)
@@ -439,7 +447,16 @@ impl Node for ReviewerNode {
             state.add_execution_metadata(self.id(), metadata.clone());
         }
 
-        "continue".to_string()
+        let review_text = output["review"].as_str().unwrap_or_default().to_lowercase();
+        if review_text.contains("needs_revision")
+            || review_text.contains("needs revision")
+            || review_text.contains("revise")
+            || review_text.contains("fix")
+        {
+            "needs_revision".to_string()
+        } else {
+            "approved".to_string()
+        }
     }
 
     fn config(&self) -> NodeConfig {
@@ -1099,6 +1116,45 @@ impl Node for ConditionalNode {
 /// Passthrough Node - does nothing, passes through
 pub struct PassthroughNode {
     config: NodeConfig,
+}
+
+/// Terminal Node - explicit end marker for flow graphs.
+/// It performs no state mutation and returns no outgoing action.
+pub struct TerminalNode {
+    config: NodeConfig,
+}
+
+impl TerminalNode {
+    pub fn new(config: NodeConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for TerminalNode {
+    fn id(&self) -> String {
+        "terminal".to_string()
+    }
+
+    fn kind(&self) -> &str {
+        "terminal"
+    }
+
+    fn prep(&self, _state: &SharedState) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+
+    async fn exec(&self, _input: serde_json::Value) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({ "terminal": true }))
+    }
+
+    fn post(&self, _state: &mut SharedState, _output: serde_json::Value) -> String {
+        "end".to_string()
+    }
+
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
 }
 
 impl PassthroughNode {

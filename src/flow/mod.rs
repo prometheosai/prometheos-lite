@@ -32,7 +32,8 @@ pub use execution::*;
 pub use execution_service::*;
 pub use factory::{
     CoderNode, ConditionalNode, ContextLoaderNode, DefaultNodeFactory, FileWriterNode, IdWrapper,
-    LlmNode, MemoryWriteNode, NodeFactory, PassthroughNode, PlannerNode, ReviewerNode, ToolNode,
+    LlmNode, MemoryWriteNode, NodeFactory, PassthroughNode, PlannerNode, ReviewerNode,
+    TerminalNode, ToolNode,
 };
 pub use idempotency::*;
 pub use intelligence::{
