@@ -104,8 +104,9 @@ impl ObservabilityCollector {
 
     pub fn end_span(&mut self, span_id: usize, status: SpanStatus) {
         if let Some(span) = self.spans.get_mut(span_id) {
-            span.end_time = Some(chrono::Utc::now());
-            span.duration_ms = span.start_time.timestamp_millis() as u64 - chrono::Utc::now().timestamp_millis() as u64;
+            let end_time = chrono::Utc::now();
+            span.end_time = Some(end_time);
+            span.duration_ms = (end_time.timestamp_millis() - span.start_time.timestamp_millis()) as u64;
             span.status = status;
         }
         self.current_span = None;
