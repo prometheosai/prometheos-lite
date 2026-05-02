@@ -124,13 +124,14 @@ async fn run_with_transaction(
     let diff = generate_diff(&transaction);
     
     if !failures.is_empty() {
+        let tx_id = transaction.id.clone();
         return Ok(PatchResult {
             applied: false,
             changed_files: vec![],
             failures,
             diff,
             dry_run: true,
-            transaction_id: Some(transaction.id),
+            transaction_id: Some(tx_id),
             content_hashes: compute_content_hashes(&transaction),
         });
     }

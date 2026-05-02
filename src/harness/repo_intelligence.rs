@@ -129,12 +129,13 @@ pub async fn build_repo_context(
     for f in mentioned_files {
         let full_path = root.join(f);
         if !ranked_files.iter().any(|rf| rf.path == full_path) {
+            let lang = detect_language(&full_path);
             ranked_files.push(RankedFile {
                 path: full_path,
                 score: 100.0,
                 reason: "explicitly mentioned".into(),
                 symbol_count: 0,
-                language: detect_language(&full_path),
+                language: lang,
             });
         }
     }
