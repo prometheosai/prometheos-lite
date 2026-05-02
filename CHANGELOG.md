@@ -1,3 +1,9 @@
+## V1.6 Harness Engine
+
+- Added the src/harness subsystem for repo intelligence, environment fingerprinting, file policy, structured edit validation, atomic patch application, sandboxed validation, review/risk/confidence scoring, trajectory recording, artifacts, and evidence-based completion.
+- Added WorkContext harness integration and API endpoints for run, trajectory, artifacts, confidence, replay, risk, and completion.
+- Added V1.6 harness documentation and issue-level test files.
+
 # PrometheOS Lite Issue Tracker
 
 This document tracks all issues from the PRDs organized by milestone, with implementation status.
@@ -1040,4 +1046,5 @@ The following critical issues were identified during code audit:
 ---
 
 ## Unfinished / Deferred / Deprecated Tasks
+
 
