@@ -6,7 +6,7 @@ use crate::harness::{
     review::{ReviewIssue, ReviewSeverity},
     risk::{RiskAssessment, RiskLevel},
     semantic_diff::SemanticDiff,
-    validation::ValidationResult,
+    validation::{ValidationCategory, ValidationResult},
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -353,16 +353,24 @@ mod tests {
             confidence: ConfidenceScore {
                 score: confidence,
                 factors: vec![],
+                explanation: "Test confidence".into(),
+                recommendation: None,
             },
             risk: RiskAssessment {
                 level: RiskLevel::Low,
                 reasons: vec![],
                 requires_approval: false,
+                can_override: true,
+                override_conditions: vec![],
             },
             validation: Some(ValidationResult {
                 passed: true,
                 command_results: vec![],
-                total_duration_ms: 1000,
+                errors: vec![],
+                duration_ms: 1000,
+                cached: false,
+                flaky_tests_detected: vec![],
+                category_results: HashMap::new(),
             }),
             review_issues: vec![],
             semantic_diff: SemanticDiff::default(),
