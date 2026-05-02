@@ -214,7 +214,7 @@ fn extract_symbols_and_relationships(
 ) -> Option<(Vec<CodeSymbol>, Vec<SymbolEdge>)> {
     let mut parser = Parser::new();
     
-    let ts_lang: tree_sitter::Language = match language.as_str() {
+    let ts_lang: tree_sitter::Language = match language {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "javascript" | "jsx" => tree_sitter_javascript::LANGUAGE.into(),
         "typescript" | "tsx" => tree_sitter_javascript::LANGUAGE.into(),
@@ -294,7 +294,7 @@ fn extract_from_node(
                 
                 if let Some(body) = find_child_by_kind(node, "field_declaration_list") {
                     for i in 0..body.child_count() {
-                        if let Some(child) = body.child(i) {
+                        if let Some(child) = body.child(i as u32) {
                             if child.kind().contains("field") {
                                 if let Some(field_name) = find_child_by_kind(&child, "identifier") {
                                     let field = content[field_name.byte_range()].to_string();
@@ -420,7 +420,7 @@ fn extract_from_node(
     }
     
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             extract_from_node(file, content, &child, language, symbols, relationships);
         }
     }
@@ -428,7 +428,7 @@ fn extract_from_node(
 
 fn find_child_by_kind<'a>(node: &'a Node<'a>, kind: &str) -> Option<Node<'a>> {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == kind {
                 return Some(child);
             }

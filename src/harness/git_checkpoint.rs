@@ -205,11 +205,11 @@ impl GitCheckpointManager {
     }
 
     pub fn stage_file(&self, file: &Path) -> Result<()> {
-        self.run_git(&["add", &file.to_string_lossy()])
+        self.run_git(&["add", &file.to_string_lossy()]).map(|_| ())
     }
 
     pub fn unstage_file(&self, file: &Path) -> Result<()> {
-        self.run_git(&["reset", "HEAD", &file.to_string_lossy()])
+        self.run_git(&["reset", "HEAD", &file.to_string_lossy()]).map(|_| ())
     }
 
     fn run_git(&self, args: &[&str]) -> Result<String> {

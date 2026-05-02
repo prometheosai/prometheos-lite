@@ -1,4 +1,4 @@
-use crate::harness::repo_intelligence::CodeSymbol;
+use crate::harness::repo_intelligence::{CodeSymbol, SymbolKind};
 use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -302,9 +302,9 @@ impl AdversarialTestGenerator {
         let mut all_stress = vec![];
 
         for symbol in symbols {
-            if symbol.kind == "function" {
+            if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method) {
                 let func_name = &symbol.name;
-                let signature = &symbol.signature;
+                let signature = symbol.signature.as_deref().unwrap_or("unknown");
 
                 all_edge_cases.extend(self.generate_edge_case_tests(func_name, signature, language));
                 all_properties.extend(self.generate_property_tests(func_name, signature, language));
