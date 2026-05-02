@@ -244,7 +244,7 @@ impl AdversarialTestGenerator {
                 id: format!("prop_{}_{}", function_name, i),
                 name: format!("{} should be {:?}", function_name, property),
                 target_function: function_name.to_string(),
-                property: *property,
+                property: property.clone(),
                 generator,
                 num_iterations: 100,
                 language: language.to_string(),

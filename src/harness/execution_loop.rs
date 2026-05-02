@@ -493,7 +493,7 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         None
     };
     
-    let mut failures: Vec<FailureKind> = dry_failures.iter().map(|f| f.kind.clone()).collect();
+    let mut failures: Vec<FailureKind> = dry_failures.iter().map(|_f| FailureKind::PatchApplyFailure).collect();
     if let Some(ref v) = validation {
         if !v.passed {
             failures.push(classify_validation_failure(v));

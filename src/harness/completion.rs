@@ -174,6 +174,7 @@ impl CompletionEvaluator {
         
         // Decision logic based on mode
         let decision = match mode {
+            HarnessMode::Review => self.evaluate_review_only(evidence, &mut decision_factors),
             HarnessMode::ReviewOnly => self.evaluate_review_only(evidence, &mut decision_factors),
             HarnessMode::Assisted => self.evaluate_assisted(evidence, &mut decision_factors),
             HarnessMode::Autonomous => self.evaluate_autonomous(evidence, &mut decision_factors),
