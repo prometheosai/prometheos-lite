@@ -42,7 +42,9 @@ impl MemorySummarizer {
             .map(|m| {
                 format!(
                     "[{:?} - {}]\n{}",
-                    m.kind, m.created_at.format("%Y-%m-%d"), m.content
+                    m.kind,
+                    m.created_at.format("%Y-%m-%d"),
+                    m.content
                 )
             })
             .collect::<Vec<_>>()
@@ -94,7 +96,7 @@ impl MemorySummarizer {
     }
 
     /// Intelligent heuristic summarization for when LLM is unavailable
-    /// 
+    ///
     /// Extracts key sentences rather than blindly truncating:
     /// 1. Always includes the first sentence (usually contains context)
     /// 2. Includes sentences with high-information keywords
@@ -114,7 +116,11 @@ impl MemorySummarizer {
 
         if sentences.is_empty() {
             // Fallback: split by newlines if no sentence boundaries found
-            let lines: Vec<&str> = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+            let lines: Vec<&str> = content
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect();
             if !lines.is_empty() {
                 let first = lines[0];
                 if first.len() >= 280 {
@@ -139,12 +145,35 @@ impl MemorySummarizer {
 
         // High-information keywords that indicate important content
         let important_keywords = [
-            "decided", "decision", "conclusion", "determined", "resolved",
-            "important", "critical", "essential", "key", "main",
-            "result", "outcome", "success", "failed", "error",
-            "requirement", "constraint", "must", "should", "need",
-            "created", "implemented", "fixed", "changed", "updated",
-            "final", "complete", "done", "finished",
+            "decided",
+            "decision",
+            "conclusion",
+            "determined",
+            "resolved",
+            "important",
+            "critical",
+            "essential",
+            "key",
+            "main",
+            "result",
+            "outcome",
+            "success",
+            "failed",
+            "error",
+            "requirement",
+            "constraint",
+            "must",
+            "should",
+            "need",
+            "created",
+            "implemented",
+            "fixed",
+            "changed",
+            "updated",
+            "final",
+            "complete",
+            "done",
+            "finished",
         ];
 
         let mut summary_parts = Vec::new();
@@ -173,7 +202,9 @@ impl MemorySummarizer {
                 if new_len <= MAX_LEN {
                     summary_parts.push(sentence_with_punct);
                     current_len = new_len;
-                } else if current_len < TARGET_LEN && sentence_with_punct.len() <= (MAX_LEN - current_len) {
+                } else if current_len < TARGET_LEN
+                    && sentence_with_punct.len() <= (MAX_LEN - current_len)
+                {
                     // Allow one more short sentence even if slightly over target
                     summary_parts.push(sentence_with_punct);
                     current_len = new_len;
@@ -303,7 +334,9 @@ mod tests {
         let summarizer = MemorySummarizer::new(None);
         let memory = create_test_memory("Test content");
 
-        let result = std::sync::Arc::new(summarizer).summarize(vec![memory]).await;
+        let result = std::sync::Arc::new(summarizer)
+            .summarize(vec![memory])
+            .await;
 
         // Should return the same memory unchanged
         assert!(result.is_ok());

@@ -573,10 +573,7 @@ async fn test_deterministic_no_api_flow_execution() {
 
     // Execute the deterministic test flow
     let execution_result = flow_execution_service
-        .execute_message(
-            "test message",
-            Default::default(),
-        )
+        .execute_message("test message", Default::default())
         .await;
 
     // This should succeed without any external dependencies

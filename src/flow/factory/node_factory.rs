@@ -38,7 +38,7 @@ impl DefaultNodeFactory {
     }
 
     /// Create a DefaultNodeFactory from a RuntimeContext
-    /// 
+    ///
     /// The ContextBuilder is automatically wired with the memory service if available,
     /// enabling automatic memory retrieval for all LLM nodes.
     pub fn from_runtime(runtime: crate::flow::RuntimeContext) -> Self {
@@ -118,7 +118,9 @@ impl DefaultNodeFactory {
 impl NodeFactory for DefaultNodeFactory {
     fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
         let node_config = Self::parse_config(&config)?;
-        let context_builder = self.context_builder.clone()
+        let context_builder = self
+            .context_builder
+            .clone()
             .unwrap_or_else(ContextBuilder::default);
 
         match node_type {
@@ -169,7 +171,9 @@ impl NodeFactory for DefaultNodeFactory {
             ))),
             // V1.5.2: AST-based coding harness nodes
             "code_analysis" => {
-                let repo_path = self.repo_path.clone()
+                let repo_path = self
+                    .repo_path
+                    .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
                 Ok(Arc::new(super::coding_nodes::CodeAnalysisNode::new(
                     node_config,
@@ -177,7 +181,9 @@ impl NodeFactory for DefaultNodeFactory {
                 )))
             }
             "symbol_resolution" => {
-                let repo_path = self.repo_path.clone()
+                let repo_path = self
+                    .repo_path
+                    .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
                 Ok(Arc::new(super::coding_nodes::SymbolResolutionNode::new(
                     node_config,
@@ -185,7 +191,9 @@ impl NodeFactory for DefaultNodeFactory {
                 )))
             }
             "dependency_analysis" => {
-                let repo_path = self.repo_path.clone()
+                let repo_path = self
+                    .repo_path
+                    .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
                 Ok(Arc::new(super::coding_nodes::DependencyAnalysisNode::new(
                     node_config,

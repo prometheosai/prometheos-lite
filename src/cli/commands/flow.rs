@@ -351,7 +351,8 @@ impl ResumeCommand {
                 if flow_path_yml.exists() {
                     logger.info(&format!("Found flow at: {}", flow_path_yml.display()));
                     // Re-execute the flow with loaded state
-                    self.execute_resumed_flow(&flow_path_yml, state, &logger).await?;
+                    self.execute_resumed_flow(&flow_path_yml, state, &logger)
+                        .await?;
                 } else {
                     logger.warn(&format!("Flow file not found for: {}", flow_name));
                     anyhow::bail!("Cannot resume: flow file not found");
@@ -359,7 +360,8 @@ impl ResumeCommand {
             } else {
                 logger.info(&format!("Found flow at: {}", flow_path.display()));
                 // Re-execute the flow with loaded state
-                self.execute_resumed_flow(&flow_path, state, &logger).await?;
+                self.execute_resumed_flow(&flow_path, state, &logger)
+                    .await?;
             }
         } else {
             logger.warn("No flow_name found in checkpoint state");
@@ -410,8 +412,8 @@ impl ResumeCommand {
 
         // Add transitions
         for trans in &flow_file.transitions {
-            builder = builder
-                .add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
+            builder =
+                builder.add_transition(trans.from.clone(), trans.action.clone(), trans.to.clone());
         }
 
         // Set start node

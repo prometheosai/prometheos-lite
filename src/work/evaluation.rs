@@ -180,7 +180,7 @@ impl EvaluationEngine {
         // Calculate weighted combination of structural and semantic scores
         // V1.5.2: Semantic score is now integrated into overall evaluation
         let structural_score = dimensions.overall_score();
-        
+
         // Weight: 60% structural (dimensions), 40% semantic (LLM-based evaluation)
         // This balances objective metrics with subjective quality assessment
         let combined_score = if semantic_score > 0.0 && semantic_score != 0.5 {
@@ -190,7 +190,7 @@ impl EvaluationEngine {
             // No semantic score available, use structural only
             structural_score
         };
-        
+
         // Apply penalties to combined score
         let penalty_severity: f32 = penalties.iter().map(|p| p.severity).sum();
         let overall_score = combined_score * (1.0 - penalty_severity.min(0.8));
@@ -218,7 +218,11 @@ impl EvaluationEngine {
     }
 
     /// Validate the structure of a WorkContext
-    pub fn validate_structure(&self, context: &crate::work::types::WorkContext, execution_metadata: &serde_json::Value) -> Result<StructuralValidation> {
+    pub fn validate_structure(
+        &self,
+        context: &crate::work::types::WorkContext,
+        execution_metadata: &serde_json::Value,
+    ) -> Result<StructuralValidation> {
         let mut errors = Vec::new();
 
         // Check if required fields are present
@@ -260,10 +264,11 @@ impl EvaluationEngine {
         );
 
         let result = router.generate(&prompt).await?;
-        
+
         // Parse the score from the response
         let score_str = result.trim();
-        score_str.parse::<f32>()
+        score_str
+            .parse::<f32>()
             .map(|s| s.clamp(0.0, 1.0))
             .map_err(|e| anyhow::anyhow!("Failed to parse semantic score '{}': {}", score_str, e))
     }
@@ -292,7 +297,10 @@ impl EvaluationEngine {
     }
 
     /// Evaluate artifact completeness
-    pub fn evaluate_artifact_completeness(&self, context: &crate::work::types::WorkContext) -> Result<f32> {
+    pub fn evaluate_artifact_completeness(
+        &self,
+        context: &crate::work::types::WorkContext,
+    ) -> Result<f32> {
         if context.artifacts.is_empty() {
             return Ok(0.5); // Neutral if no artifacts
         }
@@ -335,7 +343,7 @@ mod tests {
     #[test]
     fn test_structural_validation_valid() {
         let engine = EvaluationEngine::default();
-        
+
         let context = crate::work::types::WorkContext::new(
             uuid::Uuid::new_v4().to_string(),
             "test-user".to_string(),
@@ -345,8 +353,10 @@ mod tests {
         );
 
         let execution_metadata = serde_json::json!({});
-        let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
-        
+        let validation = engine
+            .validate_structure(&context, &execution_metadata)
+            .unwrap();
+
         assert!(validation.is_valid);
         assert!(validation.errors.is_empty());
     }
@@ -354,7 +364,7 @@ mod tests {
     #[test]
     fn test_structural_validation_invalid() {
         let engine = EvaluationEngine::default();
-        
+
         let mut context = crate::work::types::WorkContext::new(
             uuid::Uuid::new_v4().to_string(),
             "test-user".to_string(),
@@ -364,8 +374,10 @@ mod tests {
         );
 
         let execution_metadata = serde_json::json!({});
-        let validation = engine.validate_structure(&context, &execution_metadata).unwrap();
-        
+        let validation = engine
+            .validate_structure(&context, &execution_metadata)
+            .unwrap();
+
         assert!(!validation.is_valid);
         assert!(!validation.errors.is_empty());
     }
@@ -389,7 +401,7 @@ mod tests {
     #[test]
     fn test_evaluate_artifact_completeness() {
         let engine = EvaluationEngine::default();
-        
+
         let mut context = crate::work::types::WorkContext::new(
             uuid::Uuid::new_v4().to_string(),
             "test-user".to_string(),
@@ -397,7 +409,7 @@ mod tests {
             crate::work::types::WorkDomain::Software,
             "Test goal".to_string(),
         );
-        
+
         let context_id = context.id.clone();
         context.artifacts = vec![
             crate::work::Artifact::new(
@@ -425,7 +437,7 @@ mod tests {
     #[test]
     fn test_evaluate_artifact_completeness_no_artifacts() {
         let engine = EvaluationEngine::default();
-        
+
         let context = crate::work::types::WorkContext::new(
             uuid::Uuid::new_v4().to_string(),
             "test-user".to_string(),
@@ -433,9 +445,9 @@ mod tests {
             crate::work::types::WorkDomain::Software,
             "Test goal".to_string(),
         );
-        
+
         let score = engine.evaluate_artifact_completeness(&context).unwrap();
-        
+
         assert_eq!(score, 0.5); // Neutral if no artifacts
     }
 }

@@ -4,15 +4,15 @@
 //! including system metrics, job queue status, and skill/evolution management.
 
 use crate::api::state::AppState;
-use crate::db::repository::{EvolutionsOperations, SkillsOperations, FlowRunOperations};
 use crate::db::Db;
+use crate::db::repository::{EvolutionsOperations, FlowRunOperations, SkillsOperations};
 use crate::queue::JobQueueStats;
 use axum::{Router, extract::State, http::StatusCode, response::Json, routing::get};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use sysinfo::System;
 use std::time::Instant;
+use sysinfo::System;
 
 /// Global startup time for uptime calculation
 static STARTUP_TIME: once_cell::sync::Lazy<Instant> = once_cell::sync::Lazy::new(Instant::now);
@@ -73,8 +73,11 @@ async fn get_stats(
 ) -> Result<Json<ControlPanelStats>, StatusCode> {
     let system_metrics = get_system_metrics(&state).await;
     let db = Arc::new(Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
-    let job_queue_stats = build_job_queue_stats(&db).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let skills_count = db.count_skills().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
+    let job_queue_stats =
+        build_job_queue_stats(&db).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let skills_count = db
+        .count_skills()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
     let evolutions_count = db
         .count_evolutions()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
@@ -156,32 +159,27 @@ async fn list_evolutions(
             Ok(EvolutionSummary {
                 id: row.get::<_, String>(0)?,
                 playbook_id: row.get::<_, String>(1)?,
-                version: row
-                    .get::<_, i64>(2)
-                    .map(|v| v as u32)
-                    .or_else(|_| {
-                        row.get::<_, String>(2)
-                            .ok()
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .ok_or(rusqlite::Error::InvalidColumnType(
-                                2,
-                                "version".to_string(),
-                                rusqlite::types::Type::Text,
-                            ))
-                    })?,
+                version: row.get::<_, i64>(2).map(|v| v as u32).or_else(|_| {
+                    row.get::<_, String>(2)
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .ok_or(rusqlite::Error::InvalidColumnType(
+                            2,
+                            "version".to_string(),
+                            rusqlite::types::Type::Text,
+                        ))
+                })?,
                 status: row.get::<_, String>(3)?,
-                success_rate: row
-                    .get::<_, f64>(4)
-                    .or_else(|_| {
-                        row.get::<_, String>(4)
-                            .ok()
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .ok_or(rusqlite::Error::InvalidColumnType(
-                                4,
-                                "success_rate".to_string(),
-                                rusqlite::types::Type::Text,
-                            ))
-                    })?,
+                success_rate: row.get::<_, f64>(4).or_else(|_| {
+                    row.get::<_, String>(4)
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .ok_or(rusqlite::Error::InvalidColumnType(
+                            4,
+                            "success_rate".to_string(),
+                            rusqlite::types::Type::Text,
+                        ))
+                })?,
             })
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -204,7 +202,7 @@ async fn get_job_queue_stats(
 }
 
 /// Get system metrics
-/// 
+///
 /// Uses sysinfo to gather actual process and system metrics.
 async fn get_system_metrics(state: &Arc<AppState>) -> SystemMetrics {
     // Calculate uptime
@@ -213,7 +211,7 @@ async fn get_system_metrics(state: &Arc<AppState>) -> SystemMetrics {
     // Get actual memory usage using sysinfo
     let mut system = System::new_all();
     system.refresh_all();
-    
+
     // Get current process memory usage
     let memory_usage_mb = sysinfo::get_current_pid()
         .ok()

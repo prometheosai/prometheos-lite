@@ -3,11 +3,11 @@
 //! Tests for memory scoring, ranking, pruning, and summarization.
 
 use chrono::{Duration, Utc};
+use prometheos_lite::flow::memory::summarizer::MemorySummarizer;
 use prometheos_lite::flow::memory::types::{Memory, MemoryKind};
 use prometheos_lite::flow::memory::{
     MemoryScore, prune, prune_by_threshold, prune_combined, rank_memories,
 };
-use prometheos_lite::flow::memory::summarizer::MemorySummarizer;
 
 fn create_test_memory(importance: f32, days_old: i64, access_count: u32) -> Memory {
     let created_at = Utc::now() - Duration::days(days_old);
@@ -148,7 +148,9 @@ async fn test_summarize_single_memory() {
     let summarizer = MemorySummarizer::default();
     let memory = create_test_memory(0.5, 1, 10);
 
-    let result = std::sync::Arc::new(summarizer).summarize(vec![memory]).await;
+    let result = std::sync::Arc::new(summarizer)
+        .summarize(vec![memory])
+        .await;
 
     // Should return the same memory unchanged
     assert!(result.is_ok());

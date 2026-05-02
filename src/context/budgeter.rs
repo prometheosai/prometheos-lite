@@ -293,7 +293,11 @@ impl ContextBudgeter {
     }
 
     /// Recursively truncate JSON value to fit within character limit
-    fn truncate_json_value(&self, value: &serde_json::Value, max_chars: usize) -> serde_json::Value {
+    fn truncate_json_value(
+        &self,
+        value: &serde_json::Value,
+        max_chars: usize,
+    ) -> serde_json::Value {
         let json_str = value.to_string();
         if json_str.len() <= max_chars {
             return value.clone();
@@ -303,17 +307,15 @@ impl ContextBudgeter {
             serde_json::Value::Array(arr) => {
                 // Truncate arrays by keeping first N items
                 let item_limit = (max_chars / 50).max(3); // Estimate ~50 chars per item, keep at least 3
-                let truncated: Vec<serde_json::Value> = arr
-                    .iter()
-                    .take(item_limit)
-                    .cloned()
-                    .collect();
+                let truncated: Vec<serde_json::Value> =
+                    arr.iter().take(item_limit).cloned().collect();
 
                 if truncated.len() < arr.len() {
                     let mut result = truncated;
-                    result.push(serde_json::Value::String(
-                        format!("... ({} more items)", arr.len() - result.len() + 1)
-                    ));
+                    result.push(serde_json::Value::String(format!(
+                        "... ({} more items)",
+                        arr.len() - result.len() + 1
+                    )));
                     serde_json::Value::Array(result)
                 } else {
                     serde_json::Value::Array(truncated)
@@ -328,7 +330,7 @@ impl ContextBudgeter {
                     if i >= key_limit {
                         result.insert(
                             "_truncated".to_string(),
-                            serde_json::Value::String(format!("{} more fields", obj.len() - i))
+                            serde_json::Value::String(format!("{} more fields", obj.len() - i)),
                         );
                         break;
                     }
@@ -427,7 +429,9 @@ mod tests {
                 .any(|item| item.contains("memory"))
         );
         // System and task should be preserved (they're higher priority)
-        assert!(result.prompt.contains("System prompt") || result.prompt.contains("Task description"));
+        assert!(
+            result.prompt.contains("System prompt") || result.prompt.contains("Task description")
+        );
     }
 
     #[test]

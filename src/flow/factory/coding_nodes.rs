@@ -50,7 +50,7 @@ impl AstParser {
     /// Extract function names from code using language-specific heuristics
     pub fn extract_functions(content: &str, language: Language) -> Vec<String> {
         let mut functions = Vec::new();
-        
+
         match language {
             Language::Rust => {
                 for line in content.lines() {
@@ -103,14 +103,14 @@ impl AstParser {
             }
             _ => {}
         }
-        
+
         functions
     }
 
     /// Extract class/struct names from code using heuristics
     pub fn extract_classes(content: &str, language: Language) -> Vec<String> {
         let mut classes = Vec::new();
-        
+
         match language {
             Language::Rust => {
                 for line in content.lines() {
@@ -128,7 +128,9 @@ impl AstParser {
             Language::Python => {
                 for line in content.lines() {
                     if line.trim().starts_with("class ") {
-                        if let Some(name) = line.split('(').next().or_else(|| line.split(':').next()) {
+                        if let Some(name) =
+                            line.split('(').next().or_else(|| line.split(':').next())
+                        {
                             let name = name.split("class ").last().unwrap_or(name).trim();
                             if !name.is_empty() {
                                 classes.push(name.to_string());
@@ -151,14 +153,14 @@ impl AstParser {
             }
             _ => {}
         }
-        
+
         classes
     }
 
     /// Extract imports from code using heuristics
     pub fn extract_imports(content: &str, language: Language) -> Vec<String> {
         let mut imports = Vec::new();
-        
+
         match language {
             Language::Rust => {
                 for line in content.lines() {
@@ -201,22 +203,26 @@ impl AstParser {
             }
             _ => {}
         }
-        
+
         imports
     }
 
     /// Find symbol definition using text search
-    pub fn find_symbol_definition(content: &str, symbol: &str, _language: Language) -> Option<(usize, String)> {
+    pub fn find_symbol_definition(
+        content: &str,
+        symbol: &str,
+        _language: Language,
+    ) -> Option<(usize, String)> {
         for (line_num, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.contains(symbol) {
-                let is_def = trimmed.starts_with("fn ") 
+                let is_def = trimmed.starts_with("fn ")
                     || trimmed.starts_with("pub fn ")
                     || trimmed.starts_with("struct ")
                     || trimmed.starts_with("class ")
                     || trimmed.starts_with("def ")
                     || trimmed.starts_with("function ");
-                
+
                 if is_def {
                     return Some((line_num + 1, trimmed.to_string()));
                 }
@@ -287,9 +293,10 @@ impl Node for CodeAnalysisNode {
 
         let line_count = content.lines().count();
         let language_str = self.detect_language(extension);
-        
+
         // Heuristic-based analysis
-        let (functions, classes, imports) = if let Some(lang) = Language::from_extension(extension) {
+        let (functions, classes, imports) = if let Some(lang) = Language::from_extension(extension)
+        {
             let funcs = AstParser::extract_functions(&content, lang);
             let cls = AstParser::extract_classes(&content, lang);
             let imps = AstParser::extract_imports(&content, lang);
@@ -345,23 +352,23 @@ impl DependencyParser {
     /// Parse Cargo.toml for Rust dependencies
     pub fn parse_cargo_toml(content: &str) -> Vec<String> {
         let mut deps = Vec::new();
-        
+
         // Simple parsing - look for [dependencies] section
         let mut in_deps_section = false;
-        
+
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.starts_with("[dependencies]") {
                 in_deps_section = true;
                 continue;
             }
-            
+
             // Exit section on next bracket line
             if in_deps_section && trimmed.starts_with('[') && !trimmed.starts_with("[[") {
                 break;
             }
-            
+
             if in_deps_section && !trimmed.is_empty() && !trimmed.starts_with('#') {
                 // Extract dependency name (before = or space)
                 if let Some(name) = trimmed.split('=').next() {
@@ -372,35 +379,36 @@ impl DependencyParser {
                 }
             }
         }
-        
+
         deps
     }
 
     /// Parse package.json for JavaScript dependencies
     pub fn parse_package_json(content: &str) -> Vec<String> {
         let mut deps = Vec::new();
-        
+
         // Look for "dependencies" or "devDependencies" keys
         let mut in_deps = false;
-        
+
         for line in content.lines() {
             let trimmed = line.trim();
-            
-            if trimmed.starts_with("\"dependencies\"") || trimmed.starts_with("\"devDependencies\"") {
+
+            if trimmed.starts_with("\"dependencies\"") || trimmed.starts_with("\"devDependencies\"")
+            {
                 in_deps = true;
                 continue;
             }
-            
+
             if in_deps {
                 if trimmed == "}" || trimmed.starts_with('}') {
                     in_deps = false;
                     continue;
                 }
-                
+
                 // Extract package name (between quotes)
                 if let Some(start) = trimmed.find('"') {
-                    if let Some(end) = trimmed[start+1..].find('"') {
-                        let name = &trimmed[start+1..start+1+end];
+                    if let Some(end) = trimmed[start + 1..].find('"') {
+                        let name = &trimmed[start + 1..start + 1 + end];
                         if !name.is_empty() {
                             deps.push(name.to_string());
                         }
@@ -408,7 +416,7 @@ impl DependencyParser {
                 }
             }
         }
-        
+
         deps
     }
 
@@ -434,20 +442,20 @@ impl DependencyParser {
     pub fn parse_go_mod(content: &str) -> Vec<String> {
         let mut deps = Vec::new();
         let mut in_require = false;
-        
+
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.starts_with("require (") {
                 in_require = true;
                 continue;
             }
-            
+
             if in_require && trimmed == ")" {
                 in_require = false;
                 continue;
             }
-            
+
             // Single-line require: require package version
             if trimmed.starts_with("require ") && !trimmed.contains('(') {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -455,7 +463,7 @@ impl DependencyParser {
                     deps.push(parts[1].to_string());
                 }
             }
-            
+
             // Inside require block
             if in_require && !trimmed.is_empty() && !trimmed.starts_with("//") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -464,7 +472,7 @@ impl DependencyParser {
                 }
             }
         }
-        
+
         deps
     }
 }
@@ -564,8 +572,9 @@ impl SymbolResolutionNode {
 
         // Try heuristic-based resolution first
         if let Some(lang) = Language::from_extension(extension) {
-            if let Some((line_num, line_content)) = 
-                AstParser::find_symbol_definition(&content, symbol, lang) {
+            if let Some((line_num, line_content)) =
+                AstParser::find_symbol_definition(&content, symbol, lang)
+            {
                 return Ok(Some(json!({
                     "file": path.to_string_lossy(),
                     "line": line_num,

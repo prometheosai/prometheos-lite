@@ -613,7 +613,11 @@ impl EvolutionEngine {
 
         // Schema compatibility for older deployments that created a reduced
         // playbook_evolutions table.
-        self.ensure_column("playbook_evolutions", "performance", "TEXT NOT NULL DEFAULT '{}'")?;
+        self.ensure_column(
+            "playbook_evolutions",
+            "performance",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )?;
         self.ensure_column(
             "playbook_evolutions",
             "execution_count",

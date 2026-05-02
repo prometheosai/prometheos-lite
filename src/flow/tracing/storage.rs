@@ -61,18 +61,22 @@ impl TraceStorage {
 
         // Get current schema version
         let current_version: i32 = conn
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
             .unwrap_or(0);
 
         // Apply migrations if needed
         // V1.5.2: Enhanced migration framework for trace storage versioning
         let target_version = 2; // Current schema version
-        
+
         if current_version < 1 {
             tracing::info!("Migrating trace storage to v1...");
             self.migrate_to_v1(&conn)?;
         }
-        
+
         if current_version < 2 {
             tracing::info!("Migrating trace storage to v2...");
             self.migrate_to_v2(&conn)?;
@@ -80,7 +84,11 @@ impl TraceStorage {
 
         // Record final schema version
         if current_version < target_version {
-            tracing::info!("Trace storage schema migrated from v{} to v{}", current_version, target_version);
+            tracing::info!(
+                "Trace storage schema migrated from v{} to v{}",
+                current_version,
+                target_version
+            );
         }
 
         Ok(())
@@ -511,7 +519,10 @@ impl TraceStorage {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
-        let rows_affected = conn.execute("DELETE FROM execution_traces WHERE trace_id = ?1", params![trace_id])?;
+        let rows_affected = conn.execute(
+            "DELETE FROM execution_traces WHERE trace_id = ?1",
+            params![trace_id],
+        )?;
         Ok(rows_affected > 0)
     }
 
@@ -545,10 +556,10 @@ mod tests {
     #[test]
     fn test_save_and_retrieve_trace() {
         let storage = TraceStorage::in_memory().unwrap();
-        
+
         let trace_id = uuid::Uuid::new_v4().to_string();
         let flow_run_id = uuid::Uuid::new_v4().to_string();
-        
+
         let trace = HierarchicalTrace {
             trace_id: trace_id.clone(),
             work_context_id: Some("test-context".to_string()),
@@ -561,7 +572,7 @@ mod tests {
         };
 
         storage.save_trace(&trace).unwrap();
-        
+
         let retrieved = storage.get_trace(&trace_id).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().trace_id, trace.trace_id);
@@ -573,7 +584,7 @@ mod tests {
 
         let trace_id = uuid::Uuid::new_v4().to_string();
         let flow_run_id = uuid::Uuid::new_v4().to_string();
-        
+
         let trace = HierarchicalTrace {
             trace_id: trace_id.clone(),
             work_context_id: Some("test-context".to_string()),
@@ -586,10 +597,10 @@ mod tests {
         };
 
         storage.save_trace(&trace).unwrap();
-        
+
         let deleted = storage.delete_trace(&trace_id).unwrap();
         assert!(deleted);
-        
+
         let retrieved = storage.get_trace(&trace_id).unwrap();
         assert!(retrieved.is_none());
     }

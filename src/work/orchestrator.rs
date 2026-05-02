@@ -462,7 +462,10 @@ impl WorkOrchestrator {
         let project_path = self.detect_project_path(context).await?;
 
         if project_path.is_none() {
-            tracing::warn!("No project path found for context {}, skipping real test execution", context.id);
+            tracing::warn!(
+                "No project path found for context {}, skipping real test execution",
+                context.id
+            );
             return Ok(!context.is_blocked());
         }
 
@@ -489,15 +492,23 @@ impl WorkOrchestrator {
         self.work_context_service.update_context(&context)?;
 
         // Persist test artifacts
-        self.persist_test_artifacts(&context.id, &test_result).await?;
+        self.persist_test_artifacts(&context.id, &test_result)
+            .await?;
 
         Ok(test_result.success)
     }
 
     /// Detect project path from context artifacts
-    async fn detect_project_path(&self, context: &WorkContext) -> Result<Option<std::path::PathBuf>> {
+    async fn detect_project_path(
+        &self,
+        context: &WorkContext,
+    ) -> Result<Option<std::path::PathBuf>> {
         // Check context metadata for project path
-        if let Some(project_path) = context.metadata.get("project_path").and_then(|v| v.as_str()) {
+        if let Some(project_path) = context
+            .metadata
+            .get("project_path")
+            .and_then(|v| v.as_str())
+        {
             return Ok(Some(std::path::PathBuf::from(project_path)));
         }
         if let Some(repo_path) = context.metadata.get("repo_path").and_then(|v| v.as_str()) {
@@ -676,7 +687,8 @@ impl WorkOrchestrator {
             "python" => {
                 // Parse pytest/unittest output
                 for line in stdout.lines() {
-                    if line.contains("passed") || line.contains("failed") || line.contains("error") {
+                    if line.contains("passed") || line.contains("failed") || line.contains("error")
+                    {
                         if let Some(n) = line.split_whitespace().next() {
                             if let Ok(num) = n.parse::<usize>() {
                                 if line.contains("passed") {

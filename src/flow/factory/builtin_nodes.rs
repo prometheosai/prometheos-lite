@@ -62,7 +62,11 @@ pub struct PlannerNode {
 }
 
 impl PlannerNode {
-    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>, context_builder: ContextBuilder) -> Self {
+    pub fn new(
+        config: NodeConfig,
+        model_router: Option<std::sync::Arc<ModelRouter>>,
+        context_builder: ContextBuilder,
+    ) -> Self {
         Self {
             config,
             model_router,
@@ -184,7 +188,11 @@ pub struct CoderNode {
 }
 
 impl CoderNode {
-    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>, context_builder: ContextBuilder) -> Self {
+    pub fn new(
+        config: NodeConfig,
+        model_router: Option<std::sync::Arc<ModelRouter>>,
+        context_builder: ContextBuilder,
+    ) -> Self {
         Self {
             config,
             model_router,
@@ -241,7 +249,7 @@ impl Node for CoderNode {
             .context("CoderNode requires ModelRouter to be configured")?;
 
         let plan_str = serde_json::to_string(plan).unwrap_or_default();
-        
+
         // Use memory-aware context building if memory service is available
         let built_context = if self.context_builder.memory_service().is_some() {
             self.context_builder
@@ -328,7 +336,11 @@ pub struct ReviewerNode {
 }
 
 impl ReviewerNode {
-    pub fn new(config: NodeConfig, model_router: Option<std::sync::Arc<ModelRouter>>, context_builder: ContextBuilder) -> Self {
+    pub fn new(
+        config: NodeConfig,
+        model_router: Option<std::sync::Arc<ModelRouter>>,
+        context_builder: ContextBuilder,
+    ) -> Self {
         Self {
             config,
             model_router,
@@ -380,7 +392,7 @@ impl Node for ReviewerNode {
             "Review the following generated code for quality and correctness:\n\n{}",
             generated_str
         );
-        
+
         // Use memory-aware context building if memory service is available
         let built_context = if self.context_builder.memory_service().is_some() {
             self.context_builder

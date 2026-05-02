@@ -117,9 +117,7 @@ fn test_get_traces_by_flow_run() {
     storage.save_trace(&trace1).unwrap();
     storage.save_trace(&trace2).unwrap();
 
-    let traces = storage
-        .get_traces_by_flow_run(&flow_run_id)
-        .unwrap();
+    let traces = storage.get_traces_by_flow_run(&flow_run_id).unwrap();
     assert_eq!(traces.len(), 2);
 }
 

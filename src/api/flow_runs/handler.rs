@@ -120,7 +120,7 @@ pub async fn run_flow(
         } else {
             actual_message
         };
-        
+
         let message_with_context = if let Some(context) = relevant_context {
             format!("{}\n\nUser message: {}", context, message_to_process)
         } else {

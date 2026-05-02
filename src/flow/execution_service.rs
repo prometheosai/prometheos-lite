@@ -104,9 +104,7 @@ pub struct FlowExecutionService {
 }
 
 impl FlowExecutionService {
-    fn select_primary_output(
-        state: &SharedState,
-    ) -> (serde_json::Value, Option<String>) {
+    fn select_primary_output(state: &SharedState) -> (serde_json::Value, Option<String>) {
         let preferred_keys = [
             "llm_response",
             "generated",
@@ -327,13 +325,13 @@ impl FlowExecutionService {
         let mut memory_compression_performed = false;
         let mut memory_prunes_performed = 0;
         let mut total_memory_count = 0;
-        
+
         if let Some(ref memory_service) = self.runtime.memory_service {
             // Check memory stats and compress/prune if needed
             match memory_service.get_memory_stats().await {
                 Ok(stats) => {
                     total_memory_count = stats.total_count;
-                    
+
                     // Compress if threshold exceeded
                     if stats.total_count > stats.max_count {
                         match memory_service.compress_if_needed().await {
@@ -341,7 +339,9 @@ impl FlowExecutionService {
                                 if compressed {
                                     memory_ops_count += 1;
                                     memory_compression_performed = true;
-                                    tracing::info!("Memory compression performed during flow execution");
+                                    tracing::info!(
+                                        "Memory compression performed during flow execution"
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -350,7 +350,7 @@ impl FlowExecutionService {
                             }
                         }
                     }
-                    
+
                     // Prune low-importance memories
                     match memory_service.prune_memories().await {
                         Ok(pruned_count) => {
@@ -383,7 +383,7 @@ impl FlowExecutionService {
         state.set_input("prompt".to_string(), serde_json::json!(message));
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
-        
+
         // Store memory operation metadata in state for later inclusion in FinalOutput
         let memory_metadata = serde_json::json!({
             "compression_performed": memory_compression_performed,
@@ -503,14 +503,24 @@ impl FlowExecutionService {
 
                 // Extract context budget metadata from state if available
                 let context_budget = state.get_meta("context_budget").and_then(|v| {
-                    serde_json::from_value::<crate::flow::output::ContextBudgetMetadata>(v.clone()).ok()
+                    serde_json::from_value::<crate::flow::output::ContextBudgetMetadata>(v.clone())
+                        .ok()
                 });
-                
+
                 // Extract memory operations metadata from state
                 let memory_operations = state.get_meta("memory_operations").and_then(|v| {
-                    let compression = v.get("compression_performed").and_then(|c| c.as_bool()).unwrap_or(false);
-                    let prunes = v.get("prunes_performed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
-                    let total_count = v.get("total_memory_count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                    let compression = v
+                        .get("compression_performed")
+                        .and_then(|c| c.as_bool())
+                        .unwrap_or(false);
+                    let prunes = v
+                        .get("prunes_performed")
+                        .and_then(|p| p.as_u64())
+                        .unwrap_or(0) as usize;
+                    let total_count = v
+                        .get("total_memory_count")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0) as usize;
                     Some(crate::flow::output::MemoryExecutionMetadata {
                         compressions_performed: if compression { 1 } else { 0 },
                         prunes_performed: prunes,
@@ -671,14 +681,24 @@ impl FlowExecutionService {
 
                 // Extract context budget metadata from state if available
                 let context_budget = state.get_meta("context_budget").and_then(|v| {
-                    serde_json::from_value::<crate::flow::output::ContextBudgetMetadata>(v.clone()).ok()
+                    serde_json::from_value::<crate::flow::output::ContextBudgetMetadata>(v.clone())
+                        .ok()
                 });
-                
+
                 // Extract memory operations metadata from state
                 let memory_operations = state.get_meta("memory_operations").and_then(|v| {
-                    let compression = v.get("compression_performed").and_then(|c| c.as_bool()).unwrap_or(false);
-                    let prunes = v.get("prunes_performed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
-                    let total_count = v.get("total_memory_count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                    let compression = v
+                        .get("compression_performed")
+                        .and_then(|c| c.as_bool())
+                        .unwrap_or(false);
+                    let prunes = v
+                        .get("prunes_performed")
+                        .and_then(|p| p.as_u64())
+                        .unwrap_or(0) as usize;
+                    let total_count = v
+                        .get("total_memory_count")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0) as usize;
                     Some(crate::flow::output::MemoryExecutionMetadata {
                         compressions_performed: if compression { 1 } else { 0 },
                         prunes_performed: prunes,

@@ -5,9 +5,9 @@ use opentelemetry::trace::{
     Span as SpanTrait, SpanKind, Status, Tracer as OtelTracer, TracerProvider as OtelTracerProvider,
 };
 use opentelemetry::{Key, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
-use opentelemetry_otlp::WithExportConfig;
 
 use super::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 
@@ -83,7 +83,7 @@ impl OtelExporter {
                 .with_endpoint(endpoint)
                 .with_timeout(std::time::Duration::from_secs(3))
                 .build_span_exporter()?;
-            
+
             sdktrace::TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                 .build()

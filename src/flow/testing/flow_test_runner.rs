@@ -2,7 +2,9 @@
 
 use super::fixtures::{TestExpectation, TestFixture};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
-use crate::flow::{DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState, Tracer, TraceMetrics};
+use crate::flow::{
+    DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState, TraceMetrics, Tracer,
+};
 use anyhow::Result;
 use std::path::PathBuf;
 

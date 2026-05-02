@@ -9,7 +9,7 @@ use super::AsDb;
 pub trait EvolutionsOperations {
     /// Count total number of playbook evolutions
     fn count_evolutions(&self) -> Result<i64>;
-    
+
     /// Count evolutions for a specific playbook
     fn count_evolutions_by_playbook(&self, playbook_id: &str) -> Result<i64>;
 }
@@ -18,15 +18,13 @@ impl<T: AsDb> EvolutionsOperations for T {
     fn count_evolutions(&self) -> Result<i64> {
         let conn = self.as_db().conn();
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM playbook_evolutions",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM playbook_evolutions", [], |row| {
+                row.get(0)
+            })
             .context("Failed to count evolutions")?;
         Ok(count)
     }
-    
+
     fn count_evolutions_by_playbook(&self, playbook_id: &str) -> Result<i64> {
         let conn = self.as_db().conn();
         let count: i64 = conn

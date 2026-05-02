@@ -5,9 +5,11 @@
 //! - Trace ID correlation across operations
 //! - Proper span context propagation through the execution path
 
-use prometheos_lite::flow::opentelemetry::{OtelConfig, OtelExporter};
-use prometheos_lite::flow::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall, TraceId, RunId};
 use chrono::Utc;
+use prometheos_lite::flow::opentelemetry::{OtelConfig, OtelExporter};
+use prometheos_lite::flow::tracing::{
+    HierarchicalTrace, LlmCall, NodeRun, RunId, ToolCall, TraceId,
+};
 
 #[test]
 fn test_otel_config_with_endpoint() {
@@ -21,7 +23,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
     // Create a hierarchical trace with parent-child relationships
     let trace_id = TraceId::from("trace-parent-123");
     let run_id = RunId::from("run-123");
-    
+
     // Parent node (planner)
     let parent_node = NodeRun {
         node_id: "planner".to_string(),
@@ -34,7 +36,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
         started_at: Utc::now(),
         completed_at: Utc::now(),
     };
-    
+
     // Child node (coder) - should inherit trace_id from parent
     let child_node = NodeRun {
         node_id: "coder".to_string(),
@@ -47,7 +49,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
         started_at: Utc::now(),
         completed_at: Utc::now(),
     };
-    
+
     // LLM call within parent node
     let llm_call = LlmCall {
         node_id: "planner".to_string(),
@@ -61,7 +63,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     // Tool call within child node
     let tool_call = ToolCall {
         tool_name: "file_writer".to_string(),
@@ -72,7 +74,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
         duration_ms: 50,
         called_at: Utc::now(),
     };
-    
+
     // Build hierarchical trace
     let trace = HierarchicalTrace {
         trace_id: trace_id.clone(),
@@ -84,7 +86,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     // Verify trace ID correlation
     assert_eq!(trace.trace_id, trace_id);
     assert_eq!(trace.node_runs.len(), 2);
@@ -92,7 +94,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
     assert_eq!(trace.node_runs[1].trace_id, trace_id);
     assert_eq!(trace.llm_calls[0].trace_id, trace_id);
     assert_eq!(trace.tool_calls[0].trace_id, trace_id);
-    
+
     // Verify temporal ordering (parent before child)
     assert!(trace.node_runs[0].started_at <= trace.node_runs[1].started_at);
 }
@@ -101,7 +103,7 @@ fn test_hierarchical_trace_with_parent_child_context() {
 fn test_trace_propagation_across_multiple_operations() {
     // Test trace propagation across multiple operations in a single execution
     let trace_id = TraceId::from("trace-multi-123");
-    
+
     let operations = vec![
         NodeRun {
             node_id: "operation_1".to_string(),
@@ -137,12 +139,12 @@ fn test_trace_propagation_across_multiple_operations() {
             completed_at: Utc::now(),
         },
     ];
-    
+
     // All operations should share the same trace_id
     for op in &operations {
         assert_eq!(op.trace_id, trace_id);
     }
-    
+
     // Export the trace to verify it can be serialized
     let trace = HierarchicalTrace {
         trace_id: trace_id.clone(),
@@ -154,7 +156,7 @@ fn test_trace_propagation_across_multiple_operations() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     let config = OtelConfig::default();
     let exporter = OtelExporter::new(config).unwrap();
     let result = exporter.export_trace(&trace);
@@ -166,9 +168,9 @@ fn test_trace_id_uniqueness_across_executions() {
     // Verify that different executions have different trace IDs
     let trace_id_1 = TraceId::from("trace-1");
     let trace_id_2 = TraceId::from("trace-2");
-    
+
     assert_ne!(trace_id_1, trace_id_2);
-    
+
     let trace_1 = HierarchicalTrace {
         trace_id: trace_id_1,
         work_context_id: None,
@@ -179,7 +181,7 @@ fn test_trace_id_uniqueness_across_executions() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     let trace_2 = HierarchicalTrace {
         trace_id: trace_id_2,
         work_context_id: None,
@@ -190,7 +192,7 @@ fn test_trace_id_uniqueness_across_executions() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     assert_ne!(trace_1.trace_id, trace_2.trace_id);
 }
 
@@ -198,7 +200,7 @@ fn test_trace_id_uniqueness_across_executions() {
 fn test_error_propagation_in_trace() {
     // Test that errors are properly captured in the trace
     let trace_id = TraceId::from("trace-error-123");
-    
+
     let failed_node = NodeRun {
         node_id: "failing_node".to_string(),
         trace_id: trace_id.clone(),
@@ -210,7 +212,7 @@ fn test_error_propagation_in_trace() {
         started_at: Utc::now(),
         completed_at: Utc::now(),
     };
-    
+
     let failed_llm = LlmCall {
         node_id: "failing_node".to_string(),
         trace_id: trace_id.clone(),
@@ -223,7 +225,7 @@ fn test_error_propagation_in_trace() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     let trace = HierarchicalTrace {
         trace_id: trace_id.clone(),
         work_context_id: None,
@@ -234,7 +236,7 @@ fn test_error_propagation_in_trace() {
         started_at: Utc::now(),
         completed_at: Some(Utc::now()),
     };
-    
+
     // Verify errors are captured
     assert!(trace.node_runs[0].error.is_some());
     assert!(trace.llm_calls[0].error.is_some());

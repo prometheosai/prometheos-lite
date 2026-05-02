@@ -3,9 +3,9 @@
 //! Tests for enhanced evaluation with structural validation and semantic evaluation.
 
 use chrono::Utc;
-use prometheos_lite::work::{Artifact, ArtifactKind, EvaluationEngine};
-use prometheos_lite::work::types::{WorkContext, WorkDomain};
 use prometheos_lite::work::evaluation::EvaluationDimensions;
+use prometheos_lite::work::types::{WorkContext, WorkDomain};
+use prometheos_lite::work::{Artifact, ArtifactKind, EvaluationEngine};
 
 fn create_test_work_context(goal: &str) -> WorkContext {
     WorkContext::new(
@@ -117,7 +117,7 @@ fn test_evaluate_tool_consistency_all_success() {
 #[test]
 fn test_evaluate_artifact_completeness() {
     let engine = EvaluationEngine::default();
-    
+
     let mut context = create_test_work_context("Test goal");
     let context_id = context.id.clone();
     context.artifacts = vec![
@@ -146,10 +146,10 @@ fn test_evaluate_artifact_completeness() {
 #[test]
 fn test_evaluate_artifact_completeness_no_artifacts() {
     let engine = EvaluationEngine::default();
-    
+
     let context = create_test_work_context("Test goal");
     let score = engine.evaluate_artifact_completeness(&context).unwrap();
-    
+
     assert_eq!(score, 0.5); // Neutral if no artifacts
 }
 
@@ -162,7 +162,7 @@ fn test_evaluation_engine_default() {
 #[tokio::test]
 async fn test_evaluation_scoring_correctness() {
     let engine = EvaluationEngine::default();
-    
+
     let context = create_test_work_context("Test goal");
     let execution_metadata = serde_json::json!({
         "retry_count": 0,
@@ -173,7 +173,7 @@ async fn test_evaluation_scoring_correctness() {
         .evaluate(&context, &execution_metadata)
         .await
         .unwrap();
-    
+
     assert!(result.overall_score > 0.0);
     assert!(result.semantic_score > 0.0);
     assert!(result.structural_score > 0.0);

@@ -65,11 +65,7 @@ impl<T: AsDb> FlowRunOperations for T {
     fn count_flow_runs(&self) -> Result<i64> {
         let conn = self.as_db().conn();
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM flow_runs",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM flow_runs", [], |row| row.get(0))
             .context("Failed to count flow runs")?;
         Ok(count)
     }

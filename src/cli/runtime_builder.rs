@@ -55,10 +55,10 @@ impl RuntimeBuilder {
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
                 .context("Failed to create memory database")?;
         let memory_service = Arc::new(MemoryService::new(persistent_db, embedding));
-        
+
         let trace_storage = Arc::new(
             prometheos_lite::flow::tracing::TraceStorage::in_memory()
-                .context("Failed to create trace storage")?
+                .context("Failed to create trace storage")?,
         );
 
         Ok(RuntimeContext::full(

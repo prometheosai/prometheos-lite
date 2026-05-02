@@ -26,7 +26,9 @@ impl LlmProvider for DeterministicTestProvider {
             return Ok("approved".to_string());
         }
         if prompt.to_lowercase().contains("plan") {
-            return Ok("1. Analyze requirements\n2. Implement changes\n3. Validate with tests".to_string());
+            return Ok(
+                "1. Analyze requirements\n2. Implement changes\n3. Validate with tests".to_string(),
+            );
         }
         Ok(format!("Generated output for: {}", prompt))
     }

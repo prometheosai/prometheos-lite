@@ -195,9 +195,9 @@ impl ContextBuilder {
     }
 
     /// Build context with automatic memory retrieval
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if the memory service is configured but memory retrieval fails.
     /// This ensures explicit failure rather than silent degradation.
     pub async fn build_with_memory_retrieval(
@@ -214,10 +214,11 @@ impl ContextBuilder {
                 .semantic_search(&task, limit)
                 .await
                 .context("Memory retrieval failed during context building")?;
-            
+
             // Filter by project_id if provided
             if let Some(ref pid) = project_id {
-                memories.into_iter()
+                memories
+                    .into_iter()
                     .filter(|m| m.project_id.as_deref() == Some(pid))
                     .collect()
             } else {

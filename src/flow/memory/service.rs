@@ -440,7 +440,8 @@ impl MemoryService {
     pub async fn prune_memories(&self) -> Result<usize> {
         let db_guard = self.db.lock().await;
         // Get all memories by kind (semantic is the main one we care about)
-        let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
+        let all_memories =
+            db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
         drop(db_guard);
 
         if all_memories.len() <= self.max_memory_count {
@@ -463,8 +464,9 @@ impl MemoryService {
     /// Compress memories if threshold exceeded
     pub async fn compress_if_needed(&self) -> Result<bool> {
         let db_guard = self.db.lock().await;
-        let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
-        
+        let all_memories =
+            db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
+
         // Track original IDs before compression
         let original_ids: Vec<String> = all_memories.iter().map(|m| m.id.clone()).collect();
         drop(db_guard);
@@ -483,7 +485,7 @@ impl MemoryService {
             for id in original_ids {
                 let _ = db_guard.delete_memory(&id);
             }
-            
+
             // Add compressed memories with their new IDs
             for memory in compressed {
                 let _ = db_guard.create_memory(&memory);
@@ -498,7 +500,8 @@ impl MemoryService {
     /// Get memory statistics
     pub async fn get_memory_stats(&self) -> Result<MemoryStats> {
         let db_guard = self.db.lock().await;
-        let all_memories = db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
+        let all_memories =
+            db_guard.get_memories_by_kind(crate::flow::memory::types::MemoryKind::Semantic)?;
         drop(db_guard);
 
         let total_count = all_memories.len();
@@ -508,7 +511,11 @@ impl MemoryService {
             .sum();
 
         let ranked = rank_memories(all_memories);
-        let avg_importance = if ranked.is_empty() { 0.5 } else { ranked.iter().map(|(_, s)| s.overall).sum::<f32>() / ranked.len() as f32 };
+        let avg_importance = if ranked.is_empty() {
+            0.5
+        } else {
+            ranked.iter().map(|(_, s)| s.overall).sum::<f32>() / ranked.len() as f32
+        };
 
         Ok(MemoryStats {
             total_count,

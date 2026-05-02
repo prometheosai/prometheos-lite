@@ -142,11 +142,11 @@ impl<T: AsDb> InterruptOperations for T {
                     expected_schema: row.get(5)?,
                     status: row.get(6)?,
                     decision: row.get(7)?,
-                    expires_at: row
-                        .get::<_, Option<String>>(8)?
-                        .map(|s| chrono::DateTime::parse_from_rfc3339(&s)
+                    expires_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
                             .unwrap_or_else(|_| chrono::Utc::now().into())
-                            .with_timezone(&chrono::Utc)),
+                            .with_timezone(&chrono::Utc)
+                    }),
                     work_context_id: row.get(9)?,
                     created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                         .unwrap_or_else(|_| chrono::Utc::now().into())
@@ -184,11 +184,11 @@ impl<T: AsDb> InterruptOperations for T {
                     expected_schema: row.get(5)?,
                     status: row.get(6)?,
                     decision: row.get(7)?,
-                    expires_at: row
-                        .get::<_, Option<String>>(8)?
-                        .map(|s| chrono::DateTime::parse_from_rfc3339(&s)
+                    expires_at: row.get::<_, Option<String>>(8)?.map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
                             .unwrap_or_else(|_| chrono::Utc::now().into())
-                            .with_timezone(&chrono::Utc)),
+                            .with_timezone(&chrono::Utc)
+                    }),
                     work_context_id: row.get(9)?,
                     created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                         .unwrap_or_else(|_| chrono::Utc::now().into())

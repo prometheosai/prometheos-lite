@@ -457,12 +457,10 @@ impl Db {
             .context("Failed to create playbook_evolutions table")?;
 
         // Backward-compatible schema migration for existing databases.
-        let _ = self
-            .conn
-            .execute(
-                "ALTER TABLE playbook_evolutions ADD COLUMN performance TEXT NOT NULL DEFAULT '{}'",
-                [],
-            );
+        let _ = self.conn.execute(
+            "ALTER TABLE playbook_evolutions ADD COLUMN performance TEXT NOT NULL DEFAULT '{}'",
+            [],
+        );
         let _ = self.conn.execute(
             "ALTER TABLE playbook_evolutions ADD COLUMN execution_count INTEGER NOT NULL DEFAULT 0",
             [],
