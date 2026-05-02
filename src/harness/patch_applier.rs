@@ -392,13 +392,13 @@ fn compute_content_hashes(transaction: &Transaction) -> HashMap<PathBuf, String>
     let mut hashes = HashMap::new();
     
     for (path, snapshot) in &transaction.snapshots {
-        if let Some(ref hash) = snapshot.hash {
+        if let Some(hash) = snapshot.hash {
             hashes.insert(path.clone(), hash.clone());
         }
     }
     
     for (path, content) in &transaction.pending_changes {
-        if let Some(ref c) = content {
+        if let Some(c) = content {
             hashes.insert(path.clone(), compute_hash(c));
         }
     }

@@ -529,19 +529,19 @@ fn rank_files_by_relevance(
         let file_symbols_list = file_symbols.get(&file).cloned().unwrap_or_default();
         let symbol_count = file_symbols_list.len();
         
-        let mut score = 0.1;
-        let mut reasons = Vec::new();
+        let mut score: f32 = 0.1;
+        let mut reasons: Vec<String> = Vec::new();
         
         if path_str.contains("test") {
             score += 4.0;
-            reasons.push("test file");
+            reasons.push("test file".to_string());
         }
         
         for keyword in &task_keywords {
             if keyword.len() > 2 {
                 if path_str.contains(keyword) {
                     score += 12.0;
-                    reasons.push("path match");
+                    reasons.push("path match".to_string());
                 }
                 
                 if let Some(matching) = symbol_index.get(*keyword) {
@@ -551,11 +551,11 @@ fn rank_files_by_relevance(
                     
                     for sym in file_matches {
                         score += 20.0;
-                        reasons.push(&format!("symbol match: {}", sym.name));
+                        reasons.push(format!("symbol match: {}", sym.name));
                         
                         if mentioned_set.contains(&sym.name) {
                             score += 50.0;
-                            reasons.push("explicitly mentioned symbol");
+                            reasons.push("explicitly mentioned symbol".to_string());
                         }
                     }
                 }
@@ -564,7 +564,7 @@ fn rank_files_by_relevance(
         
         if file_symbols_list.iter().any(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method)) {
             score += 2.0;
-            reasons.push("has functions");
+            reasons.push("has functions".to_string());
         }
         
         let reason = if reasons.is_empty() {
@@ -573,12 +573,13 @@ fn rank_files_by_relevance(
             reasons.join(", ")
         };
         
+        let lang = detect_language(&file);
         ranked.push(RankedFile {
             path: file,
             score,
             reason,
             symbol_count,
-            language: detect_language(&file),
+            language: lang,
         });
     }
     
