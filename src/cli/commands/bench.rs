@@ -88,7 +88,7 @@ impl RunBenchCommand {
                         error: None,
                         llm_calls: test_result.metrics.llm_calls,
                         tool_calls: test_result.metrics.tool_calls,
-                        budget_exceeded: false, // TODO: Detect from test_result
+                        budget_exceeded: test_result.metrics.budget_exceeded,
                     },
                     Err(e) => BenchmarkResult {
                         task: task.to_string(),

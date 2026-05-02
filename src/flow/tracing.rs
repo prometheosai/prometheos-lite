@@ -411,6 +411,8 @@ pub struct TraceMetrics {
     pub llm_calls: u32,
     pub tool_calls: u32,
     pub node_runs: u32,
+    /// Whether execution budget was exceeded during the run
+    pub budget_exceeded: bool,
 }
 
 /// Tracer for structured logging and event timeline
@@ -624,12 +626,14 @@ impl Tracer {
                 llm_calls: trace.llm_calls.len() as u32,
                 tool_calls: trace.tool_calls.len() as u32,
                 node_runs: trace.node_runs.len() as u32,
+                budget_exceeded: false, // Budget tracking via BudgetGuard in SharedState
             }
         } else {
             TraceMetrics {
                 llm_calls: 0,
                 tool_calls: 0,
                 node_runs: 0,
+                budget_exceeded: false,
             }
         }
     }

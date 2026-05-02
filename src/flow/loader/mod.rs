@@ -20,8 +20,7 @@ pub trait FlowLoader {
     fn load_from_path(&self, path: &Path) -> Result<FlowFile>;
 }
 
-/// Flow file structure (re-exported from CLI types for now)
-/// TODO: Move this to src/flow/types.rs in Phase 1
+/// Flow file structure for loader operations
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FlowFile {
     pub version: String,

@@ -114,10 +114,17 @@ pub async fn run_flow(
             message.clone()
         };
 
+        // Prepend relevant memory context to message if available
         let message_to_process = if actual_message.is_empty() {
             message.clone()
         } else {
             actual_message
+        };
+        
+        let message_with_context = if let Some(context) = relevant_context {
+            format!("{}\n\nUser message: {}", context, message_to_process)
+        } else {
+            message_to_process
         };
 
         // Build execution options
@@ -138,9 +145,9 @@ pub async fn run_flow(
             )
             .await;
 
-        // Execute via the shared service
+        // Execute via the shared service with context-enhanced message
         let final_output = exec_service
-            .execute_message(&message_to_process, options)
+            .execute_message(&message_with_context, options)
             .await;
 
         match final_output {
