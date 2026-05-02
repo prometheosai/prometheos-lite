@@ -6,9 +6,13 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::state::AppState;
+use crate::harness::{
+    HarnessMode, HarnessWorkContextService, edit_protocol::EditOperation, parse_edit_response,
+};
 use crate::work::{
     WorkContextService,
     types::{WorkContext, WorkDomain, WorkStatus},
@@ -44,6 +48,20 @@ pub struct RunContextRequest {
     pub max_tool_calls: Option<usize>,
     #[serde(default)]
     pub max_cost: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HarnessRunRequest {
+    pub repo_root: PathBuf,
+    #[serde(default = "default_harness_mode")]
+    pub mode: HarnessMode,
+    #[serde(default)]
+    pub proposed_edits: Vec<EditOperation>,
+    #[serde(default)]
+    pub edit_response: Option<String>,
+}
+fn default_harness_mode() -> HarnessMode {
+    HarnessMode::Review
 }
 
 /// Request to update WorkContext status
@@ -315,4 +333,60 @@ pub async fn run_until_complete(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
+}
+
+pub async fn run_harness(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<HarnessRunRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let work_context_service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let service = HarnessWorkContextService::new(work_context_service);
+    let mut edits = req.proposed_edits;
+    if let Some(raw) = req.edit_response.as_deref() {
+        edits.extend(parse_edit_response(raw).map_err(|e| ApiError::BadRequest(e.to_string()))?);
+    }
+    let result = service
+        .run_for_context(&id, req.repo_root, req.mode, edits)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::to_value(result).map_err(|e| ApiError::Internal(e.to_string()))?,
+    ))
+}
+
+pub async fn get_harness_metadata(
+    State(state): State<Arc<AppState>>,
+    Path((id, view)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let ctx = svc
+        .get_context(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
+    let h = ctx
+        .metadata
+        .get("harness")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let v = match view.as_str() {
+        "trajectory" => h.get("trajectory").cloned(),
+        "artifacts" => h.get("artifacts").cloned(),
+        "confidence" => h.get("confidence").cloned(),
+        "replay" => Some(h.clone()),
+        "risk" => h.get("risk_assessment").cloned(),
+        "completion" => h.get("completion_decision").cloned(),
+        _ => {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown harness view: {}",
+                view
+            )));
+        }
+    }
+    .unwrap_or(serde_json::Value::Null);
+    Ok(Json(v))
 }
