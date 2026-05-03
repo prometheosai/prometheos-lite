@@ -293,11 +293,165 @@ fn expand_context_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOper
     Ok(repaired)
 }
 
-/// Make search pattern more specific
+/// Make search pattern more specific by expanding context
+/// 
+/// Reads the target file, finds all matches of the search pattern,
+/// and expands the search block with surrounding context to make it unique.
 fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
-    // This would analyze the search pattern and add more unique context
-    // For now, just return the original
-    Ok(edits.to_vec())
+    use std::collections::HashMap;
+    
+    let mut repaired = Vec::new();
+    
+    for edit in edits {
+        match edit {
+            EditOperation::SearchReplace(sr) => {
+                // Read the file content
+                let content = match std::fs::read_to_string(&sr.file) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to read file for narrowing: {}", e);
+                        repaired.push(edit.clone());
+                        continue;
+                    }
+                };
+                
+                // Find all occurrences of the search pattern
+                let matches: Vec<usize> = content
+                    .match_indices(&sr.search)
+                    .map(|(idx, _)| idx)
+                    .collect();
+                
+                if matches.len() <= 1 {
+                    // Already unique or not found - keep original
+                    repaired.push(edit.clone());
+                    continue;
+                }
+                
+                // Multiple matches - need to expand context
+                let lines: Vec<&str> = content.lines().collect();
+                
+                // Find which lines contain each match
+                let mut match_lines = Vec::new();
+                let mut current_pos = 0;
+                for (line_idx, line) in lines.iter().enumerate() {
+                    let line_start = current_pos;
+                    let line_end = current_pos + line.len();
+                    
+                    for &match_pos in &matches {
+                        if match_pos >= line_start && match_pos < line_end {
+                            match_lines.push(line_idx);
+                        }
+                    }
+                    
+                    current_pos = line_end + 1; // +1 for newline
+                }
+                
+                // Try to narrow by expanding context lines
+                let context_lines = sr.context_lines.unwrap_or(0) as usize;
+                let max_context = 10; // Maximum lines to expand
+                
+                let mut narrowed = None;
+                for expand in 1..=max_context {
+                    let new_context = context_lines + expand;
+                    
+                    // Build expanded search for each match location
+                    let mut unique_expansions = Vec::new();
+                    
+                    for &line_idx in &match_lines {
+                        let start_line = line_idx.saturating_sub(new_context);
+                        let end_line = (line_idx + new_context + 1).min(lines.len());
+                        
+                        let expanded_search = lines[start_line..end_line].join("\n");
+                        unique_expansions.push(expanded_search);
+                    }
+                    
+                    // Check if all expansions are unique
+                    let mut seen = HashMap::new();
+                    let all_unique = unique_expansions.iter().all(|e| {
+                        let count = seen.entry(e.clone()).or_insert(0);
+                        *count += 1;
+                        *count == 1
+                    });
+                    
+                    if all_unique {
+                        // Use the first match's expansion (most common case)
+                        let first_match_line = match_lines[0];
+                        let start_line = first_match_line.saturating_sub(new_context);
+                        let end_line = (first_match_line + new_context + 1).min(lines.len());
+                        
+                        let expanded_search = lines[start_line..end_line].join("\n");
+                        
+                        // Build corresponding replace with same context
+                        let expanded_replace = if sr.replace.contains('\n') {
+                            // Multi-line replace - preserve context around it
+                            let context_before = if start_line < first_match_line {
+                                lines[start_line..first_match_line].join("\n") + "\n"
+                            } else {
+                                String::new()
+                            };
+                            
+                            let context_after = if first_match_line + 1 < end_line {
+                                "\n".to_string() + &lines[(first_match_line + 1)..end_line].join("\n")
+                            } else {
+                                String::new()
+                            };
+                            
+                            context_before + &sr.replace + &context_after
+                        } else {
+                            // Single line replace - wrap with context
+                            let context_before = if start_line < first_match_line {
+                                lines[start_line..first_match_line].join("\n") + "\n"
+                            } else {
+                                String::new()
+                            };
+                            
+                            let context_after = if first_match_line + 1 < end_line {
+                                "\n".to_string() + &lines[(first_match_line + 1)..end_line].join("\n")
+                            } else {
+                                String::new()
+                            };
+                            
+                            context_before + &sr.replace + &context_after
+                        };
+                        
+                        narrowed = Some(EditOperation::SearchReplace(SearchReplaceEdit {
+                            file: sr.file.clone(),
+                            search: expanded_search,
+                            replace: expanded_replace,
+                            replace_all: sr.replace_all,
+                            context_lines: Some(new_context as u16),
+                        }));
+                        break;
+                    }
+                }
+                
+                match narrowed {
+                    Some(n) => {
+                        tracing::info!(
+                            file = %sr.file.display(),
+                            "Narrowed search pattern by expanding context"
+                        );
+                        repaired.push(n);
+                    }
+                    None => {
+                        tracing::warn!(
+                            file = %sr.file.display(),
+                            matches = matches.len(),
+                            "Could not narrow search pattern - too many ambiguous matches"
+                        );
+                        // Return original with warning - caller should handle
+                        repaired.push(edit.clone());
+                    }
+                }
+            }
+            _ => {
+                // Non-search/replace edits pass through
+                repaired.push(edit.clone());
+            }
+        }
+    }
+    
+    Ok(repaired)
 }
 
 /// Convert search/replace to whole-file edit

@@ -267,7 +267,7 @@ pub async fn run_validation_with_cache(
         .collect();
 
     let results = if plan.parallel {
-        run_parallel(root, &all_commands, sandbox, cache, timeout).await?
+        run_parallel(root, &all_commands, Arc::new(sandbox), cache, timeout).await?
     } else {
         run_sequential(root, &all_commands, sandbox, cache, timeout).await?
     };
@@ -335,7 +335,7 @@ pub async fn run_validation_with_cache(
 async fn run_parallel(
     root: &Path,
     commands: &[(String, ValidationCategory)],
-    sandbox: &dyn SandboxRuntime,
+    sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
     cache: &ValidationCache,
     timeout: u64,
 ) -> Result<Vec<(String, CommandResult)>> {
@@ -359,14 +359,13 @@ async fn run_parallel(
             let file_hashes_clone = file_hashes.clone();
             let cache_key_clone = cache_key.clone();
             let cmd_clone = cmd.clone();
+            let sandbox_clone = sandbox.clone();
 
             // Cloneable wrapper for sandbox execution
             let task = tokio::spawn(async move {
                 let start = Instant::now();
-                // Note: We need to create a new sandbox instance for each task
-                // since we can't share the trait object across threads
-                let local_sandbox = crate::harness::sandbox::LocalSandboxRuntime::default();
-                let result = local_sandbox
+                // Use the provided sandbox (cloned via Arc) to respect custom policies
+                let result = sandbox_clone
                     .run_command(&root_clone, &cmd_clone, timeout)
                     .await;
                 let duration = start.elapsed().as_millis() as u64;
