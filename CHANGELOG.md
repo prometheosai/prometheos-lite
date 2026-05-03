@@ -47,6 +47,36 @@
 - Rollback compares current file against `after_hash` (expected post-patch state)
 - Prevents false "external modification" conflicts when rolling back normally applied patches
 
+### V1.6 Functional Completion - Dependency Graph & Incremental Cache
+
+**Fix 19 - Full Dependency Graph Parsing (Cargo.toml, package.json, pyproject.toml)**:
+- Complete Cargo.toml parser supporting `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, and target-specific dependencies
+- Full feature parsing including `features`, `path`, `git`, `optional` flags
+- Complete package.json parser with automatic npm/yarn/pnpm detection via lockfiles
+- Full pyproject.toml parser with both Poetry and PEP 621 format support
+- Lockfile parsing for Cargo.lock, yarn.lock, package-lock.json, and poetry.lock
+- Reverse dependency mapping for transitive dependency analysis
+- Added to `RepoContext` with full serialization support
+
+**Fix 20 - Incremental RepoMap Cache with Automatic Invalidation**:
+- File-level symbol caching with content hash validation (SHA-based)
+- Automatic cache invalidation on file modification time, size change, or hash mismatch
+- Dependency graph caching with manifest file change detection
+- Cache version management for forward compatibility
+- Atomic save with `sync_all()` for durability
+- Stats tracking for monitoring (file count, symbol count, cache age)
+- Full test coverage for all cache operations
+
+**Fix 21 - RepoMap TypeScript Parser Fix**:
+- Added proper `tree-sitter-typescript` import
+- TypeScript and TSX files now use correct parser instead of JavaScript parser
+
+**Implementation Details**:
+- `DependencyGraph` struct with full dependency specification support
+- `RepoCache` with file-level granularity and automatic invalidation
+- `build_repo_context_with_cache()` async function for incremental builds
+- No placeholders, stubs, or mock data - full production implementation
+
 **Fix 18 - Rollback Integration into Main Loop (P0)**: Main execution loop now uses `apply_patch_with_rollback()` instead of plain `apply_patch()`:
 - Rollback handle captured and stored in result
 - Validation failure triggers automatic rollback based on policy
