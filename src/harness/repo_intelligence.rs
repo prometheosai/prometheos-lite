@@ -238,6 +238,9 @@ pub async fn build_repo_context(
     let compressed_context = build_compressed_context(&ranked_files, &all_symbols, token_budget);
     let token_estimate = compressed_context.len() / 4;
 
+    // Parse dependency graph from manifest files
+    let dependency_graph = parse_dependency_graph(&root);
+
     Ok(RepoContext {
         root,
         ranked_files,
@@ -246,6 +249,7 @@ pub async fn build_repo_context(
         compressed_context,
         token_estimate,
         language_breakdown,
+        dependency_graph,
     })
 }
 
@@ -314,7 +318,7 @@ fn extract_symbols_and_relationships(
     let ts_lang: tree_sitter::Language = match language {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "javascript" | "jsx" => tree_sitter_javascript::LANGUAGE.into(),
-        "typescript" | "tsx" => tree_sitter_typescript::LANGUAGE_INTO(),
+        "typescript" | "tsx" => tree_sitter_typescript::LANGUAGE.into(),
         "python" => tree_sitter_python::LANGUAGE.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
         "java" => tree_sitter_java::LANGUAGE.into(),

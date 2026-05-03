@@ -3,6 +3,7 @@
 
 use crate::harness::{
     confidence::ConfidenceScore,
+    edit_protocol::EditOperation,
     review::{ReviewIssue, ReviewSeverity},
     risk::{RiskAssessment, RiskLevel},
     semantic_diff::SemanticDiff,
@@ -12,21 +13,19 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A candidate patch for selection
+/// Contains the edits, confidence, and metadata for ranking
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PatchCandidate {
     pub id: String,
-    pub patch_content: String,
-    pub files_changed: Vec<String>,
-    pub lines_added: usize,
-    pub lines_removed: usize,
+    pub edits: Vec<EditOperation>,
+    pub source: String,
     pub confidence: ConfidenceScore,
-    pub risk: RiskAssessment,
+    pub metadata: HashMap<String, String>,
+    pub risk: Option<RiskAssessment>,
     pub validation: Option<ValidationResult>,
     pub review_issues: Vec<ReviewIssue>,
-    pub semantic_diff: SemanticDiff,
-    pub generation_strategy: String,
-    pub attempt_number: u32,
-    pub generation_time_ms: u64,
+    pub semantic_diff: Option<SemanticDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

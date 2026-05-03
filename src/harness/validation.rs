@@ -11,6 +11,7 @@ use std::{
 };
 use tokio::fs;
 use tokio::sync::Mutex;
+use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ValidationPlan {

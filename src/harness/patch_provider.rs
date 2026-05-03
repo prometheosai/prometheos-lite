@@ -528,6 +528,7 @@ fn fix_unclosed_delimiters(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOp
                     file: sr.file.clone(),
                     search: sr.search.clone(),
                     replace: new_replace,
+                    replace_all: sr.replace_all,
                     context_lines: sr.context_lines,
                 }));
             }
@@ -730,7 +731,8 @@ impl LlmPatchProvider {
                             file: std::path::PathBuf::from(file_path),
                             search: search_content,
                             replace: replace_content,
-                            context_lines: 3,
+                            replace_all: Some(false),
+                            context_lines: Some(3),
                         }));
                     }
                 }
@@ -846,20 +848,8 @@ impl LlmPatchProvider {
                                 content.push('\n');
                             }
                             content.push_str(lines[i]);
-                            i += 1;
-                        }
-                        
-                        if !content.is_empty() {
-                            edits.push(EditOperation::CreateFile(CreateFileEdit {
-                                file: std::path::PathBuf::from(file_path),
-                                content,
-                            }));
-                        }
-                        continue;
-                    }
                 }
             }
-            i += 1;
         }
 
         edits
