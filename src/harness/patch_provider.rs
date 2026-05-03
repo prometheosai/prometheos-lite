@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::harness::{
-    edit_protocol::EditOperation,
+    edit_protocol::{CreateFileEdit, EditOperation, WholeFileEdit},
     failure::{FailureDetails, FailureKind},
     repo_intelligence::RepoMap,
     review::{ReviewIssue, ReviewReport},
@@ -585,7 +585,128 @@ impl LlmPatchProvider {
 
         // If no structured edits found, try to parse as whole file
         if edits.is_empty() {
-            // TODO: Implement whole-file parsing from response
+            edits = Self::parse_whole_file_edits(response);
+        }
+
+        edits
+    }
+
+    /// Parse whole-file edits from LLM response
+    /// 
+    /// Supports formats:
+    /// - ```whole_file
+    ///   FILE: path/to/file.rs
+    ///   <content>
+    ///   ```
+    /// - ```
+    ///   FILE: path/to/file.rs
+    ///   <content>
+    ///   ```
+    fn parse_whole_file_edits(response: &str) -> Vec<EditOperation> {
+        let mut edits = Vec::new();
+        let lines: Vec<&str> = response.lines().collect();
+        let mut i = 0;
+
+        while i < lines.len() {
+            // Look for code block start with optional language marker
+            if lines[i].contains("```") {
+                let block_marker = lines[i];
+                
+                // Check if next line is FILE: marker indicating whole-file content
+                if i + 1 < lines.len() && lines[i + 1].starts_with("FILE:") {
+                    let file_line = lines[i + 1];
+                    let file_path = file_line.strip_prefix("FILE:").unwrap_or("").trim();
+                    
+                    if !file_path.is_empty() {
+                        // Collect all content until closing ```
+                        let mut content = String::new();
+                        i += 2;
+                        
+                        while i < lines.len() && !lines[i].contains("```") {
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str(lines[i]);
+                            i += 1;
+                        }
+                        
+                        if !content.is_empty() {
+                            edits.push(EditOperation::WholeFile(WholeFileEdit {
+                                file: std::path::PathBuf::from(file_path),
+                                content,
+                                backup_original: true,
+                            }));
+                        }
+                        continue;
+                    }
+                }
+                
+                // Also check for WHOLE_FILE: marker
+                if i + 1 < lines.len() && lines[i + 1].starts_with("WHOLE_FILE:") {
+                    let file_line = lines[i + 1];
+                    let file_path = file_line.strip_prefix("WHOLE_FILE:").unwrap_or("").trim();
+                    
+                    if !file_path.is_empty() {
+                        let mut content = String::new();
+                        i += 2;
+                        
+                        while i < lines.len() && !lines[i].contains("```") {
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str(lines[i]);
+                            i += 1;
+                        }
+                        
+                        if !content.is_empty() {
+                            edits.push(EditOperation::WholeFile(WholeFileEdit {
+                                file: std::path::PathBuf::from(file_path),
+                                content,
+                                backup_original: true,
+                            }));
+                        }
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        // Alternative: Look for explicit CREATE_FILE markers
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].starts_with("CREATE_FILE:") || lines[i].starts_with("CREATE:") {
+                let file_path = lines[i]
+                    .strip_prefix("CREATE_FILE:")
+                    .or_else(|| lines[i].strip_prefix("CREATE:"))
+                    .unwrap_or("")
+                    .trim();
+                
+                if !file_path.is_empty() && i + 1 < lines.len() {
+                    // Check if next line starts a code block
+                    if lines[i + 1].contains("```") {
+                        let mut content = String::new();
+                        i += 2;
+                        
+                        while i < lines.len() && !lines[i].contains("```") {
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str(lines[i]);
+                            i += 1;
+                        }
+                        
+                        if !content.is_empty() {
+                            edits.push(EditOperation::CreateFile(CreateFileEdit {
+                                file: std::path::PathBuf::from(file_path),
+                                content,
+                            }));
+                        }
+                        continue;
+                    }
+                }
+            }
+            i += 1;
         }
 
         edits
