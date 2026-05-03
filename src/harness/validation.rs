@@ -108,41 +108,67 @@ async fn compute_file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
-/// Compute hashes for all relevant files in the repository
+/// Compute hashes for all relevant files in the repository recursively
+/// 
+/// Uses WalkDir to recursively find all source and config files,
+/// respecting .gitignore patterns. This ensures the validation cache
+/// correctly invalidates when any nested file changes.
 async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String>> {
     let mut hashes = HashMap::new();
 
-    // Find all source files that might affect validation
-    let extensions = ["rs", "js", "ts", "py", "go", "java", "cpp", "c", "h", "hpp"];
+    // Source file extensions that affect validation
+    let extensions: std::collections::HashSet<&str> = 
+        ["rs", "js", "ts", "py", "go", "java", "cpp", "c", "h", "hpp"]
+            .iter().copied().collect();
 
-    let mut entries = fs::read_dir(root).await?;
-    while let Some(entry) = entries.next_entry().await? {
+    // Config files that affect validation
+    let config_files: std::collections::HashSet<&str> = 
+        ["Cargo.toml", "package.json", "Makefile", "pytest.ini", 
+         ".eslintrc", "tsconfig.json", "Cargo.lock", "package-lock.json", 
+         "yarn.lock", "pnpm-lock.yaml", "pyproject.toml", "poetry.lock"]
+            .iter().copied().collect();
+
+    // Use WalkDir for recursive directory traversal
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip common non-source directories
+            let path = e.path();
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            
+            !matches!(name, 
+                "target" | "node_modules" | ".git" | "dist" | "build" | 
+                ".cache" | "__pycache__" | ".pytest_cache" | ".next"
+            )
+        })
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if extensions.iter().any(|e| ext == *e) {
-                    if let Ok(hash) = compute_file_hash(&path).await {
-                        hashes.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf(), hash);
-                    }
-                }
-            }
+        
+        if !path.is_file() {
+            continue;
         }
-    }
 
-    // Also include config files that affect validation
-    let config_files = [
-        "Cargo.toml",
-        "package.json",
-        "Makefile",
-        "pytest.ini",
-        ".eslintrc",
-        "tsconfig.json",
-    ];
-    for config in &config_files {
-        let config_path = root.join(config);
-        if config_path.exists() {
-            if let Ok(hash) = compute_file_hash(&config_path).await {
-                hashes.insert(PathBuf::from(config), hash);
+        // Check if this is a source file by extension
+        let is_source = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| extensions.contains(e))
+            .unwrap_or(false);
+
+        // Check if this is a config file by name
+        let is_config = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| config_files.contains(n))
+            .unwrap_or(false);
+
+        if is_source || is_config {
+            let relative_path = path.strip_prefix(root).unwrap_or(path);
+            
+            if let Ok(hash) = compute_file_hash(path).await {
+                hashes.insert(relative_path.to_path_buf(), hash);
             }
         }
     }

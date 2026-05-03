@@ -919,10 +919,22 @@ pub async fn execute_harness_task(
         validation_evidence: ValidationEvidence {
             validation_performed: validation.is_some(),
             all_validations_passed: validation.as_ref().is_some_and(|v| v.passed),
-            format_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
-            static_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
-            lint_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
-            test_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
+            format_check_passed: validation.as_ref()
+                .and_then(|v| v.category_results.get(&ValidationCategory::Format))
+                .map(|r| r.success)
+                .unwrap_or(false),
+            static_check_passed: validation.as_ref()
+                .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
+                .map(|r| r.success)
+                .unwrap_or(false),
+            lint_check_passed: validation.as_ref()
+                .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
+                .map(|r| r.success)
+                .unwrap_or(false),
+            test_passed: validation.as_ref()
+                .and_then(|v| v.category_results.get(&ValidationCategory::Test))
+                .map(|r| r.success)
+                .unwrap_or(false),
             validation_summary: validation
                 .as_ref()
                 .map(|v| format!("{} commands run", v.command_results.len()))
