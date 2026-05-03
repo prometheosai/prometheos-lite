@@ -139,11 +139,12 @@ pub enum HarnessMode {
 }
 
 /// Policy for handling validation failures after patch application
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ValidationFailurePolicy {
     /// Keep the patch and request manual approval
     KeepPatchAndRequestApproval,
     /// Automatically rollback the patch
+    #[default]
     RollbackAutomatically,
     /// Rollback only on critical failures
     RollbackOnCriticalFailure,
@@ -242,6 +243,11 @@ pub enum HarnessProgress {
         success: bool,
         files_changed: usize,
         failures: usize,
+    },
+    GeneratingPatch,
+    PatchGenerated {
+        files_changed: usize,
+        total_files: usize,
     },
     Validating {
         commands_to_run: usize,
@@ -454,7 +460,7 @@ pub async fn execute_harness_task(
 
         ctx.send_progress(HarnessProgress::Error {
             step: "patch.generate".into(),
-            message: "No structured edits supplied".into(),
+            error: "No structured edits supplied".into(),
         });
 
         return Ok(HarnessExecutionResult {

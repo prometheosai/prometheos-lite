@@ -8,8 +8,8 @@ use crate::harness::{
     patch_applier::{PatchFailure, PatchResult, apply_patch, dry_run_patch},
     patch_provider::{
         AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
-        HeuristicPatchProvider, LlmPatchProvider, PatchCandidate, PatchProvider,
-        PatchProviderContext, ProviderCapabilities, RepairRequest as ProviderRepairRequest,
+        HeuristicPatchProvider, LlmPatchProvider, PatchProvider, PatchProviderContext,
+        ProviderCandidate, ProviderCapabilities, RepairRequest as ProviderRepairRequest,
         RepairResponse, RepairStrategy as ProviderRepairStrategy, RiskEstimate,
     },
     repo_intelligence::RepoMap,

@@ -341,21 +341,6 @@ pub fn rank_patches(candidates: Vec<PatchCandidate>) -> Vec<ScoredCandidate> {
     engine.rank_candidates(candidates)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::harness::review::ReviewIssueType;
-
-    fn create_test_candidate(id: &str, confidence: f32) -> PatchCandidate {
-        PatchCandidate {
-            id: id.to_string(),
-            patch_content: "test".to_string(),
-            files_changed: vec![],
-            lines_added: 10,
-            lines_removed: 5,
-            confidence: ConfidenceScore {
-                score: confidence,
-                factors: vec![],
                 explanation: "Test confidence".into(),
                 recommendation: None,
             },

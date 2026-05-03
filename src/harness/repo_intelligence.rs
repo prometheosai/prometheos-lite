@@ -19,6 +19,9 @@ pub struct RepoContext {
     pub language_breakdown: HashMap<String, usize>,
 }
 
+/// Alias for RepoContext - used by modules expecting RepoMap type
+pub type RepoMap = RepoContext;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RankedFile {
     pub path: PathBuf,

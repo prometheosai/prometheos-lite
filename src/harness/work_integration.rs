@@ -37,7 +37,7 @@ impl HarnessWorkContextService {
             .with_context(|| format!("WorkContext not found: {context_id}"))?;
         let req = HarnessExecutionRequest {
             work_context_id: ctx.id.clone(),
-            repo_root,
+            repo_root: repo_root.clone(),
             task: ctx.goal.clone(),
             requirements: ctx.requirements.clone(),
             acceptance_criteria: ctx
@@ -45,13 +45,15 @@ impl HarnessWorkContextService {
                 .iter()
                 .map(|c| c.description.clone())
                 .collect(),
-            mode,
-            limits: Default::default(),
+            mode: crate::harness::HarnessMode::from(mode.as_str()),
+            limits: crate::harness::HarnessLimits::default(),
             mentioned_files: vec![],
             mentioned_symbols: vec![],
-            proposed_edits,
-            validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
+            proposed_edits: proposed_edits.clone(),
+            patch_provider: None,
+            provider_context: None,
             progress_callback: None,
+            validation_failure_policy: crate::harness::ValidationFailurePolicy::default(),
         };
         self.work_context_service
             .update_phase(&mut ctx, WorkPhase::Execution)?;

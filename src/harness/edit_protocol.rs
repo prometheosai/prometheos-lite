@@ -21,6 +21,9 @@ pub struct SearchReplaceEdit {
     pub search: String,
     pub replace: String,
     pub replace_all: Option<bool>,
+    /// Number of context lines to include around the search pattern
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_lines: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

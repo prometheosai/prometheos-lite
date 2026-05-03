@@ -59,9 +59,9 @@ pub enum AttemptOutcome {
     RiskRejected,
 }
 
-/// A candidate patch with metadata
+/// A candidate patch with metadata from a provider
 #[derive(Debug, Clone)]
-pub struct PatchCandidate {
+pub struct ProviderCandidate {
     /// The edits to apply
     pub edits: Vec<EditOperation>,
     /// Provider that generated this candidate
@@ -75,6 +75,10 @@ pub struct PatchCandidate {
     /// Estimated risk level
     pub estimated_risk: RiskEstimate,
 }
+
+/// Deprecated alias - use ProviderCandidate instead
+#[deprecated(since = "1.6.0", note = "Use ProviderCandidate instead")]
+pub type PatchCandidate = ProviderCandidate;
 
 /// Risk estimate for a candidate
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,7 +132,7 @@ pub enum RepairStrategy {
 /// Response from patch generation
 #[derive(Debug, Clone)]
 pub struct GenerateResponse {
-    pub candidates: Vec<PatchCandidate>,
+    pub candidates: Vec<ProviderCandidate>,
     pub generation_time_ms: u64,
     pub provider_notes: Option<String>,
 }
@@ -618,7 +622,7 @@ impl PatchProvider for LlmPatchProvider {
                 let candidates = if edits.is_empty() {
                     vec![]
                 } else {
-                    vec![PatchCandidate {
+                    vec![ProviderCandidate {
                         edits,
                         source: "llm".to_string(),
                         strategy: "generation".to_string(),
