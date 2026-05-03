@@ -190,19 +190,21 @@ async fn capture_file_snapshots(
 
         let snapshot = if full_path.exists() {
             let content = fs::read_to_string(&full_path).await.ok();
-            let hash = content.as_ref().map(|c| compute_hash(c));
+            let before_hash = content.as_ref().map(|c| compute_hash(c));
 
             FileSnapshot {
                 path: path.clone(),
                 content,
-                hash,
+                before_hash,
+                after_hash: None,
                 existed_before: true,
             }
         } else {
             FileSnapshot {
                 path: path.clone(),
                 content: None,
-                hash: None,
+                before_hash: None,
+                after_hash: None,
                 existed_before: false,
             }
         };

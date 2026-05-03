@@ -450,7 +450,108 @@ pub async fn execute_harness_task(
         &req.acceptance_criteria
     });
 
-    if req.proposed_edits.is_empty() {
+    // Determine which edits to use: provided edits or generate from provider
+    let selected_edits = if req.proposed_edits.is_empty() {
+        // Try to generate candidates using patch provider
+        if let Some(ref provider) = req.patch_provider {
+            let provider_req = ProviderGenerateRequest {
+                context: req.provider_context.clone().unwrap_or_default(),
+                preferred_strategies: vec!["search_replace".into(), "whole_file".into()],
+            };
+
+            match provider.generate(provider_req).await {
+                Ok(response) if !response.candidates.is_empty() => {
+                    ctx.send_progress(HarnessProgress::GeneratingPatch);
+
+                    // Convert provider candidates to selection candidates
+                    let selection_candidates: Vec<SelectionCandidate> = response
+                        .candidates
+                        .iter()
+                        .map(|c| SelectionCandidate {
+                            id: format!("candidate_{}", c.source),
+                            edits: c.edits.clone(),
+                            source: c.source.clone(),
+                            confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+                            metadata: Default::default(),
+                        })
+                        .collect();
+
+                    // Use SelectionEngine to pick the best
+                    let selection_engine = SelectionEngine::new(SelectionCriteria::default());
+                    let outcome = selection_engine.select_best_patch(&selection_candidates);
+
+                    ctx.send_progress(HarnessProgress::PatchGenerated {
+                        files_changed: outcome
+                            .selected
+                            .as_ref()
+                            .map(|s| s.edits.len())
+                            .unwrap_or(0),
+                        total_files: files.files.len(),
+                    });
+
+                    outcome.selected.map(|s| s.edits).unwrap_or_default()
+                }
+                _ => {
+                    // No candidates generated, use empty
+                    Vec::new()
+                }
+            }
+        } else {
+            // No edits provided and no provider available - block
+            ctx.log_info("No edits provided and no patch provider available");
+            return Ok(HarnessExecutionResult {
+                work_context_id: req.work_context_id,
+                trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
+                repo_context: repo,
+                environment: env,
+                file_set: files,
+                acceptance,
+                patch_result: None,
+                validation_result: None,
+                review_issues: vec![],
+                risk_assessment: RiskAssessment {
+                    level: RiskLevel::Low,
+                    reasons: vec![RiskReason {
+                        category: RiskCategory::Logic,
+                        description: "No edits proposed".into(),
+                        severity: RiskSeverity::Info,
+                        mitigation: None,
+                    }],
+                    requires_approval: false,
+                    can_override: true,
+                    override_conditions: vec!["manual review".into()],
+                },
+                confidence: ConfidenceScore {
+                    score: 0.0,
+                    factors: vec![ConfidenceFactor {
+                        name: "edits_supplied".into(),
+                        weight: 1.0,
+                        score: 0.0,
+                        description: "no provider edits supplied".into(),
+                        impact: FactorImpact::Negative,
+                    }],
+                    explanation: "No edits were supplied for evaluation".into(),
+                    recommendation: Some("Provide structured edits for processing".into()),
+                },
+                verification_strength: VerificationStrength::None,
+                completion_decision: CompletionDecision::Blocked("no structured edits supplied".into()),
+                trajectory: traj,
+                git_checkpoint: None,
+                artifacts: vec![],
+                failures: vec![FailureKind::ModelFailure],
+                summary: "Harness blocked before patching: no edits supplied.".into(),
+                execution_metrics: metrics,
+                step_count: ctx.step_count,
+                terminated_early: true,
+                termination_reason: Some("No edits or provider".into()),
+            });
+        }
+    } else {
+        req.proposed_edits.clone()
+    };
+
+    // Validate we have edits to work with
+    if selected_edits.is_empty() {
         traj.record_step(
             "patch.generate",
             ctx.elapsed_ms(),
@@ -621,7 +722,7 @@ pub async fn execute_harness_task(
                             id: format!("candidate_{}", c.source),
                             edits: c.edits.clone(),
                             source: c.source.clone(),
-                            confidence: c.confidence as f64 / 100.0,
+                            confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
                             metadata: Default::default(),
                         })
                         .collect();
@@ -942,31 +1043,13 @@ pub async fn execute_harness_task(
     let mut result = HarnessExecutionResult {
         work_context_id: req.work_context_id,
         trace_id: Some(trace_id.clone()),
-        repo_context: repo,
-        environment: env,
-        file_set: files,
-        acceptance,
-        patch_result: patch,
-        validation_result: validation,
-        review_issues,
-        risk_assessment: risk,
-        confidence,
-        verification_strength: strength,
-        completion_decision: decision,
-        trajectory: traj,
-        git_checkpoint: checkpoint,
-        rollback_handle,
-        validation_failure_policy: req.validation_failure_policy,
-        artifacts: vec![],
-        failures,
-        summary: "Harness run completed.".into(),
-        execution_metrics: metrics,
-        step_count: ctx.step_count,
-        terminated_early: false,
-        termination_reason: None,
     };
 
-    let content = generate_completion_artifact(&result)?;
+    ctx.send_progress(HarnessProgress::Patching {
+        files_to_modify: req.proposed_edits.len(),
+        dry_run: true,
+    });
+
     result.artifacts.push(HarnessArtifact {
         id: format!("artifact-{}", result.work_context_id),
         kind: ArtifactKind::Report,

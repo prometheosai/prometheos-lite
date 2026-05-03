@@ -45,7 +45,7 @@ impl HarnessWorkContextService {
                 .iter()
                 .map(|c| c.description.clone())
                 .collect(),
-            mode: crate::harness::HarnessMode::from(mode.as_str()),
+            mode,
             limits: crate::harness::HarnessLimits::default(),
             mentioned_files: vec![],
             mentioned_symbols: vec![],

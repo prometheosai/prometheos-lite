@@ -282,7 +282,8 @@ fn expand_context_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOper
                     file: sr.file.clone(),
                     search: expanded_search,
                     replace: expanded_replace,
-                    context_lines: sr.context_lines.saturating_add(3),
+                    replace_all: sr.replace_all,
+                    context_lines: sr.context_lines.map(|c| c.saturating_add(3)),
                 }));
             }
             _ => repaired.push(edit.clone()),
@@ -634,7 +635,6 @@ impl LlmPatchProvider {
                             edits.push(EditOperation::WholeFile(WholeFileEdit {
                                 file: std::path::PathBuf::from(file_path),
                                 content,
-                                backup_original: true,
                             }));
                         }
                         continue;
@@ -662,7 +662,6 @@ impl LlmPatchProvider {
                             edits.push(EditOperation::WholeFile(WholeFileEdit {
                                 file: std::path::PathBuf::from(file_path),
                                 content,
-                                backup_original: true,
                             }));
                         }
                         continue;
