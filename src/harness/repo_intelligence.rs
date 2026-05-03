@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
+use tree_sitter_typescript;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoContext {
@@ -226,7 +227,7 @@ fn extract_symbols_and_relationships(
     let ts_lang: tree_sitter::Language = match language {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "javascript" | "jsx" => tree_sitter_javascript::LANGUAGE.into(),
-        "typescript" | "tsx" => tree_sitter_javascript::LANGUAGE.into(),
+        "typescript" | "tsx" => tree_sitter_typescript::LANGUAGE_INTO(),
         "python" => tree_sitter_python::LANGUAGE.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
         "java" => tree_sitter_java::LANGUAGE.into(),
