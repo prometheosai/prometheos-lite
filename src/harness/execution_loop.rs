@@ -8,7 +8,7 @@ use crate::harness::{
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
-    patch_applier::{PatchResult, apply_patch, dry_run_patch},
+    patch_applier::{PatchResult, apply_patch, dry_run_patch, apply_patch_with_rollback, RollbackHandle},
     repo_intelligence::{RepoContext, build_repo_context},
     review::{ReviewIssue, ReviewSeverity, ReviewIssueType, review_diff},
     risk::{RiskAssessment, RiskLevel, assess_risk, RiskReason, RiskCategory, RiskSeverity},
@@ -43,9 +43,15 @@ pub struct HarnessExecutionRequest {
     pub mentioned_symbols: Vec<String>,
     #[serde(default)]
     pub proposed_edits: Vec<EditOperation>,
+    #[serde(default = "default_validation_failure_policy")]
+    pub validation_failure_policy: ValidationFailurePolicy,
     #[serde(skip)]
     #[allow(clippy::type_complexity)]
     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
+}
+
+fn default_validation_failure_policy() -> ValidationFailurePolicy {
+    ValidationFailurePolicy::RollbackAutomatically
 }
 
 impl std::fmt::Debug for HarnessExecutionRequest {
@@ -108,6 +114,19 @@ pub enum HarnessMode {
     Benchmark,
 }
 
+/// Policy for handling validation failures after patch application
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ValidationFailurePolicy {
+    /// Keep the patch and request manual approval
+    KeepPatchAndRequestApproval,
+    /// Automatically rollback the patch
+    RollbackAutomatically,
+    /// Rollback only on critical failures
+    RollbackOnCriticalFailure,
+    /// Never rollback (manual intervention required)
+    NeverRollback,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct HarnessLimits {
     pub max_steps: u32,
@@ -147,6 +166,11 @@ pub struct HarnessExecutionResult {
     pub completion_decision: CompletionDecision,
     pub trajectory: Trajectory,
     pub git_checkpoint: Option<GitCheckpoint>,
+    /// Rollback handle for undoing the patch if needed
+    #[serde(skip)]
+    pub rollback_handle: Option<RollbackHandle>,
+    /// Policy for handling validation failures
+    pub validation_failure_policy: ValidationFailurePolicy,
     pub artifacts: Vec<HarnessArtifact>,
     pub failures: Vec<FailureKind>,
     pub summary: String,
@@ -520,14 +544,66 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         None
     };
     
-    // STEP 8: Apply patch only if approved
-    let patch = if should_apply && dry.failures.is_empty() {
-        Some(apply_patch(&req.proposed_edits, &files, &policy).await?)
+    // STEP 8: Apply patch only if approved - with rollback support
+    let (patch, rollback_handle) = if should_apply && dry.failures.is_empty() {
+        let (result, handle) = apply_patch_with_rollback(&req.proposed_edits, &files, &policy).await?;
+        (Some(result), Some(handle))
     } else {
         // Return dry-run result (patch not actually applied)
-        Some(dry.clone())
+        (Some(dry.clone()), None)
     };
     let dry_failures = dry.failures.clone();
+    
+    // STEP 8b: Handle validation failure rollback policy
+    let validation_failed = validation.as_ref().map(|v| !v.passed).unwrap_or(false);
+    let should_rollback = if validation_failed && rollback_handle.is_some() {
+        match req.validation_failure_policy {
+            ValidationFailurePolicy::RollbackAutomatically => {
+                ctx.send_progress(HarnessProgress::RollingBack {
+                    reason: "validation failed - automatic rollback".into(),
+                });
+                true
+            }
+            ValidationFailurePolicy::RollbackOnCriticalFailure => {
+                // Check if any critical failures occurred
+                let has_critical = validation.as_ref()
+                    .map(|v| v.errors.iter().any(|e| e.contains("critical") || e.contains("fatal")))
+                    .unwrap_or(false);
+                if has_critical {
+                    ctx.send_progress(HarnessProgress::RollingBack {
+                        reason: "critical validation failure - automatic rollback".into(),
+                    });
+                }
+                has_critical
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    
+    if should_rollback {
+        if let Some(handle) = rollback_handle {
+            match handle.rollback().await {
+                Ok(result) => {
+                    failures.push(FailureKind::ValidationFailed);
+                    failures.push(FailureKind::PatchRolledBack);
+                    ctx.send_progress(HarnessProgress::RolledBack {
+                        restored_files: result.restored.len(),
+                        deleted_files: result.deleted.len(),
+                        recreated_files: result.recreated.len(),
+                    });
+                }
+                Err(e) => {
+                    failures.push(FailureKind::ValidationFailed);
+                    failures.push(FailureKind::RollbackFailed);
+                    ctx.send_progress(HarnessProgress::RollbackFailed {
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+    }
     
     metrics.patch_generation_ms = patch_start.elapsed().as_millis() as u64;
     metrics.files_modified = patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0);
@@ -717,6 +793,8 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         completion_decision: decision,
         trajectory: traj,
         git_checkpoint: checkpoint,
+        rollback_handle,
+        validation_failure_policy: req.validation_failure_policy,
         artifacts: vec![],
         failures,
         summary: "Harness run completed.".into(),

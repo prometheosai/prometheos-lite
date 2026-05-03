@@ -334,7 +334,8 @@ impl LocalSandboxRuntime {
             .args(&cmd.args)
             .current_dir(root)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         
         Ok(command.spawn()?)
     }
@@ -360,7 +361,8 @@ impl LocalSandboxRuntime {
             .arg(&cmd.original)
             .current_dir(root)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         
         Ok(command.spawn()?)
     }
