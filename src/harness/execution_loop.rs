@@ -163,6 +163,8 @@ impl Default for HarnessLimits {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessExecutionResult {
     pub work_context_id: String,
+    /// OpenTelemetry trace ID for distributed tracing
+    pub trace_id: Option<String>,
     pub repo_context: RepoContext,
     pub environment: EnvironmentProfile,
     pub file_set: FileSet,
@@ -428,6 +430,7 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         
         return Ok(HarnessExecutionResult {
             work_context_id: req.work_context_id,
+            trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
             repo_context: repo,
             environment: env,
             file_set: files,
@@ -845,8 +848,11 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
     
     metrics.total_duration_ms = started.elapsed().as_millis() as u64;
     
+    let trace_id = crate::harness::observability::otel::generate_trace_id();
+    
     let mut result = HarnessExecutionResult {
         work_context_id: req.work_context_id,
+        trace_id: Some(trace_id.clone()),
         repo_context: repo,
         environment: env,
         file_set: files,
