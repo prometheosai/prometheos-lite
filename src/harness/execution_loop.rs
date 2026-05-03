@@ -297,12 +297,14 @@ impl ExecutionContext {
     }
 }
 
-pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<HarnessExecutionResult> {
+pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<HarnessExecutionResult> {
+    // Extract callback first using take() to avoid partial move
+    let progress_callback = req.progress_callback.take();
     let (mut ctx, mut progress_rx) = ExecutionContext::new(req.limits);
     let started = Instant::now();
     
     // Spawn progress forwarding task if callback is provided
-    let _progress_handle = if let Some(callback) = req.progress_callback {
+    let _progress_handle = if let Some(callback) = progress_callback {
         Some(tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
                 callback(progress);
@@ -460,25 +462,26 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
     }
     
     // STEP 2: Generate diff for review and semantic analysis
-    let diff = generate_diff_from_edits(&req.proposed_edits, &files);
+    let diff = generate_diff_from_edits(&req.proposed_edits);
     
     // STEP 3: Review the patch BEFORE applying
-    let review = if dry.failures.is_empty() {
+    let review_issues = if dry.failures.is_empty() {
         review_diff(&diff)
     } else {
-        ReviewEvidence {
-            review_performed: false,
-            issues_found: vec![],
-            security_concerns: vec![],
-            quality_score: 0.0,
-        }
+        vec![] // No review performed if dry-run failed
     };
+    
+    // Compute critical issue count for later use
+    let critical_count = review_issues
+        .iter()
+        .filter(|i| i.severity == ReviewSeverity::Critical)
+        .count();
     
     // STEP 4: Semantic diff analysis
     let semantic = analyze_semantic_diff(&diff);
     
     // STEP 5: Risk assessment BEFORE applying
-    let risk = assess_risk(&semantic, &review);
+    let risk = assess_risk(&semantic, &review_issues);
     
     // STEP 6: Approval gate - determine if patch should be applied
     let should_apply = match req.mode {
@@ -488,11 +491,12 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         }
         HarnessMode::Assisted => {
             // Assisted mode: apply only if dry-run passed and no critical issues
-            let critical_review_issues = review.issues_found.iter()
+            let has_critical_issues = review_issues
+                .iter()
                 .any(|i| matches!(i.severity, ReviewSeverity::Critical));
             let high_risk = matches!(risk.level, RiskLevel::High | RiskLevel::Critical);
             
-            dry.failures.is_empty() && !critical_review_issues && !high_risk
+            dry.failures.is_empty() && !has_critical_issues && !high_risk
         }
         HarnessMode::Autonomous => {
             // Autonomous mode: apply if dry-run passed and risk is acceptable
@@ -586,23 +590,15 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
     
-    // Use the review and risk from pre-apply phase
-    let review_for_evidence = if dry.failures.is_empty() {
-        review_diff(&diff)
-    } else {
-        ReviewEvidence {
-            review_performed: false,
-            issues_found: vec![],
-            security_concerns: vec![],
-            quality_score: 0.0,
-        }
-    };
-    
-    let risk_for_evidence = assess_risk(&semantic, &review_for_evidence);
-    
-    // Build completion evidence
+    // Build completion evidence using the review_issues from pre-apply phase
     let strength = assess_verification_strength(validation.as_ref());
-    let confidence = compute_confidence(validation.as_ref(), &review, &risk, strength);
+    let confidence = compute_confidence(validation.as_ref(), &review_issues, &risk, strength);
+    
+    // Count breaking changes - API changes have `breaking` field, dependency changes use risk_level
+    let breaking_api_changes = semantic.api_changes.iter().filter(|c| c.breaking).count();
+    let breaking_dep_changes = semantic.dependency_changes.iter()
+        .filter(|c| matches!(c.risk_level, crate::harness::semantic_diff::RiskLevel::High | crate::harness::semantic_diff::RiskLevel::Critical))
+        .count();
     
     let evidence = CompletionEvidence {
         // 8 Evidence Dimensions
@@ -624,15 +620,15 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
             validation_summary: validation.as_ref().map(|v| format!("{} commands run", v.command_results.len())).unwrap_or_default(),
         },
         review_evidence: ReviewEvidence {
-            review_performed: true,
-            total_issues: review.len(),
-            critical_issues: review.iter().filter(|i| i.severity == ReviewSeverity::Critical).count(),
-            high_issues: review.iter().filter(|i| i.severity == ReviewSeverity::High).count(),
-            medium_issues: review.iter().filter(|i| i.severity == ReviewSeverity::Medium).count(),
-            low_issues: review.iter().filter(|i| i.severity == ReviewSeverity::Low).count(),
-            security_issues: review.iter().filter(|i| i.issue_type == ReviewIssueType::Security).count(),
-            breaking_change_issues: review.iter().filter(|i| i.issue_type == ReviewIssueType::ApiChange).count(),
-            review_passed: !review.iter().any(|i| i.severity == ReviewSeverity::Critical),
+            review_performed: !review_issues.is_empty() || dry.failures.is_empty(),
+            total_issues: review_issues.len(),
+            critical_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count(),
+            high_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::High).count(),
+            medium_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::Medium).count(),
+            low_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::Low).count(),
+            security_issues: review_issues.iter().filter(|i| i.issue_type == ReviewIssueType::Security).count(),
+            breaking_change_issues: review_issues.iter().filter(|i| i.issue_type == ReviewIssueType::ApiChange).count(),
+            review_passed: !review_issues.iter().any(|i| i.severity == ReviewSeverity::Critical),
         },
         risk_evidence: RiskEvidence {
             risk_assessed: true,
@@ -658,8 +654,7 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
             database_changes_detected: !semantic.database_changes.is_empty(),
             dependency_changes_detected: !semantic.dependency_changes.is_empty(),
             config_changes_detected: !semantic.config_changes.is_empty(),
-            breaking_changes_count: semantic.api_changes.iter().filter(|c| c.breaking).count()
-                + semantic.dependency_changes.iter().filter(|c| c.breaking).count(),
+            breaking_changes_count: breaking_api_changes + breaking_dep_changes,
             security_relevant_changes: !semantic.auth_changes.is_empty() 
                 || semantic.api_changes.iter().any(|c| c.change_type == crate::harness::semantic_diff::ApiChangeType::VisibilityChanged),
         },
@@ -715,7 +710,7 @@ pub async fn execute_harness_task(req: HarnessExecutionRequest) -> Result<Harnes
         acceptance,
         patch_result: patch,
         validation_result: validation,
-        review_issues: review,
+        review_issues,
         risk_assessment: risk,
         confidence,
         verification_strength: strength,
@@ -840,4 +835,65 @@ pub fn check_resource_limits(
     }
     
     Ok(())
+}
+
+/// Generate a unified diff representation from edit operations for review purposes
+fn generate_diff_from_edits(edits: &[EditOperation]) -> String {
+    use std::fmt::Write;
+    
+    let mut diff_output = String::new();
+    
+    for edit in edits {
+        match edit {
+            EditOperation::SearchReplace(sr) => {
+                let _ = writeln!(diff_output, "--- a/{}" , sr.file.display());
+                let _ = writeln!(diff_output, "+++ b/{}" , sr.file.display());
+                let search_lines: Vec<_> = sr.search.lines().collect();
+                let replace_lines: Vec<_> = sr.replace.lines().collect();
+                let _ = writeln!(diff_output, "@@ -1,{} +1,{} @@", search_lines.len(), replace_lines.len());
+                for line in &search_lines {
+                    let _ = writeln!(diff_output, "-{}" , line);
+                }
+                for line in &replace_lines {
+                    let _ = writeln!(diff_output, "+{}" , line);
+                }
+            }
+            EditOperation::UnifiedDiff(ud) => {
+                if let Some(ref file) = ud.target_file {
+                    let _ = writeln!(diff_output, "--- a/{}" , file.display());
+                    let _ = writeln!(diff_output, "+++ b/{}" , file.display());
+                }
+                let _ = writeln!(diff_output, "{}", ud.diff);
+            }
+            EditOperation::WholeFile(wf) => {
+                let _ = writeln!(diff_output, "--- a/{}" , wf.file.display());
+                let _ = writeln!(diff_output, "+++ b/{}" , wf.file.display());
+                let _ = writeln!(diff_output, "@@ -1,1 +1,{} @@", wf.content.lines().count());
+                for line in wf.content.lines() {
+                    let _ = writeln!(diff_output, "+{}" , line);
+                }
+            }
+            EditOperation::CreateFile(cf) => {
+                let _ = writeln!(diff_output, "--- /dev/null");
+                let _ = writeln!(diff_output, "+++ b/{}" , cf.file.display());
+                let _ = writeln!(diff_output, "@@ -0,0 +1,{} @@", cf.content.lines().count());
+                for line in cf.content.lines() {
+                    let _ = writeln!(diff_output, "+{}" , line);
+                }
+            }
+            EditOperation::DeleteFile(df) => {
+                let _ = writeln!(diff_output, "--- a/{}" , df.file.display());
+                let _ = writeln!(diff_output, "+++ /dev/null");
+                let _ = writeln!(diff_output, "@@ File deleted @@");
+            }
+            EditOperation::RenameFile(rf) => {
+                let _ = writeln!(diff_output, "--- a/{}" , rf.from.display());
+                let _ = writeln!(diff_output, "+++ b/{}" , rf.to.display());
+                let _ = writeln!(diff_output, "@@ File renamed @@");
+            }
+        }
+        let _ = writeln!(diff_output);
+    }
+    
+    diff_output
 }
