@@ -9,10 +9,12 @@ use crate::harness::{
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
     patch_applier::{PatchResult, apply_patch, dry_run_patch, apply_patch_with_rollback, RollbackHandle},
+    patch_provider::{PatchProvider, PatchProviderContext, GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate, RiskEstimate},
     repo_intelligence::{RepoContext, build_repo_context},
     review::{ReviewIssue, ReviewSeverity, ReviewIssueType, review_diff},
     risk::{RiskAssessment, RiskLevel, assess_risk, RiskReason, RiskCategory, RiskSeverity},
     sandbox::LocalSandboxRuntime,
+    selection::{SelectionEngine, PatchCandidate as SelectionCandidate, CandidateOutcome, SelectionCriteria},
     semantic_diff::analyze_semantic_diff,
     trajectory::Trajectory,
     validation::{ValidationPlan, ValidationResult, run_validation},
@@ -43,11 +45,16 @@ pub struct HarnessExecutionRequest {
     pub mentioned_symbols: Vec<String>,
     #[serde(default)]
     pub proposed_edits: Vec<EditOperation>,
+    /// Optional patch provider for generating/repairing edits
+    #[serde(skip)]
+    pub patch_provider: Option<Box<dyn crate::harness::patch_provider::PatchProvider>>,
+    /// Context for patch provider (task description, repo map, etc.)
+    pub provider_context: Option<crate::harness::patch_provider::PatchProviderContext>,
+    /// Optional progress callback
+    #[serde(skip)]
+    pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
     #[serde(default = "default_validation_failure_policy")]
     pub validation_failure_policy: ValidationFailurePolicy,
-    #[serde(skip)]
-    #[allow(clippy::type_complexity)]
-    pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
 }
 
 fn default_validation_failure_policy() -> ValidationFailurePolicy {
@@ -85,6 +92,8 @@ impl Clone for HarnessExecutionRequest {
             mentioned_files: self.mentioned_files.clone(),
             mentioned_symbols: self.mentioned_symbols.clone(),
             proposed_edits: self.proposed_edits.clone(),
+            patch_provider: None, // Cannot clone trait object
+            provider_context: self.provider_context.clone(),
             validation_failure_policy: self.validation_failure_policy,
             progress_callback: None, // Cannot clone trait object
         }
@@ -556,9 +565,59 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         None
     };
     
+    // STEP 7.5: Generate and select best patch if provider available
+    let selected_edits = if req.proposed_edits.is_empty() {
+        // Try to generate candidates using patch provider
+        if let Some(ref provider) = req.patch_provider {
+            let provider_req = ProviderGenerateRequest {
+                context: req.provider_context.clone().unwrap_or_default(),
+                preferred_strategies: vec!["search_replace".into(), "whole_file".into()],
+            };
+            
+            match provider.generate(provider_req).await {
+                Ok(response) if !response.candidates.is_empty() => {
+                    ctx.send_progress(HarnessProgress::GeneratingPatch);
+                    
+                    // Convert provider candidates to selection candidates
+                    let selection_candidates: Vec<SelectionCandidate> = response.candidates
+                        .iter()
+                        .map(|c| SelectionCandidate {
+                            id: format!("candidate_{}", c.source),
+                            edits: c.edits.clone(),
+                            source: c.source.clone(),
+                            confidence: c.confidence as f64 / 100.0,
+                            metadata: Default::default(),
+                        })
+                        .collect();
+                    
+                    // Use SelectionEngine to pick the best
+                    let selection_engine = SelectionEngine::new(SelectionCriteria::default());
+                    let outcome = selection_engine.select_best_patch(&selection_candidates);
+                    
+                    ctx.send_progress(HarnessProgress::PatchGenerated {
+                        files_changed: outcome.selected.as_ref()
+                            .map(|s| s.edits.len())
+                            .unwrap_or(0),
+                        total_files: files.files.len(),
+                    });
+                    
+                    outcome.selected.map(|s| s.edits).unwrap_or_default()
+                }
+                _ => {
+                    // No candidates generated, use empty
+                    Vec::new()
+                }
+            }
+        } else {
+            req.proposed_edits.clone()
+        }
+    } else {
+        req.proposed_edits.clone()
+    };
+    
     // STEP 8: Apply patch only if approved - with rollback support
-    let (patch, rollback_handle) = if should_apply && dry.failures.is_empty() {
-        let (result, handle) = apply_patch_with_rollback(&req.proposed_edits, &files, &policy).await?;
+    let (patch, rollback_handle) = if should_apply && dry.failures.is_empty() && !selected_edits.is_empty() {
+        let (result, handle) = apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
         (Some(result), Some(handle))
     } else {
         // Return dry-run result (patch not actually applied)

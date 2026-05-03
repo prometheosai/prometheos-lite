@@ -5,6 +5,8 @@ use crate::harness::{
     file_control::{FilePolicy, FileSet},
     validation::{ValidationResult, ValidationPlan},
     sandbox::SandboxRuntime,
+    patch_provider::{PatchProvider, PatchProviderContext, GenerateRequest, GenerateResponse, RepairRequest as ProviderRepairRequest, RepairResponse, RepairStrategy as ProviderRepairStrategy, PatchCandidate, HeuristicPatchProvider, LlmPatchProvider, AggregatePatchProvider, RiskEstimate, AttemptRecord, AttemptOutcome, ProviderCapabilities},
+    repo_intelligence::RepoMap,
 };
 use anyhow::{Result, Context, bail};
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,8 @@ pub struct RepairRequest {
     pub validation_result: Option<ValidationResult>,
     pub attempt_count: u32,
     pub max_attempts: u32,
+    #[serde(skip)]
+    pub provider_context: Option<PatchProviderContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,11 +66,12 @@ pub enum RepairStrategy {
     ExpandContextWindow,
     NarrowSearchPattern,
     UseWholeFileEdit,
+    RetryWithMoreContext,
+    RetryWithNarrowerSearch,
     RequestClarification,
     Abort,
 }
 
-#[derive(Debug, Clone)]
 pub struct RepairLoop {
     max_attempts: u32,
     strategies_tried: HashMap<RepairStrategy, u32>,
@@ -88,6 +93,7 @@ impl RepairLoop {
         file_set: &FileSet,
         policy: &FilePolicy,
         sandbox: &dyn SandboxRuntime,
+        provider: Option<&dyn PatchProvider>,
     ) -> Result<RepairResult> {
         let start = Instant::now();
         let mut current_edits = request.original_edits.clone();
@@ -98,7 +104,13 @@ impl RepairLoop {
             
             let attempt_start = Instant::now();
             
-            let repair_edits = self.generate_repair_edits(&prompt, &current_edits, strategy).await?;
+            let repair_edits = if let Some(prov) = provider {
+                let context = request.provider_context.clone().unwrap_or_default();
+                self.generate_repair_edits(&request.failure, &current_edits, strategy, file_set, prov, &context).await?
+            } else {
+                // No provider - just return same edits (fallback behavior)
+                current_edits.clone()
+            };
             
             let dry_result = dry_run_patch(&repair_edits, file_set, policy).await?;
             
@@ -341,26 +353,6 @@ impl RepairLoop {
                 status,
                 attempt.duration_ms
             ));
-        }
-        history
-    }
-    
-    async fn generate_repair_edits(
-        &self,
-        _prompt: &str,
-        current_edits: &[EditOperation],
-        strategy: RepairStrategy,
-    ) -> Result<Vec<EditOperation>> {
-        match strategy {
-            RepairStrategy::UseWholeFileEdit => {
-                if let Some(first_edit) = current_edits.first() {
-                    if let Some(file) = get_edit_file(first_edit) {
-                        let content = tokio::fs::read_to_string(&file).await.ok();
-                        if let Some(existing) = content {
-                            return Ok(vec![EditOperation::WholeFile(WholeFileEdit {
-                                file,
-                                content: existing,
-                            })]);
                         }
                     }
                 }
@@ -403,6 +395,8 @@ pub async fn run_repair_loop(
     policy: &FilePolicy,
     sandbox: &dyn SandboxRuntime,
     max_attempts: u32,
+    provider: Option<&dyn PatchProvider>,
+    provider_context: Option<PatchProviderContext>,
 ) -> Result<RepairResult> {
     let request = RepairRequest {
         failure,
@@ -411,10 +405,11 @@ pub async fn run_repair_loop(
         validation_result,
         attempt_count: 0,
         max_attempts,
+        provider_context,
     };
     
     let mut loop_state = RepairLoop::new(max_attempts);
-    loop_state.execute_repair(request, file_set, policy, sandbox).await
+    loop_state.execute_repair(request, file_set, policy, sandbox, provider).await
 }
 
 pub fn format_repair_report(result: &RepairResult) -> String {

@@ -16,6 +16,7 @@ pub mod minimality;
 pub mod model_strategy;
 pub mod observability;
 pub mod patch_applier;
+pub mod patch_provider;
 pub mod permissions;
 pub mod regression_memory;
 pub mod repo_intelligence;
@@ -64,6 +65,7 @@ pub use risk::{RiskAssessment, RiskLevel, RiskCategory, RiskReason, RiskEngine, 
 pub use semantic_diff::{analyze_semantic_diff, SemanticDiff, ApiChange, AuthChange, DatabaseChange, DependencyChange, RiskLevel as SemanticRiskLevel, has_breaking_changes, requires_approval};
 pub use file_control::*;
 pub use patch_applier::*;
+pub use patch_provider::{PatchProvider, PatchProviderContext, GenerateRequest, GenerateResponse, RepairRequest, RepairResponse, RepairStrategy, PatchCandidate, HeuristicPatchProvider, LlmPatchProvider, AggregatePatchProvider, RiskEstimate, AttemptRecord, AttemptOutcome, ProviderCapabilities};
 pub use repo_intelligence::*;
 pub use sandbox::*;
 pub use validation::*;
