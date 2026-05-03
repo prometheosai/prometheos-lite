@@ -26,6 +26,20 @@
 
 **Blocker 10 - Observability Duration Bug**: Fixed subtraction order in `end_span()` - now correctly computes `end_time - start_time` instead of `start_time - end_time`.
 
+### Audit Round 2 - Compilation & Coherence Fixes
+
+**Fix 11 - Duplicate RollbackHandle**: Removed duplicate `impl RollbackHandle` block in `patch_applier.rs` that was causing compilation errors.
+
+**Fix 12 - Review/Risk Type Coherence**: Fixed `execution_loop.rs` to properly separate `ReviewIssue` (vec) from `ReviewEvidence` (struct). Fixed type mismatches in review and risk assessment calls.
+
+**Fix 13 - Missing critical_count**: Added proper definition of `critical_count` variable from review issues before it's used in completion evidence.
+
+**Fix 14 - Missing generate_diff_from_edits**: Implemented `generate_diff_from_edits()` function that generates unified diff text from edit operations for review purposes.
+
+**Fix 15 - Progress Callback Borrow**: Fixed borrow checker issue with `req.progress_callback` by using `Option::take()` to extract callback before using `req`.
+
+**Fix 16 - DependencyChange Breaking Field**: Fixed incorrect field access - `DependencyChange` uses `risk_level` instead of `breaking` boolean.
+
 # PrometheOS Lite Issue Tracker
 
 This document tracks all issues from the PRDs organized by milestone, with implementation status.
