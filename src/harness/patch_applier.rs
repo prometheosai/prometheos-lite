@@ -35,14 +35,16 @@ pub struct PatchFailure {
     pub line_number: Option<usize>,
 }
 
-/// Snapshot of a file before patch application for rollback support
+/// Snapshot of a file for rollback support
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileSnapshot {
     pub path: PathBuf,
     /// Original file content before patch. None if file didn't exist.
     pub content: Option<String>,
-    /// SHA256 hash of original content
-    pub hash: Option<String>,
+    /// SHA256 hash of original content (before patch)
+    pub before_hash: Option<String>,
+    /// SHA256 hash of expected content after patch is applied
+    pub after_hash: Option<String>,
     /// Whether the file existed before patching
     pub existed_before: bool,
 }
@@ -63,12 +65,14 @@ impl Transaction {
         }
     }
 
-    fn record_snapshot(&mut self, path: PathBuf, content: Option<String>, existed_before: bool) {
-        let hash = content.as_ref().map(|c| compute_hash(c));
+    fn record_snapshot(&mut self, path: PathBuf, before_content: Option<String>, after_content: Option<String>, existed_before: bool) {
+        let before_hash = before_content.as_ref().map(|c| compute_hash(c));
+        let after_hash = after_content.as_ref().map(|c| compute_hash(c));
         self.snapshots.insert(path.clone(), FileSnapshot {
             path,
-            content,
-            hash,
+            content: before_content,
+            before_hash,
+            after_hash,
             existed_before,
         });
     }
@@ -300,7 +304,7 @@ async fn apply_edit_to_transaction(
                 content.replacen(&x.search, &x.replace, 1)
             };
             
-            transaction.record_snapshot(path.clone(), Some(content), true);
+            transaction.record_snapshot(path.clone(), Some(content), Some(new_content.clone()), true);
             transaction.record_change(path, Some(new_content));
         }
         
@@ -311,7 +315,7 @@ async fn apply_edit_to_transaction(
             let existing = fs::read_to_string(&path).await.ok();
             let existed = path.exists();
             
-            transaction.record_snapshot(path.clone(), existing, existed);
+            transaction.record_snapshot(path.clone(), existing, Some(x.content.clone()), existed);
             transaction.record_change(path, Some(x.content.clone()));
         }
         
@@ -327,7 +331,7 @@ async fn apply_edit_to_transaction(
                 ));
             }
             
-            transaction.record_snapshot(path.clone(), None, false);
+            transaction.record_snapshot(path.clone(), None, Some(x.content.clone()), false);
             transaction.record_change(path, Some(x.content.clone()));
         }
         
@@ -339,7 +343,7 @@ async fn apply_edit_to_transaction(
                 .await
                 .map_err(|e| fail(&x.file, "delete_file", format!("Cannot read file: {}", e), None))?;
             
-            transaction.record_snapshot(path.clone(), Some(content), true);
+            transaction.record_snapshot(path.clone(), Some(content), None, true);
             transaction.record_change(path, None);
         }
         
@@ -370,8 +374,11 @@ async fn apply_edit_to_transaction(
                 .await
                 .map_err(|e| fail(&x.from, "rename_file", format!("Cannot read file: {}", e), None))?;
             
-            transaction.record_snapshot(from_path.clone(), Some(content.clone()), true);
+            // For rename: source file goes from content -> None (deleted)
+            transaction.record_snapshot(from_path.clone(), Some(content.clone()), None, true);
             transaction.record_change(from_path.clone(), None);
+            // Target file goes from None -> content (created)
+            transaction.record_snapshot(to_path.clone(), None, Some(content.clone()), false);
             transaction.record_change(to_path, Some(content));
         }
         
@@ -402,14 +409,14 @@ async fn apply_edit_to_transaction(
                     let content = reconstruct_new_file_content(&diff)
                         .map_err(|e| fail(target_path, "unified_diff", e.to_string(), None))?;
                     
-                    transaction.record_snapshot(full_path.clone(), None, false);
+                    transaction.record_snapshot(full_path.clone(), None, Some(content.clone()), false);
                     transaction.record_change(full_path, Some(content));
                 } else if diff.is_deleted {
                     let content = fs::read_to_string(&full_path)
                         .await
                         .map_err(|e| fail(target_path, "unified_diff", format!("Cannot read file: {}", e), None))?;
                     
-                    transaction.record_snapshot(full_path.clone(), Some(content), true);
+                    transaction.record_snapshot(full_path.clone(), Some(content), None, true);
                     transaction.record_change(full_path, None);
                 } else {
                     let original = fs::read_to_string(&full_path)
@@ -419,7 +426,7 @@ async fn apply_edit_to_transaction(
                     let new_content = apply_unified_diff(&original, &diff)
                         .map_err(|e| fail(target_path, "unified_diff", e.to_string(), None))?;
                     
-                    transaction.record_snapshot(full_path.clone(), Some(original), true);
+                    transaction.record_snapshot(full_path.clone(), Some(original), Some(new_content.clone()), true);
                     transaction.record_change(full_path, Some(new_content));
                 }
             }
@@ -603,12 +610,13 @@ impl RollbackHandle {
                 let current_content = fs::read_to_string(&full_path).await?;
                 let current_hash = compute_hash(&current_content);
                 
-                // If someone else modified the file, we have a conflict
-                let expected_hash = snapshot.hash.as_deref().unwrap_or("");
-                if current_hash != expected_hash && !expected_hash.is_empty() {
+                // Compare against after_hash (expected state after patch was applied)
+                // If current differs from after_hash, someone modified it after our patch
+                let expected_post_patch_hash = snapshot.after_hash.as_deref().unwrap_or("");
+                if current_hash != expected_post_patch_hash && !expected_post_patch_hash.is_empty() {
                     // File was modified after our patch - this is a conflict
                     bail!(
-                        "File {} was modified after patch application (hash mismatch). Cannot safely rollback without overwriting external changes.",
+                        "File {} was modified after patch application (current hash != expected post-patch hash). Cannot safely rollback without overwriting external changes.",
                         path.display()
                     );
                 }
