@@ -353,13 +353,8 @@ impl RepairLoop {
                 status,
                 attempt.duration_ms
             ));
-                        }
-                    }
-                }
-                Ok(current_edits.to_vec())
-            }
-            _ => Ok(current_edits.to_vec()),
         }
+        history
     }
 }
 
