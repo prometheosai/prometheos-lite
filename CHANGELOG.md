@@ -40,6 +40,28 @@
 
 **Fix 16 - DependencyChange Breaking Field**: Fixed incorrect field access - `DependencyChange` uses `risk_level` instead of `breaking` boolean.
 
+### Audit Round 3 - P0 Hardening Fixes
+
+**Fix 17 - Rollback Hash Logic (P0)**: Fixed critical rollback bug:
+- `FileSnapshot` now stores both `before_hash` and `after_hash`
+- Rollback compares current file against `after_hash` (expected post-patch state)
+- Prevents false "external modification" conflicts when rolling back normally applied patches
+
+**Fix 18 - Rollback Integration into Main Loop (P0)**: Main execution loop now uses `apply_patch_with_rollback()` instead of plain `apply_patch()`:
+- Rollback handle captured and stored in result
+- Validation failure triggers automatic rollback based on policy
+- Rollback status included in execution progress
+
+**Fix 19 - Validation Failure Policy (P0)**: Added `ValidationFailurePolicy` enum:
+- `KeepPatchAndRequestApproval` - keep patch, require manual review
+- `RollbackAutomatically` - default, rollback on any validation failure
+- `RollbackOnCriticalFailure` - only rollback on critical/fatal errors
+- `NeverRollback` - manual intervention always required
+
+**Fix 20 - Sandbox Timeout Kill (P0)**: Added `kill_on_drop(true)` to both `spawn_direct_command` and `spawn_shell_command`:
+- Ensures child processes are killed when timeout expires
+- Prevents zombie processes after timeout
+
 # PrometheOS Lite Issue Tracker
 
 This document tracks all issues from the PRDs organized by milestone, with implementation status.
