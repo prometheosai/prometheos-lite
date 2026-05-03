@@ -29,7 +29,6 @@ pub mod sandbox;
 pub mod scaling;
 pub mod selection;
 pub mod semantic_diff;
-pub mod task_cache;
 pub mod time_travel;
 pub mod trajectory;
 pub mod validation;
