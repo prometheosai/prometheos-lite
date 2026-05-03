@@ -325,6 +325,14 @@ impl SelectionEngine {
     pub fn clear_history(&mut self) {
         self.scoring_history.clear();
     }
+
+    /// Convenience method to select best patch from candidates
+    pub fn select_best_patch(
+        &mut self,
+        candidates: Vec<PatchCandidate>,
+    ) -> Result<Option<ScoredCandidate>> {
+        self.select_best_candidate(candidates)
+    }
 }
 
 pub fn select_best_patch(

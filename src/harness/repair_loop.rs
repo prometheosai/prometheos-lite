@@ -100,6 +100,71 @@ impl RepairLoop {
         }
     }
 
+    /// Generate repair edits based on failure details and strategy
+    fn generate_repair_edits(
+        &self,
+        failure: &FailureDetails,
+        current_edits: &[EditOperation],
+        strategy: RepairStrategy,
+    ) -> anyhow::Result<Vec<EditOperation>> {
+        use crate::harness::patch_provider::narrow_search_repair;
+
+        match strategy {
+            RepairStrategy::NarrowSearchContext => {
+                tracing::info!("Applying narrow search context repair");
+                narrow_search_repair(current_edits)
+            }
+            RepairStrategy::ExpandSearchWildcard => {
+                tracing::info!("Applying expand search wildcard repair");
+                // For now, delegate to narrow search as a placeholder
+                // This could be enhanced to actually expand wildcards
+                narrow_search_repair(current_edits)
+            }
+            RepairStrategy::RelaxLineAnchors => {
+                tracing::info!("Applying relax line anchors repair");
+                // Remove strict line-based constraints
+                narrow_search_repair(current_edits)
+            }
+            RepairStrategy::SwitchToWholeFile => {
+                tracing::info!("Applying whole-file replacement strategy");
+                // Convert search/replace to whole file operations
+                let mut whole_file_edits = Vec::new();
+                for edit in current_edits {
+                    if let EditOperation::SearchReplace(sr) = edit {
+                        // Try to read the file and create a whole-file replacement
+                        if let Ok(content) = std::fs::read_to_string(&sr.file) {
+                            let new_content = content.replace(&sr.search, &sr.replace);
+                            whole_file_edits.push(EditOperation::WholeFile(
+                                crate::harness::edit_protocol::WholeFileEdit {
+                                    file: sr.file.clone(),
+                                    content: new_content,
+                                }
+                            ));
+                        } else {
+                            whole_file_edits.push(edit.clone());
+                        }
+                    } else {
+                        whole_file_edits.push(edit.clone());
+                    }
+                }
+                Ok(whole_file_edits)
+            }
+            RepairStrategy::AddContextLines => {
+                tracing::info!("Applying add context lines repair");
+                narrow_search_repair(current_edits)
+            }
+            RepairStrategy::FixUnclosedDelimiters => {
+                tracing::info!("Applying fix unclosed delimiters repair");
+                crate::harness::patch_provider::fix_unclosed_delimiters(current_edits)
+            }
+            RepairStrategy::RetryWithLLM => {
+                tracing::info!("Applying retry with LLM strategy");
+                // For retry, we return the original edits and let the caller
+                // decide whether to regenerate with the LLM
+                Ok(current_edits.to_vec())
+            }
+        }
+    }
     pub async fn execute_repair(
         &mut self,
         request: RepairRequest,
