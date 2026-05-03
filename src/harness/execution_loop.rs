@@ -1,20 +1,34 @@
 use crate::harness::{
     acceptance::{AcceptanceCriterion, compile_acceptance_criteria},
-    artifacts::{HarnessArtifact, generate_completion_artifact, ArtifactKind, ArtifactMetadata, CompressionType},
-    completion::{CompletionDecision, CompletionEvidence, evaluate_completion, PatchEvidence, ValidationEvidence, ReviewEvidence, RiskEvidence, VerificationEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence},
-    confidence::{ConfidenceScore, compute_confidence, ConfidenceFactor, FactorImpact},
+    artifacts::{
+        ArtifactKind, ArtifactMetadata, CompressionType, HarnessArtifact,
+        generate_completion_artifact,
+    },
+    completion::{
+        CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
+        ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence, VerificationEvidence,
+        evaluate_completion,
+    },
+    confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact, compute_confidence},
     edit_protocol::EditOperation,
     environment::{EnvironmentProfile, fingerprint_environment},
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
-    patch_applier::{PatchResult, apply_patch, dry_run_patch, apply_patch_with_rollback, RollbackHandle},
-    patch_provider::{PatchProvider, PatchProviderContext, GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate, RiskEstimate},
+    patch_applier::{
+        PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
+    },
+    patch_provider::{
+        GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
+        PatchProvider, PatchProviderContext, RiskEstimate,
+    },
     repo_intelligence::{RepoContext, build_repo_context},
-    review::{ReviewIssue, ReviewSeverity, ReviewIssueType, review_diff},
-    risk::{RiskAssessment, RiskLevel, assess_risk, RiskReason, RiskCategory, RiskSeverity},
+    review::{ReviewIssue, ReviewIssueType, ReviewSeverity, review_diff},
+    risk::{RiskAssessment, RiskCategory, RiskLevel, RiskReason, RiskSeverity, assess_risk},
     sandbox::LocalSandboxRuntime,
-    selection::{SelectionEngine, PatchCandidate as SelectionCandidate, CandidateOutcome, SelectionCriteria},
+    selection::{
+        CandidateOutcome, PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine,
+    },
     semantic_diff::analyze_semantic_diff,
     trajectory::Trajectory,
     validation::{ValidationPlan, ValidationResult, run_validation},
@@ -291,7 +305,7 @@ struct ExecutionContext {
 impl ExecutionContext {
     fn new(limits: HarnessLimits) -> (Self, mpsc::UnboundedReceiver<HarnessProgress>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         let ctx = Self {
             limits,
             start_time: Instant::now(),
@@ -300,56 +314,67 @@ impl ExecutionContext {
             tokens_used: 0,
             progress_sender: Some(tx),
         };
-        
+
         (ctx, rx)
     }
-    
+
     fn check_limits(&self) -> Result<(), String> {
         let elapsed = self.start_time.elapsed().as_millis() as u64;
         if elapsed > self.limits.max_time_ms {
-            return Err(format!("Time limit reached: {}ms > {}ms", elapsed, self.limits.max_time_ms));
+            return Err(format!(
+                "Time limit reached: {}ms > {}ms",
+                elapsed, self.limits.max_time_ms
+            ));
         }
-        
+
         if self.step_count >= self.limits.max_steps {
-            return Err(format!("Step limit reached: {} >= {}", self.step_count, self.limits.max_steps));
+            return Err(format!(
+                "Step limit reached: {} >= {}",
+                self.step_count, self.limits.max_steps
+            ));
         }
-        
+
         if self.cost_accrued >= self.limits.max_cost_usd {
-            return Err(format!("Cost limit reached: ${:.4} >= ${:.4}", self.cost_accrued, self.limits.max_cost_usd));
+            return Err(format!(
+                "Cost limit reached: ${:.4} >= ${:.4}",
+                self.cost_accrued, self.limits.max_cost_usd
+            ));
         }
-        
+
         Ok(())
     }
-    
+
     fn increment_step(&mut self) {
         self.step_count += 1;
     }
-    
+
     fn add_cost(&mut self, cost: f64) {
         self.cost_accrued += cost;
     }
-    
+
     fn add_tokens(&mut self, tokens: u64) {
         self.tokens_used += tokens;
     }
-    
+
     fn send_progress(&self, progress: HarnessProgress) {
         if let Some(ref sender) = self.progress_sender {
             let _ = sender.send(progress);
         }
     }
-    
+
     fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
     }
 }
 
-pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<HarnessExecutionResult> {
+pub async fn execute_harness_task(
+    mut req: HarnessExecutionRequest,
+) -> Result<HarnessExecutionResult> {
     // Extract callback first using take() to avoid partial move
     let progress_callback = req.progress_callback.take();
     let (mut ctx, mut progress_rx) = ExecutionContext::new(req.limits);
     let started = Instant::now();
-    
+
     // Spawn progress forwarding task if callback is provided
     let _progress_handle = if let Some(callback) = progress_callback {
         Some(tokio::spawn(async move {
@@ -366,21 +391,21 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         });
         None
     };
-    
+
     ctx.send_progress(HarnessProgress::Started {
         work_context_id: req.work_context_id.clone(),
         step: 0,
         total_steps: req.limits.max_steps,
     });
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     let mut traj = Trajectory::new(req.work_context_id.clone());
     let mut metrics = ExecutionMetrics::default();
-    
+
     let repo_start = Instant::now();
     let repo = build_repo_context(
         &req.repo_root,
@@ -391,26 +416,26 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
     )
     .await?;
     metrics.repo_analysis_ms = repo_start.elapsed().as_millis() as u64;
-    
+
     ctx.send_progress(HarnessProgress::RepoAnalysis {
         files_found: repo.ranked_files.len(),
         symbols_found: repo.symbols.len(),
     });
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     let env_start = Instant::now();
     let env = fingerprint_environment(&req.repo_root).await?;
     metrics.repo_analysis_ms += env_start.elapsed().as_millis() as u64;
-    
+
     ctx.send_progress(HarnessProgress::EnvironmentDetected {
         languages: env.languages.clone(),
         package_manager: env.package_manager.clone(),
     });
-    
+
     let policy = FilePolicy::default_for_repo(req.repo_root.canonicalize()?);
     let files = build_file_set(&repo, &req.mentioned_files, &policy)?;
     let acceptance = compile_acceptance_criteria(if req.acceptance_criteria.is_empty() {
@@ -418,16 +443,20 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
     } else {
         &req.acceptance_criteria
     });
-    
+
     if req.proposed_edits.is_empty() {
-        traj.record_step("patch.generate", ctx.elapsed_ms(), vec!["no structured edits supplied".into()]);
+        traj.record_step(
+            "patch.generate",
+            ctx.elapsed_ms(),
+            vec!["no structured edits supplied".into()],
+        );
         traj.complete();
-        
+
         ctx.send_progress(HarnessProgress::Error {
             step: "patch.generate".into(),
             message: "No structured edits supplied".into(),
         });
-        
+
         return Ok(HarnessExecutionResult {
             work_context_id: req.work_context_id,
             trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
@@ -475,62 +504,59 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             termination_reason: None,
         });
     }
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     ctx.send_progress(HarnessProgress::Patching {
         files_to_modify: req.proposed_edits.len(),
         dry_run: true,
     });
-    
+
     let patch_start = Instant::now();
-    
+
     // STEP 1: Dry-run patch to verify it applies cleanly
     let dry = dry_run_patch(&req.proposed_edits, &files, &policy)
         .await
         .context("patch dry-run failed")?;
-    
-    let dry_failures: Vec<FailureKind> = dry.failures
-        .iter()
-        .map(classify_patch_failure)
-        .collect();
-    
+
+    let dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
+
     ctx.send_progress(HarnessProgress::PatchResult {
         success: dry.failures.is_empty(),
         files_changed: dry.changed_files.len(),
         failures: dry.failures.len(),
     });
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     // STEP 2: Generate diff for review and semantic analysis
     let diff = generate_diff_from_edits(&req.proposed_edits);
-    
+
     // STEP 3: Review the patch BEFORE applying
     let review_issues = if dry.failures.is_empty() {
         review_diff(&diff)
     } else {
         vec![] // No review performed if dry-run failed
     };
-    
+
     // Compute critical issue count for later use
     let critical_count = review_issues
         .iter()
         .filter(|i| i.severity == ReviewSeverity::Critical)
         .count();
-    
+
     // STEP 4: Semantic diff analysis
     let semantic = analyze_semantic_diff(&diff);
-    
+
     // STEP 5: Risk assessment BEFORE applying
     let risk = assess_risk(&semantic, &review_issues);
-    
+
     // STEP 6: Approval gate - determine if patch should be applied
     let should_apply = match req.mode {
         HarnessMode::ReviewOnly => {
@@ -543,7 +569,7 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
                 .iter()
                 .any(|i| matches!(i.severity, ReviewSeverity::Critical));
             let high_risk = matches!(risk.level, RiskLevel::High | RiskLevel::Critical);
-            
+
             dry.failures.is_empty() && !has_critical_issues && !high_risk
         }
         HarnessMode::Autonomous => {
@@ -560,14 +586,14 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             dry.failures.is_empty()
         }
     };
-    
+
     // STEP 7: Create git checkpoint ONLY if we're going to apply
     let checkpoint = if should_apply {
         create_pre_task_checkpoint(&req.repo_root).await.ok()
     } else {
         None
     };
-    
+
     // STEP 7.5: Generate and select best patch if provider available
     let selected_edits = if req.proposed_edits.is_empty() {
         // Try to generate candidates using patch provider
@@ -576,13 +602,14 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
                 context: req.provider_context.clone().unwrap_or_default(),
                 preferred_strategies: vec!["search_replace".into(), "whole_file".into()],
             };
-            
+
             match provider.generate(provider_req).await {
                 Ok(response) if !response.candidates.is_empty() => {
                     ctx.send_progress(HarnessProgress::GeneratingPatch);
-                    
+
                     // Convert provider candidates to selection candidates
-                    let selection_candidates: Vec<SelectionCandidate> = response.candidates
+                    let selection_candidates: Vec<SelectionCandidate> = response
+                        .candidates
                         .iter()
                         .map(|c| SelectionCandidate {
                             id: format!("candidate_{}", c.source),
@@ -592,18 +619,20 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
                             metadata: Default::default(),
                         })
                         .collect();
-                    
+
                     // Use SelectionEngine to pick the best
                     let selection_engine = SelectionEngine::new(SelectionCriteria::default());
                     let outcome = selection_engine.select_best_patch(&selection_candidates);
-                    
+
                     ctx.send_progress(HarnessProgress::PatchGenerated {
-                        files_changed: outcome.selected.as_ref()
+                        files_changed: outcome
+                            .selected
+                            .as_ref()
                             .map(|s| s.edits.len())
                             .unwrap_or(0),
                         total_files: files.files.len(),
                     });
-                    
+
                     outcome.selected.map(|s| s.edits).unwrap_or_default()
                 }
                 _ => {
@@ -617,29 +646,31 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
     } else {
         req.proposed_edits.clone()
     };
-    
+
     // STEP 8: Apply patch only if approved - with rollback support
-    let (patch, rollback_handle) = if should_apply && dry.failures.is_empty() && !selected_edits.is_empty() {
-        let (result, handle) = apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
-        (Some(result), Some(handle))
-    } else {
-        // Return dry-run result (patch not actually applied)
-        (Some(dry.clone()), None)
-    };
+    let (patch, rollback_handle) =
+        if should_apply && dry.failures.is_empty() && !selected_edits.is_empty() {
+            let (result, handle) =
+                apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
+            (Some(result), Some(handle))
+        } else {
+            // Return dry-run result (patch not actually applied)
+            (Some(dry.clone()), None)
+        };
     let dry_failures = dry.failures.clone();
-    
+
     metrics.patch_generation_ms = patch_start.elapsed().as_millis() as u64;
     metrics.files_modified = patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0);
-    
+
     if let Some(ref p) = patch {
         metrics.lines_changed = p.diff.lines().count();
     }
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     let plan = ValidationPlan {
         format_commands: env.format_commands.clone(),
         lint_commands: env.lint_commands.clone(),
@@ -648,37 +679,46 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         timeout_ms: Some(120000),
         parallel: true,
     };
-    
+
     let validation = if patch.as_ref().is_some_and(|p| p.failures.is_empty()) {
         ctx.send_progress(HarnessProgress::Validating {
-            commands_to_run: plan.format_commands.len() + plan.lint_commands.len() + plan.test_commands.len(),
+            commands_to_run: plan.format_commands.len()
+                + plan.lint_commands.len()
+                + plan.test_commands.len(),
         });
-        
+
         let val_start = Instant::now();
         let result = run_validation(&req.repo_root, &plan, &LocalSandboxRuntime::default()).await?;
         metrics.validation_ms = val_start.elapsed().as_millis() as u64;
-        
+
         let tests_run = result.command_results.len();
-        let tests_passed = result.command_results.iter().filter(|r| r.exit_code == Some(0)).count();
-        
+        let tests_passed = result
+            .command_results
+            .iter()
+            .filter(|r| r.exit_code == Some(0))
+            .count();
+
         ctx.send_progress(HarnessProgress::ValidationResult {
             passed: result.passed,
             tests_run,
             tests_passed,
         });
-        
+
         Some(result)
     } else {
         None
     };
-    
-    let mut failures: Vec<FailureKind> = dry_failures.iter().map(|_f| FailureKind::PatchApplyFailure).collect();
+
+    let mut failures: Vec<FailureKind> = dry_failures
+        .iter()
+        .map(|_f| FailureKind::PatchApplyFailure)
+        .collect();
     if let Some(ref v) = validation {
         if !v.passed {
             failures.push(classify_validation_failure(v));
         }
     }
-    
+
     // STEP 9: Handle validation failure rollback policy
     if let Some(ref v) = validation {
         if !v.passed && rollback_handle.is_some() {
@@ -690,7 +730,10 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
                     true
                 }
                 ValidationFailurePolicy::RollbackOnCriticalFailure => {
-                    let has_critical = v.errors.iter().any(|e| e.contains("critical") || e.contains("fatal"));
+                    let has_critical = v
+                        .errors
+                        .iter()
+                        .any(|e| e.contains("critical") || e.contains("fatal"));
                     if has_critical {
                         ctx.send_progress(HarnessProgress::RollingBack {
                             reason: "critical validation failure - automatic rollback".into(),
@@ -700,7 +743,7 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
                 }
                 _ => false,
             };
-            
+
             if should_rollback {
                 if let Some(handle) = rollback_handle {
                     match handle.rollback().await {
@@ -725,27 +768,35 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             }
         }
     }
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     ctx.increment_step();
     if let Err(reason) = ctx.check_limits() {
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
-    
+
     // Build completion evidence using the review_issues from pre-apply phase
     let strength = assess_verification_strength(validation.as_ref());
     let confidence = compute_confidence(validation.as_ref(), &review_issues, &risk, strength);
-    
+
     // Count breaking changes - API changes have `breaking` field, dependency changes use risk_level
     let breaking_api_changes = semantic.api_changes.iter().filter(|c| c.breaking).count();
-    let breaking_dep_changes = semantic.dependency_changes.iter()
-        .filter(|c| matches!(c.risk_level, crate::harness::semantic_diff::RiskLevel::High | crate::harness::semantic_diff::RiskLevel::Critical))
+    let breaking_dep_changes = semantic
+        .dependency_changes
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.risk_level,
+                crate::harness::semantic_diff::RiskLevel::High
+                    | crate::harness::semantic_diff::RiskLevel::Critical
+            )
+        })
         .count();
-    
+
     let evidence = CompletionEvidence {
         // 8 Evidence Dimensions
         patch_evidence: PatchEvidence {
@@ -753,7 +804,9 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             files_modified: patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0),
             lines_changed: patch.as_ref().map(|p| p.diff.lines().count()).unwrap_or(0),
             patch_applied_cleanly: patch.as_ref().is_some_and(|p| p.failures.is_empty()),
-            patch_hash: patch.as_ref().map(|p| format!("{:x}", md5::compute(&p.diff))),
+            patch_hash: patch
+                .as_ref()
+                .map(|p| format!("{:x}", md5::compute(&p.diff))),
             dry_run_passed: dry.failures.is_empty(),
         },
         validation_evidence: ValidationEvidence {
@@ -763,18 +816,41 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             static_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
             lint_check_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
             test_passed: validation.as_ref().map(|v| v.passed).unwrap_or(false),
-            validation_summary: validation.as_ref().map(|v| format!("{} commands run", v.command_results.len())).unwrap_or_default(),
+            validation_summary: validation
+                .as_ref()
+                .map(|v| format!("{} commands run", v.command_results.len()))
+                .unwrap_or_default(),
         },
         review_evidence: ReviewEvidence {
             review_performed: !review_issues.is_empty() || dry.failures.is_empty(),
             total_issues: review_issues.len(),
-            critical_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count(),
-            high_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::High).count(),
-            medium_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::Medium).count(),
-            low_issues: review_issues.iter().filter(|i| i.severity == ReviewSeverity::Low).count(),
-            security_issues: review_issues.iter().filter(|i| i.issue_type == ReviewIssueType::Security).count(),
-            breaking_change_issues: review_issues.iter().filter(|i| i.issue_type == ReviewIssueType::ApiChange).count(),
-            review_passed: !review_issues.iter().any(|i| i.severity == ReviewSeverity::Critical),
+            critical_issues: review_issues
+                .iter()
+                .filter(|i| i.severity == ReviewSeverity::Critical)
+                .count(),
+            high_issues: review_issues
+                .iter()
+                .filter(|i| i.severity == ReviewSeverity::High)
+                .count(),
+            medium_issues: review_issues
+                .iter()
+                .filter(|i| i.severity == ReviewSeverity::Medium)
+                .count(),
+            low_issues: review_issues
+                .iter()
+                .filter(|i| i.severity == ReviewSeverity::Low)
+                .count(),
+            security_issues: review_issues
+                .iter()
+                .filter(|i| i.issue_type == ReviewIssueType::Security)
+                .count(),
+            breaking_change_issues: review_issues
+                .iter()
+                .filter(|i| i.issue_type == ReviewIssueType::ApiChange)
+                .count(),
+            review_passed: !review_issues
+                .iter()
+                .any(|i| i.severity == ReviewSeverity::Critical),
         },
         risk_evidence: RiskEvidence {
             risk_assessed: true,
@@ -788,7 +864,10 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         },
         verification_evidence: VerificationEvidence {
             verification_level: strength,
-            test_count: validation.as_ref().map(|v| v.command_results.len()).unwrap_or(0),
+            test_count: validation
+                .as_ref()
+                .map(|v| v.command_results.len())
+                .unwrap_or(0),
             coverage_percent: None,
             reproduction_test_passed: false,
             integration_tests_passed: false,
@@ -801,8 +880,10 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             dependency_changes_detected: !semantic.dependency_changes.is_empty(),
             config_changes_detected: !semantic.config_changes.is_empty(),
             breaking_changes_count: breaking_api_changes + breaking_dep_changes,
-            security_relevant_changes: !semantic.auth_changes.is_empty() 
-                || semantic.api_changes.iter().any(|c| c.change_type == crate::harness::semantic_diff::ApiChangeType::VisibilityChanged),
+            security_relevant_changes: !semantic.auth_changes.is_empty()
+                || semantic.api_changes.iter().any(|c| {
+                    c.change_type == crate::harness::semantic_diff::ApiChangeType::VisibilityChanged
+                }),
         },
         confidence_evidence: ConfidenceEvidence {
             confidence_score: confidence.score,
@@ -820,9 +901,11 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
             time_limit_respected: true,
             step_limit_respected: true,
         },
-        
+
         // Legacy fields
-        patch_exists: patch.as_ref().is_some_and(|p| !p.diff.is_empty() && p.failures.is_empty()),
+        patch_exists: patch
+            .as_ref()
+            .is_some_and(|p| !p.diff.is_empty() && p.failures.is_empty()),
         validation_ran: validation.is_some(),
         validation_passed: validation.as_ref().is_some_and(|v| v.passed),
         review_ran: true,
@@ -830,26 +913,26 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         confidence: confidence.clone(),
         verification_strength: strength,
         requires_approval: risk.requires_approval,
-        
+
         // Decision metadata
         decision_factors: vec!["harness execution completed".into()],
         evidence_completeness: 1.0,
     };
-    
+
     let decision = evaluate_completion(&evidence, req.mode)?;
-    
+
     ctx.send_progress(HarnessProgress::Completing {
         decision: format!("{:?}", decision),
         confidence: confidence.score,
     });
-    
+
     traj.record_step("completion.evaluate", ctx.elapsed_ms(), vec![]);
     traj.complete();
-    
+
     metrics.total_duration_ms = started.elapsed().as_millis() as u64;
-    
+
     let trace_id = crate::harness::observability::otel::generate_trace_id();
-    
+
     let mut result = HarnessExecutionResult {
         work_context_id: req.work_context_id,
         trace_id: Some(trace_id.clone()),
@@ -876,7 +959,7 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         terminated_early: false,
         termination_reason: None,
     };
-    
+
     let content = generate_completion_artifact(&result)?;
     result.artifacts.push(HarnessArtifact {
         id: format!("artifact-{}", result.work_context_id),
@@ -895,12 +978,12 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
         size_bytes: content.len(),
         compressed_size_bytes: None,
     });
-    
+
     ctx.send_progress(HarnessProgress::Finished {
         success: true,
         duration_ms: ctx.elapsed_ms(),
     });
-    
+
     Ok(result)
 }
 
@@ -921,9 +1004,9 @@ fn create_terminated_result(
             max_steps: req.limits.max_steps,
         }
     };
-    
+
     ctx.send_progress(progress);
-    
+
     bail!("Harness execution terminated: {}", reason)
 }
 
@@ -935,18 +1018,18 @@ where
     F: FnMut(HarnessProgress) + Send + 'static,
 {
     let (ctx, mut rx) = ExecutionContext::new(req.limits);
-    
+
     let handle = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
             progress_callback(progress);
         }
     });
-    
+
     let result = execute_harness_task(req).await;
-    
+
     drop(ctx);
     handle.abort();
-    
+
     result
 }
 
@@ -954,7 +1037,7 @@ pub fn estimate_execution_cost(limits: &HarnessLimits, estimated_files: usize) -
     let base_cost = 0.01;
     let per_file_cost = 0.005;
     let time_cost = limits.max_time_ms as f64 / 1000.0 / 60.0 * 0.05;
-    
+
     base_cost + (per_file_cost * estimated_files as f64) + time_cost
 }
 
@@ -976,75 +1059,80 @@ pub fn check_resource_limits(
             }
         }
     }
-    
+
     if limits.max_steps < 5 {
         return Err("Minimum 5 steps required for safe execution".into());
     }
-    
+
     if limits.max_time_ms < 10000 {
         return Err("Minimum 10 seconds required for safe execution".into());
     }
-    
+
     Ok(())
 }
 
 /// Generate a unified diff representation from edit operations for review purposes
 fn generate_diff_from_edits(edits: &[EditOperation]) -> String {
     use std::fmt::Write;
-    
+
     let mut diff_output = String::new();
-    
+
     for edit in edits {
         match edit {
             EditOperation::SearchReplace(sr) => {
-                let _ = writeln!(diff_output, "--- a/{}" , sr.file.display());
-                let _ = writeln!(diff_output, "+++ b/{}" , sr.file.display());
+                let _ = writeln!(diff_output, "--- a/{}", sr.file.display());
+                let _ = writeln!(diff_output, "+++ b/{}", sr.file.display());
                 let search_lines: Vec<_> = sr.search.lines().collect();
                 let replace_lines: Vec<_> = sr.replace.lines().collect();
-                let _ = writeln!(diff_output, "@@ -1,{} +1,{} @@", search_lines.len(), replace_lines.len());
+                let _ = writeln!(
+                    diff_output,
+                    "@@ -1,{} +1,{} @@",
+                    search_lines.len(),
+                    replace_lines.len()
+                );
                 for line in &search_lines {
-                    let _ = writeln!(diff_output, "-{}" , line);
+                    let _ = writeln!(diff_output, "-{}", line);
                 }
                 for line in &replace_lines {
-                    let _ = writeln!(diff_output, "+{}" , line);
+                    let _ = writeln!(diff_output, "+{}", line);
                 }
             }
             EditOperation::UnifiedDiff(ud) => {
                 if let Some(ref file) = ud.target_file {
-                    let _ = writeln!(diff_output, "--- a/{}" , file.display());
-                    let _ = writeln!(diff_output, "+++ b/{}" , file.display());
+                    let _ = writeln!(diff_output, "--- a/{}", file.display());
+                    let _ = writeln!(diff_output, "+++ b/{}", file.display());
                 }
                 let _ = writeln!(diff_output, "{}", ud.diff);
             }
             EditOperation::WholeFile(wf) => {
-                let _ = writeln!(diff_output, "--- a/{}" , wf.file.display());
-                let _ = writeln!(diff_output, "+++ b/{}" , wf.file.display());
+                let _ = writeln!(diff_output, "--- a/{}", wf.file.display());
+                let _ = writeln!(diff_output, "+++ b/{}", wf.file.display());
                 let _ = writeln!(diff_output, "@@ -1,1 +1,{} @@", wf.content.lines().count());
                 for line in wf.content.lines() {
-                    let _ = writeln!(diff_output, "+{}" , line);
+                    let _ = writeln!(diff_output, "+{}", line);
                 }
             }
             EditOperation::CreateFile(cf) => {
                 let _ = writeln!(diff_output, "--- /dev/null");
-                let _ = writeln!(diff_output, "+++ b/{}" , cf.file.display());
+                let _ = writeln!(diff_output, "+++ b/{}", cf.file.display());
                 let _ = writeln!(diff_output, "@@ -0,0 +1,{} @@", cf.content.lines().count());
                 for line in cf.content.lines() {
-                    let _ = writeln!(diff_output, "+{}" , line);
+                    let _ = writeln!(diff_output, "+{}", line);
                 }
             }
             EditOperation::DeleteFile(df) => {
-                let _ = writeln!(diff_output, "--- a/{}" , df.file.display());
+                let _ = writeln!(diff_output, "--- a/{}", df.file.display());
                 let _ = writeln!(diff_output, "+++ /dev/null");
                 let _ = writeln!(diff_output, "@@ File deleted @@");
             }
             EditOperation::RenameFile(rf) => {
-                let _ = writeln!(diff_output, "--- a/{}" , rf.from.display());
-                let _ = writeln!(diff_output, "+++ b/{}" , rf.to.display());
+                let _ = writeln!(diff_output, "--- a/{}", rf.from.display());
+                let _ = writeln!(diff_output, "+++ b/{}", rf.to.display());
                 let _ = writeln!(diff_output, "@@ File renamed @@");
             }
         }
         let _ = writeln!(diff_output);
     }
-    
+
     diff_output
 }

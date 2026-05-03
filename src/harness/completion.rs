@@ -1,10 +1,6 @@
 use crate::harness::{
-    confidence::ConfidenceScore,
-    execution_loop::HarnessMode,
-    review::ReviewReport,
-    risk::RiskAssessment,
-    semantic_diff::SemanticDiff,
-    validation::ValidationResult,
+    confidence::ConfidenceScore, execution_loop::HarnessMode, review::ReviewReport,
+    risk::RiskAssessment, semantic_diff::SemanticDiff, validation::ValidationResult,
     verification::VerificationStrength,
 };
 use anyhow::Result;
@@ -22,7 +18,7 @@ pub struct CompletionEvidence {
     pub semantic_evidence: SemanticEvidence,
     pub confidence_evidence: ConfidenceEvidence,
     pub process_evidence: ProcessEvidence,
-    
+
     // Legacy fields for compatibility
     pub patch_exists: bool,
     pub validation_ran: bool,
@@ -32,7 +28,7 @@ pub struct CompletionEvidence {
     pub confidence: ConfidenceScore,
     pub verification_strength: VerificationStrength,
     pub requires_approval: bool,
-    
+
     // Decision metadata
     pub decision_factors: Vec<String>,
     pub evidence_completeness: f32,
@@ -166,12 +162,16 @@ impl CompletionEvaluator {
         }
     }
 
-    pub fn evaluate(&self, evidence: &CompletionEvidence, mode: HarnessMode) -> Result<CompletionDecision> {
+    pub fn evaluate(
+        &self,
+        evidence: &CompletionEvidence,
+        mode: HarnessMode,
+    ) -> Result<CompletionDecision> {
         let mut decision_factors = vec![];
 
         // Check evidence completeness
         let completeness = self.calculate_completeness(evidence);
-        
+
         // Decision logic based on mode
         let decision = match mode {
             HarnessMode::Review => self.evaluate_review_only(evidence, &mut decision_factors),
@@ -184,21 +184,34 @@ impl CompletionEvaluator {
         Ok(decision)
     }
 
-    fn evaluate_review_only(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
+    fn evaluate_review_only(
+        &self,
+        evidence: &CompletionEvidence,
+        factors: &mut Vec<String>,
+    ) -> CompletionDecision {
         if !evidence.review_evidence.review_performed {
             factors.push("Review not performed".to_string());
             return CompletionDecision::Blocked("Review required in ReviewOnly mode".to_string());
         }
 
         if evidence.review_evidence.critical_issues > 0 {
-            factors.push(format!("{} critical issues found", evidence.review_evidence.critical_issues));
-            return CompletionDecision::Blocked("Critical review issues must be resolved".to_string());
+            factors.push(format!(
+                "{} critical issues found",
+                evidence.review_evidence.critical_issues
+            ));
+            return CompletionDecision::Blocked(
+                "Critical review issues must be resolved".to_string(),
+            );
         }
 
         CompletionDecision::Complete
     }
 
-    fn evaluate_assisted(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
+    fn evaluate_assisted(
+        &self,
+        evidence: &CompletionEvidence,
+        factors: &mut Vec<String>,
+    ) -> CompletionDecision {
         // Must have patch
         if !evidence.patch_evidence.patch_created {
             factors.push("No patch created".to_string());
@@ -213,7 +226,9 @@ impl CompletionEvaluator {
 
         if !evidence.validation_evidence.all_validations_passed {
             factors.push("Validation failed".to_string());
-            return CompletionDecision::NeedsRepair("Validation failed - fixes required".to_string());
+            return CompletionDecision::NeedsRepair(
+                "Validation failed - fixes required".to_string(),
+            );
         }
 
         // Review required
@@ -229,7 +244,9 @@ impl CompletionEvaluator {
                 evidence.confidence_evidence.confidence_score * 100.0,
                 self.min_confidence_threshold * 100.0
             ));
-            return CompletionDecision::NeedsApproval("Low confidence - approval required".to_string());
+            return CompletionDecision::NeedsApproval(
+                "Low confidence - approval required".to_string(),
+            );
         }
 
         // Check risk
@@ -241,16 +258,24 @@ impl CompletionEvaluator {
         CompletionDecision::Complete
     }
 
-    fn evaluate_autonomous(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
+    fn evaluate_autonomous(
+        &self,
+        evidence: &CompletionEvidence,
+        factors: &mut Vec<String>,
+    ) -> CompletionDecision {
         // Stricter requirements for autonomous mode
         if evidence.confidence_evidence.confidence_score < 0.8 {
             factors.push("Insufficient confidence for autonomous mode".to_string());
-            return CompletionDecision::NeedsApproval("Confidence below 80% for autonomous execution".to_string());
+            return CompletionDecision::NeedsApproval(
+                "Confidence below 80% for autonomous execution".to_string(),
+            );
         }
 
         if evidence.risk_evidence.overall_risk_level == "Critical" {
             factors.push("Critical risk in autonomous mode".to_string());
-            return CompletionDecision::NeedsApproval("Critical risk - human review required".to_string());
+            return CompletionDecision::NeedsApproval(
+                "Critical risk - human review required".to_string(),
+            );
         }
 
         // Must have full verification
@@ -258,14 +283,20 @@ impl CompletionEvaluator {
             VerificationStrength::Full | VerificationStrength::Reproduction => {}
             _ => {
                 factors.push("Full verification not achieved".to_string());
-                return CompletionDecision::NeedsRepair("Full verification required for autonomous mode".to_string());
+                return CompletionDecision::NeedsRepair(
+                    "Full verification required for autonomous mode".to_string(),
+                );
             }
         }
 
         self.evaluate_assisted(evidence, factors)
     }
 
-    fn evaluate_benchmark(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
+    fn evaluate_benchmark(
+        &self,
+        evidence: &CompletionEvidence,
+        factors: &mut Vec<String>,
+    ) -> CompletionDecision {
         // Benchmark mode is for testing harness itself - less strict
         if !evidence.patch_evidence.patch_created {
             return CompletionDecision::Blocked("No patch".to_string());
@@ -278,20 +309,41 @@ impl CompletionEvaluator {
         let mut dimensions_present = 0u32;
         let total_dimensions = 8u32;
 
-        if evidence.patch_evidence.patch_created { dimensions_present += 1; }
-        if evidence.validation_evidence.validation_performed { dimensions_present += 1; }
-        if evidence.review_evidence.review_performed { dimensions_present += 1; }
-        if evidence.risk_evidence.risk_assessed { dimensions_present += 1; }
-        if evidence.verification_evidence.test_count > 0 { dimensions_present += 1; }
-        if evidence.semantic_evidence.api_changes_detected || evidence.patch_evidence.files_modified > 0 { dimensions_present += 1; }
-        if evidence.confidence_evidence.confidence_score > 0.0 { dimensions_present += 1; }
-        if evidence.process_evidence.git_checkpoint_created { dimensions_present += 1; }
+        if evidence.patch_evidence.patch_created {
+            dimensions_present += 1;
+        }
+        if evidence.validation_evidence.validation_performed {
+            dimensions_present += 1;
+        }
+        if evidence.review_evidence.review_performed {
+            dimensions_present += 1;
+        }
+        if evidence.risk_evidence.risk_assessed {
+            dimensions_present += 1;
+        }
+        if evidence.verification_evidence.test_count > 0 {
+            dimensions_present += 1;
+        }
+        if evidence.semantic_evidence.api_changes_detected
+            || evidence.patch_evidence.files_modified > 0
+        {
+            dimensions_present += 1;
+        }
+        if evidence.confidence_evidence.confidence_score > 0.0 {
+            dimensions_present += 1;
+        }
+        if evidence.process_evidence.git_checkpoint_created {
+            dimensions_present += 1;
+        }
 
         dimensions_present as f32 / total_dimensions as f32
     }
 }
 
-pub fn evaluate_completion(evidence: &CompletionEvidence, mode: HarnessMode) -> Result<CompletionDecision> {
+pub fn evaluate_completion(
+    evidence: &CompletionEvidence,
+    mode: HarnessMode,
+) -> Result<CompletionDecision> {
     let evaluator = CompletionEvaluator::new();
     evaluator.evaluate(evidence, mode)
 }
@@ -318,20 +370,52 @@ pub fn create_evidence_from_components(
         total_issues: review.summary.total_issues,
         critical_issues: review.critical_count,
         high_issues: review.high_count,
-        medium_issues: review.summary.by_severity.get(&crate::harness::review::ReviewSeverity::Medium).copied().unwrap_or(0),
-        low_issues: review.summary.by_severity.get(&crate::harness::review::ReviewSeverity::Low).copied().unwrap_or(0),
-        security_issues: review.summary.by_type.get(&crate::harness::review::ReviewIssueType::Security).copied().unwrap_or(0),
-        breaking_change_issues: review.summary.by_type.get(&crate::harness::review::ReviewIssueType::ApiChange).copied().unwrap_or(0),
+        medium_issues: review
+            .summary
+            .by_severity
+            .get(&crate::harness::review::ReviewSeverity::Medium)
+            .copied()
+            .unwrap_or(0),
+        low_issues: review
+            .summary
+            .by_severity
+            .get(&crate::harness::review::ReviewSeverity::Low)
+            .copied()
+            .unwrap_or(0),
+        security_issues: review
+            .summary
+            .by_type
+            .get(&crate::harness::review::ReviewIssueType::Security)
+            .copied()
+            .unwrap_or(0),
+        breaking_change_issues: review
+            .summary
+            .by_type
+            .get(&crate::harness::review::ReviewIssueType::ApiChange)
+            .copied()
+            .unwrap_or(0),
         review_passed: review.passed,
     };
 
     let risk_evidence = RiskEvidence {
         risk_assessed: true,
         overall_risk_level: format!("{:?}", risk.level),
-        security_risk: format!("{:?}", risk.reasons.iter().any(|r| r.category == crate::harness::risk::RiskCategory::Security)),
+        security_risk: format!(
+            "{:?}",
+            risk.reasons
+                .iter()
+                .any(|r| r.category == crate::harness::risk::RiskCategory::Security)
+        ),
         api_risk: format!("{:?}", semantic.api_changes.iter().any(|a| a.breaking)),
         database_risk: format!("{:?}", semantic.database_changes.iter().any(|d| d.breaking)),
-        dependency_risk: format!("{:?}", semantic.dependency_changes.iter().any(|d| matches!(d.risk_level, crate::harness::semantic_diff::RiskLevel::High | crate::harness::semantic_diff::RiskLevel::Critical))),
+        dependency_risk: format!(
+            "{:?}",
+            semantic.dependency_changes.iter().any(|d| matches!(
+                d.risk_level,
+                crate::harness::semantic_diff::RiskLevel::High
+                    | crate::harness::semantic_diff::RiskLevel::Critical
+            ))
+        ),
         requires_approval: risk.requires_approval,
         risk_reasons: risk.reasons.iter().map(|r| r.description.clone()).collect(),
     };
@@ -348,7 +432,16 @@ pub fn create_evidence_from_components(
 
     let confidence_evidence = ConfidenceEvidence {
         confidence_score: confidence.score,
-        confidence_classification: format!("{:?}", if confidence.score >= 0.8 { "High" } else if confidence.score >= 0.6 { "Medium" } else { "Low" }),
+        confidence_classification: format!(
+            "{:?}",
+            if confidence.score >= 0.8 {
+                "High"
+            } else if confidence.score >= 0.6 {
+                "Medium"
+            } else {
+                "Low"
+            }
+        ),
         validation_contribution: 0.0, // Would calculate from factors
         risk_contribution: 0.0,
         review_contribution: 0.0,
@@ -360,17 +453,41 @@ pub fn create_evidence_from_components(
         validation_evidence: ValidationEvidence {
             validation_performed: true,
             all_validations_passed: validation.passed,
-            format_check_passed: validation.command_results.iter().any(|r| r.command.contains("fmt") && r.exit_code == Some(0)),
-            static_check_passed: validation.command_results.iter().any(|r| (r.command.contains("check") || r.command.contains("build")) && r.exit_code == Some(0)),
-            lint_check_passed: validation.command_results.iter().any(|r| r.command.contains("clippy") && r.exit_code == Some(0)),
-            test_passed: validation.command_results.iter().any(|r| r.command.contains("test") && r.exit_code == Some(0)),
-            validation_summary: format!("{} commands, {} passed", validation.command_results.len(), validation.command_results.iter().filter(|r| r.exit_code == Some(0)).count()),
+            format_check_passed: validation
+                .command_results
+                .iter()
+                .any(|r| r.command.contains("fmt") && r.exit_code == Some(0)),
+            static_check_passed: validation.command_results.iter().any(|r| {
+                (r.command.contains("check") || r.command.contains("build"))
+                    && r.exit_code == Some(0)
+            }),
+            lint_check_passed: validation
+                .command_results
+                .iter()
+                .any(|r| r.command.contains("clippy") && r.exit_code == Some(0)),
+            test_passed: validation
+                .command_results
+                .iter()
+                .any(|r| r.command.contains("test") && r.exit_code == Some(0)),
+            validation_summary: format!(
+                "{} commands, {} passed",
+                validation.command_results.len(),
+                validation
+                    .command_results
+                    .iter()
+                    .filter(|r| r.exit_code == Some(0))
+                    .count()
+            ),
         },
         review_evidence,
         risk_evidence,
         verification_evidence: VerificationEvidence {
             verification_level: crate::harness::verification::VerificationStrength::Tests,
-            test_count: validation.command_results.iter().filter(|r| r.command.contains("test")).count(),
+            test_count: validation
+                .command_results
+                .iter()
+                .filter(|r| r.command.contains("test"))
+                .count(),
             coverage_percent: None,
             reproduction_test_passed: false,
             integration_tests_passed: false,

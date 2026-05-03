@@ -1,9 +1,9 @@
-use anyhow::{Result, Context, bail};
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::HashSet;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitCheckpoint {
@@ -84,7 +84,12 @@ impl GitCheckpointManager {
         self.run_git(&["checkout", "-b", &branch_name])
             .context("Failed to create checkpoint branch")?;
 
-        let id = format!("{}-{}-{}", work_context_id, timestamp, before_head.as_deref().unwrap_or("unknown"));
+        let id = format!(
+            "{}-{}-{}",
+            work_context_id,
+            timestamp,
+            before_head.as_deref().unwrap_or("unknown")
+        );
 
         Ok(GitCheckpoint {
             id,
@@ -102,7 +107,11 @@ impl GitCheckpointManager {
         })
     }
 
-    pub async fn commit_changes(&self, checkpoint: &mut GitCheckpoint, message: &str) -> Result<()> {
+    pub async fn commit_changes(
+        &self,
+        checkpoint: &mut GitCheckpoint,
+        message: &str,
+    ) -> Result<()> {
         // Stage only touched files (not unrelated dirty files)
         for file in &checkpoint.touched_files {
             if file.exists() {
@@ -124,7 +133,11 @@ impl GitCheckpointManager {
         Ok(())
     }
 
-    pub async fn rollback(&self, checkpoint: &GitCheckpoint, strategy: RollbackStrategy) -> Result<()> {
+    pub async fn rollback(
+        &self,
+        checkpoint: &GitCheckpoint,
+        strategy: RollbackStrategy,
+    ) -> Result<()> {
         match strategy {
             RollbackStrategy::HardReset => {
                 // Switch to original branch and delete checkpoint branch
@@ -144,7 +157,11 @@ impl GitCheckpointManager {
                     // Revert the commit
                     if let Some(ref after_head) = checkpoint.after_head {
                         self.run_git(&["revert", "--no-commit", after_head])?;
-                        self.run_git(&["commit", "-m", &format!("Revert harness checkpoint {}", checkpoint.id)])?;
+                        self.run_git(&[
+                            "commit",
+                            "-m",
+                            &format!("Revert harness checkpoint {}", checkpoint.id),
+                        ])?;
                     }
                 }
                 // Switch back to original
@@ -209,7 +226,8 @@ impl GitCheckpointManager {
     }
 
     pub fn unstage_file(&self, file: &Path) -> Result<()> {
-        self.run_git(&["reset", "HEAD", &file.to_string_lossy()]).map(|_| ())
+        self.run_git(&["reset", "HEAD", &file.to_string_lossy()])
+            .map(|_| ())
     }
 
     fn run_git(&self, args: &[&str]) -> Result<String> {
@@ -243,7 +261,9 @@ pub async fn commit_success(root: &Path, message: &str) -> Result<GitCheckpoint>
 
 pub async fn rollback_to_checkpoint(root: &Path, checkpoint: &GitCheckpoint) -> Result<()> {
     let manager = GitCheckpointManager::new(root.to_path_buf());
-    manager.rollback(checkpoint, RollbackStrategy::HardReset).await
+    manager
+        .rollback(checkpoint, RollbackStrategy::HardReset)
+        .await
 }
 
 pub fn is_git_repo(root: &Path) -> bool {
@@ -253,7 +273,7 @@ pub fn is_git_repo(root: &Path) -> bool {
 
 pub fn get_repo_info(root: &Path) -> Result<RepoInfo> {
     let manager = GitCheckpointManager::new(root.to_path_buf());
-    
+
     Ok(RepoInfo {
         is_git_repo: manager.is_git_repo(),
         current_branch: manager.get_current_branch().ok(),

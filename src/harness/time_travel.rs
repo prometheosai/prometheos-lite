@@ -123,11 +123,7 @@ impl TimeTravelDebugger {
         }
     }
 
-    pub fn create_session(
-        &mut self,
-        trajectory_id: String,
-        checkpoints: Vec<TimePoint>,
-    ) -> String {
+    pub fn create_session(&mut self, trajectory_id: String, checkpoints: Vec<TimePoint>) -> String {
         let session_id = format!("session-{}", self.sessions.len() + 1);
         let session = TimeTravelSession {
             id: session_id.clone(),
@@ -138,61 +134,67 @@ impl TimeTravelDebugger {
             breakpoints: Vec::new(),
             watch_expressions: Vec::new(),
         };
-        
+
         self.sessions.insert(session_id.clone(), session);
         self.current_session = Some(session_id.clone());
         session_id
     }
 
     pub fn step_forward(&mut self, session_id: &str) -> Result<TimePoint> {
-        let session = self.sessions.get_mut(session_id)
+        let session = self
+            .sessions
+            .get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
+
         if session.current_index + 1 >= session.checkpoints.len() {
             bail!("Already at the end of the timeline");
         }
-        
+
         session.current_index += 1;
         let checkpoint = session.checkpoints[session.current_index].clone();
-        
+
         // Update variables
         for (name, var) in &checkpoint.variables {
             session.variables.insert(name.clone(), var.clone());
         }
-        
+
         Ok(checkpoint)
     }
 
     pub fn step_backward(&mut self, session_id: &str) -> Result<TimePoint> {
-        let session = self.sessions.get_mut(session_id)
+        let session = self
+            .sessions
+            .get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
+
         if session.current_index == 0 {
             bail!("Already at the beginning of the timeline");
         }
-        
+
         session.current_index -= 1;
         let checkpoint = session.checkpoints[session.current_index].clone();
-        
+
         // Restore variables from checkpoint
         for (name, var) in &checkpoint.variables {
             session.variables.insert(name.clone(), var.clone());
         }
-        
+
         Ok(checkpoint)
     }
 
     pub fn jump_to(&mut self, session_id: &str, index: usize) -> Result<TimePoint> {
-        let session = self.sessions.get_mut(session_id)
+        let session = self
+            .sessions
+            .get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
+
         if index >= session.checkpoints.len() {
             bail!("Index out of bounds");
         }
-        
+
         session.current_index = index;
         let checkpoint = session.checkpoints[index].clone();
-        
+
         // Reconstruct variables from all previous checkpoints up to this point
         session.variables.clear();
         for i in 0..=index {
@@ -200,21 +202,23 @@ impl TimeTravelDebugger {
                 session.variables.insert(name.clone(), var.clone());
             }
         }
-        
+
         Ok(checkpoint)
     }
 
     pub fn get_current_state(&self, session_id: &str) -> Result<DebugState> {
-        let session = self.sessions.get(session_id)
+        let session = self
+            .sessions
+            .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
+
         let checkpoint = &session.checkpoints[session.current_index];
-        
+
         // Find current file and line from description
         let (current_file, line_number) = self.parse_location(&checkpoint.description);
-        
+
         let variables: Vec<_> = session.variables.values().cloned().collect();
-        
+
         Ok(DebugState {
             current_step: session.current_index,
             total_steps: session.checkpoints.len(),
@@ -247,20 +251,21 @@ impl TimeTravelDebugger {
     }
 
     pub fn continue_until_breakpoint(&mut self, session_id: &str) -> Result<Option<TimePoint>> {
-        let session = self.sessions.get(session_id)
+        let session = self
+            .sessions
+            .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
-        let enabled_breakpoints: Vec<_> = session.breakpoints.iter()
-            .filter(|bp| bp.enabled)
-            .collect();
-        
+
+        let enabled_breakpoints: Vec<_> =
+            session.breakpoints.iter().filter(|bp| bp.enabled).collect();
+
         if enabled_breakpoints.is_empty() {
             return Ok(None);
         }
-        
+
         let start_index = session.current_index;
         drop(session); // Release borrow
-        
+
         for i in (start_index + 1)..self.sessions.get(session_id).unwrap().checkpoints.len() {
             // Check if any breakpoint condition matches
             for bp in &enabled_breakpoints {
@@ -270,14 +275,21 @@ impl TimeTravelDebugger {
                 }
             }
         }
-        
+
         Ok(None)
     }
 
-    fn check_breakpoint_condition(&self, session_id: &str, index: usize, condition: &Option<String>) -> Result<bool> {
-        let session = self.sessions.get(session_id)
+    fn check_breakpoint_condition(
+        &self,
+        session_id: &str,
+        index: usize,
+        condition: &Option<String>,
+    ) -> Result<bool> {
+        let session = self
+            .sessions
+            .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
+
         if let Some(cond) = condition {
             // Simple condition evaluation
             if cond.contains("step_id=") {
@@ -293,37 +305,46 @@ impl TimeTravelDebugger {
             // No condition = always break
             return Ok(true);
         }
-        
+
         Ok(false)
     }
 
-    pub fn compare_points(&self, session_id: &str, from_index: usize, to_index: usize) -> Result<DiffView> {
-        let session = self.sessions.get(session_id)
+    pub fn compare_points(
+        &self,
+        session_id: &str,
+        from_index: usize,
+        to_index: usize,
+    ) -> Result<DiffView> {
+        let session = self
+            .sessions
+            .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-        
+
         if from_index >= session.checkpoints.len() || to_index >= session.checkpoints.len() {
             bail!("Index out of bounds");
         }
-        
+
         let from = &session.checkpoints[from_index];
         let to = &session.checkpoints[to_index];
-        
+
         // Compare file states
         let mut file_changes = Vec::new();
-        let all_files: std::collections::HashSet<_> = from.file_states.keys()
+        let all_files: std::collections::HashSet<_> = from
+            .file_states
+            .keys()
             .chain(to.file_states.keys())
             .collect();
-        
+
         for file in all_files {
             let before = from.file_states.get(file).cloned();
             let after = to.file_states.get(file).cloned();
-            
+
             if before != after {
                 let diff_lines = self.compute_diff(
                     before.as_ref().and_then(|f| f.content.as_ref()),
                     after.as_ref().and_then(|f| f.content.as_ref()),
                 );
-                
+
                 file_changes.push(FileChangeDiff {
                     path: file.clone(),
                     before: before.and_then(|f| f.content),
@@ -332,22 +353,31 @@ impl TimeTravelDebugger {
                 });
             }
         }
-        
+
         // Compare variables
         let mut variable_changes = Vec::new();
-        let all_vars: std::collections::HashSet<_> = from.variables.keys()
-            .chain(to.variables.keys())
-            .collect();
-        
+        let all_vars: std::collections::HashSet<_> =
+            from.variables.keys().chain(to.variables.keys()).collect();
+
         for var in all_vars {
-            let before = from.variables.get(var).map(|v| v.value.clone()).unwrap_or_default();
-            let after = to.variables.get(var).map(|v| v.value.clone()).unwrap_or_default();
-            
+            let before = from
+                .variables
+                .get(var)
+                .map(|v| v.value.clone())
+                .unwrap_or_default();
+            let after = to
+                .variables
+                .get(var)
+                .map(|v| v.value.clone())
+                .unwrap_or_default();
+
             if before != after {
-                let scope = to.variables.get(var)
+                let scope = to
+                    .variables
+                    .get(var)
                     .map(|v| v.scope.clone())
                     .unwrap_or_else(|| "unknown".to_string());
-                
+
                 variable_changes.push(VariableChange {
                     name: var.clone(),
                     before,
@@ -356,7 +386,7 @@ impl TimeTravelDebugger {
                 });
             }
         }
-        
+
         Ok(DiffView {
             from_index,
             to_index,
@@ -367,16 +397,16 @@ impl TimeTravelDebugger {
 
     fn compute_diff(&self, before: Option<&String>, after: Option<&String>) -> Vec<DiffLine> {
         let mut diff_lines = Vec::new();
-        
+
         let before_lines: Vec<_> = before.map(|s| s.lines().collect()).unwrap_or_default();
         let after_lines: Vec<_> = after.map(|s| s.lines().collect()).unwrap_or_default();
-        
+
         let max_lines = before_lines.len().max(after_lines.len());
-        
+
         for i in 0..max_lines {
             let before_line = before_lines.get(i);
             let after_line = after_lines.get(i);
-            
+
             match (before_line, after_line) {
                 (Some(b), Some(a)) if b != a => {
                     diff_lines.push(DiffLine {
@@ -408,7 +438,7 @@ impl TimeTravelDebugger {
                 }
             }
         }
-        
+
         diff_lines
     }
 
@@ -417,8 +447,13 @@ impl TimeTravelDebugger {
         if let Some(pos) = description.find(':') {
             let file_part = &description[..pos];
             let line_part = &description[pos + 1..];
-            
-            if let Ok(line) = line_part.split_whitespace().next().unwrap_or("0").parse::<u32>() {
+
+            if let Ok(line) = line_part
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse::<u32>()
+            {
                 return (Some(PathBuf::from(file_part)), Some(line));
             }
         }
@@ -426,7 +461,8 @@ impl TimeTravelDebugger {
     }
 
     pub fn export_session(&self, session_id: &str) -> Result<TimeTravelSession> {
-        self.sessions.get(session_id)
+        self.sessions
+            .get(session_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Session not found"))
     }
@@ -474,14 +510,25 @@ Call Stack:
 "#,
         state.current_step + 1,
         state.total_steps,
-        state.current_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".to_string()),
-        state.line_number.map(|l| l.to_string()).unwrap_or_else(|| "?".to_string()),
+        state
+            .current_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        state
+            .line_number
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "?".to_string()),
         state.variables.len(),
-        state.variables.iter()
+        state
+            .variables
+            .iter()
             .map(|v| format!("  {}: {} ({})", v.name, v.value, v.type_info))
             .collect::<Vec<_>>()
             .join("\n"),
-        state.call_stack.iter()
+        state
+            .call_stack
+            .iter()
             .map(|f| format!("  {} at {}:{}", f.function, f.file.display(), f.line))
             .collect::<Vec<_>>()
             .join("\n")
@@ -520,19 +567,19 @@ mod tests {
     #[test]
     fn test_create_and_navigate_session() {
         let mut debugger = TimeTravelDebugger::new();
-        
+
         let checkpoints = vec![
             create_test_timepoint(0, "start"),
             create_test_timepoint(1, "middle"),
             create_test_timepoint(2, "end"),
         ];
-        
+
         let session_id = debugger.create_session("traj-1".to_string(), checkpoints);
-        
+
         // Step forward
         let point = debugger.step_forward(&session_id).unwrap();
         assert_eq!(point.step_id, "middle");
-        
+
         // Step backward
         let point = debugger.step_backward(&session_id).unwrap();
         assert_eq!(point.step_id, "start");
@@ -541,15 +588,15 @@ mod tests {
     #[test]
     fn test_jump_to() {
         let mut debugger = TimeTravelDebugger::new();
-        
+
         let checkpoints = vec![
             create_test_timepoint(0, "start"),
             create_test_timepoint(1, "middle"),
             create_test_timepoint(2, "end"),
         ];
-        
+
         let session_id = debugger.create_session("traj-1".to_string(), checkpoints);
-        
+
         let point = debugger.jump_to(&session_id, 2).unwrap();
         assert_eq!(point.step_id, "end");
     }
@@ -557,10 +604,10 @@ mod tests {
     #[test]
     fn test_add_breakpoint() {
         let mut debugger = TimeTravelDebugger::new();
-        
+
         let checkpoints = vec![create_test_timepoint(0, "start")];
         let session_id = debugger.create_session("traj-1".to_string(), checkpoints);
-        
+
         let bp_id = debugger.add_breakpoint(&session_id, Some("step_id=middle".to_string()));
         assert!(!bp_id.is_empty());
     }

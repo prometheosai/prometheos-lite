@@ -128,7 +128,11 @@ impl ConfidenceCalibrator {
             } else {
                 "No validation performed".to_string()
             },
-            impact: if validation_score > 0.7 { FactorImpact::Positive } else { FactorImpact::Negative },
+            impact: if validation_score > 0.7 {
+                FactorImpact::Positive
+            } else {
+                FactorImpact::Negative
+            },
         });
 
         // Factor 2: Verification Strength (20%)
@@ -147,7 +151,11 @@ impl ConfidenceCalibrator {
             weight: self.weights.verification_strength,
             score: verification_score,
             description: format!("Verification level: {:?}", verification),
-            impact: if verification_score > 0.7 { FactorImpact::Positive } else { FactorImpact::Negative },
+            impact: if verification_score > 0.7 {
+                FactorImpact::Positive
+            } else {
+                FactorImpact::Negative
+            },
         });
 
         // Factor 3: Risk Level (20%)
@@ -164,23 +172,44 @@ impl ConfidenceCalibrator {
             weight: self.weights.risk_level,
             score: risk_score,
             description: format!("Risk assessment: {:?}", risk.level),
-            impact: if risk_score > 0.7 { FactorImpact::Positive } else { FactorImpact::Negative },
+            impact: if risk_score > 0.7 {
+                FactorImpact::Positive
+            } else {
+                FactorImpact::Negative
+            },
         });
 
         // Factor 4: Review Issues (15%)
-        let critical_count = issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count();
-        let high_count = issues.iter().filter(|i| i.severity == ReviewSeverity::High).count();
-        let medium_count = issues.iter().filter(|i| i.severity == ReviewSeverity::Medium).count();
-        
-        let issue_penalty = (critical_count as f32 * 0.4) + (high_count as f32 * 0.2) + (medium_count as f32 * 0.1);
+        let critical_count = issues
+            .iter()
+            .filter(|i| i.severity == ReviewSeverity::Critical)
+            .count();
+        let high_count = issues
+            .iter()
+            .filter(|i| i.severity == ReviewSeverity::High)
+            .count();
+        let medium_count = issues
+            .iter()
+            .filter(|i| i.severity == ReviewSeverity::Medium)
+            .count();
+
+        let issue_penalty =
+            (critical_count as f32 * 0.4) + (high_count as f32 * 0.2) + (medium_count as f32 * 0.1);
         let issue_score = (1.0 - issue_penalty).max(0.0);
         let issue_contribution = issue_score * self.weights.review_issues;
         factors.push(ConfidenceFactor {
             name: "Review Issues".to_string(),
             weight: self.weights.review_issues,
             score: issue_score,
-            description: format!("{} critical, {} high, {} medium issues", critical_count, high_count, medium_count),
-            impact: if issue_score > 0.7 { FactorImpact::Positive } else { FactorImpact::Negative },
+            description: format!(
+                "{} critical, {} high, {} medium issues",
+                critical_count, high_count, medium_count
+            ),
+            impact: if issue_score > 0.7 {
+                FactorImpact::Positive
+            } else {
+                FactorImpact::Negative
+            },
         });
 
         // Factor 5: Change Size (10%)
@@ -220,16 +249,20 @@ impl ConfidenceCalibrator {
             } else {
                 "No test files modified".to_string()
             },
-            impact: if test_score > 0.7 { FactorImpact::Positive } else { FactorImpact::Negative },
+            impact: if test_score > 0.7 {
+                FactorImpact::Positive
+            } else {
+                FactorImpact::Negative
+            },
         });
 
         // Calculate final score
-        let total_score = validation_contribution +
-                         verification_contribution +
-                         risk_contribution +
-                         issue_contribution +
-                         size_contribution +
-                         test_contribution;
+        let total_score = validation_contribution
+            + verification_contribution
+            + risk_contribution
+            + issue_contribution
+            + size_contribution
+            + test_contribution;
 
         let explanation = self.generate_explanation(&factors, total_score);
         let recommendation = self.generate_recommendation(total_score, risk, issues);
@@ -244,20 +277,28 @@ impl ConfidenceCalibrator {
 
     fn generate_explanation(&self, factors: &[ConfidenceFactor], total_score: f32) -> String {
         let mut explanation = format!("Overall confidence score: {:.0}%\n\n", total_score * 100.0);
-        
+
         explanation.push_str("Factor breakdown:\n");
         for factor in factors {
             let contribution = factor.score * factor.weight * 100.0;
             explanation.push_str(&format!(
                 "  - {}: {:.0}% contribution ({:.0}% of {:.0}% weight)\n",
-                factor.name, contribution, factor.score * 100.0, factor.weight * 100.0
+                factor.name,
+                contribution,
+                factor.score * 100.0,
+                factor.weight * 100.0
             ));
         }
 
         explanation
     }
 
-    fn generate_recommendation(&self, score: f32, risk: &RiskAssessment, issues: &[ReviewIssue]) -> Option<String> {
+    fn generate_recommendation(
+        &self,
+        score: f32,
+        risk: &RiskAssessment,
+        issues: &[ReviewIssue],
+    ) -> Option<String> {
         if score >= self.thresholds.high_confidence {
             if risk.level <= RiskLevel::Low {
                 Some("High confidence - safe to proceed".to_string())

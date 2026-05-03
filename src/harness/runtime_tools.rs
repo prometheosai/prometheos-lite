@@ -107,7 +107,11 @@ impl RuntimeToolRegistry {
             version: "1.0".to_string(),
             tool_type: ToolType::Formatter,
             executable_path: PathBuf::from("rustfmt"),
-            args_template: vec!["--emit".to_string(), "stdout".to_string(), "{file}".to_string()],
+            args_template: vec![
+                "--emit".to_string(),
+                "stdout".to_string(),
+                "{file}".to_string(),
+            ],
             env_vars: HashMap::new(),
             timeout_ms: 30000,
             max_memory_mb: 512,
@@ -122,7 +126,12 @@ impl RuntimeToolRegistry {
             version: "1.0".to_string(),
             tool_type: ToolType::Linter,
             executable_path: PathBuf::from("cargo"),
-            args_template: vec!["clippy".to_string(), "--".to_string(), "-D".to_string(), "warnings".to_string()],
+            args_template: vec![
+                "clippy".to_string(),
+                "--".to_string(),
+                "-D".to_string(),
+                "warnings".to_string(),
+            ],
             env_vars: HashMap::new(),
             timeout_ms: 120000,
             max_memory_mb: 1024,
@@ -179,7 +188,8 @@ impl RuntimeToolRegistry {
     }
 
     pub fn list_by_type(&self, tool_type: ToolType) -> Vec<&RuntimeTool> {
-        self.tools.values()
+        self.tools
+            .values()
             .filter(|t| t.tool_type == tool_type)
             .collect()
     }
@@ -191,7 +201,9 @@ impl RuntimeToolRegistry {
         input_file: Option<&Path>,
         extra_args: &[String],
     ) -> Result<ToolResult> {
-        let tool = self.tools.get(tool_id)
+        let tool = self
+            .tools
+            .get(tool_id)
             .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found", tool_id))?;
 
         let start_time = chrono::Utc::now();
@@ -224,8 +236,9 @@ impl RuntimeToolRegistry {
         // Execute with timeout
         let output = tokio::time::timeout(
             tokio::time::Duration::from_millis(tool.timeout_ms),
-            cmd.output()
-        ).await;
+            cmd.output(),
+        )
+        .await;
 
         let (success, exit_code, stdout, stderr) = match output {
             Ok(Ok(output)) => {
@@ -235,12 +248,8 @@ impl RuntimeToolRegistry {
                 let exit_code = output.status.code().unwrap_or(-1);
                 (success, exit_code, stdout, stderr)
             }
-            Ok(Err(e)) => {
-                (false, -1, String::new(), format!("Execution error: {}", e))
-            }
-            Err(_) => {
-                (false, -1, String::new(), "Timeout exceeded".to_string())
-            }
+            Ok(Err(e)) => (false, -1, String::new(), format!("Execution error: {}", e)),
+            Err(_) => (false, -1, String::new(), "Timeout exceeded".to_string()),
         };
 
         let duration_ms = start_instant.elapsed().as_millis() as u64;
@@ -361,9 +370,10 @@ impl RuntimeToolRegistry {
 
     fn parse_generic_issue(&self, line: &str) -> Option<ToolIssue> {
         // Generic issue detection
-        if line.to_lowercase().contains("error") || 
-           line.to_lowercase().contains("warning") ||
-           line.to_lowercase().contains("failed") {
+        if line.to_lowercase().contains("error")
+            || line.to_lowercase().contains("warning")
+            || line.to_lowercase().contains("failed")
+        {
             let severity = if line.to_lowercase().contains("error") {
                 IssueSeverity::Error
             } else if line.to_lowercase().contains("warning") {
@@ -393,10 +403,7 @@ impl RuntimeToolRegistry {
                     return Ok(false);
                 }
 
-                let output = Command::new(parts[0])
-                    .args(&parts[1..])
-                    .output()
-                    .await;
+                let output = Command::new(parts[0]).args(&parts[1..]).output().await;
 
                 return match output {
                     Ok(output) => Ok(output.status.success()),
@@ -413,7 +420,9 @@ impl RuntimeToolRegistry {
     }
 
     pub fn get_tool_stats(&self, tool_id: &str) -> Option<ToolStats> {
-        let executions: Vec<_> = self.execution_history.iter()
+        let executions: Vec<_> = self
+            .execution_history
+            .iter()
             .filter(|e| e.tool_id == tool_id)
             .collect();
 
@@ -423,9 +432,14 @@ impl RuntimeToolRegistry {
 
         let total = executions.len();
         let successful = executions.iter().filter(|e| e.success).count();
-        let avg_duration = executions.iter()
-            .filter_map(|e| e.end_time.map(|end| (end - e.start_time).num_milliseconds() as u64))
-            .sum::<u64>() / total as u64;
+        let avg_duration = executions
+            .iter()
+            .filter_map(|e| {
+                e.end_time
+                    .map(|end| (end - e.start_time).num_milliseconds() as u64)
+            })
+            .sum::<u64>()
+            / total as u64;
 
         Some(ToolStats {
             tool_id: tool_id.to_string(),

@@ -1,6 +1,8 @@
 use crate::harness::{
     review::{ReviewIssue, ReviewIssueType, ReviewSeverity},
-    semantic_diff::{SemanticDiff, RiskLevel as SemanticRiskLevel, requires_approval, has_breaking_changes},
+    semantic_diff::{
+        RiskLevel as SemanticRiskLevel, SemanticDiff, has_breaking_changes, requires_approval,
+    },
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -94,7 +96,8 @@ impl RiskEngine {
         let mut level = RiskLevel::None;
 
         // Check for critical security issues
-        let critical_issues: Vec<_> = issues.iter()
+        let critical_issues: Vec<_> = issues
+            .iter()
             .filter(|i| i.severity == ReviewSeverity::Critical)
             .collect();
 
@@ -109,7 +112,8 @@ impl RiskEngine {
         }
 
         // Check for high severity issues
-        let high_issues: Vec<_> = issues.iter()
+        let high_issues: Vec<_> = issues
+            .iter()
             .filter(|i| i.severity == ReviewSeverity::High)
             .collect();
 
@@ -127,14 +131,16 @@ impl RiskEngine {
         }
 
         // Assess API changes
-        let breaking_api_changes: Vec<_> = diff.api_changes.iter()
-            .filter(|a| a.breaking)
-            .collect();
+        let breaking_api_changes: Vec<_> = diff.api_changes.iter().filter(|a| a.breaking).collect();
 
         for change in &breaking_api_changes {
             reasons.push(RiskReason {
                 category: RiskCategory::ApiBreaking,
-                description: format!("Breaking API change: {} in {}", change.signature, change.file.display()),
+                description: format!(
+                    "Breaking API change: {} in {}",
+                    change.signature,
+                    change.file.display()
+                ),
                 severity: RiskSeverity::High,
                 mitigation: Some("Document breaking changes and version appropriately".to_string()),
             });
@@ -156,14 +162,20 @@ impl RiskEngine {
         }
 
         // Assess database changes
-        let breaking_db_changes: Vec<_> = diff.database_changes.iter()
+        let breaking_db_changes: Vec<_> = diff
+            .database_changes
+            .iter()
             .filter(|d| d.breaking)
             .collect();
 
         for change in &breaking_db_changes {
             reasons.push(RiskReason {
                 category: RiskCategory::DatabaseBreaking,
-                description: format!("Breaking DB change: {:?} in {}", change.change_type, change.file.display()),
+                description: format!(
+                    "Breaking DB change: {:?} in {}",
+                    change.change_type,
+                    change.file.display()
+                ),
                 severity: RiskSeverity::High,
                 mitigation: Some("Ensure migration strategy is in place".to_string()),
             });
@@ -186,8 +198,15 @@ impl RiskEngine {
         }
 
         // Assess auth/security changes
-        let high_risk_auth: Vec<_> = diff.auth_changes.iter()
-            .filter(|a| matches!(a.risk_level, SemanticRiskLevel::High | SemanticRiskLevel::Critical))
+        let high_risk_auth: Vec<_> = diff
+            .auth_changes
+            .iter()
+            .filter(|a| {
+                matches!(
+                    a.risk_level,
+                    SemanticRiskLevel::High | SemanticRiskLevel::Critical
+                )
+            })
             .collect();
 
         for change in &high_risk_auth {
@@ -203,14 +222,24 @@ impl RiskEngine {
         }
 
         // Assess dependency changes
-        let high_risk_deps: Vec<_> = diff.dependency_changes.iter()
-            .filter(|d| matches!(d.risk_level, SemanticRiskLevel::High | SemanticRiskLevel::Critical))
+        let high_risk_deps: Vec<_> = diff
+            .dependency_changes
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.risk_level,
+                    SemanticRiskLevel::High | SemanticRiskLevel::Critical
+                )
+            })
             .collect();
 
         for change in &high_risk_deps {
             reasons.push(RiskReason {
                 category: RiskCategory::Dependency,
-                description: format!("High-risk dependency change: {} {:?}", change.package_name, change.change_type),
+                description: format!(
+                    "High-risk dependency change: {} {:?}",
+                    change.package_name, change.change_type
+                ),
                 severity: RiskSeverity::Medium,
                 mitigation: Some("Review dependency for security vulnerabilities".to_string()),
             });
@@ -220,14 +249,24 @@ impl RiskEngine {
         }
 
         // Assess config changes
-        let prod_config_changes: Vec<_> = diff.config_changes.iter()
-            .filter(|c| matches!(c.environment, crate::harness::semantic_diff::ConfigEnvironment::Production))
+        let prod_config_changes: Vec<_> = diff
+            .config_changes
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.environment,
+                    crate::harness::semantic_diff::ConfigEnvironment::Production
+                )
+            })
             .collect();
 
         for change in &prod_config_changes {
             reasons.push(RiskReason {
                 category: RiskCategory::Configuration,
-                description: format!("Production config change: {} {:?}", change.config_key, change.change_type),
+                description: format!(
+                    "Production config change: {} {:?}",
+                    change.config_key, change.change_type
+                ),
                 severity: RiskSeverity::High,
                 mitigation: Some("Verify in staging before production".to_string()),
             });
@@ -237,8 +276,10 @@ impl RiskEngine {
         }
 
         // Determine if approval is required
-        let requires_approval = level >= RiskLevel::High ||
-            reasons.iter().any(|r| self.approval_required_for.contains(&r.category));
+        let requires_approval = level >= RiskLevel::High
+            || reasons
+                .iter()
+                .any(|r| self.approval_required_for.contains(&r.category));
 
         // Determine if override is possible
         let can_override = level < RiskLevel::Critical || !self.auto_reject_critical;
@@ -268,8 +309,15 @@ impl RiskEngine {
         let mut conditions = vec![];
 
         for reason in reasons {
-            if self.override_policy.allowed_categories.contains(&reason.category) {
-                conditions.push(format!("Override for {:?}: {}", reason.category, reason.description));
+            if self
+                .override_policy
+                .allowed_categories
+                .contains(&reason.category)
+            {
+                conditions.push(format!(
+                    "Override for {:?}: {}",
+                    reason.category, reason.description
+                ));
             }
         }
 
@@ -284,7 +332,11 @@ impl RiskEngine {
         conditions
     }
 
-    pub fn request_override(&self, assessment: &RiskAssessment, justification: &str) -> OverrideResult {
+    pub fn request_override(
+        &self,
+        assessment: &RiskAssessment,
+        justification: &str,
+    ) -> OverrideResult {
         if !assessment.can_override {
             return OverrideResult::Rejected("Critical risks cannot be overridden".to_string());
         }
@@ -317,7 +369,10 @@ impl Default for OverridePolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OverrideResult {
-    Approved { conditions: Vec<String>, audit_log: String },
+    Approved {
+        conditions: Vec<String>,
+        audit_log: String,
+    },
     Rejected(String),
 }
 
@@ -333,13 +388,21 @@ pub fn format_risk_assessment(assessment: &RiskAssessment) -> String {
     output.push_str("===============\n\n");
 
     output.push_str(&format!("Overall Risk Level: {:?}\n", assessment.level));
-    output.push_str(&format!("Requires Approval: {}\n", assessment.requires_approval));
+    output.push_str(&format!(
+        "Requires Approval: {}\n",
+        assessment.requires_approval
+    ));
     output.push_str(&format!("Can Override: {}\n\n", assessment.can_override));
 
     if !assessment.reasons.is_empty() {
         output.push_str("Risk Reasons:\n");
         for (i, reason) in assessment.reasons.iter().enumerate() {
-            output.push_str(&format!("\n{}. [{:?}] {:?}\n", i + 1, reason.severity, reason.category));
+            output.push_str(&format!(
+                "\n{}. [{:?}] {:?}\n",
+                i + 1,
+                reason.severity,
+                reason.category
+            ));
             output.push_str(&format!("   Description: {}\n", reason.description));
             if let Some(mitigation) = &reason.mitigation {
                 output.push_str(&format!("   Mitigation: {}\n", mitigation));

@@ -209,13 +209,11 @@ impl GoldenPathRegistry {
                     name: "Review Changes".to_string(),
                     description: "Review the fix for quality".to_string(),
                     step_type: StepType::Review,
-                    tool_invocations: vec![
-                        ToolInvocation {
-                            tool_id: "clippy".to_string(),
-                            args: vec![],
-                            required: false,
-                        },
-                    ],
+                    tool_invocations: vec![ToolInvocation {
+                        tool_id: "clippy".to_string(),
+                        args: vec![],
+                        required: false,
+                    }],
                     validation: None,
                     rollback_point: false,
                     optional: true,
@@ -331,8 +329,15 @@ impl GoldenPathRegistry {
                 },
             ],
             estimated_duration_ms: 600000, // 10 minutes
-            required_context: vec!["feature_spec".to_string(), "acceptance_criteria".to_string()],
-            success_criteria: vec!["tests_pass".to_string(), "lints_pass".to_string(), "documented".to_string()],
+            required_context: vec![
+                "feature_spec".to_string(),
+                "acceptance_criteria".to_string(),
+            ],
+            success_criteria: vec![
+                "tests_pass".to_string(),
+                "lints_pass".to_string(),
+                "documented".to_string(),
+            ],
         });
 
         // Refactoring Path
@@ -358,13 +363,11 @@ impl GoldenPathRegistry {
                     name: "Ensure Test Coverage".to_string(),
                     description: "Verify existing tests cover the refactoring area".to_string(),
                     step_type: StepType::Testing,
-                    tool_invocations: vec![
-                        ToolInvocation {
-                            tool_id: "cargo-test".to_string(),
-                            args: vec![],
-                            required: true,
-                        },
-                    ],
+                    tool_invocations: vec![ToolInvocation {
+                        tool_id: "cargo-test".to_string(),
+                        args: vec![],
+                        required: true,
+                    }],
                     validation: Some(StepValidation {
                         condition: "tests_exist".to_string(),
                         required_outcome: "Tests must exist and pass".to_string(),
@@ -389,13 +392,11 @@ impl GoldenPathRegistry {
                     name: "Validate Each Step".to_string(),
                     description: "Run tests after each change".to_string(),
                     step_type: StepType::Validation,
-                    tool_invocations: vec![
-                        ToolInvocation {
-                            tool_id: "cargo-test".to_string(),
-                            args: vec![],
-                            required: true,
-                        },
-                    ],
+                    tool_invocations: vec![ToolInvocation {
+                        tool_id: "cargo-test".to_string(),
+                        args: vec![],
+                        required: true,
+                    }],
                     validation: Some(StepValidation {
                         condition: "tests_pass".to_string(),
                         required_outcome: "Tests must pass after each change".to_string(),
@@ -406,13 +407,11 @@ impl GoldenPathRegistry {
                     optional: false,
                 },
             ],
-            validation_rules: vec![
-                ValidationRule {
-                    rule_type: RuleType::TestMustPass,
-                    condition: "all_tests".to_string(),
-                    error_message: "All tests must pass throughout refactoring".to_string(),
-                },
-            ],
+            validation_rules: vec![ValidationRule {
+                rule_type: RuleType::TestMustPass,
+                condition: "all_tests".to_string(),
+                error_message: "All tests must pass throughout refactoring".to_string(),
+            }],
             estimated_duration_ms: 450000, // 7.5 minutes
             required_context: vec!["refactoring_goal".to_string()],
             success_criteria: vec!["tests_pass".to_string(), "code_improved".to_string()],
@@ -451,13 +450,11 @@ impl GoldenPathRegistry {
                     name: "Validate Documentation".to_string(),
                     description: "Check doc tests and links".to_string(),
                     step_type: StepType::Validation,
-                    tool_invocations: vec![
-                        ToolInvocation {
-                            tool_id: "cargo-test".to_string(),
-                            args: vec!["--doc".to_string()],
-                            required: true,
-                        },
-                    ],
+                    tool_invocations: vec![ToolInvocation {
+                        tool_id: "cargo-test".to_string(),
+                        args: vec!["--doc".to_string()],
+                        required: true,
+                    }],
                     validation: Some(StepValidation {
                         condition: "doc_tests_pass".to_string(),
                         required_outcome: "Documentation tests must pass".to_string(),
@@ -468,13 +465,11 @@ impl GoldenPathRegistry {
                     optional: false,
                 },
             ],
-            validation_rules: vec![
-                ValidationRule {
-                    rule_type: RuleType::TestMustPass,
-                    condition: "doc_tests".to_string(),
-                    error_message: "Documentation tests must pass".to_string(),
-                },
-            ],
+            validation_rules: vec![ValidationRule {
+                rule_type: RuleType::TestMustPass,
+                condition: "doc_tests".to_string(),
+                error_message: "Documentation tests must pass".to_string(),
+            }],
             estimated_duration_ms: 120000, // 2 minutes
             required_context: vec!["documentation_scope".to_string()],
             success_criteria: vec!["doc_tests_pass".to_string()],
@@ -494,12 +489,17 @@ impl GoldenPathRegistry {
     }
 
     pub fn list_by_category(&self, category: PathCategory) -> Vec<&GoldenPath> {
-        self.paths.values()
+        self.paths
+            .values()
             .filter(|p| p.category == category)
             .collect()
     }
 
-    pub fn find_matching_paths(&self, context: &str, category: Option<PathCategory>) -> Vec<PathMatch> {
+    pub fn find_matching_paths(
+        &self,
+        context: &str,
+        category: Option<PathCategory>,
+    ) -> Vec<PathMatch> {
         let mut matches = Vec::new();
         let context_lower = context.to_lowercase();
 
@@ -566,7 +566,9 @@ impl GoldenPathRegistry {
     }
 
     pub fn start_execution(&mut self, path_id: &str, context_id: &str) -> Result<usize> {
-        let path = self.paths.get(path_id)
+        let path = self
+            .paths
+            .get(path_id)
             .ok_or_else(|| anyhow::anyhow!("Path '{}' not found", path_id))?;
 
         let execution = PathExecution {
@@ -584,7 +586,12 @@ impl GoldenPathRegistry {
         Ok(self.execution_history.len() - 1)
     }
 
-    pub fn record_step_completion(&mut self, execution_idx: usize, step_id: &str, success: bool) -> Result<()> {
+    pub fn record_step_completion(
+        &mut self,
+        execution_idx: usize,
+        step_id: &str,
+        success: bool,
+    ) -> Result<()> {
         if let Some(execution) = self.execution_history.get_mut(execution_idx) {
             execution.steps_completed.push(step_id.to_string());
             execution.execution_log.push(format!(
@@ -617,7 +624,9 @@ impl GoldenPathRegistry {
     }
 
     pub fn get_path_stats(&self, path_id: &str) -> Option<PathStats> {
-        let executions: Vec<_> = self.execution_history.iter()
+        let executions: Vec<_> = self
+            .execution_history
+            .iter()
             .filter(|e| e.path_id == path_id)
             .collect();
 
@@ -627,12 +636,15 @@ impl GoldenPathRegistry {
 
         let total = executions.len();
         let successful = executions.iter().filter(|e| e.success).count();
-        
-        let avg_duration = executions.iter()
+
+        let avg_duration = executions
+            .iter()
             .filter_map(|e| {
-                e.end_time.map(|end| (end - e.start_time).num_milliseconds() as u64)
+                e.end_time
+                    .map(|end| (end - e.start_time).num_milliseconds() as u64)
             })
-            .sum::<u64>() / total as u64;
+            .sum::<u64>()
+            / total as u64;
 
         Some(PathStats {
             path_id: path_id.to_string(),
@@ -682,7 +694,10 @@ mod tests {
     fn test_register_and_get_path() {
         let registry = GoldenPathRegistry::new();
         assert!(registry.get("bug-fix").is_some());
-        assert_eq!(registry.get("bug-fix").unwrap().category, PathCategory::BugFix);
+        assert_eq!(
+            registry.get("bug-fix").unwrap().category,
+            PathCategory::BugFix
+        );
     }
 
     #[test]
@@ -690,7 +705,11 @@ mod tests {
         let registry = GoldenPathRegistry::new();
         let bug_fix_paths = registry.list_by_category(PathCategory::BugFix);
         assert!(!bug_fix_paths.is_empty());
-        assert!(bug_fix_paths.iter().all(|p| p.category == PathCategory::BugFix));
+        assert!(
+            bug_fix_paths
+                .iter()
+                .all(|p| p.category == PathCategory::BugFix)
+        );
     }
 
     #[test]
@@ -705,9 +724,13 @@ mod tests {
     fn test_path_execution() {
         let mut registry = GoldenPathRegistry::new();
         let idx = registry.start_execution("bug-fix", "ctx-123").unwrap();
-        
-        registry.record_step_completion(idx, "analyze", true).unwrap();
-        registry.record_step_completion(idx, "reproduce", true).unwrap();
+
+        registry
+            .record_step_completion(idx, "analyze", true)
+            .unwrap();
+        registry
+            .record_step_completion(idx, "reproduce", true)
+            .unwrap();
         registry.complete_execution(idx, true).unwrap();
 
         let history = registry.get_execution_history();

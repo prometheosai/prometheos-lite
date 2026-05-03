@@ -105,7 +105,7 @@ impl ScalingEngine {
 
     pub fn next_attempt(&mut self, previous_result: Option<AttemptResult>) -> ScalingDecision {
         self.current_attempt += 1;
-        
+
         if let Some(result) = previous_result {
             self.attempt_history.push(AttemptRecord {
                 attempt_number: self.current_attempt - 1,
@@ -118,8 +118,8 @@ impl ScalingEngine {
             });
         }
 
-        let should_continue = self.current_attempt <= self.config.max_attempts
-            && !self.is_resource_exhausted();
+        let should_continue =
+            self.current_attempt <= self.config.max_attempts && !self.is_resource_exhausted();
 
         if !should_continue {
             return ScalingDecision {
@@ -144,59 +144,75 @@ impl ScalingEngine {
             should_continue: true,
             next_timeout_ms: next_timeout,
             recommended_strategy: strategy,
-            reason: format!("Attempt {} of {}", self.current_attempt, self.config.max_attempts),
+            reason: format!(
+                "Attempt {} of {}",
+                self.current_attempt, self.config.max_attempts
+            ),
             resource_allocation: allocation,
         }
     }
 
     fn calculate_next_timeout(&self) -> u64 {
         let base = self.config.initial_timeout_ms as f64;
-        let multiplier = self.config.backoff_multiplier.powi(self.current_attempt as i32 - 1);
+        let multiplier = self
+            .config
+            .backoff_multiplier
+            .powi(self.current_attempt as i32 - 1);
         let timeout = (base * multiplier) as u64;
         timeout.min(self.config.max_timeout_ms)
     }
 
     fn recommend_strategy(&self) -> String {
         // Analyze previous failures and recommend a strategy
-        let failures: Vec<&AttemptRecord> = self.attempt_history
-            .iter()
-            .filter(|a| !a.success)
-            .collect();
+        let failures: Vec<&AttemptRecord> =
+            self.attempt_history.iter().filter(|a| !a.success).collect();
 
         if failures.is_empty() {
             return "standard".to_string();
         }
 
         // Check for patterns
-        let syntax_errors = failures.iter().filter(|f| {
-            f.error_type.as_ref().map(|e| e.contains("syntax")).unwrap_or(false)
-        }).count();
+        let syntax_errors = failures
+            .iter()
+            .filter(|f| {
+                f.error_type
+                    .as_ref()
+                    .map(|e| e.contains("syntax"))
+                    .unwrap_or(false)
+            })
+            .count();
 
-        let test_failures = failures.iter().filter(|f| {
-            f.error_type.as_ref().map(|e| e.contains("test")).unwrap_or(false)
-        }).count();
+        let test_failures = failures
+            .iter()
+            .filter(|f| {
+                f.error_type
+                    .as_ref()
+                    .map(|e| e.contains("test"))
+                    .unwrap_or(false)
+            })
+            .count();
 
         if syntax_errors > 1 {
-            "conservative".to_string()  // Be more careful with edits
+            "conservative".to_string() // Be more careful with edits
         } else if test_failures > 1 {
-            "test_focused".to_string()  // Focus on test fixes
+            "test_focused".to_string() // Focus on test fixes
         } else if self.current_attempt > 3 {
-            "aggressive".to_string()  // Try more comprehensive changes
+            "aggressive".to_string() // Try more comprehensive changes
         } else {
-            "adaptive".to_string()  // Adjust based on feedback
+            "adaptive".to_string() // Adjust based on feedback
         }
     }
 
     fn allocate_resources(&self) -> ResourceAllocation {
         // Increase resources as attempts progress
         let attempt_factor = (self.current_attempt as f64).sqrt();
-        
-        let token_budget = (self.config.resource_limits.max_tokens_per_attempt as f64 * 
-            (1.0 + (attempt_factor - 1.0) * 0.3)) as u64;
-        
-        let cost_budget = self.config.resource_limits.max_cost_per_attempt * 
-            (1.0 + (attempt_factor - 1.0) * 0.2);
-        
+
+        let token_budget = (self.config.resource_limits.max_tokens_per_attempt as f64
+            * (1.0 + (attempt_factor - 1.0) * 0.3)) as u64;
+
+        let cost_budget =
+            self.config.resource_limits.max_cost_per_attempt * (1.0 + (attempt_factor - 1.0) * 0.2);
+
         let time_budget = self.calculate_next_timeout();
 
         let priority = match self.current_attempt {
@@ -253,7 +269,8 @@ impl ScalingEngine {
         let avg_cost = if self.attempt_history.is_empty() {
             self.config.resource_limits.max_cost_per_attempt * 0.5
         } else {
-            self.attempt_history.iter().map(|a| a.cost).sum::<f64>() / self.attempt_history.len() as f64
+            self.attempt_history.iter().map(|a| a.cost).sum::<f64>()
+                / self.attempt_history.len() as f64
         };
 
         let remaining = self.config.max_attempts - self.current_attempt;
@@ -305,7 +322,7 @@ mod tests {
     #[test]
     fn test_scaling_engine_increases_timeout() {
         let mut engine = ScalingEngine::with_defaults();
-        
+
         let decision1 = engine.next_attempt(None);
         let decision2 = engine.next_attempt(Some(AttemptResult {
             strategy: "test".to_string(),
@@ -315,14 +332,14 @@ mod tests {
             success: false,
             error_type: None,
         }));
-        
+
         assert!(decision2.next_timeout_ms > decision1.next_timeout_ms);
     }
 
     #[test]
     fn test_resource_allocation_increases() {
         let mut engine = ScalingEngine::with_defaults();
-        
+
         let decision1 = engine.next_attempt(None);
         let _ = engine.next_attempt(Some(AttemptResult {
             strategy: "test".to_string(),
@@ -333,8 +350,11 @@ mod tests {
             error_type: None,
         }));
         let decision2 = engine.next_attempt(None);
-        
-        assert!(decision2.resource_allocation.token_budget >= decision1.resource_allocation.token_budget);
+
+        assert!(
+            decision2.resource_allocation.token_budget
+                >= decision1.resource_allocation.token_budget
+        );
     }
 
     #[test]
@@ -342,10 +362,10 @@ mod tests {
         let mut config = ScalingConfig::default();
         config.max_attempts = 2;
         let mut engine = ScalingEngine::new(config);
-        
+
         let _ = engine.next_attempt(None);
         let decision = engine.next_attempt(None);
-        
+
         assert!(!decision.should_continue);
     }
 }

@@ -1,5 +1,6 @@
 use crate::harness::repo_intelligence::RepoContext;
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
+use ignore::gitignore::GitignoreBuilder;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -7,7 +8,6 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
 };
-use ignore::gitignore::GitignoreBuilder;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct FileSet {
@@ -155,16 +155,16 @@ pub fn build_file_set(
 ) -> Result<FileSet> {
     let mut file_set = FileSet::default();
     let mut gitignore = build_gitignore(&policy.repo_root)?;
-    
+
     let mut classifications: HashMap<PathBuf, FileClassification> = HashMap::new();
-    
+
     for ranked_file in &ctx.ranked_files {
         let path = &ranked_file.path;
-        
+
         let classification = classify_file(path, &mut gitignore, policy)?;
         classifications.insert(path.clone(), classification);
     }
-    
+
     for mentioned in mentioned_files {
         let full_path = normalize_path(&policy.repo_root, mentioned)?;
         if !classifications.contains_key(&full_path) {
@@ -173,10 +173,10 @@ pub fn build_file_set(
             }
         }
     }
-    
+
     for (path, classification) in classifications {
         let category = categorize_file(&path, &classification, policy)?;
-        
+
         match category {
             FileCategory::Editable => file_set.editable.push(path),
             FileCategory::Readonly => file_set.readonly.push(path),
@@ -185,13 +185,13 @@ pub fn build_file_set(
             FileCategory::Denied(reason) => file_set.denied.push((path, reason)),
         }
     }
-    
+
     file_set.editable.sort();
     file_set.readonly.sort();
     file_set.generated.sort();
     file_set.binary.sort();
     file_set.denied.sort_by(|a, b| a.0.cmp(&b.0));
-    
+
     Ok(file_set)
 }
 
@@ -211,12 +211,12 @@ fn classify_file(
 ) -> Result<FileClassification> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
-    
+
     let size = metadata.len();
     let is_binary = is_binary_file(path)?;
     let is_sensitive = is_sensitive_file(path, policy);
     let is_generated = is_generated_file(path, policy);
-    
+
     let is_gitignored = if policy.respect_gitignore {
         if let Some(gi) = gitignore.as_ref() {
             gi.matched(path, metadata.is_dir()).is_ignore()
@@ -226,7 +226,7 @@ fn classify_file(
     } else {
         false
     };
-    
+
     Ok(FileClassification {
         path: path.to_path_buf(),
         is_binary,
@@ -245,43 +245,43 @@ fn categorize_file(
     if is_path_denied(path, policy)? {
         return Ok(FileCategory::Denied(DenyReason::DeniedPath));
     }
-    
+
     if classification.is_sensitive {
         return Ok(FileCategory::Denied(DenyReason::SensitiveFile));
     }
-    
+
     if classification.size > policy.max_file_size_bytes {
         return Ok(FileCategory::Denied(DenyReason::TooLarge));
     }
-    
+
     if classification.is_binary && !policy.allow_binary_edit {
         return Ok(FileCategory::Binary);
     }
-    
+
     if classification.is_generated && !policy.allow_generated_edits {
         return Ok(FileCategory::Generated);
     }
-    
+
     if classification.is_gitignored {
         return Ok(FileCategory::Readonly);
     }
-    
+
     Ok(FileCategory::Editable)
 }
 
 fn build_gitignore(repo_root: &Path) -> Result<Option<ignore::gitignore::Gitignore>> {
     let gitignore_path = repo_root.join(".gitignore");
-    
+
     if !gitignore_path.exists() {
         return Ok(None);
     }
-    
+
     let mut builder = GitignoreBuilder::new(repo_root);
-    
+
     if let Some(e) = builder.add(&gitignore_path) {
         eprintln!("Warning: Failed to parse .gitignore: {}", e);
     }
-    
+
     let global_gitignore = dirs::home_dir().map(|h| h.join(".gitignore_global"));
     if let Some(ref global) = global_gitignore {
         if global.exists() {
@@ -290,123 +290,179 @@ fn build_gitignore(repo_root: &Path) -> Result<Option<ignore::gitignore::Gitigno
             }
         }
     }
-    
+
     Ok(Some(builder.build()?))
 }
 
 fn is_binary_file(path: &Path) -> Result<bool> {
     const SAMPLE_SIZE: usize = 8192;
     const MAX_TEXT_RATIO: f64 = 0.10;
-    
-    let extension = path.extension()
+
+    let extension = path
+        .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase());
-    
+
     let text_extensions: HashSet<&str> = [
-        "txt", "md", "rs", "js", "ts", "jsx", "tsx", "py", "go", "java", "c", "cpp", "h",
-        "hpp", "rb", "php", "swift", "kt", "scala", "r", "m", "mm", "html", "css", "scss",
-        "sass", "less", "json", "yaml", "yml", "toml", "xml", "sql", "sh", "bash", "zsh",
-        "fish", "ps1", "bat", "cmd", "dockerfile", "makefile", "cmake", "graphql", "gql",
-    ].iter().cloned().collect();
-    
+        "txt",
+        "md",
+        "rs",
+        "js",
+        "ts",
+        "jsx",
+        "tsx",
+        "py",
+        "go",
+        "java",
+        "c",
+        "cpp",
+        "h",
+        "hpp",
+        "rb",
+        "php",
+        "swift",
+        "kt",
+        "scala",
+        "r",
+        "m",
+        "mm",
+        "html",
+        "css",
+        "scss",
+        "sass",
+        "less",
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "xml",
+        "sql",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "ps1",
+        "bat",
+        "cmd",
+        "dockerfile",
+        "makefile",
+        "cmake",
+        "graphql",
+        "gql",
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
     if let Some(ref ext) = extension {
         if text_extensions.contains(ext.as_str()) {
             return Ok(false);
         }
     }
-    
+
     let binary_extensions: HashSet<&str> = [
-        "exe", "dll", "so", "dylib", "bin", "obj", "o", "a", "lib", "pyc", "class",
-        "jar", "war", "ear", "zip", "tar", "gz", "bz2", "7z", "rar", "jpg", "jpeg",
-        "png", "gif", "bmp", "ico", "svg", "pdf", "doc", "docx", "xls", "xlsx", "ppt",
-        "pptx", "mp3", "mp4", "avi", "mov", "wav", "ogg", "webm", "ttf", "otf", "woff",
-        "woff2", "eot", "swf", "fla", "db", "sqlite", "sqlite3", "mdb", "accdb",
-    ].iter().cloned().collect();
-    
+        "exe", "dll", "so", "dylib", "bin", "obj", "o", "a", "lib", "pyc", "class", "jar", "war",
+        "ear", "zip", "tar", "gz", "bz2", "7z", "rar", "jpg", "jpeg", "png", "gif", "bmp", "ico",
+        "svg", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "mp3", "mp4", "avi", "mov",
+        "wav", "ogg", "webm", "ttf", "otf", "woff", "woff2", "eot", "swf", "fla", "db", "sqlite",
+        "sqlite3", "mdb", "accdb",
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
     if let Some(ref ext) = extension {
         if binary_extensions.contains(ext.as_str()) {
             return Ok(true);
         }
     }
-    
+
     let mut file = fs::File::open(path)
         .with_context(|| format!("Failed to open {} for binary detection", path.display()))?;
-    
+
     let mut buffer = vec![0u8; SAMPLE_SIZE];
-    let bytes_read = file.read(&mut buffer)
+    let bytes_read = file
+        .read(&mut buffer)
         .with_context(|| format!("Failed to read from {}", path.display()))?;
-    
+
     buffer.truncate(bytes_read);
-    
+
     let null_byte_count = buffer.iter().filter(|&&b| b == 0).count();
     let null_ratio = null_byte_count as f64 / bytes_read as f64;
-    
+
     if null_ratio > MAX_TEXT_RATIO {
         return Ok(true);
     }
-    
-    let control_char_count = buffer.iter()
+
+    let control_char_count = buffer
+        .iter()
         .filter(|&&b| b < 32 && b != 0x09 && b != 0x0A && b != 0x0D)
         .count();
     let control_ratio = control_char_count as f64 / bytes_read as f64;
-    
+
     Ok(control_ratio > MAX_TEXT_RATIO)
 }
 
 fn is_sensitive_file(path: &Path, policy: &FilePolicy) -> bool {
     let path_str = path.to_string_lossy();
-    let file_name = path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
     for pattern in &policy.sensitive_file_patterns {
         if glob_match(pattern, &path_str) || glob_match(pattern, file_name) {
             return true;
         }
     }
-    
+
     let sensitive_content_indicators = [
-        "password", "secret", "token", "key", "credential", "private",
-        "api_key", "apikey", "auth_token", "access_token", "bearer",
+        "password",
+        "secret",
+        "token",
+        "key",
+        "credential",
+        "private",
+        "api_key",
+        "apikey",
+        "auth_token",
+        "access_token",
+        "bearer",
     ];
-    
+
     let lower_path = path_str.to_lowercase();
     for indicator in &sensitive_content_indicators {
         if lower_path.contains(indicator) {
             return true;
         }
     }
-    
+
     false
 }
 
 fn is_generated_file(path: &Path, policy: &FilePolicy) -> bool {
     let path_str = path.to_string_lossy();
-    let file_name = path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
     for pattern in &policy.generated_file_patterns {
         if glob_match(pattern, &path_str) || glob_match(pattern, file_name) {
             return true;
         }
     }
-    
+
     if let Ok(content) = fs::read_to_string(path) {
         let first_lines: String = content.lines().take(5).collect::<Vec<_>>().join("\n");
-        if first_lines.contains("@generated") ||
-           first_lines.contains("GENERATED") ||
-           first_lines.contains("Auto-generated") ||
-           first_lines.contains("This file was generated") {
+        if first_lines.contains("@generated")
+            || first_lines.contains("GENERATED")
+            || first_lines.contains("Auto-generated")
+            || first_lines.contains("This file was generated")
+        {
             return true;
         }
     }
-    
+
     false
 }
 
 /// Normalize a path without requiring the file to exist
-/// 
+///
 /// This handles the case for CreateFile where the path doesn't exist yet.
 /// It canonicalizes the parent directory (if it exists) and joins the filename.
 fn normalize_path_without_existence(path: &Path) -> Result<PathBuf> {
@@ -414,21 +470,24 @@ fn normalize_path_without_existence(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("Path must be absolute: {}", path.display());
     }
-    
+
     // Try to canonicalize - if it works, great
     if let Ok(canonical) = path.canonicalize() {
         return Ok(canonical);
     }
-    
+
     // Path doesn't exist - try to canonicalize parent directories
     let mut current = path;
     let mut to_push = Vec::new();
-    
+
     // Walk up the tree until we find an existing directory
     while let Some(parent) = current.parent() {
-        to_push.push(current.file_name()
-            .ok_or_else(|| anyhow::anyhow!("Path has no file name: {}", path.display()))?);
-        
+        to_push.push(
+            current
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Path has no file name: {}", path.display()))?,
+        );
+
         if let Ok(canonical_parent) = parent.canonicalize() {
             // Found an existing parent - reconstruct the path
             let mut result = canonical_parent;
@@ -437,87 +496,99 @@ fn normalize_path_without_existence(path: &Path) -> Result<PathBuf> {
             }
             return Ok(result);
         }
-        
+
         current = parent;
     }
-    
+
     // Couldn't find any existing parent - check if path has any ".." components
     // that would escape the root
-    bail!("Cannot normalize path - no existing parent directory found: {}", path.display())
+    bail!(
+        "Cannot normalize path - no existing parent directory found: {}",
+        path.display()
+    )
 }
 
 fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
     // Handle non-existing paths by normalizing without requiring existence
     let canonical = normalize_path_without_existence(path)?;
     let repo_root = policy.repo_root.canonicalize()?;
-    
+
     if !canonical.starts_with(&repo_root) {
         return Ok(true);
     }
-    
-    let relative = canonical.strip_prefix(&repo_root)
+
+    let relative = canonical
+        .strip_prefix(&repo_root)
         .map_err(|_| anyhow::anyhow!("Failed to get relative path"))?;
-    
+
     for denied in &policy.denied_paths {
         if relative.starts_with(denied) {
             return Ok(true);
         }
     }
-    
+
     let path_str = path.to_string_lossy();
     for pattern in &policy.denied_patterns {
         if glob_match(pattern, &path_str) {
             return Ok(true);
         }
     }
-    
+
     Ok(false)
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
     if pattern.ends_with('/') {
         let dir_pattern = &pattern[..pattern.len() - 1];
-        return text.contains(&format!("{}/", dir_pattern)) ||
-               text.ends_with(dir_pattern);
+        return text.contains(&format!("{}/", dir_pattern)) || text.ends_with(dir_pattern);
     }
-    
+
     if pattern.starts_with("*") && pattern.ends_with("*") {
         let middle = &pattern[1..pattern.len() - 1];
         return text.contains(middle);
     }
-    
+
     if pattern.starts_with("*") {
         let suffix = &pattern[1..];
         return text.ends_with(suffix);
     }
-    
+
     if pattern.ends_with("*") {
         let prefix = &pattern[..pattern.len() - 1];
         return text.starts_with(prefix);
     }
-    
+
     text == pattern
 }
 
 pub fn assert_edit_allowed(path: &Path, set: &FileSet, policy: &FilePolicy) -> Result<()> {
     let normalized = normalize_path(&policy.repo_root, path)?;
-    
+
     if let Some((_, reason)) = set.denied.iter().find(|(p, _)| p == &normalized) {
         bail!("Edit not allowed for {}: {}", path.display(), reason);
     }
-    
+
     if set.binary.contains(&normalized) && !policy.allow_binary_edit {
-        bail!("Edit not allowed for {}: binary file editing is disabled", path.display());
+        bail!(
+            "Edit not allowed for {}: binary file editing is disabled",
+            path.display()
+        );
     }
-    
+
     if set.generated.contains(&normalized) && !policy.allow_generated_edits {
-        bail!("Edit not allowed for {}: generated file editing is disabled", path.display());
+        bail!(
+            "Edit not allowed for {}: generated file editing is disabled",
+            path.display()
+        );
     }
-    
+
     if !set.editable.contains(&normalized) && normalized.exists() {
-        bail!("Edit not allowed for {}: file is not in editable set", path.display());
+        bail!(
+            "Edit not allowed for {}: file is not in editable set",
+            path.display()
+        );
     }
-    
+
     Ok(())
 }
 
@@ -525,22 +596,27 @@ pub fn assert_delete_allowed(path: &Path, set: &FileSet, policy: &FilePolicy) ->
     if !policy.allow_delete {
         bail!("Delete operations are not allowed by policy");
     }
-    
+
     assert_edit_allowed(path, set, policy)
 }
 
-pub fn assert_rename_allowed(from: &Path, to: &Path, set: &FileSet, policy: &FilePolicy) -> Result<()> {
+pub fn assert_rename_allowed(
+    from: &Path,
+    to: &Path,
+    set: &FileSet,
+    policy: &FilePolicy,
+) -> Result<()> {
     if !policy.allow_rename {
         bail!("Rename operations are not allowed by policy");
     }
-    
+
     assert_edit_allowed(from, set, policy)?;
-    
+
     let to_normalized = normalize_path(&policy.repo_root, to)?;
     if is_path_denied(&to_normalized, policy)? {
         bail!("Cannot rename to {}: target path is denied", to.display());
     }
-    
+
     Ok(())
 }
 
@@ -550,7 +626,7 @@ pub(crate) fn normalize_path(root: &Path, path: &Path) -> Result<PathBuf> {
     } else {
         root.join(path)
     };
-    
+
     Ok(resolved.canonicalize().unwrap_or(resolved))
 }
 
@@ -559,7 +635,7 @@ pub fn get_file_category(path: &Path, set: &FileSet) -> &'static str {
         Ok(p) => p,
         Err(_) => return "unknown",
     };
-    
+
     if set.editable.contains(&normalized) {
         "editable"
     } else if set.readonly.contains(&normalized) {

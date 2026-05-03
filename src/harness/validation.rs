@@ -1,16 +1,16 @@
 use crate::harness::sandbox::SandboxRuntime;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
 use tokio::fs;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ValidationPlan {
@@ -33,12 +33,12 @@ impl ValidationPlan {
             parallel: true,
         }
     }
-    
+
     pub fn sequential(mut self) -> Self {
         self.parallel = false;
         self
     }
-    
+
     pub fn with_timeout(mut self, ms: u64) -> Self {
         self.timeout_ms = Some(ms);
         self
@@ -111,10 +111,10 @@ async fn compute_file_hash(path: &Path) -> Result<String> {
 /// Compute hashes for all relevant files in the repository
 async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String>> {
     let mut hashes = HashMap::new();
-    
+
     // Find all source files that might affect validation
     let extensions = ["rs", "js", "ts", "py", "go", "java", "cpp", "c", "h", "hpp"];
-    
+
     let mut entries = fs::read_dir(root).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
@@ -128,9 +128,16 @@ async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String
             }
         }
     }
-    
+
     // Also include config files that affect validation
-    let config_files = ["Cargo.toml", "package.json", "Makefile", "pytest.ini", ".eslintrc", "tsconfig.json"];
+    let config_files = [
+        "Cargo.toml",
+        "package.json",
+        "Makefile",
+        "pytest.ini",
+        ".eslintrc",
+        "tsconfig.json",
+    ];
     for config in &config_files {
         let config_path = root.join(config);
         if config_path.exists() {
@@ -139,7 +146,7 @@ async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String
             }
         }
     }
-    
+
     Ok(hashes)
 }
 
@@ -148,12 +155,13 @@ fn create_cache_key(root: &Path, command: &str, file_hashes: &HashMap<PathBuf, S
     // Sort hashes for consistent key generation
     let mut hash_entries: Vec<_> = file_hashes.iter().collect();
     hash_entries.sort_by(|a, b| a.0.cmp(b.0));
-    
-    let hash_str = hash_entries.iter()
+
+    let hash_str = hash_entries
+        .iter()
         .map(|(path, hash)| format!("{}:{}", path.display(), hash))
         .collect::<Vec<_>>()
         .join("|");
-    
+
     format!("{}:{}:{}", root.display(), command, hash_str)
 }
 
@@ -177,15 +185,19 @@ impl ValidationCache {
             ttl_ms,
         }
     }
-    
-    async fn get(&self, key: &str, current_hashes: &HashMap<PathBuf, String>) -> Option<CommandResult> {
+
+    async fn get(
+        &self,
+        key: &str,
+        current_hashes: &HashMap<PathBuf, String>,
+    ) -> Option<CommandResult> {
         let entries = self.entries.lock().await;
         if let Some(cached) = entries.get(key) {
             // Check TTL
             if cached.timestamp.elapsed().as_millis() >= self.ttl_ms as u128 {
                 return None;
             }
-            
+
             // Validate file hashes match
             if &cached.file_hashes == current_hashes {
                 let mut result = cached.result.clone();
@@ -195,16 +207,19 @@ impl ValidationCache {
         }
         None
     }
-    
+
     async fn set(&self, key: String, result: CommandResult, file_hashes: HashMap<PathBuf, String>) {
         let mut entries = self.entries.lock().await;
-        entries.insert(key, CachedResult {
-            result,
-            timestamp: Instant::now(),
-            file_hashes,
-        });
+        entries.insert(
+            key,
+            CachedResult {
+                result,
+                timestamp: Instant::now(),
+                file_hashes,
+            },
+        );
     }
-    
+
     async fn clear(&self) {
         let mut entries = self.entries.lock().await;
         entries.clear();
@@ -229,55 +244,83 @@ pub async fn run_validation_with_cache(
 ) -> Result<ValidationResult> {
     let start = Instant::now();
     let timeout = plan.timeout_ms.unwrap_or(120000);
-    
-    let all_commands: Vec<(String, ValidationCategory)> = plan.format_commands.iter()
+
+    let all_commands: Vec<(String, ValidationCategory)> = plan
+        .format_commands
+        .iter()
         .map(|c| (c.clone(), ValidationCategory::Format))
-        .chain(plan.lint_commands.iter().map(|c| (c.clone(), ValidationCategory::Lint)))
-        .chain(plan.test_commands.iter().map(|c| (c.clone(), ValidationCategory::Test)))
-        .chain(plan.repro_commands.iter().map(|c| (c.clone(), ValidationCategory::Repro)))
+        .chain(
+            plan.lint_commands
+                .iter()
+                .map(|c| (c.clone(), ValidationCategory::Lint)),
+        )
+        .chain(
+            plan.test_commands
+                .iter()
+                .map(|c| (c.clone(), ValidationCategory::Test)),
+        )
+        .chain(
+            plan.repro_commands
+                .iter()
+                .map(|c| (c.clone(), ValidationCategory::Repro)),
+        )
         .collect();
-    
+
     let results = if plan.parallel {
         run_parallel(root, &all_commands, sandbox, cache, timeout).await?
     } else {
         run_sequential(root, &all_commands, sandbox, cache, timeout).await?
     };
-    
+
     let mut category_results: HashMap<ValidationCategory, CategoryResult> = HashMap::new();
-    for cat in [ValidationCategory::Format, ValidationCategory::Lint, ValidationCategory::Test, ValidationCategory::Repro] {
-        let cat_commands: Vec<_> = results.iter()
-            .filter(|(cmd, _)| all_commands.iter().any(|(c, ccat)| c == cmd && *ccat == cat))
+    for cat in [
+        ValidationCategory::Format,
+        ValidationCategory::Lint,
+        ValidationCategory::Test,
+        ValidationCategory::Repro,
+    ] {
+        let cat_commands: Vec<_> = results
+            .iter()
+            .filter(|(cmd, _)| {
+                all_commands
+                    .iter()
+                    .any(|(c, ccat)| c == cmd && *ccat == cat)
+            })
             .map(|(_, r)| r.clone())
             .collect();
-        
+
         let passed = cat_commands.iter().all(|r| r.exit_code == Some(0));
         let total_duration: u64 = cat_commands.iter().map(|r| r.duration_ms).sum();
-        
-        category_results.insert(cat.clone(), CategoryResult {
-            category: cat,
-            passed,
-            commands: cat_commands,
-            total_duration_ms: total_duration,
-        });
+
+        category_results.insert(
+            cat.clone(),
+            CategoryResult {
+                category: cat,
+                passed,
+                commands: cat_commands,
+                total_duration_ms: total_duration,
+            },
+        );
     }
-    
-    let errors: Vec<String> = results.iter()
+
+    let errors: Vec<String> = results
+        .iter()
         .filter(|(_, r)| r.exit_code != Some(0))
         .map(|(cmd, _)| cmd.clone())
         .collect();
-    
+
     let passed = errors.is_empty();
     let cached = results.iter().all(|(_, r)| r.cached);
-    
+
     let test_commands: Vec<_> = plan.test_commands.clone();
     let flaky_tests = if !test_commands.is_empty() && !plan.parallel {
         detect_flaky_tests(root, &test_commands, sandbox, timeout).await?
     } else {
         vec![]
     };
-    
+
     let command_results: Vec<_> = results.into_iter().map(|(_, r)| r).collect();
-    
+
     Ok(ValidationResult {
         passed,
         command_results,
@@ -298,16 +341,16 @@ async fn run_parallel(
 ) -> Result<Vec<(String, CommandResult)>> {
     // Compute file hashes once for all commands
     let file_hashes = compute_repo_file_hashes(root).await.unwrap_or_default();
-    
+
     // Check cache for all commands first
     let mut tasks = Vec::new();
     let mut cached_results = Vec::new();
-    
+
     for (cmd, _cat) in commands {
         let cmd = cmd.clone();
         let root = root.to_path_buf();
         let cache_key = create_cache_key(&root, &cmd, &file_hashes);
-        
+
         if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
             cached_results.push((cmd, cached));
         } else {
@@ -316,16 +359,18 @@ async fn run_parallel(
             let file_hashes_clone = file_hashes.clone();
             let cache_key_clone = cache_key.clone();
             let cmd_clone = cmd.clone();
-            
+
             // Cloneable wrapper for sandbox execution
             let task = tokio::spawn(async move {
                 let start = Instant::now();
                 // Note: We need to create a new sandbox instance for each task
                 // since we can't share the trait object across threads
                 let local_sandbox = crate::harness::sandbox::LocalSandboxRuntime::default();
-                let result = local_sandbox.run_command(&root_clone, &cmd_clone, timeout).await;
+                let result = local_sandbox
+                    .run_command(&root_clone, &cmd_clone, timeout)
+                    .await;
                 let duration = start.elapsed().as_millis() as u64;
-                
+
                 let cmd_result = match result {
                     Ok(r) => CommandResult {
                         command: cmd_clone.clone(),
@@ -348,14 +393,14 @@ async fn run_parallel(
                         timed_out: true,
                     },
                 };
-                
+
                 (cmd_clone, cache_key_clone, cmd_result, file_hashes_clone)
             });
-            
+
             tasks.push(task);
         }
     }
-    
+
     // Wait for all tasks to complete in parallel
     let mut results = cached_results;
     for task in tasks {
@@ -363,7 +408,7 @@ async fn run_parallel(
         cache.set(cache_key, cmd_result.clone(), file_hashes).await;
         results.push((cmd, cmd_result));
     }
-    
+
     Ok(results)
 }
 
@@ -375,22 +420,22 @@ async fn run_sequential(
     timeout: u64,
 ) -> Result<Vec<(String, CommandResult)>> {
     let mut results = vec![];
-    
+
     // Compute file hashes once at the start
     let file_hashes = compute_repo_file_hashes(root).await.unwrap_or_default();
-    
+
     for (cmd, _cat) in commands {
         let cache_key = create_cache_key(root, cmd, &file_hashes);
-        
+
         if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
             results.push((cmd.clone(), cached));
             continue;
         }
-        
+
         let start = Instant::now();
         let result = sandbox.run_command(root, cmd, timeout).await;
         let duration = start.elapsed().as_millis() as u64;
-        
+
         let cmd_result = match result {
             Ok(r) => CommandResult {
                 command: cmd.clone(),
@@ -413,11 +458,13 @@ async fn run_sequential(
                 timed_out: true,
             },
         };
-        
-        cache.set(cache_key, cmd_result.clone(), file_hashes.clone()).await;
+
+        cache
+            .set(cache_key, cmd_result.clone(), file_hashes.clone())
+            .await;
         results.push((cmd.clone(), cmd_result));
     }
-    
+
     Ok(results)
 }
 
@@ -428,21 +475,23 @@ async fn detect_flaky_tests(
     timeout: u64,
 ) -> Result<Vec<FlakyTestInfo>> {
     let mut flaky = vec![];
-    
+
     for cmd in test_commands {
         let mut attempts = vec![];
         let mut results_different = false;
-        
+
         for i in 0..3 {
             let start = Instant::now();
             let result = sandbox.run_command(root, cmd, timeout).await?;
             let duration = start.elapsed().as_millis() as u64;
             let passed = result.exit_code == Some(0);
-            
-            if !attempts.is_empty() && attempts.last().map(|a: &TestAttempt| a.passed) != Some(passed) {
+
+            if !attempts.is_empty()
+                && attempts.last().map(|a: &TestAttempt| a.passed) != Some(passed)
+            {
                 results_different = true;
             }
-            
+
             attempts.push(TestAttempt {
                 attempt: i + 1,
                 passed,
@@ -450,7 +499,7 @@ async fn detect_flaky_tests(
                 exit_code: result.exit_code,
             });
         }
-        
+
         if results_different {
             flaky.push(FlakyTestInfo {
                 test_name: extract_test_name(cmd),
@@ -459,12 +508,13 @@ async fn detect_flaky_tests(
             });
         }
     }
-    
+
     Ok(flaky)
 }
 
 fn extract_test_name(command: &str) -> String {
-    command.split_whitespace()
+    command
+        .split_whitespace()
         .last()
         .map(|s| s.to_string())
         .unwrap_or_else(|| command.to_string())
@@ -477,14 +527,14 @@ pub async fn validate_with_retry(
     max_retries: u32,
 ) -> Result<ValidationResult> {
     let mut last_result = None;
-    
+
     for attempt in 0..=max_retries {
         let result = run_validation(root, plan, sandbox).await?;
-        
+
         if result.passed {
             return Ok(result);
         }
-        
+
         if attempt < max_retries && !result.flaky_tests_detected.is_empty() {
             tokio::time::sleep(Duration::from_secs(1)).await;
             last_result = Some(result);
@@ -492,33 +542,54 @@ pub async fn validate_with_retry(
             return Ok(result);
         }
     }
-    
+
     Ok(last_result.unwrap())
 }
 
 pub fn get_validation_summary(result: &ValidationResult) -> String {
     let categories = [
-        ("Format", result.category_results.get(&ValidationCategory::Format)),
-        ("Lint", result.category_results.get(&ValidationCategory::Lint)),
-        ("Test", result.category_results.get(&ValidationCategory::Test)),
-        ("Repro", result.category_results.get(&ValidationCategory::Repro)),
+        (
+            "Format",
+            result.category_results.get(&ValidationCategory::Format),
+        ),
+        (
+            "Lint",
+            result.category_results.get(&ValidationCategory::Lint),
+        ),
+        (
+            "Test",
+            result.category_results.get(&ValidationCategory::Test),
+        ),
+        (
+            "Repro",
+            result.category_results.get(&ValidationCategory::Repro),
+        ),
     ];
-    
+
     let mut parts = vec![];
     for (name, opt_cat) in categories {
         if let Some(cat) = opt_cat {
             let status = if cat.passed { "✓" } else { "✗" };
-            parts.push(format!("{} {} ({} cmds, {}ms)", status, name, cat.commands.len(), cat.total_duration_ms));
+            parts.push(format!(
+                "{} {} ({} cmds, {}ms)",
+                status,
+                name,
+                cat.commands.len(),
+                cat.total_duration_ms
+            ));
         }
     }
-    
+
     if !result.flaky_tests_detected.is_empty() {
-        parts.push(format!("⚠ {} flaky tests", result.flaky_tests_detected.len()));
+        parts.push(format!(
+            "⚠ {} flaky tests",
+            result.flaky_tests_detected.len()
+        ));
     }
-    
+
     if result.cached {
         parts.push("(cached)".into());
     }
-    
+
     parts.join(" | ")
 }

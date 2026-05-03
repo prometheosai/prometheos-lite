@@ -7,10 +7,10 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ModelTier {
-    Fast,      // Quick tasks, simple edits
-    Balanced,  // Standard development work
-    Powerful,  // Complex analysis and generation
-    Expert,    // Critical architectural decisions
+    Fast,     // Quick tasks, simple edits
+    Balanced, // Standard development work
+    Powerful, // Complex analysis and generation
+    Expert,   // Critical architectural decisions
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,9 +107,17 @@ impl ModelStrategyEngine {
             context_window: 128000,
             cost_per_1k_tokens: 0.15,
             avg_latency_ms: 500,
-            strengths: vec!["fast".to_string(), "cheap".to_string(), "simple_tasks".to_string()],
+            strengths: vec![
+                "fast".to_string(),
+                "cheap".to_string(),
+                "simple_tasks".to_string(),
+            ],
             weaknesses: vec!["limited_reasoning".to_string()],
-            supported_languages: vec!["rust".to_string(), "python".to_string(), "javascript".to_string()],
+            supported_languages: vec![
+                "rust".to_string(),
+                "python".to_string(),
+                "javascript".to_string(),
+            ],
             max_file_size_kb: 100,
         });
 
@@ -120,9 +128,19 @@ impl ModelStrategyEngine {
             context_window: 128000,
             cost_per_1k_tokens: 2.50,
             avg_latency_ms: 2000,
-            strengths: vec!["code_generation".to_string(), "debugging".to_string(), "refactoring".to_string()],
+            strengths: vec![
+                "code_generation".to_string(),
+                "debugging".to_string(),
+                "refactoring".to_string(),
+            ],
             weaknesses: vec!["complex_architecture".to_string()],
-            supported_languages: vec!["rust".to_string(), "python".to_string(), "javascript".to_string(), "go".to_string(), "java".to_string()],
+            supported_languages: vec![
+                "rust".to_string(),
+                "python".to_string(),
+                "javascript".to_string(),
+                "go".to_string(),
+                "java".to_string(),
+            ],
             max_file_size_kb: 500,
         });
 
@@ -133,9 +151,20 @@ impl ModelStrategyEngine {
             context_window: 200000,
             cost_per_1k_tokens: 3.00,
             avg_latency_ms: 3000,
-            strengths: vec!["complex_reasoning".to_string(), "architecture".to_string(), "large_context".to_string()],
+            strengths: vec![
+                "complex_reasoning".to_string(),
+                "architecture".to_string(),
+                "large_context".to_string(),
+            ],
             weaknesses: vec!["higher_cost".to_string()],
-            supported_languages: vec!["rust".to_string(), "python".to_string(), "javascript".to_string(), "go".to_string(), "java".to_string(), "cpp".to_string()],
+            supported_languages: vec![
+                "rust".to_string(),
+                "python".to_string(),
+                "javascript".to_string(),
+                "go".to_string(),
+                "java".to_string(),
+                "cpp".to_string(),
+            ],
             max_file_size_kb: 1000,
         });
 
@@ -146,22 +175,38 @@ impl ModelStrategyEngine {
             context_window: 128000,
             cost_per_1k_tokens: 15.00,
             avg_latency_ms: 10000,
-            strengths: vec!["expert_reasoning".to_string(), "complex_algorithms".to_string(), "system_design".to_string()],
+            strengths: vec![
+                "expert_reasoning".to_string(),
+                "complex_algorithms".to_string(),
+                "system_design".to_string(),
+            ],
             weaknesses: vec!["very_expensive".to_string(), "slow".to_string()],
-            supported_languages: vec!["rust".to_string(), "python".to_string(), "javascript".to_string(), "go".to_string(), "java".to_string(), "cpp".to_string(), "haskell".to_string()],
+            supported_languages: vec![
+                "rust".to_string(),
+                "python".to_string(),
+                "javascript".to_string(),
+                "go".to_string(),
+                "java".to_string(),
+                "cpp".to_string(),
+                "haskell".to_string(),
+            ],
             max_file_size_kb: 2000,
         });
     }
 
-    pub fn select_model(&mut self, requirements: &TaskRequirements, task_id: &str) -> Result<ModelRecommendation> {
+    pub fn select_model(
+        &mut self,
+        requirements: &TaskRequirements,
+        task_id: &str,
+    ) -> Result<ModelRecommendation> {
         let candidates = self.rank_models(requirements);
-        
+
         if candidates.is_empty() {
             bail!("No suitable model found for requirements");
         }
 
         let best = candidates[0].clone();
-        
+
         self.selection_history.push(ModelSelection {
             task_id: task_id.to_string(),
             selected_model: best.model.id.clone(),
@@ -175,12 +220,19 @@ impl ModelStrategyEngine {
             estimated_cost: best.estimated_cost,
             estimated_latency_ms: best.estimated_latency_ms,
             reasoning: best.reasoning,
-            alternatives: candidates.iter().skip(1).take(2).map(|c| c.model.clone()).collect(),
+            alternatives: candidates
+                .iter()
+                .skip(1)
+                .take(2)
+                .map(|c| c.model.clone())
+                .collect(),
         })
     }
 
     fn rank_models(&self, requirements: &TaskRequirements) -> Vec<ScoredModel> {
-        let mut scored: Vec<ScoredModel> = self.models.iter()
+        let mut scored: Vec<ScoredModel> = self
+            .models
+            .iter()
             .filter(|m| self.is_compatible(m, requirements))
             .map(|m| self.score_model(m, requirements))
             .collect();
@@ -191,8 +243,11 @@ impl ModelStrategyEngine {
 
     fn is_compatible(&self, model: &ModelProfile, requirements: &TaskRequirements) -> bool {
         // Check language support
-        let language_match = requirements.languages.is_empty() || 
-            requirements.languages.iter().all(|lang| model.supported_languages.contains(lang));
+        let language_match = requirements.languages.is_empty()
+            || requirements
+                .languages
+                .iter()
+                .all(|lang| model.supported_languages.contains(lang));
 
         // Check size constraint
         let size_ok = requirements.code_size_lines * 50 < model.max_file_size_kb * 1024; // Rough estimate
@@ -245,10 +300,18 @@ impl ModelStrategyEngine {
         // Latency preference (20%)
         let latency_score = match requirements.urgency {
             UrgencyLevel::Critical => {
-                if model.avg_latency_ms < 1000 { 1.0 } else { 0.3 }
+                if model.avg_latency_ms < 1000 {
+                    1.0
+                } else {
+                    0.3
+                }
             }
             UrgencyLevel::High => {
-                if model.avg_latency_ms < 2000 { 1.0 } else { 0.5 }
+                if model.avg_latency_ms < 2000 {
+                    1.0
+                } else {
+                    0.5
+                }
             }
             _ => 0.8,
         };
@@ -263,11 +326,13 @@ impl ModelStrategyEngine {
         score += perf_score * 0.2;
 
         // Capability match (10%)
-        let capability_score = if requirements.requires_reasoning && 
-            model.strengths.contains(&"complex_reasoning".to_string()) {
+        let capability_score = if requirements.requires_reasoning
+            && model.strengths.contains(&"complex_reasoning".to_string())
+        {
             1.0
-        } else if requirements.requires_creativity && 
-            model.strengths.contains(&"code_generation".to_string()) {
+        } else if requirements.requires_creativity
+            && model.strengths.contains(&"code_generation".to_string())
+        {
             1.0
         } else {
             0.7
@@ -295,7 +360,8 @@ impl ModelStrategyEngine {
     fn get_performance_score(&self, model_id: &str) -> f64 {
         match self.performance_data.get(model_id) {
             Some(perf) => {
-                let success_rate = perf.successful_requests as f64 / perf.total_requests.max(1) as f64;
+                let success_rate =
+                    perf.successful_requests as f64 / perf.total_requests.max(1) as f64;
                 let satisfaction = perf.user_satisfaction;
                 (success_rate + satisfaction) / 2.0
             }
@@ -303,23 +369,33 @@ impl ModelStrategyEngine {
         }
     }
 
-    pub fn record_performance(&mut self, model_id: &str, success: bool, cost: f64, latency_ms: u64) {
-        let entry = self.performance_data.entry(model_id.to_string()).or_insert(ModelPerformance {
-            total_requests: 0,
-            successful_requests: 0,
-            avg_latency_ms: 0.0,
-            total_cost: 0.0,
-            user_satisfaction: 0.5,
-        });
+    pub fn record_performance(
+        &mut self,
+        model_id: &str,
+        success: bool,
+        cost: f64,
+        latency_ms: u64,
+    ) {
+        let entry = self
+            .performance_data
+            .entry(model_id.to_string())
+            .or_insert(ModelPerformance {
+                total_requests: 0,
+                successful_requests: 0,
+                avg_latency_ms: 0.0,
+                total_cost: 0.0,
+                user_satisfaction: 0.5,
+            });
 
         entry.total_requests += 1;
         if success {
             entry.successful_requests += 1;
         }
         entry.total_cost += cost;
-        
+
         // Update rolling average
-        entry.avg_latency_ms = (entry.avg_latency_ms * (entry.total_requests - 1) as f64 + latency_ms as f64) 
+        entry.avg_latency_ms = (entry.avg_latency_ms * (entry.total_requests - 1) as f64
+            + latency_ms as f64)
             / entry.total_requests as f64;
     }
 
@@ -373,8 +449,16 @@ Alternatives: {}
         rec.confidence * 100.0,
         rec.estimated_cost,
         rec.estimated_latency_ms,
-        rec.reasoning.iter().map(|r| format!("  - {}", r)).collect::<Vec<_>>().join("\n"),
-        rec.alternatives.iter().map(|m| m.name.clone()).collect::<Vec<_>>().join(", ")
+        rec.reasoning
+            .iter()
+            .map(|r| format!("  - {}", r))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        rec.alternatives
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 

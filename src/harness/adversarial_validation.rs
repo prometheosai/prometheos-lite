@@ -94,12 +94,30 @@ pub struct ValueGenerator {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum GeneratorType {
-    IntegerRange { min: i64, max: i64 },
-    StringPattern { pattern: String, min_len: usize, max_len: usize },
-    FloatRange { min: f64, max: f64 },
-    ArrayOf { element_gen: Box<GeneratorType>, min_len: usize, max_len: usize },
-    OptionOf { inner: Box<GeneratorType> },
-    OneOf { variants: Vec<String> },
+    IntegerRange {
+        min: i64,
+        max: i64,
+    },
+    StringPattern {
+        pattern: String,
+        min_len: usize,
+        max_len: usize,
+    },
+    FloatRange {
+        min: f64,
+        max: f64,
+    },
+    ArrayOf {
+        element_gen: Box<GeneratorType>,
+        min_len: usize,
+        max_len: usize,
+    },
+    OptionOf {
+        inner: Box<GeneratorType>,
+    },
+    OneOf {
+        variants: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,10 +151,22 @@ pub struct StressTest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LoadPattern {
-    Constant { rps: u32 },
-    RampUp { start_rps: u32, end_rps: u32 },
-    Spike { base_rps: u32, spike_rps: u32, spike_duration_secs: u64 },
-    Random { min_rps: u32, max_rps: u32 },
+    Constant {
+        rps: u32,
+    },
+    RampUp {
+        start_rps: u32,
+        end_rps: u32,
+    },
+    Spike {
+        base_rps: u32,
+        spike_rps: u32,
+        spike_duration_secs: u64,
+    },
+    Random {
+        min_rps: u32,
+        max_rps: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -154,38 +184,53 @@ impl AdversarialTestGenerator {
     pub fn new() -> Self {
         let mut edge_case_patterns = HashMap::new();
 
-        edge_case_patterns.insert(EdgeCaseType::EmptyInput, vec![
-            r"vec!\[\]".to_string(),
-            r#""""#.to_string(),
-            r"None".to_string(),
-            r"0".to_string(),
-        ]);
+        edge_case_patterns.insert(
+            EdgeCaseType::EmptyInput,
+            vec![
+                r"vec!\[\]".to_string(),
+                r#""""#.to_string(),
+                r"None".to_string(),
+                r"0".to_string(),
+            ],
+        );
 
-        edge_case_patterns.insert(EdgeCaseType::MaximumValue, vec![
-            r"i64::MAX".to_string(),
-            r"usize::MAX".to_string(),
-            r"f64::MAX".to_string(),
-        ]);
+        edge_case_patterns.insert(
+            EdgeCaseType::MaximumValue,
+            vec![
+                r"i64::MAX".to_string(),
+                r"usize::MAX".to_string(),
+                r"f64::MAX".to_string(),
+            ],
+        );
 
-        edge_case_patterns.insert(EdgeCaseType::MinimumValue, vec![
-            r"i64::MIN".to_string(),
-            r"isize::MIN".to_string(),
-            r"f64::MIN".to_string(),
-        ]);
+        edge_case_patterns.insert(
+            EdgeCaseType::MinimumValue,
+            vec![
+                r"i64::MIN".to_string(),
+                r"isize::MIN".to_string(),
+                r"f64::MIN".to_string(),
+            ],
+        );
 
-        edge_case_patterns.insert(EdgeCaseType::UnicodeEdge, vec![
-            r#""\u{0000}""#.to_string(),
-            r#""\u{FFFF}""#.to_string(),
-            r#""\u{1F600}""#.to_string(),
-            r#""日本語""#.to_string(),
-            r#""𐍈""#.to_string(),
-        ]);
+        edge_case_patterns.insert(
+            EdgeCaseType::UnicodeEdge,
+            vec![
+                r#""\u{0000}""#.to_string(),
+                r#""\u{FFFF}""#.to_string(),
+                r#""\u{1F600}""#.to_string(),
+                r#""日本語""#.to_string(),
+                r#""𐍈""#.to_string(),
+            ],
+        );
 
-        edge_case_patterns.insert(EdgeCaseType::InvalidFormat, vec![
-            r#""not-a-number""#.to_string(),
-            r#""2023-99-99""#.to_string(),
-            r#""invalid@email""#.to_string(),
-        ]);
+        edge_case_patterns.insert(
+            EdgeCaseType::InvalidFormat,
+            vec![
+                r#""not-a-number""#.to_string(),
+                r#""2023-99-99""#.to_string(),
+                r#""invalid@email""#.to_string(),
+            ],
+        );
 
         Self { edge_case_patterns }
     }
@@ -306,7 +351,8 @@ impl AdversarialTestGenerator {
                 let func_name = &symbol.name;
                 let signature = symbol.signature.as_deref().unwrap_or("unknown");
 
-                all_edge_cases.extend(self.generate_edge_case_tests(func_name, signature, language));
+                all_edge_cases
+                    .extend(self.generate_edge_case_tests(func_name, signature, language));
                 all_properties.extend(self.generate_property_tests(func_name, signature, language));
                 all_fuzz.extend(self.generate_fuzz_tests(func_name, 60));
                 all_stress.extend(self.generate_stress_tests(func_name, 120));
@@ -352,7 +398,12 @@ impl AdversarialTestGenerator {
             .collect()
     }
 
-    fn adapt_pattern_to_type(&self, pattern: &str, type_name: &str, edge_case: EdgeCaseType) -> String {
+    fn adapt_pattern_to_type(
+        &self,
+        pattern: &str,
+        type_name: &str,
+        edge_case: EdgeCaseType,
+    ) -> String {
         match type_name {
             "String" | "&str" => pattern.to_string(),
             "i32" | "i64" | "isize" | "u32" | "u64" | "usize" => {
@@ -370,13 +421,23 @@ impl AdversarialTestGenerator {
         }
     }
 
-    fn determine_expected_behavior(&self, edge_case: EdgeCaseType, _types: &[String]) -> ExpectedBehavior {
+    fn determine_expected_behavior(
+        &self,
+        edge_case: EdgeCaseType,
+        _types: &[String],
+    ) -> ExpectedBehavior {
         match edge_case {
             EdgeCaseType::DivisionByZero => ExpectedBehavior::Panic("Division by zero".to_string()),
             EdgeCaseType::NullInput => ExpectedBehavior::ReturnError("Null pointer".to_string()),
-            EdgeCaseType::InvalidFormat => ExpectedBehavior::ReturnError("Invalid format".to_string()),
-            EdgeCaseType::IntegerOverflow => ExpectedBehavior::ReturnError("Integer overflow".to_string()),
-            EdgeCaseType::ResourceExhaustion => ExpectedBehavior::ReturnError("Out of memory".to_string()),
+            EdgeCaseType::InvalidFormat => {
+                ExpectedBehavior::ReturnError("Invalid format".to_string())
+            }
+            EdgeCaseType::IntegerOverflow => {
+                ExpectedBehavior::ReturnError("Integer overflow".to_string())
+            }
+            EdgeCaseType::ResourceExhaustion => {
+                ExpectedBehavior::ReturnError("Out of memory".to_string())
+            }
             EdgeCaseType::DeepRecursion => ExpectedBehavior::Timeout,
             _ => ExpectedBehavior::NoCrash,
         }
@@ -384,12 +445,12 @@ impl AdversarialTestGenerator {
 
     fn determine_priority(&self, edge_case: EdgeCaseType) -> TestPriority {
         match edge_case {
-            EdgeCaseType::DivisionByZero |
-            EdgeCaseType::IntegerOverflow |
-            EdgeCaseType::NullInput => TestPriority::Critical,
-            EdgeCaseType::EmptyInput |
-            EdgeCaseType::MaximumValue |
-            EdgeCaseType::MinimumValue => TestPriority::High,
+            EdgeCaseType::DivisionByZero
+            | EdgeCaseType::IntegerOverflow
+            | EdgeCaseType::NullInput => TestPriority::Critical,
+            EdgeCaseType::EmptyInput | EdgeCaseType::MaximumValue | EdgeCaseType::MinimumValue => {
+                TestPriority::High
+            }
             _ => TestPriority::Medium,
         }
     }
@@ -438,10 +499,7 @@ impl AdversarialTestGenerator {
     }
 }
 
-pub fn generate_adversarial_tests(
-    symbols: &[CodeSymbol],
-    language: &str,
-) -> AdversarialTestSuite {
+pub fn generate_adversarial_tests(symbols: &[CodeSymbol], language: &str) -> AdversarialTestSuite {
     let generator = AdversarialTestGenerator::new();
     generator.generate_complete_suite(symbols, language)
 }
@@ -453,7 +511,10 @@ pub fn format_test_suite(suite: &AdversarialTestSuite) -> String {
     output.push_str("======================\n\n");
 
     output.push_str(&format!("Generated: {}\n", suite.generated_at));
-    output.push_str(&format!("Edge case tests: {}\n", suite.edge_case_tests.len()));
+    output.push_str(&format!(
+        "Edge case tests: {}\n",
+        suite.edge_case_tests.len()
+    ));
     output.push_str(&format!("Property tests: {}\n", suite.property_tests.len()));
     output.push_str(&format!("Fuzz tests: {}\n", suite.fuzz_tests.len()));
     output.push_str(&format!("Stress tests: {}\n\n", suite.stress_tests.len()));
@@ -471,7 +532,10 @@ pub fn format_test_suite(suite: &AdversarialTestSuite) -> String {
     output
 }
 
-pub fn filter_tests_by_priority(suite: &AdversarialTestSuite, min_priority: TestPriority) -> AdversarialTestSuite {
+pub fn filter_tests_by_priority(
+    suite: &AdversarialTestSuite,
+    min_priority: TestPriority,
+) -> AdversarialTestSuite {
     let priority_value = |p: &TestPriority| match p {
         TestPriority::Low => 1,
         TestPriority::Medium => 2,

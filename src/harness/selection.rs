@@ -98,7 +98,10 @@ impl SelectionEngine {
         Self::new(SelectionCriteria::default())
     }
 
-    pub fn select_best_candidate(&mut self, candidates: Vec<PatchCandidate>) -> Result<Option<ScoredCandidate>> {
+    pub fn select_best_candidate(
+        &mut self,
+        candidates: Vec<PatchCandidate>,
+    ) -> Result<Option<ScoredCandidate>> {
         if candidates.is_empty() {
             return Ok(None);
         }

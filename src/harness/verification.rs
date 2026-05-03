@@ -26,11 +26,15 @@ impl VerificationStrength {
         match self {
             VerificationStrength::None => "No verification performed",
             VerificationStrength::FormatOnly => "Code formatting verified only",
-            VerificationStrength::StaticOnly => "Static analysis passed (compilation/type-checking)",
+            VerificationStrength::StaticOnly => {
+                "Static analysis passed (compilation/type-checking)"
+            }
             VerificationStrength::LintOnly => "Linting passed (style/best practices)",
             VerificationStrength::Tests => "Unit tests passed",
             VerificationStrength::Reproduction => "Fix verified with reproduction tests",
-            VerificationStrength::Full => "Full verification including integration tests and coverage",
+            VerificationStrength::Full => {
+                "Full verification including integration tests and coverage"
+            }
         }
     }
 
@@ -42,7 +46,15 @@ impl VerificationStrength {
             VerificationStrength::LintOnly => vec!["lint_check"],
             VerificationStrength::Tests => vec!["unit_tests"],
             VerificationStrength::Reproduction => vec!["unit_tests", "reproduction_test"],
-            VerificationStrength::Full => vec!["format_check", "static_check", "lint_check", "unit_tests", "integration_tests", "coverage_check", "reproduction_test"],
+            VerificationStrength::Full => vec![
+                "format_check",
+                "static_check",
+                "lint_check",
+                "unit_tests",
+                "integration_tests",
+                "coverage_check",
+                "reproduction_test",
+            ],
         }
     }
 
@@ -114,35 +126,41 @@ impl Default for VerificationAssessor {
 impl VerificationAssessor {
     pub fn new() -> Self {
         let mut level_mapping = HashMap::new();
-        
+
         // Format commands
         level_mapping.insert("cargo fmt".to_string(), VerificationLevel::FormatCheck);
         level_mapping.insert("rustfmt".to_string(), VerificationLevel::FormatCheck);
         level_mapping.insert("prettier".to_string(), VerificationLevel::FormatCheck);
         level_mapping.insert("black --check".to_string(), VerificationLevel::FormatCheck);
-        
+
         // Static checks
         level_mapping.insert("cargo check".to_string(), VerificationLevel::StaticCheck);
         level_mapping.insert("tsc --noEmit".to_string(), VerificationLevel::StaticCheck);
         level_mapping.insert("mypy".to_string(), VerificationLevel::StaticCheck);
         level_mapping.insert("go build".to_string(), VerificationLevel::StaticCheck);
-        
+
         // Lint checks
         level_mapping.insert("cargo clippy".to_string(), VerificationLevel::LintCheck);
         level_mapping.insert("eslint".to_string(), VerificationLevel::LintCheck);
         level_mapping.insert("pylint".to_string(), VerificationLevel::LintCheck);
         level_mapping.insert("golint".to_string(), VerificationLevel::LintCheck);
-        
+
         // Unit tests
         level_mapping.insert("cargo test".to_string(), VerificationLevel::UnitTests);
         level_mapping.insert("pytest".to_string(), VerificationLevel::UnitTests);
         level_mapping.insert("jest".to_string(), VerificationLevel::UnitTests);
         level_mapping.insert("go test".to_string(), VerificationLevel::UnitTests);
-        
+
         // Integration tests (often same command with flags)
-        level_mapping.insert("cargo test --test integration".to_string(), VerificationLevel::IntegrationTests);
-        level_mapping.insert("pytest tests/integration".to_string(), VerificationLevel::IntegrationTests);
-        
+        level_mapping.insert(
+            "cargo test --test integration".to_string(),
+            VerificationLevel::IntegrationTests,
+        );
+        level_mapping.insert(
+            "pytest tests/integration".to_string(),
+            VerificationLevel::IntegrationTests,
+        );
+
         Self { level_mapping }
     }
 
@@ -226,7 +244,11 @@ impl VerificationAssessor {
         }
     }
 
-    fn calculate_strength(&self, achieved: &[VerificationLevel], coverage: Option<f32>) -> VerificationStrength {
+    fn calculate_strength(
+        &self,
+        achieved: &[VerificationLevel],
+        coverage: Option<f32>,
+    ) -> VerificationStrength {
         let has_format = achieved.contains(&VerificationLevel::FormatCheck);
         let has_static = achieved.contains(&VerificationLevel::StaticCheck);
         let has_lint = achieved.contains(&VerificationLevel::LintCheck);
@@ -235,7 +257,14 @@ impl VerificationAssessor {
         let has_coverage = coverage.map(|c| c >= 70.0).unwrap_or(false);
         let has_reproduction = achieved.contains(&VerificationLevel::ReproductionTest);
 
-        if has_format && has_static && has_lint && has_unit_tests && has_integration && has_coverage && has_reproduction {
+        if has_format
+            && has_static
+            && has_lint
+            && has_unit_tests
+            && has_integration
+            && has_coverage
+            && has_reproduction
+        {
             VerificationStrength::Full
         } else if has_unit_tests && has_reproduction {
             VerificationStrength::Reproduction
@@ -258,7 +287,8 @@ impl VerificationAssessor {
         // Python: "5 passed, 2 failed"
         // JavaScript: "5 passing (10ms)"
 
-        let rust_pattern = regex::Regex::new(r"test result:.*?(\d+)\s*passed.*?(\d+)\s*failed").ok()?;
+        let rust_pattern =
+            regex::Regex::new(r"test result:.*?(\d+)\s*passed.*?(\d+)\s*failed").ok()?;
         if let Some(cap) = rust_pattern.captures(output) {
             let passed = cap.get(1)?.as_str().parse().ok()?;
             let failed = cap.get(2)?.as_str().parse().ok()?;
@@ -269,7 +299,8 @@ impl VerificationAssessor {
         let pytest_failed = regex::Regex::new(r"(\d+)\s*failed").ok()?;
         if let Some(cap) = pytest_pattern.captures(output) {
             let passed = cap.get(1)?.as_str().parse().ok()?;
-            let failed = pytest_failed.captures(output)
+            let failed = pytest_failed
+                .captures(output)
                 .and_then(|c| c.get(1))
                 .and_then(|m| m.as_str().parse().ok())
                 .unwrap_or(0);
@@ -284,33 +315,43 @@ impl VerificationAssessor {
         // "coverage: 85.4%"
         // "Coverage: 85%"
         let pattern = regex::Regex::new(r"[Cc]overage[:\s]+(\d+\.?\d*)%").ok()?;
-        pattern.captures(output)?
-            .get(1)?
-            .as_str()
-            .parse()
-            .ok()
+        pattern.captures(output)?.get(1)?.as_str().parse().ok()
     }
 
     pub fn recommend_improvements(&self, assessment: &VerificationAssessment) -> Vec<String> {
         let mut recommendations = vec![];
 
         if assessment.strength == VerificationStrength::None {
-            recommendations.push("No verification performed - add at least format checking".to_string());
+            recommendations
+                .push("No verification performed - add at least format checking".to_string());
         }
 
-        if !assessment.achieved_levels.contains(&VerificationLevel::StaticCheck) {
+        if !assessment
+            .achieved_levels
+            .contains(&VerificationLevel::StaticCheck)
+        {
             recommendations.push("Add static type checking (cargo check, tsc, mypy)".to_string());
         }
 
-        if !assessment.achieved_levels.contains(&VerificationLevel::LintCheck) {
+        if !assessment
+            .achieved_levels
+            .contains(&VerificationLevel::LintCheck)
+        {
             recommendations.push("Add linting (clippy, eslint, pylint)".to_string());
         }
 
-        if !assessment.achieved_levels.contains(&VerificationLevel::UnitTests) {
+        if !assessment
+            .achieved_levels
+            .contains(&VerificationLevel::UnitTests)
+        {
             recommendations.push("Add unit tests for critical code paths".to_string());
         }
 
-        if assessment.coverage_percent.map(|c| c < 70.0).unwrap_or(true) {
+        if assessment
+            .coverage_percent
+            .map(|c| c < 70.0)
+            .unwrap_or(true)
+        {
             recommendations.push("Improve test coverage to at least 70%".to_string());
         }
 
@@ -334,7 +375,10 @@ pub fn format_verification_assessment(assessment: &VerificationAssessment) -> St
     output.push_str("=======================\n\n");
 
     output.push_str(&format!("Overall Strength: {:?}\n", assessment.strength));
-    output.push_str(&format!("Description: {}\n\n", assessment.strength.description()));
+    output.push_str(&format!(
+        "Description: {}\n\n",
+        assessment.strength.description()
+    ));
 
     output.push_str("Achieved Levels:\n");
     for level in &assessment.achieved_levels {
@@ -348,8 +392,10 @@ pub fn format_verification_assessment(assessment: &VerificationAssessment) -> St
         }
     }
 
-    output.push_str(&format!("\nTests: {} passed, {} failed ({} total)\n",
-        assessment.passed_tests, assessment.failed_tests, assessment.test_count));
+    output.push_str(&format!(
+        "\nTests: {} passed, {} failed ({} total)\n",
+        assessment.passed_tests, assessment.failed_tests, assessment.test_count
+    ));
 
     if let Some(coverage) = assessment.coverage_percent {
         output.push_str(&format!("Coverage: {:.1}%\n", coverage));

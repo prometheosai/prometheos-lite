@@ -3,7 +3,8 @@ use crate::{
         completion::CompletionDecision,
         edit_protocol::EditOperation,
         execution_loop::{
-            HarnessExecutionRequest, HarnessExecutionResult, HarnessMode, ValidationFailurePolicy, execute_harness_task,
+            HarnessExecutionRequest, HarnessExecutionResult, HarnessMode, ValidationFailurePolicy,
+            execute_harness_task,
         },
     },
     work::{

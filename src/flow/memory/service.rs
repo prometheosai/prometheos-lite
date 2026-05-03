@@ -231,7 +231,11 @@ impl MemoryService {
             if let Some(existing) = similar {
                 // Update existing memory instead of creating new one
                 if let Err(e) = self.update_memory_importance(&existing.id, importance_score) {
-                    tracing::warn!("Failed to update memory importance for {}: {}", existing.id, e);
+                    tracing::warn!(
+                        "Failed to update memory importance for {}: {}",
+                        existing.id,
+                        e
+                    );
                     // Continue with creating new memory instead of failing silently
                 } else {
                     return Ok(()); // Successfully updated existing memory
@@ -498,13 +502,21 @@ impl MemoryService {
         let mut failed_deletions = 0usize;
         for memory in pruned {
             if let Err(e) = db_guard.delete_memory(&memory.id) {
-                tracing::error!("Failed to delete memory {} during pruning: {}", memory.id, e);
+                tracing::error!(
+                    "Failed to delete memory {} during pruning: {}",
+                    memory.id,
+                    e
+                );
                 failed_deletions += 1;
             }
         }
 
         if failed_deletions > 0 {
-            tracing::warn!("Pruning completed with {} failed deletions out of {}", failed_deletions, pruned_count);
+            tracing::warn!(
+                "Pruning completed with {} failed deletions out of {}",
+                failed_deletions,
+                pruned_count
+            );
         }
 
         Ok(pruned_count - failed_deletions)
@@ -534,13 +546,21 @@ impl MemoryService {
             let mut failed_deletions = 0usize;
             for id in &original_ids {
                 if let Err(e) = db_guard.delete_memory(id) {
-                    tracing::error!("Failed to delete original memory {} during compression: {}", id, e);
+                    tracing::error!(
+                        "Failed to delete original memory {} during compression: {}",
+                        id,
+                        e
+                    );
                     failed_deletions += 1;
                 }
             }
 
             if failed_deletions > 0 {
-                tracing::warn!("Compression: {} out of {} original memories failed to delete", failed_deletions, original_ids.len());
+                tracing::warn!(
+                    "Compression: {} out of {} original memories failed to delete",
+                    failed_deletions,
+                    original_ids.len()
+                );
             }
 
             // Add compressed memories with their new IDs
@@ -553,7 +573,10 @@ impl MemoryService {
             }
 
             if failed_insertions > 0 {
-                tracing::warn!("Compression: {} compressed memories failed to insert", failed_insertions);
+                tracing::warn!(
+                    "Compression: {} compressed memories failed to insert",
+                    failed_insertions
+                );
             }
 
             // Return true if at least some compression happened

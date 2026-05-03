@@ -106,7 +106,8 @@ impl ObservabilityCollector {
         if let Some(span) = self.spans.get_mut(span_id) {
             let end_time = chrono::Utc::now();
             span.end_time = Some(end_time);
-            span.duration_ms = (end_time.timestamp_millis() - span.start_time.timestamp_millis()) as u64;
+            span.duration_ms =
+                (end_time.timestamp_millis() - span.start_time.timestamp_millis()) as u64;
             span.status = status;
         }
         self.current_span = None;
@@ -191,7 +192,8 @@ impl ObservabilityCollector {
             },
             duration_seconds: self.metrics.duration_ms as f64 / 1000.0,
             success_rate: if self.metrics.steps_completed + self.metrics.steps_failed > 0 {
-                self.metrics.steps_completed as f64 / (self.metrics.steps_completed + self.metrics.steps_failed) as f64
+                self.metrics.steps_completed as f64
+                    / (self.metrics.steps_completed + self.metrics.steps_failed) as f64
             } else {
                 1.0
             },
@@ -262,12 +264,12 @@ mod tests {
     #[test]
     fn test_collector_records_metrics() {
         let mut collector = ObservabilityCollector::new("test-123".to_string());
-        
+
         collector.record_step_completed(true);
         collector.record_patch_generated();
         collector.record_validation(true);
         collector.record_review(2);
-        
+
         let metrics = collector.finish();
         assert_eq!(metrics.steps_completed, 1);
         assert_eq!(metrics.patches_generated, 1);
@@ -278,11 +280,11 @@ mod tests {
     #[test]
     fn test_span_tracking() {
         let mut collector = ObservabilityCollector::new("test-456".to_string());
-        
+
         let span_id = collector.start_span("validation");
         collector.add_event("command_start", HashMap::new());
         collector.end_span(span_id, SpanStatus::Ok);
-        
+
         let spans = collector.get_spans();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "validation");
@@ -292,7 +294,7 @@ mod tests {
     fn test_custom_metrics() {
         let mut collector = ObservabilityCollector::new("test-789".to_string());
         collector.record_custom_metric("cache_hit_rate", 0.85);
-        
+
         let metrics = collector.finish();
         assert_eq!(metrics.custom_metrics.get("cache_hit_rate"), Some(&0.85));
     }

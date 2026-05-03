@@ -155,7 +155,9 @@ impl BenchmarkRunner {
     }
 
     pub async fn run_suite(&mut self, suite_id: &str) -> Result<Vec<BenchmarkResult>> {
-        let suite = self.suites.iter()
+        let suite = self
+            .suites
+            .iter()
             .find(|s| s.id == suite_id)
             .ok_or_else(|| anyhow::anyhow!("Suite '{}' not found", suite_id))?;
 
@@ -188,7 +190,10 @@ impl BenchmarkRunner {
             match self.execute_iteration(test).await {
                 Ok(metrics) => {
                     for (metric_type, value) in metrics {
-                        metric_values.entry(metric_type).or_insert_with(Vec::new).push(value);
+                        metric_values
+                            .entry(metric_type)
+                            .or_insert_with(Vec::new)
+                            .push(value);
                     }
                     iterations_completed = i + 1;
 
@@ -197,11 +202,13 @@ impl BenchmarkRunner {
                         // Calculate confidence interval for duration
                         if let Some(durations) = metric_values.get(&MetricType::Duration) {
                             if let Some(stats) = self.calculate_stats(durations) {
-                                let ci_width = stats.confidence_interval.1 - stats.confidence_interval.0;
+                                let ci_width =
+                                    stats.confidence_interval.1 - stats.confidence_interval.0;
                                 let relative_ci = ci_width / stats.mean;
-                                
+
                                 // Stop if confidence interval is tight enough
-                                if relative_ci < 0.05 { // 5% relative CI
+                                if relative_ci < 0.05 {
+                                    // 5% relative CI
                                     break;
                                 }
                             }
@@ -240,7 +247,7 @@ impl BenchmarkRunner {
 
     async fn execute_iteration(&self, test: &BenchmarkTest) -> Result<HashMap<MetricType, f64>> {
         let start = Instant::now();
-        
+
         // Execute the command
         let output = tokio::process::Command::new(&test.command)
             .args(&test.args)
@@ -253,7 +260,10 @@ impl BenchmarkRunner {
         let duration = start.elapsed();
 
         if !output.status.success() {
-            bail!("Command failed: {}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let mut metrics = HashMap::new();
@@ -277,7 +287,7 @@ impl BenchmarkRunner {
         }
 
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        
+
         // Calculate median
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -288,13 +298,12 @@ impl BenchmarkRunner {
         };
 
         // Calculate standard deviation
-        let variance = values.iter()
-            .map(|v| (v - mean).powi(2))
-            .sum::<f64>() / values.len() as f64;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
         let std_dev = variance.sqrt();
 
         // Remove outliers
-        let filtered: Vec<_> = values.iter()
+        let filtered: Vec<_> = values
+            .iter()
             .filter(|&&v| (v - mean).abs() <= std_dev * self.config.outlier_threshold)
             .cloned()
             .collect();
@@ -333,9 +342,10 @@ impl BenchmarkRunner {
     fn parse_throughput(&self, output: &str) -> Option<f64> {
         // Look for throughput patterns
         for line in output.lines() {
-            if line.to_lowercase().contains("ops/sec") || 
-               line.to_lowercase().contains("req/sec") ||
-               line.to_lowercase().contains("throughput") {
+            if line.to_lowercase().contains("ops/sec")
+                || line.to_lowercase().contains("req/sec")
+                || line.to_lowercase().contains("throughput")
+            {
                 if let Some(num) = self.extract_number(line) {
                     return Some(num);
                 }
@@ -352,7 +362,10 @@ impl BenchmarkRunner {
                 return Some(num);
             }
             // Try removing trailing punctuation
-            let clean: String = part.chars().filter(|c| c.is_numeric() || *c == '.').collect();
+            let clean: String = part
+                .chars()
+                .filter(|c| c.is_numeric() || *c == '.')
+                .collect();
             if let Ok(num) = clean.parse::<f64>() {
                 return Some(num);
             }
@@ -360,15 +373,20 @@ impl BenchmarkRunner {
         None
     }
 
-    pub fn compare_results(&self, baseline: &BenchmarkResult, current: &BenchmarkResult) -> ComparisonResult {
+    pub fn compare_results(
+        &self,
+        baseline: &BenchmarkResult,
+        current: &BenchmarkResult,
+    ) -> ComparisonResult {
         let mut improvements = Vec::new();
         let mut regressions = Vec::new();
         let mut regression_detected = false;
 
         for (metric_type, current_metric) in &current.metrics {
             if let Some(baseline_metric) = baseline.metrics.get(metric_type) {
-                let percent_change = (current_metric.mean - baseline_metric.mean) / baseline_metric.mean * 100.0;
-                
+                let percent_change =
+                    (current_metric.mean - baseline_metric.mean) / baseline_metric.mean * 100.0;
+
                 // Determine if change is significant (more than 2 standard deviations)
                 let is_significant = percent_change.abs() > 10.0; // 10% threshold
 
@@ -382,9 +400,10 @@ impl BenchmarkRunner {
 
                 // For duration and memory, lower is better
                 let is_regression = match metric_type {
-                    MetricType::Duration | MetricType::Memory | MetricType::Latency | MetricType::ErrorRate => {
-                        percent_change > 10.0
-                    }
+                    MetricType::Duration
+                    | MetricType::Memory
+                    | MetricType::Latency
+                    | MetricType::ErrorRate => percent_change > 10.0,
                     MetricType::Throughput => percent_change < -10.0,
                     _ => false,
                 };
@@ -407,7 +426,11 @@ impl BenchmarkRunner {
         }
     }
 
-    pub fn check_anti_overfitting(&self, suite_id: &str, num_runs: u32) -> Result<AntiOverfittingReport> {
+    pub fn check_anti_overfitting(
+        &self,
+        suite_id: &str,
+        num_runs: u32,
+    ) -> Result<AntiOverfittingReport> {
         let mut test_runs: Vec<TestRun> = Vec::new();
         let mut flaky_tests = Vec::new();
         let mut stable_tests = Vec::new();
@@ -416,7 +439,8 @@ impl BenchmarkRunner {
         let mut results_by_test: HashMap<String, Vec<&BenchmarkResult>> = HashMap::new();
         for result in &self.results {
             if result.suite_id == suite_id {
-                results_by_test.entry(result.test_id.clone())
+                results_by_test
+                    .entry(result.test_id.clone())
                     .or_insert_with(Vec::new)
                     .push(result);
             }
@@ -429,17 +453,17 @@ impl BenchmarkRunner {
 
             // Check consistency across runs
             let mut is_flaky = false;
-            
+
             for metric_type in [MetricType::Duration, MetricType::Memory] {
-                let values: Vec<_> = results.iter()
+                let values: Vec<_> = results
+                    .iter()
                     .filter_map(|r| r.metrics.get(&metric_type).map(|m| m.mean))
                     .collect();
 
                 if values.len() >= 2 {
                     let mean = values.iter().sum::<f64>() / values.len() as f64;
-                    let variance = values.iter()
-                        .map(|v| (v - mean).powi(2))
-                        .sum::<f64>() / values.len() as f64;
+                    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                        / values.len() as f64;
                     let cv = variance.sqrt() / mean; // Coefficient of variation
 
                     // If CV > 0.15 (15%), consider it flaky
@@ -498,11 +522,7 @@ pub fn format_benchmark_result(result: &BenchmarkResult) -> String {
     for (metric_type, metric) in &result.metrics {
         metrics_str.push_str(&format!(
             "  {:?}: {:.2} ± {:.2} ({}..{})\n",
-            metric_type,
-            metric.mean,
-            metric.std_dev,
-            metric.min,
-            metric.max
+            metric_type, metric.mean, metric.std_dev, metric.min, metric.max
         ));
     }
 
@@ -510,16 +530,17 @@ pub fn format_benchmark_result(result: &BenchmarkResult) -> String {
         r#"{} {}: {} iterations
 {}
 "#,
-        status,
-        result.test_id,
-        result.iterations_completed,
-        metrics_str
+        status, result.test_id, result.iterations_completed, metrics_str
     )
 }
 
 pub fn format_comparison(result: &ComparisonResult) -> String {
-    let status = if result.regression_detected { "⚠ REGRESSION" } else { "✓ OK" };
-    
+    let status = if result.regression_detected {
+        "⚠ REGRESSION"
+    } else {
+        "✓ OK"
+    };
+
     let mut changes = String::new();
     for improvement in &result.improvements {
         changes.push_str(&format!(
@@ -540,9 +561,7 @@ pub fn format_comparison(result: &ComparisonResult) -> String {
         r#"{} {}
 {}
 "#,
-        status,
-        result.current_result.test_id,
-        changes
+        status, result.current_result.test_id, changes
     )
 }
 
@@ -570,7 +589,7 @@ mod tests {
     fn test_calculate_stats() {
         let runner = BenchmarkRunner::with_defaults();
         let values = vec![10.0, 12.0, 11.0, 10.5, 11.5];
-        
+
         let stats = runner.calculate_stats(&values).unwrap();
         assert!((stats.mean - 11.0).abs() < 0.1);
         assert!(stats.std_dev > 0.0);
@@ -579,7 +598,7 @@ mod tests {
     #[test]
     fn test_compare_results() {
         let runner = BenchmarkRunner::with_defaults();
-        
+
         let baseline = BenchmarkResult {
             suite_id: "test".to_string(),
             test_id: "test".to_string(),
@@ -588,16 +607,19 @@ mod tests {
             iterations_completed: 10,
             metrics: {
                 let mut m = HashMap::new();
-                m.insert(MetricType::Duration, MetricResult {
-                    metric_type: MetricType::Duration,
-                    values: vec![100.0],
-                    mean: 100.0,
-                    median: 100.0,
-                    std_dev: 0.0,
-                    min: 100.0,
-                    max: 100.0,
-                    confidence_interval: (95.0, 105.0),
-                });
+                m.insert(
+                    MetricType::Duration,
+                    MetricResult {
+                        metric_type: MetricType::Duration,
+                        values: vec![100.0],
+                        mean: 100.0,
+                        median: 100.0,
+                        std_dev: 0.0,
+                        min: 100.0,
+                        max: 100.0,
+                        confidence_interval: (95.0, 105.0),
+                    },
+                );
                 m
             },
             success: true,
@@ -612,16 +634,19 @@ mod tests {
             iterations_completed: 10,
             metrics: {
                 let mut m = HashMap::new();
-                m.insert(MetricType::Duration, MetricResult {
-                    metric_type: MetricType::Duration,
-                    values: vec![120.0],
-                    mean: 120.0,
-                    median: 120.0,
-                    std_dev: 0.0,
-                    min: 120.0,
-                    max: 120.0,
-                    confidence_interval: (115.0, 125.0),
-                });
+                m.insert(
+                    MetricType::Duration,
+                    MetricResult {
+                        metric_type: MetricType::Duration,
+                        values: vec![120.0],
+                        mean: 120.0,
+                        median: 120.0,
+                        std_dev: 0.0,
+                        min: 120.0,
+                        max: 120.0,
+                        confidence_interval: (115.0, 125.0),
+                    },
+                );
                 m
             },
             success: true,

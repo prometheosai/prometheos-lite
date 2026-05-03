@@ -72,7 +72,7 @@ impl PermissionLedger {
 
     pub fn with_defaults() -> Self {
         let mut ledger = Self::new();
-        
+
         // Default safe permissions
         ledger.grant(PermissionGrant {
             permission: Permission::Read,
@@ -148,8 +148,12 @@ impl PermissionLedger {
         }
 
         // No matching grant found - deny by default
-        self.deny(permission, Some(path.to_path_buf()), "No matching permission grant".to_string());
-        
+        self.deny(
+            permission,
+            Some(path.to_path_buf()),
+            "No matching permission grant".to_string(),
+        );
+
         PermissionCheck {
             granted: false,
             permission,
@@ -165,11 +169,9 @@ impl PermissionLedger {
         for grant in &self.grants {
             if grant.permission == Permission::Execute && grant.scope == PermissionScope::Command {
                 let allowed = match &grant.pattern {
-                    Some(pattern) => {
-                        regex::Regex::new(pattern)
-                            .map(|re| re.is_match(cmd))
-                            .unwrap_or(false)
-                    }
+                    Some(pattern) => regex::Regex::new(pattern)
+                        .map(|re| re.is_match(cmd))
+                        .unwrap_or(false),
                     None => false,
                 };
 
@@ -184,7 +186,11 @@ impl PermissionLedger {
             }
         }
 
-        self.deny(Permission::Execute, None, format!("Command '{}' not allowed", cmd));
+        self.deny(
+            Permission::Execute,
+            None,
+            format!("Command '{}' not allowed", cmd),
+        );
 
         PermissionCheck {
             granted: false,
@@ -199,7 +205,11 @@ impl PermissionLedger {
         if check.granted {
             Ok(())
         } else {
-            bail!("Permission denied: {} for {}", format_permission(permission), path.display())
+            bail!(
+                "Permission denied: {} for {}",
+                format_permission(permission),
+                path.display()
+            )
         }
     }
 
@@ -253,7 +263,7 @@ pub fn create_standard_ledger() -> PermissionLedger {
 
 pub fn create_permissive_ledger() -> PermissionLedger {
     let mut ledger = PermissionLedger::new();
-    
+
     // Allow all file operations
     ledger.grant(PermissionGrant {
         permission: Permission::Read,
@@ -308,7 +318,7 @@ mod tests {
         let mut ledger = PermissionLedger::with_defaults();
         let check = ledger.check_command("cargo build");
         assert!(check.granted);
-        
+
         let check = ledger.check_command("rm -rf /");
         assert!(!check.granted);
     }
@@ -318,7 +328,7 @@ mod tests {
         let mut ledger = PermissionLedger::with_defaults();
         ledger.check(Permission::Read, Path::new("test.rs"));
         ledger.check(Permission::Delete, Path::new("/etc/passwd"));
-        
+
         let stats = ledger.get_stats();
         assert_eq!(stats.check_count, 2);
         assert_eq!(stats.deny_count, 1);

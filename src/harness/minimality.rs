@@ -105,12 +105,20 @@ impl MinimalityEnforcer {
         let files_changed = self.parse_patch_files(patch_content);
         let total_lines_added: usize = files_changed.iter().map(|f| f.lines_added).sum();
         let total_lines_removed: usize = files_changed.iter().map(|f| f.lines_removed).sum();
-        
+
         let concerns_detected = self.detect_concerns(&files_changed, target_issue);
         let unrelated_changes = self.identify_unrelated_changes(&files_changed, target_issue);
-        let violations = self.check_violations(&files_changed, total_lines_added, total_lines_removed, &concerns_detected, &unrelated_changes);
-        
-        let is_minimal = violations.iter().all(|v| matches!(v.severity, ViolationSeverity::Warning));
+        let violations = self.check_violations(
+            &files_changed,
+            total_lines_added,
+            total_lines_removed,
+            &concerns_detected,
+            &unrelated_changes,
+        );
+
+        let is_minimal = violations
+            .iter()
+            .all(|v| matches!(v.severity, ViolationSeverity::Warning));
 
         let analysis = PatchAnalysis {
             files_changed,
@@ -128,13 +136,16 @@ impl MinimalityEnforcer {
 
     pub fn enforce(&mut self, patch_content: &str, target_issue: &str) -> Result<()> {
         let analysis = self.analyze_patch(patch_content, target_issue);
-        
-        let errors: Vec<_> = analysis.violations.iter()
+
+        let errors: Vec<_> = analysis
+            .violations
+            .iter()
             .filter(|v| matches!(v.severity, ViolationSeverity::Error))
             .collect();
 
         if !errors.is_empty() {
-            let error_msg = errors.iter()
+            let error_msg = errors
+                .iter()
                 .map(|v| format!("{}: {}", v.rule, v.description))
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -159,11 +170,12 @@ impl MinimalityEnforcer {
                         ..file
                     });
                 }
-                
-                let path = line.strip_prefix("+++ b/")
+
+                let path = line
+                    .strip_prefix("+++ b/")
                     .or_else(|| line.strip_prefix("+++ "))
                     .unwrap_or("unknown");
-                
+
                 current_file = Some(FileChange {
                     path: PathBuf::from(path),
                     lines_added: 0,
@@ -193,7 +205,7 @@ impl MinimalityEnforcer {
 
     fn detect_concerns(&self, files: &[FileChange], target_issue: &str) -> Vec<String> {
         let mut concerns = HashSet::new();
-        
+
         for file in files {
             // Detect concern from file path and content
             if file.path.extension().map(|e| e == "rs").unwrap_or(false) {
@@ -205,8 +217,13 @@ impl MinimalityEnforcer {
             if file.path.to_string_lossy().contains("doc") {
                 concerns.insert("documentation".to_string());
             }
-            if file.path.to_string_lossy().contains("config") || 
-               file.path.extension().map(|e| e == "toml" || e == "yaml" || e == "json").unwrap_or(false) {
+            if file.path.to_string_lossy().contains("config")
+                || file
+                    .path
+                    .extension()
+                    .map(|e| e == "toml" || e == "yaml" || e == "json")
+                    .unwrap_or(false)
+            {
                 concerns.insert("configuration".to_string());
             }
         }
@@ -219,9 +236,13 @@ impl MinimalityEnforcer {
         concerns.into_iter().collect()
     }
 
-    fn identify_unrelated_changes(&self, files: &[FileChange], target_issue: &str) -> Vec<UnrelatedChange> {
+    fn identify_unrelated_changes(
+        &self,
+        files: &[FileChange],
+        target_issue: &str,
+    ) -> Vec<UnrelatedChange> {
         let mut unrelated = Vec::new();
-        
+
         if self.config.allow_unrelated_fixes {
             return unrelated;
         }
@@ -229,7 +250,7 @@ impl MinimalityEnforcer {
         for file in files {
             // Check if change is unrelated to target issue
             let file_str = file.path.to_string_lossy();
-            
+
             // Style-only changes
             if file.lines_added == file.lines_removed && file.lines_added < 5 {
                 unrelated.push(UnrelatedChange {
@@ -238,10 +259,11 @@ impl MinimalityEnforcer {
                     suggested_action: "Remove if not related to the fix".to_string(),
                 });
             }
-            
+
             // Refactoring in unrelated files
-            if file_str.contains("refactor") || 
-               (file.change_type == ChangeType::Refactor && !file_str.contains(target_issue)) {
+            if file_str.contains("refactor")
+                || (file.change_type == ChangeType::Refactor && !file_str.contains(target_issue))
+            {
                 unrelated.push(UnrelatedChange {
                     file: file.path.clone(),
                     description: "Refactoring in unrelated file".to_string(),
@@ -303,8 +325,7 @@ impl MinimalityEnforcer {
                 severity: ViolationSeverity::Warning,
                 description: format!(
                     "Total lines changed: {} (recommended max: {})",
-                    total_lines,
-                    self.config.max_total_lines_changed
+                    total_lines, self.config.max_total_lines_changed
                 ),
                 suggestion: "Consider splitting changes".to_string(),
             });
@@ -315,10 +336,7 @@ impl MinimalityEnforcer {
             violations.push(MinimalityViolation {
                 rule: "single_concern".to_string(),
                 severity: ViolationSeverity::Warning,
-                description: format!(
-                    "Multiple concerns detected: {}",
-                    concerns.join(", ")
-                ),
+                description: format!("Multiple concerns detected: {}", concerns.join(", ")),
                 suggestion: "Focus on one concern per patch".to_string(),
             });
         }
@@ -329,11 +347,7 @@ impl MinimalityEnforcer {
                 violations.push(MinimalityViolation {
                     rule: "unrelated_change".to_string(),
                     severity: ViolationSeverity::Warning,
-                    description: format!(
-                        "{} in {}",
-                        change.description,
-                        change.file.display()
-                    ),
+                    description: format!("{} in {}", change.description, change.file.display()),
                     suggestion: change.suggested_action.clone(),
                 });
             }
@@ -344,10 +358,12 @@ impl MinimalityEnforcer {
 
     pub fn get_stats(&self) -> MinimalityStats {
         let total_analyzed = self.violation_history.len();
-        let minimal_count = self.violation_history.iter()
+        let minimal_count = self
+            .violation_history
+            .iter()
             .filter(|a| a.is_minimal)
             .count();
-        
+
         MinimalityStats {
             total_patches_analyzed: total_analyzed,
             minimal_patches: minimal_count,
@@ -357,9 +373,11 @@ impl MinimalityEnforcer {
                 0.0
             },
             average_violations_per_patch: if total_analyzed > 0 {
-                self.violation_history.iter()
+                self.violation_history
+                    .iter()
                     .map(|a| a.violations.len())
-                    .sum::<usize>() as f64 / total_analyzed as f64
+                    .sum::<usize>() as f64
+                    / total_analyzed as f64
             } else {
                 0.0
             },
@@ -386,20 +404,29 @@ pub fn enforce_patch_minimality(patch_content: &str, target_issue: &str) -> Resu
 }
 
 pub fn format_analysis_report(analysis: &PatchAnalysis) -> String {
-    let status = if analysis.is_minimal { "✓ Minimal" } else { "✗ Not Minimal" };
-    
+    let status = if analysis.is_minimal {
+        "✓ Minimal"
+    } else {
+        "✗ Not Minimal"
+    };
+
     let violations_str = if analysis.violations.is_empty() {
         "No violations found.\n".to_string()
     } else {
-        analysis.violations.iter()
-            .map(|v| format!("  - [{}] {}: {}", 
-                match v.severity {
-                    ViolationSeverity::Error => "ERROR",
-                    ViolationSeverity::Warning => "WARN",
-                },
-                v.rule,
-                v.description
-            ))
+        analysis
+            .violations
+            .iter()
+            .map(|v| {
+                format!(
+                    "  - [{}] {}: {}",
+                    match v.severity {
+                        ViolationSeverity::Error => "ERROR",
+                        ViolationSeverity::Warning => "WARN",
+                    },
+                    v.rule,
+                    v.description
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -448,7 +475,7 @@ mod tests {
     fn test_detects_large_patch() {
         let mut config = MinimalityConfig::default();
         config.max_lines_per_file = 5;
-        
+
         let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
 +++ b/src/lib.rs
@@ -466,16 +493,21 @@ mod tests {
 
         let mut enforcer = MinimalityEnforcer::new(config);
         let analysis = enforcer.analyze_patch(patch, "fix-123");
-        
+
         assert!(!analysis.is_minimal);
-        assert!(analysis.violations.iter().any(|v| v.rule == "max_lines_per_file"));
+        assert!(
+            analysis
+                .violations
+                .iter()
+                .any(|v| v.rule == "max_lines_per_file")
+        );
     }
 
     #[test]
     fn test_enforce_rejects_violations() {
         let mut config = MinimalityConfig::default();
         config.max_files_changed = 1;
-        
+
         let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
 +++ b/src/lib.rs

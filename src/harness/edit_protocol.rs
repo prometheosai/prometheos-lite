@@ -1,5 +1,5 @@
 use crate::harness::file_control::{FilePolicy, FileSet, assert_edit_allowed, normalize_path};
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -83,28 +83,28 @@ pub enum DiffLine {
 
 pub fn parse_edit_response(raw: &str) -> Result<Vec<EditOperation>> {
     let t = raw.trim();
-    
+
     if let Ok(v) = serde_json::from_str::<Vec<EditOperation>>(t) {
         return Ok(v);
     }
     if let Ok(v) = serde_json::from_str::<EditOperation>(t) {
         return Ok(vec![v]);
     }
-    
+
     if t.starts_with("---") || t.contains("diff --git") || t.contains("@@") {
         let edits = parse_unified_diff_text(t)?;
         if !edits.is_empty() {
             return Ok(edits);
         }
     }
-    
+
     bail!("unknown edit protocol: input is neither valid JSON nor recognized diff format")
 }
 
 fn parse_unified_diff_text(diff_text: &str) -> Result<Vec<EditOperation>> {
     let mut edits = Vec::new();
     let diffs = parse_unified_diff(diff_text)?;
-    
+
     for diff in diffs {
         if diff.is_new_file {
             let content = reconstruct_new_file_content(&diff)?;
@@ -124,7 +124,7 @@ fn parse_unified_diff_text(diff_text: &str) -> Result<Vec<EditOperation>> {
             }));
         }
     }
-    
+
     Ok(edits)
 }
 
@@ -132,7 +132,7 @@ pub fn parse_unified_diff(diff_text: &str) -> Result<Vec<ParsedDiff>> {
     let mut diffs = Vec::new();
     let lines: Vec<&str> = diff_text.lines().collect();
     let mut i = 0;
-    
+
     while i < lines.len() {
         if lines[i].starts_with("diff --git") || lines[i].starts_with("---") {
             let (diff, consumed) = parse_single_diff(&lines[i..])
@@ -143,7 +143,7 @@ pub fn parse_unified_diff(diff_text: &str) -> Result<Vec<ParsedDiff>> {
             i += 1;
         }
     }
-    
+
     Ok(diffs)
 }
 
@@ -154,10 +154,10 @@ fn parse_single_diff(lines: &[&str]) -> Result<(ParsedDiff, usize)> {
     let mut is_new_file = false;
     let mut is_deleted = false;
     let mut hunks = Vec::new();
-    
+
     while i < lines.len() {
         let line = lines[i];
-        
+
         if line.starts_with("diff --git") {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
@@ -167,13 +167,13 @@ fn parse_single_diff(lines: &[&str]) -> Result<(ParsedDiff, usize)> {
             i += 1;
             continue;
         }
-        
+
         if line.starts_with("---") {
             let content = &line[4..];
             if content == "/dev/null" {
                 is_new_file = true;
             } else if content.starts_with('"') && content.ends_with('"') {
-                old_file = Some(PathBuf::from(&content[1..content.len()-1]));
+                old_file = Some(PathBuf::from(&content[1..content.len() - 1]));
             } else {
                 let path = content.split_whitespace().next().unwrap_or("");
                 if path.starts_with("a/") || path.starts_with("b/") {
@@ -185,13 +185,13 @@ fn parse_single_diff(lines: &[&str]) -> Result<(ParsedDiff, usize)> {
             i += 1;
             continue;
         }
-        
+
         if line.starts_with("+++") {
             let content = &line[4..];
             if content == "/dev/null" {
                 is_deleted = true;
             } else if content.starts_with('"') && content.ends_with('"') {
-                new_file = PathBuf::from(&content[1..content.len()-1]);
+                new_file = PathBuf::from(&content[1..content.len() - 1]);
             } else {
                 let path = content.split_whitespace().next().unwrap_or("");
                 if path.starts_with("a/") || path.starts_with("b/") {
@@ -203,25 +203,25 @@ fn parse_single_diff(lines: &[&str]) -> Result<(ParsedDiff, usize)> {
             i += 1;
             continue;
         }
-        
+
         if line.starts_with("@@") {
             let (hunk, consumed) = parse_hunk(&lines[i..])?;
             hunks.push(hunk);
             i += consumed;
             continue;
         }
-        
+
         if line.starts_with("diff --git") && i > 0 {
             break;
         }
-        
+
         i += 1;
     }
-    
+
     if new_file.as_os_str().is_empty() && old_file.is_some() {
         new_file = old_file.clone().unwrap();
     }
-    
+
     let diff = ParsedDiff {
         old_file,
         new_file,
@@ -229,32 +229,39 @@ fn parse_single_diff(lines: &[&str]) -> Result<(ParsedDiff, usize)> {
         is_new_file,
         is_deleted,
     };
-    
+
     Ok((diff, i))
 }
 
 fn parse_hunk(lines: &[&str]) -> Result<(DiffHunk, usize)> {
     let header = lines[0];
     let header_re = regex::Regex::new(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap();
-    
-    let caps = header_re.captures(header)
+
+    let caps = header_re
+        .captures(header)
         .ok_or_else(|| anyhow::anyhow!("Invalid hunk header: {}", header))?;
-    
+
     let old_start: usize = caps[1].parse()?;
-    let old_lines: usize = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+    let old_lines: usize = caps
+        .get(2)
+        .map(|m| m.as_str().parse().unwrap_or(0))
+        .unwrap_or(0);
     let new_start: usize = caps[3].parse()?;
-    let new_lines: usize = caps.get(4).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
-    
+    let new_lines: usize = caps
+        .get(4)
+        .map(|m| m.as_str().parse().unwrap_or(0))
+        .unwrap_or(0);
+
     let mut diff_lines = Vec::new();
     let mut i = 1;
-    
+
     while i < lines.len() {
         let line = lines[i];
-        
+
         if line.starts_with("@@") || line.starts_with("diff --git") {
             break;
         }
-        
+
         if line.starts_with('+') {
             diff_lines.push(DiffLine::Added(line[1..].to_string()));
         } else if line.starts_with('-') && !line.starts_with("---") {
@@ -265,10 +272,10 @@ fn parse_hunk(lines: &[&str]) -> Result<(DiffHunk, usize)> {
         } else if line.starts_with("\\") {
             // "\ No newline at end of file" - metadata line, skip
         }
-        
+
         i += 1;
     }
-    
+
     let hunk = DiffHunk {
         old_start,
         old_lines,
@@ -277,13 +284,13 @@ fn parse_hunk(lines: &[&str]) -> Result<(DiffHunk, usize)> {
         lines: diff_lines,
         header: header.to_string(),
     };
-    
+
     Ok((hunk, i))
 }
 
 fn reconstruct_new_file_content(diff: &ParsedDiff) -> Result<String> {
     let mut content = Vec::new();
-    
+
     for hunk in &diff.hunks {
         for line in &hunk.lines {
             if let DiffLine::Added(text) | DiffLine::Context(text) = line {
@@ -291,17 +298,17 @@ fn reconstruct_new_file_content(diff: &ParsedDiff) -> Result<String> {
             }
         }
     }
-    
+
     Ok(content.join("\n"))
 }
 
 fn render_hunks(diff: &ParsedDiff) -> String {
     let mut output = String::new();
-    
+
     for hunk in &diff.hunks {
         output.push_str(&hunk.header);
         output.push('\n');
-        
+
         for line in &hunk.lines {
             match line {
                 DiffLine::Context(text) => {
@@ -322,22 +329,22 @@ fn render_hunks(diff: &ParsedDiff) -> String {
             }
         }
     }
-    
+
     output
 }
 
 /// Apply a unified diff to original content
-/// 
+///
 /// This function correctly handles context lines - they are verified but not modified.
 /// Only Removed lines are deleted and Added lines are inserted.
 pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
     let original_lines: Vec<&str> = original.lines().collect();
     let mut result: Vec<String> = original_lines.iter().map(|s| s.to_string()).collect();
     let mut offset: i64 = 0;
-    
+
     for (hunk_idx, hunk) in diff.hunks.iter().enumerate() {
         let insert_pos = (hunk.old_start as i64 - 1 + offset) as usize;
-        
+
         if insert_pos > result.len() {
             bail!(
                 "Hunk {} offset out of bounds: trying to insert at line {}, but file only has {} lines",
@@ -346,7 +353,7 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
                 result.len()
             );
         }
-        
+
         // Verify context lines match before applying
         let mut verify_pos = insert_pos;
         for line in &hunk.lines {
@@ -367,12 +374,12 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
                 verify_pos += 1;
             }
         }
-        
+
         // Collect operations: (position, operation, content)
         // We process in reverse order to maintain correct indices
         let mut operations: Vec<(usize, char, Option<String>)> = Vec::new();
         let mut line_idx = insert_pos;
-        
+
         for line in &hunk.lines {
             match line {
                 DiffLine::Context(_) => {
@@ -390,7 +397,7 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
                 }
             }
         }
-        
+
         // Sort operations: first by position (descending), then removals before insertions
         operations.sort_by(|a, b| {
             let pos_cmp = b.0.cmp(&a.0); // Reverse position order
@@ -400,7 +407,7 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
             // At same position, removals ('-') come before insertions ('+')
             b.1.cmp(&a.1)
         });
-        
+
         // Apply operations
         for (pos, op, content) in operations {
             match op {
@@ -419,11 +426,11 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
                 _ => {}
             }
         }
-        
+
         // Update offset for next hunk
         offset += (hunk.new_lines as i64) - (hunk.old_lines as i64);
     }
-    
+
     Ok(result.join("\n"))
 }
 
@@ -433,7 +440,7 @@ pub fn validate_edit_operations(
     policy: &FilePolicy,
 ) -> Result<()> {
     let mut seen_files: HashMap<PathBuf, usize> = HashMap::new();
-    
+
     for (idx, e) in edits.iter().enumerate() {
         match e {
             EditOperation::SearchReplace(x) => {
@@ -449,7 +456,10 @@ pub fn validate_edit_operations(
             EditOperation::WholeFile(x) => {
                 assert_edit_allowed(&x.file, set, policy)?;
                 if x.content.is_empty() {
-                    bail!("Whole file edit for {} would result in empty file", x.file.display());
+                    bail!(
+                        "Whole file edit for {} would result in empty file",
+                        x.file.display()
+                    );
                 }
                 *seen_files.entry(x.file.clone()).or_insert(0) += 1;
             }
@@ -475,7 +485,7 @@ pub fn validate_edit_operations(
                     bail!("Rename operations are disabled by policy");
                 }
                 assert_edit_allowed(&x.from, set, policy)?;
-                
+
                 let to_normalized = normalize_path(&policy.repo_root, &x.to)?;
                 if is_path_denied(&to_normalized, policy)? {
                     bail!("Cannot rename to {}: target path is denied", x.to.display());
@@ -485,15 +495,17 @@ pub fn validate_edit_operations(
                 if !x.diff.contains("@@") {
                     bail!("Invalid unified diff: missing hunk markers (@@)");
                 }
-                
+
                 let parsed = parse_unified_diff(&x.diff)?;
                 if parsed.is_empty() {
                     bail!("Invalid unified diff: no hunks found");
                 }
-                
+
                 for diff in &parsed {
                     if !diff.is_new_file {
-                        let target = x.target_file.as_ref()
+                        let target = x
+                            .target_file
+                            .as_ref()
                             .or(diff.old_file.as_ref())
                             .or(Some(&diff.new_file))
                             .ok_or_else(|| anyhow::anyhow!("Diff missing target file"))?;
@@ -503,34 +515,38 @@ pub fn validate_edit_operations(
             }
         }
     }
-    
+
     for (file, count) in seen_files {
         if count > 1 {
-            bail!("File {} is modified by {} different edits - consider consolidating", 
-                  file.display(), count);
+            bail!(
+                "File {} is modified by {} different edits - consider consolidating",
+                file.display(),
+                count
+            );
         }
     }
-    
+
     Ok(())
 }
 
 fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
     let canonical = path.canonicalize()?;
     let repo_root = policy.repo_root.canonicalize()?;
-    
+
     if !canonical.starts_with(&repo_root) {
         return Ok(true);
     }
-    
-    let relative = canonical.strip_prefix(&repo_root)
+
+    let relative = canonical
+        .strip_prefix(&repo_root)
         .map_err(|_| anyhow::anyhow!("Failed to get relative path"))?;
-    
+
     for denied in &policy.denied_paths {
         if relative.starts_with(denied) {
             return Ok(true);
         }
     }
-    
+
     Ok(false)
 }
 
@@ -539,7 +555,7 @@ pub fn get_edit_summary(edits: &[EditOperation]) -> String {
     let mut modifications = 0;
     let mut deletions = 0;
     let mut renames = 0;
-    
+
     for edit in edits {
         match edit {
             EditOperation::CreateFile(_) => creates += 1,
@@ -548,7 +564,7 @@ pub fn get_edit_summary(edits: &[EditOperation]) -> String {
             _ => modifications += 1,
         }
     }
-    
+
     let mut parts = Vec::new();
     if creates > 0 {
         parts.push(format!("{} create(s)", creates));
@@ -562,7 +578,7 @@ pub fn get_edit_summary(edits: &[EditOperation]) -> String {
     if renames > 0 {
         parts.push(format!("{} rename(s)", renames));
     }
-    
+
     if parts.is_empty() {
         "No changes".to_string()
     } else {
@@ -572,7 +588,7 @@ pub fn get_edit_summary(edits: &[EditOperation]) -> String {
 
 pub fn merge_edits(edits: Vec<EditOperation>) -> Vec<EditOperation> {
     let mut by_file: HashMap<PathBuf, Vec<EditOperation>> = HashMap::new();
-    
+
     for edit in edits {
         let file = match &edit {
             EditOperation::SearchReplace(x) => x.file.clone(),
@@ -582,22 +598,26 @@ pub fn merge_edits(edits: Vec<EditOperation>) -> Vec<EditOperation> {
             EditOperation::RenameFile(x) => x.from.clone(),
             EditOperation::UnifiedDiff(x) => x.target_file.clone().unwrap_or_default(),
         };
-        
+
         by_file.entry(file).or_default().push(edit);
     }
-    
+
     let mut merged = Vec::new();
-    
+
     for (file, file_edits) in by_file {
         if file_edits.len() == 1 {
             merged.push(file_edits.into_iter().next().unwrap());
         } else {
-            let whole_file = file_edits.iter().find(|e| matches!(e, EditOperation::WholeFile(_)));
-            
+            let whole_file = file_edits
+                .iter()
+                .find(|e| matches!(e, EditOperation::WholeFile(_)));
+
             if let Some(wf) = whole_file {
                 merged.push(wf.clone());
             } else {
-                let create = file_edits.iter().find(|e| matches!(e, EditOperation::CreateFile(_)));
+                let create = file_edits
+                    .iter()
+                    .find(|e| matches!(e, EditOperation::CreateFile(_)));
                 if let Some(c) = create {
                     merged.push(c.clone());
                 } else {
@@ -606,6 +626,6 @@ pub fn merge_edits(edits: Vec<EditOperation>) -> Vec<EditOperation> {
             }
         }
     }
-    
+
     merged
 }
