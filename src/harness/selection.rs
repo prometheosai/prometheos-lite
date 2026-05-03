@@ -335,38 +335,14 @@ pub fn select_best_patch(
     let mut engine = SelectionEngine::new(criteria);
     engine.select_best_candidate(candidates)
 }
-
 pub fn rank_patches(candidates: Vec<PatchCandidate>) -> Vec<ScoredCandidate> {
     let engine = SelectionEngine::with_default_criteria();
     engine.rank_candidates(candidates)
 }
 
-                explanation: "Test confidence".into(),
-                recommendation: None,
-            },
-            risk: RiskAssessment {
-                level: RiskLevel::Low,
-                reasons: vec![],
-                requires_approval: false,
-                can_override: true,
-                override_conditions: vec![],
-            },
-            validation: Some(ValidationResult {
-                passed: true,
-                command_results: vec![],
-                errors: vec![],
-                duration_ms: 1000,
-                cached: false,
-                flaky_tests_detected: vec![],
-                category_results: HashMap::new(),
-            }),
-            review_issues: vec![],
-            semantic_diff: SemanticDiff::default(),
-            generation_strategy: "test".to_string(),
-            attempt_number: 1,
-            generation_time_ms: 100,
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn test_selection_engine_ranks_by_confidence() {
