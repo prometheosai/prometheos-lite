@@ -493,7 +493,7 @@ fn compute_content_hashes(transaction: &Transaction) -> HashMap<PathBuf, String>
     let mut hashes = HashMap::new();
     
     for (path, snapshot) in &transaction.snapshots {
-        if let Some(hash) = &snapshot.hash {
+        if let Some(hash) = &snapshot.before_hash {
             hashes.insert(path.clone(), hash.clone());
         }
     }

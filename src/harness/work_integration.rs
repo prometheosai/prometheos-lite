@@ -3,7 +3,7 @@ use crate::{
         completion::CompletionDecision,
         edit_protocol::EditOperation,
         execution_loop::{
-            HarnessExecutionRequest, HarnessExecutionResult, HarnessMode, execute_harness_task,
+            HarnessExecutionRequest, HarnessExecutionResult, HarnessMode, ValidationFailurePolicy, execute_harness_task,
         },
     },
     work::{
@@ -49,6 +49,7 @@ impl HarnessWorkContextService {
             mentioned_files: vec![],
             mentioned_symbols: vec![],
             proposed_edits,
+            validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
             progress_callback: None,
         };
         self.work_context_service

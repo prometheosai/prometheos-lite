@@ -85,6 +85,7 @@ impl Clone for HarnessExecutionRequest {
             mentioned_files: self.mentioned_files.clone(),
             mentioned_symbols: self.mentioned_symbols.clone(),
             proposed_edits: self.proposed_edits.clone(),
+            validation_failure_policy: self.validation_failure_policy,
             progress_callback: None, // Cannot clone trait object
         }
     }
@@ -251,7 +252,18 @@ pub enum HarnessProgress {
     },
     Error {
         step: String,
-        message: String,
+        error: String,
+    },
+    RollingBack {
+        reason: String,
+    },
+    RolledBack {
+        restored_files: usize,
+        deleted_files: usize,
+        recreated_files: usize,
+    },
+    RollbackFailed {
+        error: String,
     },
 }
 
@@ -554,57 +566,6 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
     };
     let dry_failures = dry.failures.clone();
     
-    // STEP 8b: Handle validation failure rollback policy
-    let validation_failed = validation.as_ref().map(|v| !v.passed).unwrap_or(false);
-    let should_rollback = if validation_failed && rollback_handle.is_some() {
-        match req.validation_failure_policy {
-            ValidationFailurePolicy::RollbackAutomatically => {
-                ctx.send_progress(HarnessProgress::RollingBack {
-                    reason: "validation failed - automatic rollback".into(),
-                });
-                true
-            }
-            ValidationFailurePolicy::RollbackOnCriticalFailure => {
-                // Check if any critical failures occurred
-                let has_critical = validation.as_ref()
-                    .map(|v| v.errors.iter().any(|e| e.contains("critical") || e.contains("fatal")))
-                    .unwrap_or(false);
-                if has_critical {
-                    ctx.send_progress(HarnessProgress::RollingBack {
-                        reason: "critical validation failure - automatic rollback".into(),
-                    });
-                }
-                has_critical
-            }
-            _ => false,
-        }
-    } else {
-        false
-    };
-    
-    if should_rollback {
-        if let Some(handle) = rollback_handle {
-            match handle.rollback().await {
-                Ok(result) => {
-                    failures.push(FailureKind::ValidationFailed);
-                    failures.push(FailureKind::PatchRolledBack);
-                    ctx.send_progress(HarnessProgress::RolledBack {
-                        restored_files: result.restored.len(),
-                        deleted_files: result.deleted.len(),
-                        recreated_files: result.recreated.len(),
-                    });
-                }
-                Err(e) => {
-                    failures.push(FailureKind::ValidationFailed);
-                    failures.push(FailureKind::RollbackFailed);
-                    ctx.send_progress(HarnessProgress::RollbackFailed {
-                        error: e.to_string(),
-                    });
-                }
-            }
-        }
-    }
-    
     metrics.patch_generation_ms = patch_start.elapsed().as_millis() as u64;
     metrics.files_modified = patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0);
     
@@ -653,6 +614,53 @@ pub async fn execute_harness_task(mut req: HarnessExecutionRequest) -> Result<Ha
     if let Some(ref v) = validation {
         if !v.passed {
             failures.push(classify_validation_failure(v));
+        }
+    }
+    
+    // STEP 9: Handle validation failure rollback policy
+    if let Some(ref v) = validation {
+        if !v.passed && rollback_handle.is_some() {
+            let should_rollback = match req.validation_failure_policy {
+                ValidationFailurePolicy::RollbackAutomatically => {
+                    ctx.send_progress(HarnessProgress::RollingBack {
+                        reason: "validation failed - automatic rollback".into(),
+                    });
+                    true
+                }
+                ValidationFailurePolicy::RollbackOnCriticalFailure => {
+                    let has_critical = v.errors.iter().any(|e| e.contains("critical") || e.contains("fatal"));
+                    if has_critical {
+                        ctx.send_progress(HarnessProgress::RollingBack {
+                            reason: "critical validation failure - automatic rollback".into(),
+                        });
+                    }
+                    has_critical
+                }
+                _ => false,
+            };
+            
+            if should_rollback {
+                if let Some(handle) = rollback_handle {
+                    match handle.rollback().await {
+                        Ok(result) => {
+                            failures.push(FailureKind::ValidationFailed);
+                            failures.push(FailureKind::PatchRolledBack);
+                            ctx.send_progress(HarnessProgress::RolledBack {
+                                restored_files: result.restored.len(),
+                                deleted_files: result.deleted.len(),
+                                recreated_files: result.recreated.len(),
+                            });
+                        }
+                        Err(e) => {
+                            failures.push(FailureKind::ValidationFailed);
+                            failures.push(FailureKind::RollbackFailed);
+                            ctx.send_progress(HarnessProgress::RollbackFailed {
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
     
