@@ -119,7 +119,7 @@ impl ScalingEngine {
         }
 
         let should_continue =
-            self.current_attempt <= self.config.max_attempts && !self.is_resource_exhausted();
+            self.current_attempt < self.config.max_attempts && !self.is_resource_exhausted();
 
         if !should_continue {
             return ScalingDecision {

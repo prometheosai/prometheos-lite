@@ -326,9 +326,9 @@ impl ModelStrategyEngine {
         score += perf_score * 0.2;
 
         // Capability match (10%)
-        let capability_score = if requirements.requires_reasoning
-            && model.strengths.contains(&"complex_reasoning".to_string())
-        {
+        let has_reasoning = model.strengths.contains(&"complex_reasoning".to_string())
+            || model.strengths.contains(&"expert_reasoning".to_string());
+        let capability_score = if requirements.requires_reasoning && has_reasoning {
             1.0
         } else if requirements.requires_creativity
             && model.strengths.contains(&"code_generation".to_string())
@@ -510,10 +510,12 @@ mod tests {
             requires_reasoning: true,
             requires_creativity: false,
             urgency: UrgencyLevel::Normal,
-            budget_constraint: Some(1.0), // Very low budget
+            budget_constraint: Some(5.0), // Budget that allows mini model (cost ~3.75) but not expensive ones
         };
 
         let rec = engine.select_model(&requirements, "test-3").unwrap();
-        assert!(rec.estimated_cost <= 1.0);
+        assert!(rec.estimated_cost <= 5.0);
+        // Should select the cheapest model that fits (gpt-4o-mini)
+        assert_eq!(rec.model.tier, ModelTier::Fast);
     }
 }

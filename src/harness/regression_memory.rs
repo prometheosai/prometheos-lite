@@ -150,7 +150,7 @@ impl RegressionMemory {
                 .or_insert_with(Vec::new)
                 .push(pattern_signature.clone());
 
-            id
+            pattern_signature
         };
 
         self.log_access(&pattern_id, AccessType::Write);
@@ -478,7 +478,7 @@ mod tests {
         );
 
         assert!(!matches.is_empty());
-        assert_eq!(matches[0].pattern.id, pattern_id);
+        assert_eq!(matches[0].pattern.pattern_signature, pattern_id);
     }
 
     #[test]

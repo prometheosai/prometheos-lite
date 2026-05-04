@@ -552,7 +552,7 @@ impl GoldenPathRegistry {
             // Cap score at 1.0
             score = score.min(1.0);
 
-            if score > 0.3 {
+            if score >= 0.3 {
                 matches.push(PathMatch {
                     path: path.clone(),
                     match_score: score,

@@ -421,6 +421,7 @@ mod tests {
     fn test_security_validation_rejects_shell_without_permission() {
         let policy = SandboxSecurityPolicy {
             allow_shell: false,
+            allowed_programs: vec![], // Empty list allows all non-blocked programs
             ..Default::default()
         };
         let runtime = LocalSandboxRuntime::with_policy(policy);

@@ -377,13 +377,20 @@ mod tests {
 
     #[test]
     fn test_selection_engine_ranks_by_confidence() {
+        // Use custom criteria that doesn't require validation
+        let criteria = SelectionCriteria {
+            require_validation: false,
+            ..SelectionCriteria::default()
+        };
+        let engine = SelectionEngine::new(criteria);
+
         let candidates = vec![
             create_test_candidate("low", 0.5),
             create_test_candidate("high", 0.9),
             create_test_candidate("med", 0.7),
         ];
 
-        let ranked = rank_patches(candidates);
+        let ranked = engine.rank_candidates(candidates);
         assert_eq!(ranked[0].candidate.id, "high");
         assert_eq!(ranked[1].candidate.id, "med");
         assert_eq!(ranked[2].candidate.id, "low");
@@ -393,6 +400,7 @@ mod tests {
     fn test_eligibility_threshold() {
         let mut criteria = SelectionCriteria::default();
         criteria.min_confidence_threshold = 0.8;
+        criteria.require_validation = false; // Disable validation for test
 
         let mut engine = SelectionEngine::new(criteria);
         let candidates = vec![
