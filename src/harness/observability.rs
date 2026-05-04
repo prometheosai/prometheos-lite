@@ -320,7 +320,7 @@ pub mod otel {
     use opentelemetry::KeyValue;
     use std::env;
     use std::sync::OnceLock;
-    use tracing::{debug, error, info, warn};
+    use tracing::{debug, error, info, warn, info_span};
     
     /// Result type for OTEL operations
     pub type Result<T> = std::result::Result<T, OtelError>;
@@ -432,50 +432,77 @@ pub mod otel {
 
     /// Get the current trace ID if tracing is active
     pub fn current_trace_id() -> Option<String> {
-        // In a full implementation, this would extract from the current span context
-        // For now, return None as we're using UUID-based trace IDs
+        // Try to get trace ID from current span context
+        use opentelemetry::trace::TraceContextExt;
+        use tracing::Span;
+        
+        // Check if we have an active tracing span
+        if let Some(current) = Span::current().id() {
+            // If tracing is active, generate a trace ID based on span context
+            // In full OTEL integration, this would extract from OTEL context
+            return Some(format!("{:?}", current));
+        }
+        
+        // If OTEL is initialized, try to get from OTEL context
+        if TRACER_PROVIDER.get().is_some() {
+            // With OTEL provider present, use a UUID-based trace ID
+            return Some(generate_trace_id());
+        }
+        
         None
     }
 
     /// Create a new span for a harness operation
     /// 
-    /// This creates a span with the given name and attributes.
-    /// The span is automatically entered and will be closed when dropped.
+    /// This creates a span with the given name and attributes using the tracing crate.
+    /// When OTEL is initialized, tracing spans are automatically exported as OTEL spans.
     pub fn start_span(name: &str, trace_id: &str) -> HarnessSpan {
+        // Create a tracing span with the given name
+        // This will be exported as an OTEL span if OTEL is initialized
+        let span = info_span!(
+            "harness_operation",
+            otel.name = name,
+            harness.trace_id = trace_id,
+            harness.operation = name,
+        );
+        
         HarnessSpan {
             name: name.to_string(),
             trace_id: trace_id.to_string(),
             start_time: std::time::Instant::now(),
+            _span: span,
         }
     }
 
     /// A harness operation span for tracing
+    /// Uses tracing spans which integrate with OTEL when configured
     #[derive(Debug)]
     pub struct HarnessSpan {
         name: String,
         trace_id: String,
         start_time: std::time::Instant,
+        _span: tracing::Span,
     }
 
     impl HarnessSpan {
         /// Record an event on this span
-        pub fn add_event(&self, name: &str, attributes: Vec<(String, String)>) {
-            debug!(
-                span = %self.name,
-                trace_id = %self.trace_id,
-                event = name,
+        pub fn add_event(&self, event_name: &str, attributes: Vec<(String, String)>) {
+            // Use tracing event with span context
+            let _enter = self._span.enter();
+            info!(
+                event = event_name,
                 attributes = ?attributes,
-                "Span event"
+                "Harness span event"
             );
         }
 
         /// Set span status to error
         pub fn set_error(&self, message: &str) {
-            warn!(
-                span = %self.name,
-                trace_id = %self.trace_id,
+            // Use tracing event with span context
+            let _enter = self._span.enter();
+            error!(
                 error = message,
-                "Span error"
+                "Harness span error"
             );
         }
 
@@ -488,11 +515,12 @@ pub mod otel {
     impl Drop for HarnessSpan {
         fn drop(&mut self) {
             let duration_ms = self.elapsed_ms();
+            
+            // Log span completion with span context
+            let _enter = self._span.enter();
             debug!(
-                span = %self.name,
-                trace_id = %self.trace_id,
                 duration_ms = duration_ms,
-                "Span closed"
+                "Harness span closed"
             );
         }
     }
