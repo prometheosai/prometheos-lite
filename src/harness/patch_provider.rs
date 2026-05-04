@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::harness::{
-    edit_protocol::{CreateFileEdit, EditOperation, WholeFileEdit},
+    edit_protocol::{CreateFileEdit, EditOperation, SearchReplaceEdit, WholeFileEdit},
     failure::{FailureDetails, FailureKind},
     repo_intelligence::RepoMap,
     review::{ReviewIssue, ReviewReport},
@@ -18,7 +18,7 @@ use crate::harness::{
 };
 
 /// Context available to patch providers for generating or repairing edits
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchProviderContext {
     /// The original task description
     pub task: String,
@@ -41,7 +41,7 @@ pub struct PatchProviderContext {
 }
 
 /// Record of a previous attempt for learning
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     pub attempt_number: u32,
     pub edits: Vec<EditOperation>,
@@ -50,7 +50,7 @@ pub struct AttemptRecord {
 }
 
 /// Outcome of an attempt
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AttemptOutcome {
     Success,
     PatchFailed,
@@ -297,7 +297,7 @@ fn expand_context_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOper
 /// 
 /// Reads the target file, finds all matches of the search pattern,
 /// and expands the search block with surrounding context to make it unique.
-fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
     use std::collections::HashMap;
     
     let mut repaired = Vec::new();
@@ -500,7 +500,7 @@ fn fix_syntax_repair(
     }
 }
 
-fn fix_unclosed_delimiters(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+pub fn fix_unclosed_delimiters(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
     use crate::harness::edit_protocol::SearchReplaceEdit;
 
     let mut repaired = Vec::new();
@@ -848,8 +848,20 @@ impl LlmPatchProvider {
                                 content.push('\n');
                             }
                             content.push_str(lines[i]);
+                            i += 1;
+                        }
+                        
+                        if !content.is_empty() {
+                            edits.push(EditOperation::CreateFile(CreateFileEdit {
+                                file: std::path::PathBuf::from(file_path),
+                                content,
+                                executable: None,
+                            }));
+                        }
+                    }
                 }
             }
+            i += 1;
         }
 
         edits

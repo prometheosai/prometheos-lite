@@ -26,6 +26,10 @@ pub enum FailureKind {
     UnknownFailure,
     Fatal,
     Critical,
+    ValidationFailed,
+    PatchRolledBack,
+    RollbackFailed,
+    SyntaxError,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +105,10 @@ impl FailureKind {
             FailureKind::UnknownFailure => FailureCategory::Tooling,
             FailureKind::Fatal => FailureCategory::Tooling,
             FailureKind::Critical => FailureCategory::Tooling,
+            FailureKind::ValidationFailed => FailureCategory::Semantic,
+            FailureKind::PatchRolledBack => FailureCategory::Tooling,
+            FailureKind::RollbackFailed => FailureCategory::Tooling,
+            FailureKind::SyntaxError => FailureCategory::Syntax,
         }
     }
 
@@ -118,6 +126,10 @@ impl FailureKind {
             FailureKind::NetworkFailure => FailureSeverity::Warning,
             FailureKind::ResourceExhaustion => FailureSeverity::Critical,
             FailureKind::SandboxFailure => FailureSeverity::Error,
+            FailureKind::ValidationFailed => FailureSeverity::Error,
+            FailureKind::PatchRolledBack => FailureSeverity::Warning,
+            FailureKind::RollbackFailed => FailureSeverity::Critical,
+            FailureKind::SyntaxError => FailureSeverity::Error,
             _ => FailureSeverity::Info,
         }
     }
@@ -130,6 +142,10 @@ impl FailureKind {
             FailureKind::SandboxFailure => RecoveryAction::UseAlternative,
             FailureKind::ResourceExhaustion => RecoveryAction::Abort,
             FailureKind::ToolFailure => RecoveryAction::UseAlternative,
+            FailureKind::ValidationFailed => RecoveryAction::Retry,
+            FailureKind::PatchRolledBack => RecoveryAction::Retry,
+            FailureKind::RollbackFailed => RecoveryAction::Abort,
+            FailureKind::SyntaxError => RecoveryAction::Retry,
             _ => RecoveryAction::Retry,
         }
     }

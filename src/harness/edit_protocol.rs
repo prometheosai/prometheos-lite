@@ -632,3 +632,43 @@ pub fn merge_edits(edits: Vec<EditOperation>) -> Vec<EditOperation> {
 
     merged
 }
+
+impl EditOperation {
+    /// Count lines added by this edit operation
+    pub fn lines_added(&self) -> usize {
+        match self {
+            EditOperation::SearchReplace(sr) => {
+                let search_lines = sr.search.lines().count();
+                let replace_lines = sr.replace.lines().count();
+                replace_lines.saturating_sub(search_lines)
+            }
+            EditOperation::UnifiedDiff(ud) => {
+                // Count added lines in unified diff format
+                ud.diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count()
+            }
+            EditOperation::WholeFile(wf) => wf.content.lines().count(),
+            EditOperation::CreateFile(cf) => cf.content.lines().count(),
+            EditOperation::DeleteFile(_) => 0,
+            EditOperation::RenameFile(_) => 0,
+        }
+    }
+
+    /// Count lines removed by this edit operation
+    pub fn lines_removed(&self) -> usize {
+        match self {
+            EditOperation::SearchReplace(sr) => {
+                let search_lines = sr.search.lines().count();
+                let replace_lines = sr.replace.lines().count();
+                search_lines.saturating_sub(replace_lines)
+            }
+            EditOperation::UnifiedDiff(ud) => {
+                // Count removed lines in unified diff format
+                ud.diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count()
+            }
+            EditOperation::WholeFile(_) => 0, // Whole file doesn't track removals
+            EditOperation::CreateFile(_) => 0,
+            EditOperation::DeleteFile(_) => 0, // Whole file removal
+            EditOperation::RenameFile(_) => 0,
+        }
+    }
+}

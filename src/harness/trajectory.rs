@@ -368,9 +368,9 @@ pub async fn replay_trajectory(
     );
 
     let start = std::time::Instant::now();
-    let mut steps_replayed = 0;
-    let mut steps_skipped = 0;
-    let mut steps_failed = 0;
+    let mut steps_replayed: usize = 0;
+    let mut steps_skipped: usize = 0;
+    let mut steps_failed: usize = 0;
     let mut divergence_details = Vec::new();
 
     for (idx, step) in trajectory.steps.iter().enumerate() {
