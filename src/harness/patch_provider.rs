@@ -676,9 +676,23 @@ impl LlmPatchProvider {
     }
 
     fn parse_edits_from_response(&self, response: &str) -> Vec<EditOperation> {
-        // Simple parsing: look for code blocks with edit format
         let mut edits = Vec::new();
 
+        // First, try strict JSON schema parsing (preferred)
+        if let Some(json) = Self::parse_json_schema_response(response) {
+            if let Some(edits_array) = json.get("edits").and_then(|v| v.as_array()) {
+                for edit_json in edits_array {
+                    if let Some(edit) = Self::json_to_edit_operation(edit_json) {
+                        edits.push(edit);
+                    }
+                }
+                if !edits.is_empty() {
+                    return edits;
+                }
+            }
+        }
+
+        // Fall back to legacy markdown parsing for backward compatibility
         // Parse search/replace blocks
         // Format: ```edit
         // FILE: path/to/file.rs
@@ -865,6 +879,92 @@ impl LlmPatchProvider {
         }
 
         edits
+    }
+
+    /// Parse JSON schema response for edits
+    /// 
+    /// JSON Schema format:
+    /// {
+    ///   "edits": [
+    ///     {
+    ///       "type": "search_replace",
+    ///       "file": "path/to/file.rs",
+    ///       "search": "text to find",
+    ///       "replace": "replacement text"
+    ///     },
+    ///     {
+    ///       "type": "whole_file",
+    ///       "file": "path/to/file.rs",
+    ///       "content": "full file content"
+    ///     },
+    ///     {
+    ///       "type": "create_file",
+    ///       "file": "path/to/file.rs",
+    ///       "content": "file content",
+    ///       "executable": false
+    ///     }
+    ///   ],
+    ///   "reasoning": "explanation of changes",
+    ///   "confidence": 85,
+    ///   "risks": ["potential risk 1", "risk 2"]
+    /// }
+    fn parse_json_schema_response(response: &str) -> Option<serde_json::Value> {
+        // Try to extract JSON from code blocks or raw JSON
+        let trimmed = response.trim();
+        
+        // Check if wrapped in code block
+        if trimmed.starts_with("```json") || trimmed.starts_with("```") {
+            // Extract content between code fences
+            let start = trimmed.find('\n').unwrap_or(0);
+            let end = trimmed.rfind("```").unwrap_or(trimmed.len());
+            if start < end {
+                let json_content = &trimmed[start..end].trim();
+                return serde_json::from_str(json_content).ok();
+            }
+        }
+        
+        // Try parsing as raw JSON
+        serde_json::from_str(trimmed).ok()
+    }
+
+    /// Convert JSON schema to EditOperation
+    fn json_to_edit_operation(json: &serde_json::Value) -> Option<EditOperation> {
+        let edit_type = json.get("type")?.as_str()?;
+        let file = std::path::PathBuf::from(json.get("file")?.as_str()?);
+        
+        match edit_type {
+            "search_replace" => {
+                let search = json.get("search")?.as_str()?.to_string();
+                let replace = json.get("replace")?.as_str()?.to_string();
+                Some(EditOperation::SearchReplace(SearchReplaceEdit {
+                    file,
+                    search,
+                    replace,
+                    replace_all: json.get("replace_all").and_then(|v| v.as_bool()).or(Some(false)),
+                    context_lines: json.get("context_lines").and_then(|v| v.as_u64()).map(|v| v as u16).or(Some(3)),
+                }))
+            }
+            "whole_file" => {
+                let content = json.get("content")?.as_str()?.to_string();
+                Some(EditOperation::WholeFile(WholeFileEdit {
+                    file,
+                    content,
+                }))
+            }
+            "create_file" => {
+                let content = json.get("content")?.as_str()?.to_string();
+                let executable = json.get("executable").and_then(|v| v.as_bool());
+                Some(EditOperation::CreateFile(CreateFileEdit {
+                    file,
+                    content,
+                    executable,
+                }))
+            }
+            "delete_file" => {
+                Some(EditOperation::DeleteFile(crate::harness::edit_protocol::DeleteFileEdit { file }))
+            }
+            _ => None,
+        }
     }
 }
 
