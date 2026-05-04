@@ -1,0 +1,1847 @@
+    Checking prometheos-lite v0.1.0 (E:\Projects\PrometheOS-Lite)
+error[E0428]: the name `detect_language` is defined multiple times
+    --> src\harness\repo_intelligence.rs:1571:1
+     |
+ 289 | fn detect_language(p: &Path) -> String {
+     | -------------------------------------- previous definition of the value `detect_language` here
+...
+1571 | fn detect_language(ext: &str) -> &str {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `detect_language` redefined here
+     |
+     = note: `detect_language` must be defined only once in the value namespace of this module
+
+error[E0432]: unresolved import `crate::harness::selection::CandidateOutcome`
+  --> src\harness\execution_loop.rs:30:9
+   |
+30 |         CandidateOutcome, PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine,
+   |         ^^^^^^^^^^^^^^^^ no `CandidateOutcome` in `harness::selection`
+
+error[E0433]: cannot find type `ValidationCategory` in this scope
+   --> src\harness\execution_loop.rs:923:55
+    |
+923 |                 .and_then(|v| v.category_results.get(&ValidationCategory::Format))
+    |                                                       ^^^^^^^^^^^^^^^^^^ use of undeclared type `ValidationCategory`
+    |
+help: consider importing this enum through its public re-export
+    |
+  1 + use crate::harness::ValidationCategory;
+    |
+
+error[E0433]: cannot find type `ValidationCategory` in this scope
+   --> src\harness\execution_loop.rs:927:55
+    |
+927 |                 .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
+    |                                                       ^^^^^^^^^^^^^^^^^^ use of undeclared type `ValidationCategory`
+    |
+help: consider importing this enum through its public re-export
+    |
+  1 + use crate::harness::ValidationCategory;
+    |
+
+error[E0433]: cannot find type `ValidationCategory` in this scope
+   --> src\harness\execution_loop.rs:931:55
+    |
+931 |                 .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
+    |                                                       ^^^^^^^^^^^^^^^^^^ use of undeclared type `ValidationCategory`
+    |
+help: consider importing this enum through its public re-export
+    |
+  1 + use crate::harness::ValidationCategory;
+    |
+
+error[E0433]: cannot find type `ValidationCategory` in this scope
+   --> src\harness\execution_loop.rs:935:55
+    |
+935 |                 .and_then(|v| v.category_results.get(&ValidationCategory::Test))
+    |                                                       ^^^^^^^^^^^^^^^^^^ use of undeclared type `ValidationCategory`
+    |
+help: consider importing this enum through its public re-export
+    |
+  1 + use crate::harness::ValidationCategory;
+    |
+
+error[E0425]: cannot find value `content` in this scope
+    --> src\harness\execution_loop.rs:1069:23
+     |
+1069 |         content: Some(content.clone()),
+     |                       ^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `content` in this scope
+    --> src\harness\execution_loop.rs:1079:21
+     |
+1079 |         size_bytes: content.len(),
+     |                     ^^^^^^^ not found in this scope
+
+error[E0422]: cannot find struct, variant or union type `SearchReplaceEdit` in this scope
+   --> src\harness\patch_provider.rs:417:70
+    |
+417 |                         narrowed = Some(EditOperation::SearchReplace(SearchReplaceEdit {
+    |                                                                      ^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+  7 + use crate::harness::SearchReplaceEdit;
+    |
+
+error[E0425]: cannot find value `LANGUAGE` in crate `tree_sitter_typescript`
+   --> src\harness\repo_intelligence.rs:321:57
+    |
+321 |         "typescript" | "tsx" => tree_sitter_typescript::LANGUAGE.into(),
+    |                                                         ^^^^^^^^ not found in `tree_sitter_typescript`
+
+error[E0603]: function `narrow_search_repair` is private
+   --> src\harness\repair_loop.rs:110:45
+    |
+110 |         use crate::harness::patch_provider::narrow_search_repair;
+    |                                             ^^^^^^^^^^^^^^^^^^^^ private function
+    |
+note: the function `narrow_search_repair` is defined here
+   --> src\harness\patch_provider.rs:300:1
+    |
+300 | fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: struct import `ConfidenceScore` is private
+   --> src\harness\execution_loop.rs:474:68
+    |
+474 | ...                   confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+    |                                                              ^^^^^^^^^^^^^^^ private struct import
+    |
+note: the struct import `ConfidenceScore` is defined here...
+   --> src\harness\selection.rs:5:5
+    |
+  5 |     confidence::ConfidenceScore,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...and refers to the struct `ConfidenceScore` which is defined here
+   --> src\harness\confidence.rs:10:1
+    |
+ 10 | pub struct ConfidenceScore {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^ you could import this directly
+help: consider importing this struct through its public re-export instead
+    |
+474 -                             confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+474 +                             confidence: crate::harness::ConfidenceScore::new(c.confidence as f64 / 100.0),
+    |
+help: import `ConfidenceScore` directly
+    |
+474 -                             confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+474 +                             confidence: harness::confidence::ConfidenceScore(c.confidence as f64 / 100.0),
+    |
+
+error[E0603]: struct import `ConfidenceScore` is private
+   --> src\harness\execution_loop.rs:725:68
+    |
+725 | ...                   confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+    |                                                              ^^^^^^^^^^^^^^^ private struct import
+    |
+note: the struct import `ConfidenceScore` is defined here...
+   --> src\harness\selection.rs:5:5
+    |
+  5 |     confidence::ConfidenceScore,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...and refers to the struct `ConfidenceScore` which is defined here
+   --> src\harness\confidence.rs:10:1
+    |
+ 10 | pub struct ConfidenceScore {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^ you could import this directly
+help: consider importing this struct through its public re-export instead
+    |
+725 -                             confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+725 +                             confidence: crate::harness::ConfidenceScore::new(c.confidence as f64 / 100.0),
+    |
+help: import `ConfidenceScore` directly
+    |
+725 -                             confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+725 +                             confidence: harness::confidence::ConfidenceScore(c.confidence as f64 / 100.0),
+    |
+
+error[E0603]: function `fix_unclosed_delimiters` is private
+   --> src\harness\repair_loop.rs:158:49
+    |
+158 |                 crate::harness::patch_provider::fix_unclosed_delimiters(current_edits)
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^ private function
+    |
+note: the function `fix_unclosed_delimiters` is defined here
+   --> src\harness\patch_provider.rs:503:1
+    |
+503 | fn fix_unclosed_delimiters(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `WorkContextService` and `WorkContext`
+  --> src\api\work_contexts.rs:17:5
+   |
+17 |     WorkContextService,
+   |     ^^^^^^^^^^^^^^^^^^
+18 |     types::{WorkContext, WorkDomain, WorkStatus},
+   |             ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TrimmedContext`
+  --> src\context\builder.rs:10:70
+   |
+10 | use super::budgeter::{ContextBudgeter, ContextItem, ContextPriority, TrimmedContext};
+   |                                                                      ^^^^^^^^^^^^^^
+
+warning: unused import: `uuid::Uuid`
+ --> src\db\models.rs:8:5
+  |
+8 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+
+warning: unused import: `super::interrupts::InterruptOperations`
+ --> src\db\repository\db.rs:9:5
+  |
+9 | use super::interrupts::InterruptOperations;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::outbox::OutboxOperations`
+  --> src\db\repository\db.rs:11:5
+   |
+11 | use super::outbox::OutboxOperations;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::snapshots::FlowSnapshotOperations`
+  --> src\db\repository\db.rs:13:5
+   |
+13 | use super::snapshots::FlowSnapshotOperations;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::trust_policies::TrustPolicyOperations`
+  --> src\db\repository\db.rs:15:5
+   |
+15 | use super::trust_policies::TrustPolicyOperations;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StepStatus`
+ --> src\db\repository\execution_plans.rs:7:44
+  |
+7 | use crate::work::{ExecutionPlan, PlanStep, StepStatus};
+  |                                            ^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\flow\budget\budget_guard.rs:3:14
+  |
+3 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `ExecutionBudget`
+ --> src\flow\execution\flow.rs:4:26
+  |
+4 |     Action, BudgetGuard, ExecutionBudget, Input, Node, NodeConfig, NodeId, Output, SharedState,
+  |                          ^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\execution\flow_types.rs:4:5
+  |
+4 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\execution\rate_limit.rs:4:5
+  |
+4 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src\flow\execution\rate_limit.rs:8:5
+  |
+8 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NodeConfig`
+  --> src\flow\execution\rate_limit.rs:10:25
+   |
+10 | use crate::flow::{Node, NodeConfig, NodeId, SharedState};
+   |                         ^^^^^^^^^^
+
+warning: unused imports: `RunId` and `Tracer`
+  --> src\flow\execution_service.rs:20:28
+   |
+20 | use crate::flow::tracing::{RunId, SharedTracer, TraceEvent, Tracer};
+   |                            ^^^^^                            ^^^^^^
+
+warning: unused import: `RunStatus`
+   --> src\flow\execution_service.rs:483:55
+    |
+483 |                 use crate::flow::execution::{FlowRun, RunStatus};
+    |                                                       ^^^^^^^^^
+
+warning: unused import: `RunStatus`
+   --> src\flow\execution_service.rs:662:55
+    |
+662 |                 use crate::flow::execution::{FlowRun, RunStatus};
+    |                                                       ^^^^^^^^^
+
+warning: unused import: `crate::tools::PathGuard`
+ --> src\flow\factory\builtin_nodes.rs:5:5
+  |
+5 | use crate::tools::PathGuard;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\factory\builtin_nodes.rs:7:5
+  |
+7 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::json`
+ --> src\flow\factory\builtin_nodes.rs:8:5
+  |
+8 | use serde_json::json;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `InterruptOperations`
+  --> src\flow\factory\builtin_nodes.rs:12:29
+   |
+12 | use crate::db::repository::{InterruptOperations, OutboxOperations};
+   |                             ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+  --> src\flow\factory\coding_nodes.rs:10:5
+   |
+10 | use async_trait::async_trait;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing`
+  --> src\flow\factory\coding_nodes.rs:13:5
+   |
+13 | use tracing;
+   |     ^^^^^^^
+
+warning: unused import: `Duration`
+ --> src\flow\memory\scoring.rs:6:14
+  |
+6 | use chrono::{Duration, Utc};
+  |              ^^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> src\flow\memory\service.rs:4:5
+  |
+4 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ContextBundle`
+  --> src\flow\memory\service.rs:15:20
+   |
+15 | use super::types::{ContextBundle, Memory, MemoryKind, MemoryType, MemoryWriteTask};
+   |                    ^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\flow\memory\summarizer.rs:6:14
+  |
+6 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused imports: `Deserialize` and `Serialize`
+ --> src\flow\memory\summarizer.rs:7:13
+  |
+7 | use serde::{Deserialize, Serialize};
+  |             ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `Key`
+ --> src\flow\opentelemetry.rs:7:21
+  |
+7 | use opentelemetry::{Key, KeyValue};
+  |                     ^^^
+
+warning: unused import: `opentelemetry_sdk::Resource`
+ --> src\flow\opentelemetry.rs:9:5
+  |
+9 | use opentelemetry_sdk::Resource;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TracerProvider`
+  --> src\flow\opentelemetry.rs:10:50
+   |
+10 | use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
+   |                                                  ^^^^^^^^^^^^^^
+
+warning: unused import: `uuid::Uuid`
+  --> src\flow\strict_mode.rs:10:5
+   |
+10 | use uuid::Uuid;
+   |     ^^^^^^^^^^
+
+warning: unused import: `SharedState`
+ --> src\flow\tracing.rs:9:27
+  |
+9 | use crate::flow::{NodeId, SharedState};
+  |                           ^^^^^^^^^^^
+
+warning: unused import: `BudgetUsage`
+ --> src\flow\types.rs:6:34
+  |
+6 | use super::budget::{BudgetGuard, BudgetUsage, ExecutionBudget};
+  |                                  ^^^^^^^^^^^
+
+warning: unused import: `adapter::*`
+  --> src\flow\mod.rs:28:9
+   |
+28 | pub use adapter::*;
+   |         ^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\acceptance.rs:2:5
+  |
+2 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `Path` and `collections::HashMap`
+ --> src\harness\acceptance.rs:6:5
+  |
+6 |     collections::HashMap,
+  |     ^^^^^^^^^^^^^^^^^^^^
+7 |     path::{Path, PathBuf},
+  |            ^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\adversarial_validation.rs:2:5
+  |
+2 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+ --> src\harness\adversarial_validation.rs:6:5
+  |
+6 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `Path`
+ --> src\harness\benchmark.rs:7:17
+  |
+7 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `Duration`
+ --> src\harness\benchmark.rs:8:17
+  |
+8 | use std::time::{Duration, Instant};
+  |                 ^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\harness\completion.rs:8:5
+  |
+8 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\environment.rs:1:14
+  |
+1 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `process::Command`
+ --> src\harness\environment.rs:3:49
+  |
+3 | use std::{collections::HashMap, fs, path::Path, process::Command};
+  |                                                 ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PatchCandidate as ProviderCandidate`, `PatchProviderContext`, `RiskEstimate`, `apply_patch`, and `generate_completion_artifact`
+  --> src\harness\execution_loop.rs:5:9
+   |
+ 5 |         generate_completion_artifact,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+19 |         PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
+   |                                      ^^^^^^^^^^^
+...
+22 |         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
+   |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         PatchProvider, PatchProviderContext, RiskEstimate,
+   |                        ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\harness\execution_loop.rs:43:12
+   |
+43 |     time::{Duration, Instant},
+   |            ^^^^^^^^
+
+warning: unused imports: `PatchResult` and `edit_protocol::EditOperation`
+ --> src\harness\failure.rs:2:5
+  |
+2 |     edit_protocol::EditOperation,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+3 |     patch_applier::{PatchFailure, PatchResult},
+  |                                   ^^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\failure.rs:6:5
+  |
+6 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `self`
+ --> src\harness\file_control.rs:8:10
+  |
+8 |     io::{self, Read},
+  |          ^^^^
+
+warning: unused import: `std::collections::HashSet`
+ --> src\harness\git_checkpoint.rs:4:5
+  |
+4 | use std::collections::HashSet;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\knowledge_cache.rs:1:14
+  |
+1 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `Instant`
+ --> src\harness\knowledge_cache.rs:8:22
+  |
+8 |     time::{Duration, Instant},
+  |                      ^^^^^^^
+
+warning: unused import: `HashMap`
+ --> src\harness\minimality.rs:6:24
+  |
+6 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^
+
+warning: unused import: `Path`
+ --> src\harness\minimality.rs:7:17
+  |
+7 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\observability.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+ --> src\harness\observability.rs:7:17
+  |
+7 | use std::time::{Duration, Instant};
+  |                 ^^^^^^^^
+
+warning: unused import: `TracerProvider`
+   --> src\harness\observability.rs:317:40
+    |
+317 |     use opentelemetry::trace::{Tracer, TracerProvider};
+    |                                        ^^^^^^^^^^^^^^
+
+warning: unused imports: `assert_delete_allowed` and `assert_rename_allowed`
+ --> src\harness\patch_applier.rs:6:30
+  |
+6 |         FilePolicy, FileSet, assert_delete_allowed, assert_rename_allowed, normalize_path,
+  |                              ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `io::Write`
+  --> src\harness\patch_applier.rs:15:5
+   |
+15 |     io::Write,
+   |     ^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\harness\patch_provider.rs:9:5
+  |
+9 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ReviewReport` and `validation::ValidationResult`
+  --> src\harness\patch_provider.rs:16:27
+   |
+16 |     review::{ReviewIssue, ReviewReport},
+   |                           ^^^^^^^^^^^^
+17 |     validation::ValidationResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+ --> src\harness\permissions.rs:6:24
+  |
+6 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^  ^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\regression_memory.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `HashSet`
+ --> src\harness\regression_memory.rs:6:33
+  |
+6 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+
+warning: unused imports: `Duration` and `SystemTime`
+ --> src\harness\regression_memory.rs:8:17
+  |
+8 | use std::time::{Duration, SystemTime};
+  |                 ^^^^^^^^  ^^^^^^^^^^
+
+warning: unused imports: `AggregatePatchProvider`, `AttemptOutcome`, `AttemptRecord`, `GenerateRequest`, `GenerateResponse`, `HeuristicPatchProvider`, `LlmPatchProvider`, `PatchFailure`, `ProviderCandidate`, `ProviderCapabilities`, `RepairRequest as ProviderRepairRequest`, `RepairResponse`, `RepairStrategy as ProviderRepairStrategy`, `RiskEstimate`, `SearchReplaceEdit`, `WholeFileEdit`, and `repo_intelligence::RepoMap`
+  --> src\harness\repair_loop.rs:2:36
+   |
+ 2 |     edit_protocol::{EditOperation, SearchReplaceEdit, WholeFileEdit},
+   |                                    ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+...
+ 8 |     patch_applier::{PatchFailure, PatchResult, apply_patch, dry_run_patch},
+   |                     ^^^^^^^^^^^^
+ 9 |     patch_provider::{
+10 |         AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
+   |         ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+11 |         HeuristicPatchProvider, LlmPatchProvider, PatchProvider, PatchProviderContext,
+   |         ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+12 |         ProviderCandidate, ProviderCapabilities, RepairRequest as ProviderRepairRequest,
+   |         ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 |         RepairResponse, RepairStrategy as ProviderRepairStrategy, RiskEstimate,
+   |         ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+14 |     },
+15 |     repo_intelligence::RepoMap,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Context` and `bail`
+  --> src\harness\repair_loop.rs:19:14
+   |
+19 | use anyhow::{Context, Result, bail};
+   |              ^^^^^^^          ^^^^
+
+warning: unused import: `Duration`
+  --> src\harness\repair_loop.rs:24:12
+   |
+24 |     time::{Duration, Instant},
+   |            ^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\repo_intelligence.rs:1:14
+  |
+1 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `sync::Arc`
+ --> src\harness\repo_intelligence.rs:8:5
+  |
+8 |     sync::Arc,
+  |     ^^^^^^^^^
+
+warning: unused imports: `QueryCursor`, `Query`, and `Tree`
+  --> src\harness\repo_intelligence.rs:11:33
+   |
+11 | use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
+   |                                 ^^^^^  ^^^^^^^^^^^  ^^^^
+
+warning: unused import: `edit_protocol::EditOperation`
+ --> src\harness\reproduction.rs:2:5
+  |
+2 |     edit_protocol::EditOperation,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Context` and `bail`
+ --> src\harness\reproduction.rs:7:14
+  |
+7 | use anyhow::{Context, Result, bail};
+  |              ^^^^^^^          ^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+  --> src\harness\reproduction.rs:10:19
+   |
+10 |     collections::{HashMap, HashSet},
+   |                   ^^^^^^^  ^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\review.rs:1:5
+  |
+1 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `has_breaking_changes` and `requires_approval`
+ --> src\harness\risk.rs:4:55
+  |
+4 |         RiskLevel as SemanticRiskLevel, SemanticDiff, has_breaking_changes, requires_approval,
+  |                                                       ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\risk.rs:7:5
+  |
+7 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\harness\risk.rs:9:5
+  |
+9 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bail`
+ --> src\harness\runtime_tools.rs:4:22
+  |
+4 | use anyhow::{Result, bail};
+  |                      ^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\scaling.rs:4:5
+  |
+4 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src\harness\scaling.rs:6:5
+  |
+6 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ValidationCategory`
+  --> src\harness\selection.rs:10:18
+   |
+10 |     validation::{ValidationCategory, ValidationResult},
+   |                  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HashMap`
+ --> src\harness\semantic_diff.rs:3:24
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^
+
+warning: unused import: `Path`
+ --> src\harness\time_travel.rs:7:17
+  |
+7 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `error`
+ --> src\harness\trajectory.rs:7:22
+  |
+7 | use tracing::{debug, error, info, warn};
+  |                      ^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\validation.rs:2:14
+  |
+2 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\harness\verification.rs:2:5
+  |
+2 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ValidationFailurePolicy`
+ --> src\harness\work_integration.rs:6:75
+  |
+6 |             HarnessExecutionRequest, HarnessExecutionResult, HarnessMode, ValidationFailurePolicy,
+  |                                                                           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\queue\mod.rs:6:14
+  |
+6 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused imports: `ToolContext` and `ToolMetadata`
+ --> src\tools\coding.rs:7:20
+  |
+7 | use crate::tools::{ToolContext, ToolMetadata};
+  |                    ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `ToolContext` and `ToolMetadata`
+ --> src\tools\command.rs:8:20
+  |
+8 | use crate::tools::{ToolContext, ToolMetadata};
+  |                    ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `ToolContext` and `ToolMetadata`
+  --> src\tools\repo.rs:12:31
+   |
+12 | use crate::tools::{PathGuard, ToolContext, ToolMetadata};
+   |                               ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `Datelike`
+ --> src\utils\time.rs:3:24
+  |
+3 | use chrono::{DateTime, Datelike, Duration, Utc};
+  |                        ^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\work\evaluation.rs:6:14
+  |
+6 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src\work\evaluation.rs:8:5
+  |
+8 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `WorkContextPlaybook`
+  --> src\work\evolution_engine.rs:14:57
+   |
+14 | use crate::work::playbook::{PatternRecord, PatternType, WorkContextPlaybook};
+   |                                                         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `domain::WorkDomainProfile` and `playbook::WorkContextPlaybook`
+  --> src\work\execution_service.rs:17:5
+   |
+17 |     domain::WorkDomainProfile,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+18 |     playbook::WorkContextPlaybook,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `WorkPhase`
+  --> src\work\orchestrator.rs:12:69
+   |
+12 | use super::types::{AutonomyLevel, TestExecutionResult, WorkContext, WorkPhase, WorkStatus};
+   |                                                                     ^^^^^^^^^
+
+warning: unused import: `crate::flow::execution_service::FlowExecutionService`
+  --> src\work\orchestrator.rs:13:5
+   |
+13 | use crate::flow::execution_service::FlowExecutionService;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `anyhow::Result`
+ --> src\work\phase_controller.rs:3:5
+  |
+3 | use anyhow::Result;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `LifecycleTemplate`
+ --> src\work\template_loader.rs:7:21
+  |
+7 | use super::domain::{LifecycleTemplate, WorkDomainProfile};
+  |                     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::types::ApprovalPolicy`
+ --> src\work\template_loader.rs:8:5
+  |
+8 | use super::types::ApprovalPolicy;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated type alias `harness::patch_provider::PatchCandidate`: Use ProviderCandidate instead
+  --> src\harness\execution_loop.rs:22:53
+   |
+22 |         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
+   |                                                     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+error[E0599]: no function or associated item named `new` found for struct `ConfidenceScore` in the current scope
+   --> src\harness\execution_loop.rs:474:85
+    |
+474 | ...                   confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+    |                                                                               ^^^ function or associated item not found in `ConfidenceScore`
+    |
+   ::: src\harness\confidence.rs:10:1
+    |
+ 10 | pub struct ConfidenceScore {
+    | -------------------------- function or associated item `new` not found for this struct
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following traits define an item `new`, perhaps you need to implement one of them:
+            candidate #1: `Allocable`
+            candidate #2: `AnyBoxConstructor`
+            candidate #3: `Bit`
+            candidate #4: `KeyInit`
+            candidate #5: `KeyIvInit`
+            candidate #6: `UniformSampler`
+            candidate #7: `VariableOutput`
+            candidate #8: `VariableOutputCore`
+            candidate #9: `parking_lot_core::thread_parker::ThreadParkerT`
+            candidate #10: `sha2::Digest`
+help: there is a method `ne` with a similar name
+    |
+474 -                             confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+474 +                             confidence: crate::harness::selection::ConfidenceScore::ne(c.confidence as f64 / 100.0),
+    |
+
+error[E0063]: missing fields `review_issues`, `risk`, `semantic_diff` and 1 other field in initializer of `selection::PatchCandidate`
+   --> src\harness\execution_loop.rs:470:34
+    |
+470 |                         .map(|c| SelectionCandidate {
+    |                                  ^^^^^^^^^^^^^^^^^^ missing `review_issues`, `risk`, `semantic_diff` and 1 other field
+
+error[E0308]: mismatched types
+   --> src\harness\execution_loop.rs:481:70
+    |
+481 |                     let outcome = selection_engine.select_best_patch(&selection_candidates);
+    |                                                    ----------------- ^^^^^^^^^^^^^^^^^^^^^ expected `Vec<PatchCandidate>`, found `&Vec<PatchCandidate>`
+    |                                                    |
+    |                                                    arguments to this method are incorrect
+    |
+    = note: expected struct `Vec<_>`
+            found reference `&Vec<_>`
+note: method defined here
+   --> src\harness\selection.rs:330:12
+    |
+330 |     pub fn select_best_patch(
+    |            ^^^^^^^^^^^^^^^^^
+331 |         &mut self,
+332 |         candidates: Vec<PatchCandidate>,
+    |         -------------------------------
+help: consider removing the borrow
+    |
+481 -                     let outcome = selection_engine.select_best_patch(&selection_candidates);
+481 +                     let outcome = selection_engine.select_best_patch(selection_candidates);
+    |
+
+error[E0609]: no field `selected` on type `std::result::Result<std::option::Option<ScoredCandidate>, anyhow::Error>`
+   --> src\harness\execution_loop.rs:485:30
+    |
+485 | ...                   .selected
+    |                        ^^^^^^^^ unknown field
+
+error[E0609]: no field `files` on type `FileSet`
+   --> src\harness\execution_loop.rs:489:44
+    |
+489 |                         total_files: files.files.len(),
+    |                                            ^^^^^ unknown field
+    |
+    = note: available fields are: `editable`, `readonly`, `generated`, `artifacts`, `denied`, `binary`
+
+error[E0609]: no field `selected` on type `std::result::Result<std::option::Option<ScoredCandidate>, anyhow::Error>`
+   --> src\harness\execution_loop.rs:492:29
+    |
+492 |                     outcome.selected.map(|s| s.edits).unwrap_or_default()
+    |                             ^^^^^^^^ unknown field
+
+error[E0599]: no method named `log_info` found for struct `ExecutionContext` in the current scope
+   --> src\harness\execution_loop.rs:501:17
+    |
+302 | struct ExecutionContext {
+    | ----------------------- method `log_info` not found for this struct
+...
+501 |             ctx.log_info("No edits provided and no patch provider available");
+    |                 ^^^^^^^^ method not found in `ExecutionContext`
+
+error[E0063]: missing fields `rollback_handle` and `validation_failure_policy` in initializer of `HarnessExecutionResult`
+   --> src\harness\execution_loop.rs:502:23
+    |
+502 |             return Ok(HarnessExecutionResult {
+    |                       ^^^^^^^^^^^^^^^^^^^^^^ missing `rollback_handle` and `validation_failure_policy`
+
+error[E0063]: missing fields `rollback_handle` and `validation_failure_policy` in initializer of `HarnessExecutionResult`
+   --> src\harness\execution_loop.rs:567:19
+    |
+567 |         return Ok(HarnessExecutionResult {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^ missing `rollback_handle` and `validation_failure_policy`
+
+error[E0599]: no function or associated item named `new` found for struct `ConfidenceScore` in the current scope
+   --> src\harness\execution_loop.rs:725:85
+    |
+725 | ...                   confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+    |                                                                               ^^^ function or associated item not found in `ConfidenceScore`
+    |
+   ::: src\harness\confidence.rs:10:1
+    |
+ 10 | pub struct ConfidenceScore {
+    | -------------------------- function or associated item `new` not found for this struct
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following traits define an item `new`, perhaps you need to implement one of them:
+            candidate #1: `Allocable`
+            candidate #2: `AnyBoxConstructor`
+            candidate #3: `Bit`
+            candidate #4: `KeyInit`
+            candidate #5: `KeyIvInit`
+            candidate #6: `UniformSampler`
+            candidate #7: `VariableOutput`
+            candidate #8: `VariableOutputCore`
+            candidate #9: `parking_lot_core::thread_parker::ThreadParkerT`
+            candidate #10: `sha2::Digest`
+help: there is a method `ne` with a similar name
+    |
+725 -                             confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+725 +                             confidence: crate::harness::selection::ConfidenceScore::ne(c.confidence as f64 / 100.0),
+    |
+
+error[E0063]: missing fields `review_issues`, `risk`, `semantic_diff` and 1 other field in initializer of `selection::PatchCandidate`
+   --> src\harness\execution_loop.rs:721:34
+    |
+721 |                         .map(|c| SelectionCandidate {
+    |                                  ^^^^^^^^^^^^^^^^^^ missing `review_issues`, `risk`, `semantic_diff` and 1 other field
+
+error[E0308]: mismatched types
+   --> src\harness\execution_loop.rs:732:70
+    |
+732 |                     let outcome = selection_engine.select_best_patch(&selection_candidates);
+    |                                                    ----------------- ^^^^^^^^^^^^^^^^^^^^^ expected `Vec<PatchCandidate>`, found `&Vec<PatchCandidate>`
+    |                                                    |
+    |                                                    arguments to this method are incorrect
+    |
+    = note: expected struct `Vec<_>`
+            found reference `&Vec<_>`
+note: method defined here
+   --> src\harness\selection.rs:330:12
+    |
+330 |     pub fn select_best_patch(
+    |            ^^^^^^^^^^^^^^^^^
+331 |         &mut self,
+332 |         candidates: Vec<PatchCandidate>,
+    |         -------------------------------
+help: consider removing the borrow
+    |
+732 -                     let outcome = selection_engine.select_best_patch(&selection_candidates);
+732 +                     let outcome = selection_engine.select_best_patch(selection_candidates);
+    |
+
+error[E0609]: no field `selected` on type `std::result::Result<std::option::Option<ScoredCandidate>, anyhow::Error>`
+   --> src\harness\execution_loop.rs:736:30
+    |
+736 | ...                   .selected
+    |                        ^^^^^^^^ unknown field
+
+error[E0609]: no field `files` on type `FileSet`
+   --> src\harness\execution_loop.rs:740:44
+    |
+740 |                         total_files: files.files.len(),
+    |                                            ^^^^^ unknown field
+    |
+    = note: available fields are: `editable`, `readonly`, `generated`, `artifacts`, `denied`, `binary`
+
+error[E0609]: no field `selected` on type `std::result::Result<std::option::Option<ScoredCandidate>, anyhow::Error>`
+   --> src\harness\execution_loop.rs:743:29
+    |
+743 |                     outcome.selected.map(|s| s.edits).unwrap_or_default()
+    |                             ^^^^^^^^ unknown field
+
+error[E0599]: no variant or associated item named `ValidationFailed` found for enum `FailureKind` in the current scope
+   --> src\harness\execution_loop.rs:858:56
+    |
+858 | ...                   failures.push(FailureKind::ValidationFailed);
+    |                                                  ^^^^^^^^^^^^^^^^ variant or associated item not found in `FailureKind`
+    |
+   ::: src\harness\failure.rs:11:1
+    |
+ 11 | pub enum FailureKind {
+    | -------------------- variant or associated item `ValidationFailed` not found for this enum
+
+error[E0599]: no variant or associated item named `PatchRolledBack` found for enum `FailureKind` in the current scope
+   --> src\harness\execution_loop.rs:859:56
+    |
+859 | ...                   failures.push(FailureKind::PatchRolledBack);
+    |                                                  ^^^^^^^^^^^^^^^ variant or associated item not found in `FailureKind`
+    |
+   ::: src\harness\failure.rs:11:1
+    |
+ 11 | pub enum FailureKind {
+    | -------------------- variant or associated item `PatchRolledBack` not found for this enum
+
+error[E0599]: no variant or associated item named `ValidationFailed` found for enum `FailureKind` in the current scope
+   --> src\harness\execution_loop.rs:867:56
+    |
+867 | ...                   failures.push(FailureKind::ValidationFailed);
+    |                                                  ^^^^^^^^^^^^^^^^ variant or associated item not found in `FailureKind`
+    |
+   ::: src\harness\failure.rs:11:1
+    |
+ 11 | pub enum FailureKind {
+    | -------------------- variant or associated item `ValidationFailed` not found for this enum
+
+error[E0599]: no variant or associated item named `RollbackFailed` found for enum `FailureKind` in the current scope
+   --> src\harness\execution_loop.rs:868:56
+    |
+868 | ...                   failures.push(FailureKind::RollbackFailed);
+    |                                                  ^^^^^^^^^^^^^^ variant or associated item not found in `FailureKind`
+    |
+   ::: src\harness\failure.rs:11:1
+    |
+ 11 | pub enum FailureKind {
+    | -------------------- variant or associated item `RollbackFailed` not found for this enum
+
+error[E0609]: no field `success` on type `&CategoryResult`
+   --> src\harness\execution_loop.rs:924:28
+    |
+924 |                 .map(|r| r.success)
+    |                            ^^^^^^^ unknown field
+    |
+    = note: available fields are: `category`, `passed`, `commands`, `total_duration_ms`
+
+error[E0609]: no field `success` on type `&CategoryResult`
+   --> src\harness\execution_loop.rs:928:28
+    |
+928 |                 .map(|r| r.success)
+    |                            ^^^^^^^ unknown field
+    |
+    = note: available fields are: `category`, `passed`, `commands`, `total_duration_ms`
+
+error[E0609]: no field `success` on type `&CategoryResult`
+   --> src\harness\execution_loop.rs:932:28
+    |
+932 |                 .map(|r| r.success)
+    |                            ^^^^^^^ unknown field
+    |
+    = note: available fields are: `category`, `passed`, `commands`, `total_duration_ms`
+
+error[E0609]: no field `success` on type `&CategoryResult`
+   --> src\harness\execution_loop.rs:936:28
+    |
+936 |                 .map(|r| r.success)
+    |                            ^^^^^^^ unknown field
+    |
+    = note: available fields are: `category`, `passed`, `commands`, `total_duration_ms`
+
+error[E0063]: missing fields `acceptance`, `artifacts`, `completion_decision` and 19 other fields in initializer of `HarnessExecutionResult`
+    --> src\harness\execution_loop.rs:1055:22
+     |
+1055 |     let mut result = HarnessExecutionResult {
+     |                      ^^^^^^^^^^^^^^^^^^^^^^ missing `acceptance`, `artifacts`, `completion_decision` and 19 other fields
+
+error[E0061]: this method takes 3 arguments but 6 arguments were supplied
+   --> src\harness\repair_loop.rs:187:22
+    |
+187 |                 self.generate_repair_edits(
+    |                      ^^^^^^^^^^^^^^^^^^^^^
+...
+191 |                     file_set,
+    |                     -------- unexpected argument #4 of type `&FileSet`
+192 |                     prov,
+    |                     ---- unexpected argument #5 of type `&dyn PatchProvider`
+193 |                     &context,
+    |                     -------- unexpected argument #6 of type `&PatchProviderContext`
+    |
+note: method defined here
+   --> src\harness\repair_loop.rs:104:8
+    |
+104 |     fn generate_repair_edits(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra arguments
+    |
+190 -                     strategy,
+191 -                     file_set,
+192 -                     prov,
+193 -                     &context,
+190 +                     strategy,
+    |
+
+error[E0277]: `std::result::Result<Vec<EditOperation>, anyhow::Error>` is not a future
+   --> src\harness\repair_loop.rs:195:18
+    |
+195 |                 .await?
+    |                  ^^^^^ `std::result::Result<Vec<EditOperation>, anyhow::Error>` is not a future
+    |
+    = help: the trait `futures::Future` is not implemented for `std::result::Result<Vec<EditOperation>, anyhow::Error>`
+    = note: std::result::Result<Vec<EditOperation>, anyhow::Error> must be a future or must implement `IntoFuture` to be awaited
+    = note: required for `std::result::Result<Vec<EditOperation>, anyhow::Error>` to implement `std::future::IntoFuture`
+help: remove the `.await`
+    |
+195 -                 .await?
+195 +                 ?
+    |
+
+error[E0308]: mismatched types
+    --> src\harness\repo_intelligence.rs:1657:40
+     |
+1657 |             let lang = detect_language(ext);
+     |                        --------------- ^^^ expected `&Path`, found `&str`
+     |                        |
+     |                        arguments to this function are incorrect
+     |
+     = note: expected reference `&std::path::Path`
+                found reference `&str`
+note: function defined here
+    --> src\harness\repo_intelligence.rs:289:4
+     |
+ 289 | fn detect_language(p: &Path) -> String {
+     |    ^^^^^^^^^^^^^^^ --------
+
+error[E0063]: missing fields `language` and `symbol_count` in initializer of `RankedFile`
+    --> src\harness\repo_intelligence.rs:1663:27
+     |
+1663 |         ranked_files.push(RankedFile {
+     |                           ^^^^^^^^^^ missing `language` and `symbol_count`
+
+error[E0425]: cannot find function `generate_compressed_context` in this scope
+    --> src\harness\repo_intelligence.rs:1677:30
+     |
+ 710 | / fn build_compressed_context(
+ 711 | |     ranked_files: &[RankedFile],
+ 712 | |     symbols: &[CodeSymbol],
+ 713 | |     token_budget: usize,
+...    |
+ 769 | |     context
+ 770 | | }
+     | |_- similarly named function `build_compressed_context` defined here
+...
+1677 |       let compressed_context = generate_compressed_context(&all_symbols, max_tokens);
+     |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: a function with a similar name exists
+     |
+1677 -     let compressed_context = generate_compressed_context(&all_symbols, max_tokens);
+1677 +     let compressed_context = build_compressed_context(&all_symbols, max_tokens);
+     |
+
+error[E0308]: mismatched types
+    --> src\harness\repo_intelligence.rs:1759:36
+     |
+1759 |     let language = detect_language(ext);
+     |                    --------------- ^^^ expected `&Path`, found `&str`
+     |                    |
+     |                    arguments to this function are incorrect
+     |
+     = note: expected reference `&std::path::Path`
+                found reference `&str`
+note: function defined here
+    --> src\harness\repo_intelligence.rs:289:4
+     |
+ 289 | fn detect_language(p: &Path) -> String {
+     |    ^^^^^^^^^^^^^^^ --------
+
+error[E0425]: cannot find function `extract_symbols_with_tree_sitter` in this scope
+    --> src\harness\repo_intelligence.rs:1764:27
+     |
+1764 |     if let Some((s, r)) = extract_symbols_with_tree_sitter(path, &content, language) {
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+warning: variable does not need to be mutable
+   --> src\harness\trajectory.rs:373:9
+    |
+373 |     let mut steps_failed = 0;
+    |         ----^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `&dyn SandboxRuntime: SandboxRuntime` is not satisfied
+   --> src\harness\validation.rs:297:43
+    |
+297 |         run_parallel(root, &all_commands, Arc::new(sandbox), cache, timeout).await?
+    |                                           ^^^^^^^^^^^^^^^^^ the trait `SandboxRuntime` is not implemented for `&dyn SandboxRuntime`
+    |
+help: the trait `SandboxRuntime` is implemented for `LocalSandboxRuntime`
+   --> src\harness\sandbox.rs:257:1
+    |
+257 | impl SandboxRuntime for LocalSandboxRuntime {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: required for the cast from `Arc<&dyn SandboxRuntime>` to `Arc<(dyn SandboxRuntime + std::marker::Send + std::marker::Sync + 'static)>`
+
+error[E0277]: the trait bound `PatchProviderContext: serde::Serialize` is not satisfied
+    --> src\harness\execution_loop.rs:47:10
+     |
+  47 | #[derive(Serialize, Deserialize)]
+     |          ^^^^^^^^^ unsatisfied trait bound
+...
+  65 |     /// Context for patch provider (task description, repo map, etc.)
+     |     ----------------------------------------------------------------- required by a bound introduced by this call
+     |
+help: the trait `queue::_::_serde::Serialize` is not implemented for `PatchProviderContext`
+    --> src\harness\patch_provider.rs:22:1
+     |
+  22 | pub struct PatchProviderContext {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: for local types consider adding `#[derive(serde::Serialize)]` to your `PatchProviderContext` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `queue::_::_serde::Serialize`:
+               &'a T
+               &'a mut T
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+               (T0, T1, T2, T3)
+               (T0, T1, T2, T3, T4)
+             and 527 others
+     = note: required for `std::option::Option<PatchProviderContext>` to implement `queue::_::_serde::Serialize`
+note: required by a bound in `queue::_::_serde::ser::SerializeStruct::serialize_field`
+    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\ser\mod.rs:1917:21
+     |
+1915 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+     |        --------------- required by a bound in this associated function
+1916 |     where
+1917 |         T: ?Sized + Serialize;
+     |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+     = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `PatchProviderContext: serde::Deserialize<'de>` is not satisfied
+    --> src\harness\execution_loop.rs:66:27
+     |
+  66 |     pub provider_context: Option<crate::harness::patch_provider::PatchProviderContext>,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+     |
+help: the trait `queue::_::_serde::Deserialize<'_>` is not implemented for `PatchProviderContext`
+    --> src\harness\patch_provider.rs:22:1
+     |
+  22 | pub struct PatchProviderContext {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `PatchProviderContext` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `queue::_::_serde::Deserialize<'de>`:
+               &'a RawValue
+               &'a [u8]
+               &'a std::path::Path
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+             and 572 others
+     = note: required for `std::option::Option<PatchProviderContext>` to implement `queue::_::_serde::Deserialize<'_>`
+note: required by a bound in `next_element`
+    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\mod.rs:1771:12
+     |
+1769 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+     |        ------------ required by a bound in this associated function
+1770 |     where
+1771 |         T: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+     = note: the full name for the type has been written to 'E:\Projects\PrometheOS-Lite\target\debug\deps\prometheos_lite-341fa409bb6083fe.long-type-2733864070464214139.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the trait bound `PatchProviderContext: serde::Deserialize<'de>` is not satisfied
+    --> src\harness\execution_loop.rs:66:27
+     |
+  66 |     pub provider_context: Option<crate::harness::patch_provider::PatchProviderContext>,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+     |
+help: the trait `queue::_::_serde::Deserialize<'_>` is not implemented for `PatchProviderContext`
+    --> src\harness\patch_provider.rs:22:1
+     |
+  22 | pub struct PatchProviderContext {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `PatchProviderContext` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `queue::_::_serde::Deserialize<'de>`:
+               &'a RawValue
+               &'a [u8]
+               &'a std::path::Path
+               &'a str
+               ()
+               (T,)
+               (T0, T1)
+               (T0, T1, T2)
+             and 572 others
+     = note: required for `std::option::Option<PatchProviderContext>` to implement `queue::_::_serde::Deserialize<'_>`
+note: required by a bound in `next_value`
+    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\mod.rs:1916:12
+     |
+1914 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+     |        ---------- required by a bound in this associated function
+1915 |     where
+1916 |         V: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+     = note: the full name for the type has been written to 'E:\Projects\PrometheOS-Lite\target\debug\deps\prometheos_lite-341fa409bb6083fe.long-type-2733864070464214139.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the trait bound `PatchProviderContext: serde::Deserialize<'de>` is not satisfied
+  --> src\harness\execution_loop.rs:47:21
+   |
+47 | #[derive(Serialize, Deserialize)]
+   |                     ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `queue::_::_serde::Deserialize<'_>` is not implemented for `PatchProviderContext`
+  --> src\harness\patch_provider.rs:22:1
+   |
+22 | pub struct PatchProviderContext {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `PatchProviderContext` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `queue::_::_serde::Deserialize<'de>`:
+             &'a RawValue
+             &'a [u8]
+             &'a std::path::Path
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+           and 572 others
+   = note: required for `std::option::Option<PatchProviderContext>` to implement `queue::_::_serde::Deserialize<'_>`
+note: required by a bound in `queue::_::_serde::__private228::de::missing_field`
+  --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:26:8
+   |
+24 | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+   |        ------------- required by a bound in this function
+25 | where
+26 |     V: Deserialize<'de>,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+   = note: the full name for the type has been written to 'E:\Projects\PrometheOS-Lite\target\debug\deps\prometheos_lite-341fa409bb6083fe.long-type-2733864070464214139.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+   = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no function or associated item named `builder` found for struct `opentelemetry_otlp::SpanExporter` in the current scope
+   --> src\harness\observability.rs:402:58
+    |
+402 |         let exporter = opentelemetry_otlp::SpanExporter::builder()
+    |                                                          ^^^^^^^ function or associated item not found in `opentelemetry_otlp::SpanExporter`
+    |
+note: if you're trying to build a new `opentelemetry_otlp::SpanExporter`, consider using `opentelemetry_otlp::SpanExporter::new` which returns `opentelemetry_otlp::SpanExporter`
+   --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\opentelemetry-otlp-0.16.0\src\span.rs:221:5
+    |
+221 |     pub fn new(client: impl opentelemetry_sdk::export::trace::SpanExporter + 'static) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `shutdown` found for reference `&opentelemetry_sdk::trace::TracerProvider` in the current scope
+   --> src\harness\observability.rs:505:38
+    |
+505 |             if let Err(e) = provider.shutdown() {
+    |                                      ^^^^^^^^ method not found in `&opentelemetry_sdk::trace::TracerProvider`
+
+error[E0599]: no variant or associated item named `SyntaxError` found for enum `FailureKind` in the current scope
+   --> src\harness\patch_provider.rs:253:32
+    |
+253 |                 | FailureKind::SyntaxError
+    |                                ^^^^^^^^^^^ variant or associated item not found in `FailureKind`
+    |
+   ::: src\harness\failure.rs:11:1
+    |
+ 11 | pub enum FailureKind {
+    | -------------------- variant or associated item `SyntaxError` not found for this enum
+
+error[E0308]: mismatched types
+   --> src\harness\patch_provider.rs:285:34
+    |
+285 |                     replace_all: sr.replace_all.unwrap_or(false),
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<bool>`, found `bool`
+    |
+    = note: expected enum `std::option::Option<bool>`
+               found type `bool`
+help: try wrapping the expression in `Some`
+    |
+285 |                     replace_all: Some(sr.replace_all.unwrap_or(false)),
+    |                                  +++++                               +
+
+error[E0308]: mismatched types
+   --> src\harness\patch_provider.rs:531:34
+    |
+531 |                     replace_all: sr.replace_all.unwrap_or(false),
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<bool>`, found `bool`
+    |
+    = note: expected enum `std::option::Option<bool>`
+               found type `bool`
+help: try wrapping the expression in `Some`
+    |
+531 |                     replace_all: Some(sr.replace_all.unwrap_or(false)),
+    |                                  +++++                               +
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<PatchProviderContext>`
+  --> src\harness\repair_loop.rs:36:5
+   |
+27 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+   |                                                --------- in this derive macro expansion
+...
+36 |     pub provider_context: Option<PatchProviderContext>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: an implementation of `PartialEq` might be missing for `PatchProviderContext`
+  --> src\harness\patch_provider.rs:22:1
+   |
+22 | pub struct PatchProviderContext {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `PatchProviderContext` with `#[derive(PartialEq)]`
+  --> src\harness\patch_provider.rs:22:1
+   |
+22 + #[derive(PartialEq)]
+23 | pub struct PatchProviderContext {
+   |
+
+error[E0277]: the trait bound `PatchProviderContext: Eq` is not satisfied
+   --> src\harness\repair_loop.rs:36:5
+    |
+ 27 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    |                                                           -- in this derive macro expansion
+...
+ 36 |     pub provider_context: Option<PatchProviderContext>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `Eq` is not implemented for `PatchProviderContext`
+   --> src\harness\patch_provider.rs:22:1
+    |
+ 22 | pub struct PatchProviderContext {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: the trait `Eq` is implemented for `std::option::Option<T>`
+   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<PatchProviderContext>` to implement `Eq`
+note: required by a bound in `std::cmp::AssertParamIsEq`
+   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:379:31
+    |
+379 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+
+error[E0599]: no variant or associated item named `NarrowSearchContext` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:113:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `NarrowSearchContext` not found for this enum
+...
+113 |             RepairStrategy::NarrowSearchContext => {
+    |                             ^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+    |
+help: there is a variant with a similar name
+    |
+113 -             RepairStrategy::NarrowSearchContext => {
+113 +             RepairStrategy::NarrowSearchPattern => {
+    |
+
+error[E0599]: no variant or associated item named `ExpandSearchWildcard` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:117:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `ExpandSearchWildcard` not found for this enum
+...
+117 |             RepairStrategy::ExpandSearchWildcard => {
+    |                             ^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+
+error[E0599]: no variant or associated item named `RelaxLineAnchors` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:123:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `RelaxLineAnchors` not found for this enum
+...
+123 |             RepairStrategy::RelaxLineAnchors => {
+    |                             ^^^^^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+
+error[E0599]: no variant or associated item named `SwitchToWholeFile` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:128:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `SwitchToWholeFile` not found for this enum
+...
+128 |             RepairStrategy::SwitchToWholeFile => {
+    |                             ^^^^^^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+
+error[E0599]: no variant or associated item named `AddContextLines` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:152:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `AddContextLines` not found for this enum
+...
+152 |             RepairStrategy::AddContextLines => {
+    |                             ^^^^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+
+error[E0599]: no variant or associated item named `FixUnclosedDelimiters` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:156:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `FixUnclosedDelimiters` not found for this enum
+...
+156 |             RepairStrategy::FixUnclosedDelimiters => {
+    |                             ^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+
+error[E0599]: no variant or associated item named `RetryWithLLM` found for enum `repair_loop::RepairStrategy` in the current scope
+   --> src\harness\repair_loop.rs:160:29
+    |
+ 72 | pub enum RepairStrategy {
+    | ----------------------- variant or associated item `RetryWithLLM` not found for this enum
+...
+160 |             RepairStrategy::RetryWithLLM => {
+    |                             ^^^^^^^^^^^^ variant or associated item not found in `repair_loop::RepairStrategy`
+
+error[E0308]: mismatched types
+    --> src\harness\repo_intelligence.rs:1457:38
+     |
+1457 |             .map(|e| detect_language(e).to_string())
+     |                      --------------- ^ expected `&Path`, found `&str`
+     |                      |
+     |                      arguments to this function are incorrect
+     |
+     = note: expected reference `&std::path::Path`
+                found reference `&str`
+note: function defined here
+    --> src\harness\repo_intelligence.rs:289:4
+     |
+ 289 | fn detect_language(p: &Path) -> String {
+     |    ^^^^^^^^^^^^^^^ --------
+
+error[E0609]: no field `visibility` on type `&&CodeSymbol`
+    --> src\harness\repo_intelligence.rs:1718:23
+     |
+1718 |         .filter(|s| s.visibility == Visibility::Public)
+     |                       ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `name`, `kind`, `file`, `line_start`, `line_end` ... and 4 others
+
+error[E0433]: cannot find type `Visibility` in this scope
+    --> src\harness\repo_intelligence.rs:1718:37
+     |
+1718 |         .filter(|s| s.visibility == Visibility::Public)
+     |                                     ^^^^^^^^^^ use of undeclared type `Visibility`
+
+error[E0609]: no field `visibility` on type `&&CodeSymbol`
+    --> src\harness\repo_intelligence.rs:1727:23
+     |
+1727 |         .filter(|s| s.visibility == Visibility::Public)
+     |                       ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `name`, `kind`, `file`, `line_start`, `line_end` ... and 4 others
+
+error[E0433]: cannot find type `Visibility` in this scope
+    --> src\harness\repo_intelligence.rs:1727:37
+     |
+1727 |         .filter(|s| s.visibility == Visibility::Public)
+     |                                     ^^^^^^^^^^ use of undeclared type `Visibility`
+
+error[E0609]: no field `level` on type `std::option::Option<risk::RiskAssessment>`
+   --> src\harness\selection.rs:183:30
+    |
+183 |         match candidate.risk.level {
+    |                              ^^^^^ unknown field
+    |
+help: one of the expressions' fields has a field of the same name
+    |
+183 |         match candidate.risk.unwrap().level {
+    |                              +++++++++
+
+error[E0609]: no field `lines_added` on type `&selection::PatchCandidate`
+   --> src\harness\selection.rs:193:37
+    |
+193 |         let total_lines = candidate.lines_added + candidate.lines_removed;
+    |                                     ^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `id`, `edits`, `source`, `confidence`, `metadata` ... and 4 others
+
+error[E0609]: no field `lines_removed` on type `&selection::PatchCandidate`
+   --> src\harness\selection.rs:193:61
+    |
+193 |         let total_lines = candidate.lines_added + candidate.lines_removed;
+    |                                                             ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `id`, `edits`, `source`, `confidence`, `metadata` ... and 4 others
+
+error[E0609]: no field `level` on type `std::option::Option<risk::RiskAssessment>`
+   --> src\harness\selection.rs:256:53
+    |
+256 |         let risk_level_value = match candidate.risk.level {
+    |                                                     ^^^^^ unknown field
+    |
+help: one of the expressions' fields has a field of the same name
+    |
+256 |         let risk_level_value = match candidate.risk.unwrap().level {
+    |                                                     +++++++++
+
+error[E0609]: no field `level` on type `std::option::Option<risk::RiskAssessment>`
+   --> src\harness\selection.rs:274:32
+    |
+274 |                 candidate.risk.level, self.criteria.max_risk_level
+    |                                ^^^^^ unknown field
+    |
+help: one of the expressions' fields has a field of the same name
+    |
+274 |                 candidate.risk.unwrap().level, self.criteria.max_risk_level
+    |                                +++++++++
+
+error[E0609]: no field `lines_added` on type `&selection::PatchCandidate`
+   --> src\harness\selection.rs:280:37
+    |
+280 |         let total_lines = candidate.lines_added + candidate.lines_removed;
+    |                                     ^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `id`, `edits`, `source`, `confidence`, `metadata` ... and 4 others
+
+error[E0609]: no field `lines_removed` on type `&selection::PatchCandidate`
+   --> src\harness\selection.rs:280:61
+    |
+280 |         let total_lines = candidate.lines_added + candidate.lines_removed;
+    |                                                             ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `id`, `edits`, `source`, `confidence`, `metadata` ... and 4 others
+
+warning: unused import: `PatchProvider`
+  --> src\harness\execution_loop.rs:23:9
+   |
+23 |         PatchProvider, PatchProviderContext, RiskEstimate,
+   |         ^^^^^^^^^^^^^
+
+warning: unused variable: `remaining_tokens`
+   --> src\context\budgeter.rs:125:13
+    |
+125 |         let remaining_tokens = available_tokens - system_tokens;
+    |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_remaining_tokens`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `state`
+  --> src\flow\debug.rs:54:47
+   |
+54 |     fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input) {
+   |                                               ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `input`
+  --> src\flow\debug.rs:54:68
+   |
+54 |     fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input) {
+   |                                                                    ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `from`
+  --> src\flow\debug.rs:74:29
+   |
+74 |     fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId) {
+   |                             ^^^^ help: if this is intentional, prefix it with an underscore: `_from`
+
+warning: unused variable: `to`
+  --> src\flow\debug.rs:74:61
+   |
+74 |     fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId) {
+   |                                                             ^^ help: if this is intentional, prefix it with an underscore: `_to`
+
+warning: unused variable: `output`
+   --> src\flow\factory\coding_nodes.rs:548:46
+    |
+548 |     fn post(&self, _state: &mut SharedState, output: serde_json::Value) -> String {
+    |                                              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `count`
+   --> src\flow\memory\nodes.rs:124:21
+    |
+124 |         if let Some(count) = output["extracted_count"].as_u64() {
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+
+warning: unused variable: `filtered`
+   --> src\harness\benchmark.rs:305:13
+    |
+305 |         let filtered: Vec<_> = values
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_filtered`
+
+warning: unused variable: `num_runs`
+   --> src\harness\benchmark.rs:432:9
+    |
+432 |         num_runs: u32,
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_runs`
+
+warning: unused variable: `completeness`
+   --> src\harness\completion.rs:173:13
+    |
+173 |         let completeness = self.calculate_completeness(evidence);
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_completeness`
+
+warning: unused variable: `factors`
+   --> src\harness\completion.rs:298:9
+    |
+298 |         factors: &mut Vec<String>,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_factors`
+
+warning: unused variable: `file`
+   --> src\harness\edit_protocol.rs:610:10
+    |
+610 |     for (file, file_edits) in by_file {
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_file`
+
+warning: value assigned to `detected_pm` is never read
+   --> src\harness\environment.rs:124:31
+    |
+124 |         let mut detected_pm = None;
+    |                               ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `has_gemspec`
+   --> src\harness\environment.rs:408:9
+    |
+408 |     let has_gemspec = root.join("*.gemspec").exists();
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_gemspec`
+
+warning: unused variable: `task_id`
+   --> src\harness\knowledge_cache.rs:405:14
+    |
+405 |         for (task_id, cache) in caches.iter() {
+    |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
+
+warning: unused variable: `edit_index`
+   --> src\harness\patch_applier.rs:274:5
+    |
+274 |     edit_index: usize,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edit_index`
+
+warning: unused variable: `policy`
+   --> src\harness\patch_applier.rs:502:56
+    |
+502 | async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
+    |                                                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
+
+warning: unused variable: `new_content`
+   --> src\harness\patch_applier.rs:505:16
+    |
+505 |     for (path, new_content) in changes.iter().rev() {
+    |                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_content`
+
+warning: unused variable: `block_marker`
+   --> src\harness\patch_provider.rs:770:21
+    |
+770 |                 let block_marker = lines[i];
+    |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_block_marker`
+
+warning: unused variable: `kind`
+   --> src\harness\patch_provider.rs:953:26
+    |
+953 |     fn can_handle(&self, kind: FailureKind) -> bool {
+    |                          ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
+
+warning: unused variable: `now`
+   --> src\harness\regression_memory.rs:232:13
+    |
+232 |         let now = chrono::Utc::now();
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+
+warning: unused variable: `name`
+   --> src\harness\repo_intelligence.rs:918:27
+    |
+918 | fn parse_cargo_dependency(name: &str, spec: &toml::Value) -> DependencySpec {
+    |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `spec`
+    --> src\harness\repo_intelligence.rs:1274:25
+     |
+1274 |         for (dependent, spec) in &self.dependencies {
+     |                         ^^^^ help: if this is intentional, prefix it with an underscore: `_spec`
+
+warning: variable does not need to be mutable
+    --> src\harness\repo_intelligence.rs:1348:13
+     |
+1348 |         let mut cache: RepoCache = serde_json::from_str(&content).ok()?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+error[E0382]: borrow of moved value: `to_remove`
+    --> src\harness\repo_intelligence.rs:1506:13
+     |
+1495 |         let to_remove: Vec<_> = self.files.iter()
+     |             --------- move occurs because `to_remove` has type `Vec<PathBuf>`, which does not implement the `Copy` trait
+...
+1502 |         for path in to_remove {
+     |                     --------- `to_remove` moved due to this implicit call to `.into_iter()`
+...
+1506 |         if !to_remove.is_empty() {
+     |             ^^^^^^^^^ value borrowed here after move
+     |
+note: `into_iter` takes ownership of the receiver `self`, which moves `to_remove`
+    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\traits\collect.rs:312:18
+     |
+ 312 |     fn into_iter(self) -> Self::IntoIter;
+     |                  ^^^^
+help: consider iterating over a slice of the `Vec<PathBuf>`'s content to avoid moving into the `for` loop
+     |
+1502 |         for path in &to_remove {
+     |                     +
+
+warning: unused variable: `repo`
+   --> src\harness\reproduction.rs:622:5
+    |
+622 |     repo: &RepoContext,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_repo`
+
+warning: unused variable: `diff_lower`
+   --> src\harness\semantic_diff.rs:371:13
+    |
+371 |         let diff_lower = diff.to_lowercase();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_diff_lower`
+
+warning: unused variable: `artifact_data`
+   --> src\work\orchestrator.rs:740:13
+    |
+740 |         let artifact_data = serde_json::json!({
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_artifact_data`
+
+warning: variable does not need to be mutable
+  --> src\work\service.rs:42:13
+   |
+42 |         let mut context = WorkContext::new(id, user_id, title, domain, goal);
+   |             ----^^^^^^^
+   |             |
+   |             help: remove this `mut`
+
+Some errors have detailed explanations: E0061, E0063, E0277, E0308, E0369, E0382, E0422, E0425, E0428...
+For more information about an error, try `rustc --explain E0061`.
+warning: `prometheos-lite` (lib) generated 133 warnings
+error: could not compile `prometheos-lite` (lib) due to 77 previous errors; 133 warnings emitted
