@@ -27,11 +27,11 @@ use crate::harness::{
     risk::{RiskAssessment, RiskCategory, RiskLevel, RiskReason, RiskSeverity, assess_risk},
     sandbox::LocalSandboxRuntime,
     selection::{
-        CandidateOutcome, PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine,
+        PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine,
     },
     semantic_diff::analyze_semantic_diff,
     trajectory::Trajectory,
-    validation::{ValidationPlan, ValidationResult, run_validation},
+    validation::{ValidationCategory, ValidationPlan, ValidationResult, run_validation},
     verification::{VerificationStrength, assess_verification_strength},
 };
 use anyhow::{Context, Result, bail};
@@ -371,6 +371,10 @@ impl ExecutionContext {
     fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
     }
+
+    fn record_action(&self, category: &str, action: &str, details: &str) {
+        tracing::info!("[{}] {}: {}", category, action, details);
+    }
 }
 
 pub async fn execute_harness_task(
@@ -471,25 +475,37 @@ pub async fn execute_harness_task(
                             id: format!("candidate_{}", c.source),
                             edits: c.edits.clone(),
                             source: c.source.clone(),
-                            confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+                            confidence: crate::harness::confidence::ConfidenceScore {
+                                score: c.confidence as f32 / 100.0,
+                                factors: vec![],
+                                explanation: "Provider confidence score".to_string(),
+                                recommendation: None,
+                            },
                             metadata: Default::default(),
+                            risk: None,
+                            validation: None,
+                            review_issues: vec![],
+                            semantic_diff: None,
+                            lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
+                            lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
                         })
                         .collect();
 
                     // Use SelectionEngine to pick the best
-                    let selection_engine = SelectionEngine::new(SelectionCriteria::default());
-                    let outcome = selection_engine.select_best_patch(&selection_candidates);
+                    let mut selection_engine = SelectionEngine::new(SelectionCriteria::default());
+                    let outcome = selection_engine.select_best_patch(selection_candidates);
 
                     ctx.send_progress(HarnessProgress::PatchGenerated {
                         files_changed: outcome
-                            .selected
                             .as_ref()
-                            .map(|s| s.edits.len())
+                            .ok()
+                            .and_then(|o| o.as_ref())
+                            .map(|s| s.candidate.edits.len())
                             .unwrap_or(0),
-                        total_files: files.files.len(),
+                        total_files: files.editable.len(),
                     });
 
-                    outcome.selected.map(|s| s.edits).unwrap_or_default()
+                    outcome.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
                 }
                 _ => {
                     // No candidates generated, use empty
@@ -498,7 +514,7 @@ pub async fn execute_harness_task(
             }
         } else {
             // No edits provided and no provider available - block
-            ctx.log_info("No edits provided and no patch provider available");
+            ctx.record_action("patch", "blocked", "No edits provided and no patch provider available");
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
                 trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
@@ -537,6 +553,8 @@ pub async fn execute_harness_task(
                 completion_decision: CompletionDecision::Blocked("no structured edits supplied".into()),
                 trajectory: traj,
                 git_checkpoint: None,
+                rollback_handle: None,
+                validation_failure_policy: ValidationFailurePolicy::KeepPatchAndRequestApproval,
                 artifacts: vec![],
                 failures: vec![FailureKind::ModelFailure],
                 summary: "Harness blocked before patching: no edits supplied.".into(),
@@ -570,6 +588,8 @@ pub async fn execute_harness_task(
             repo_context: repo,
             environment: env,
             file_set: files,
+            rollback_handle: None,
+            validation_failure_policy: ValidationFailurePolicy::KeepPatchAndRequestApproval,
             acceptance,
             patch_result: None,
             validation_result: None,
@@ -722,25 +742,37 @@ pub async fn execute_harness_task(
                             id: format!("candidate_{}", c.source),
                             edits: c.edits.clone(),
                             source: c.source.clone(),
-                            confidence: crate::harness::selection::ConfidenceScore::new(c.confidence as f64 / 100.0),
+                            confidence: crate::harness::confidence::ConfidenceScore {
+                                score: c.confidence as f32 / 100.0,
+                                factors: vec![],
+                                explanation: "Provider confidence score".to_string(),
+                                recommendation: None,
+                            },
                             metadata: Default::default(),
+                            risk: None,
+                            validation: None,
+                            review_issues: vec![],
+                            semantic_diff: None,
+                            lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
+                            lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
                         })
                         .collect();
 
                     // Use SelectionEngine to pick the best
-                    let selection_engine = SelectionEngine::new(SelectionCriteria::default());
-                    let outcome = selection_engine.select_best_patch(&selection_candidates);
+                    let mut selection_engine = SelectionEngine::new(SelectionCriteria::default());
+                    let outcome = selection_engine.select_best_patch(selection_candidates);
 
                     ctx.send_progress(HarnessProgress::PatchGenerated {
                         files_changed: outcome
-                            .selected
                             .as_ref()
-                            .map(|s| s.edits.len())
+                            .ok()
+                            .and_then(|o| o.as_ref())
+                            .map(|s| s.candidate.edits.len())
                             .unwrap_or(0),
-                        total_files: files.files.len(),
+                        total_files: files.editable.len(),
                     });
 
-                    outcome.selected.map(|s| s.edits).unwrap_or_default()
+                    outcome.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
                 }
                 _ => {
                     // No candidates generated, use empty
@@ -795,7 +827,7 @@ pub async fn execute_harness_task(
         });
 
         let val_start = Instant::now();
-        let result = run_validation(&req.repo_root, &plan, &LocalSandboxRuntime::default()).await?;
+        let result = run_validation(&req.repo_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
         metrics.validation_ms = val_start.elapsed().as_millis() as u64;
 
         let tests_run = result.command_results.len();
@@ -852,8 +884,8 @@ pub async fn execute_harness_task(
             };
 
             if should_rollback {
-                if let Some(handle) = rollback_handle {
-                    match handle.rollback().await {
+                if let Some(ref handle) = rollback_handle {
+                    match handle.clone().rollback().await {
                         Ok(result) => {
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::PatchRolledBack);
@@ -921,19 +953,19 @@ pub async fn execute_harness_task(
             all_validations_passed: validation.as_ref().is_some_and(|v| v.passed),
             format_check_passed: validation.as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Format))
-                .map(|r| r.success)
+                .map(|r| r.passed)
                 .unwrap_or(false),
             static_check_passed: validation.as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
-                .map(|r| r.success)
+                .map(|r| r.passed)
                 .unwrap_or(false),
             lint_check_passed: validation.as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
-                .map(|r| r.success)
+                .map(|r| r.passed)
                 .unwrap_or(false),
             test_passed: validation.as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Test))
-                .map(|r| r.success)
+                .map(|r| r.passed)
                 .unwrap_or(false),
             validation_summary: validation
                 .as_ref()
@@ -1055,6 +1087,28 @@ pub async fn execute_harness_task(
     let mut result = HarnessExecutionResult {
         work_context_id: req.work_context_id,
         trace_id: Some(trace_id.clone()),
+        repo_context: repo,
+        environment: env,
+        file_set: files,
+        acceptance,
+        patch_result: patch,
+        validation_result: validation,
+        review_issues: review_issues.clone(),
+        risk_assessment: risk.clone(),
+        confidence: confidence.clone(),
+        verification_strength: strength,
+        completion_decision: decision.clone(),
+        trajectory: traj.clone(),
+        git_checkpoint: checkpoint,
+        rollback_handle,
+        validation_failure_policy: req.validation_failure_policy,
+        artifacts: vec![],
+        failures: failures.clone(),
+        summary: format!("Harness execution completed with decision: {:?}", decision),
+        execution_metrics: metrics.clone(),
+        step_count: ctx.step_count,
+        terminated_early: false,
+        termination_reason: None,
     };
 
     ctx.send_progress(HarnessProgress::Patching {
@@ -1062,11 +1116,23 @@ pub async fn execute_harness_task(
         dry_run: true,
     });
 
+    let report_content = format!(
+        "# Harness Execution Report\n\n\
+        Work Context ID: {}\n\
+        Decision: {:?}\n\
+        Steps: {}\n\
+        Failures: {:?}\n",
+        result.work_context_id,
+        result.completion_decision,
+        result.step_count,
+        result.failures
+    );
+
     result.artifacts.push(HarnessArtifact {
         id: format!("artifact-{}", result.work_context_id),
         kind: ArtifactKind::Report,
         path: None,
-        content: Some(content.clone()),
+        content: Some(report_content.clone()),
         compressed_content: None,
         compression: CompressionType::None,
         metadata: ArtifactMetadata {
@@ -1076,7 +1142,7 @@ pub async fn execute_harness_task(
             custom_fields: HashMap::new(),
         },
         created_at: Utc::now(),
-        size_bytes: content.len(),
+        size_bytes: report_content.len(),
         compressed_size_bytes: None,
     });
 

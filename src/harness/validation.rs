@@ -258,7 +258,7 @@ static GLOBAL_CACHE: Lazy<ValidationCache> = Lazy::new(|| ValidationCache::new(3
 pub async fn run_validation(
     root: &Path,
     plan: &ValidationPlan,
-    sandbox: &dyn SandboxRuntime,
+    sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
 ) -> Result<ValidationResult> {
     run_validation_with_cache(root, plan, sandbox, &GLOBAL_CACHE).await
 }
@@ -266,7 +266,7 @@ pub async fn run_validation(
 pub async fn run_validation_with_cache(
     root: &Path,
     plan: &ValidationPlan,
-    sandbox: &dyn SandboxRuntime,
+    sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
     cache: &ValidationCache,
 ) -> Result<ValidationResult> {
     let start = Instant::now();
@@ -294,9 +294,9 @@ pub async fn run_validation_with_cache(
         .collect();
 
     let results = if plan.parallel {
-        run_parallel(root, &all_commands, Arc::new(sandbox), cache, timeout).await?
+        run_parallel(root, &all_commands, sandbox.clone(), cache, timeout).await?
     } else {
-        run_sequential(root, &all_commands, sandbox, cache, timeout).await?
+        run_sequential(root, &all_commands, &*sandbox, cache, timeout).await?
     };
 
     let mut category_results: HashMap<ValidationCategory, CategoryResult> = HashMap::new();
@@ -341,7 +341,7 @@ pub async fn run_validation_with_cache(
 
     let test_commands: Vec<_> = plan.test_commands.clone();
     let flaky_tests = if !test_commands.is_empty() && !plan.parallel {
-        detect_flaky_tests(root, &test_commands, sandbox, timeout).await?
+        detect_flaky_tests(root, &test_commands, &*sandbox, timeout).await?
     } else {
         vec![]
     };
@@ -549,13 +549,13 @@ fn extract_test_name(command: &str) -> String {
 pub async fn validate_with_retry(
     root: &Path,
     plan: &ValidationPlan,
-    sandbox: &dyn SandboxRuntime,
+    sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
     max_retries: u32,
 ) -> Result<ValidationResult> {
     let mut last_result = None;
 
     for attempt in 0..=max_retries {
-        let result = run_validation(root, plan, sandbox).await?;
+        let result = run_validation(root, plan, sandbox.clone()).await?;
 
         if result.passed {
             return Ok(result);
