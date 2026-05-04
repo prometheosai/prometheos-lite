@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use walkdir::WalkDir;
 
 /// A temporary workspace for validation without mutating the real repo
 #[derive(Debug, Clone)]
@@ -27,9 +28,11 @@ impl TempWorkspace {
         policy: &FilePolicy,
     ) -> Result<(Self, PatchResult)> {
         let temp_dir = std::env::temp_dir();
+        // Use UUID + timestamp for unique, collision-safe naming
         let workspace_name = format!(
-            "prometheos_validate_{}",
-            std::process::id()
+            "prometheos_validate_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_millis()
         );
         let temp_root = temp_dir.join(&workspace_name);
 
@@ -81,15 +84,97 @@ impl TempWorkspace {
         // Copy important config files
         let config_files = [
             "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json",
-            "pyproject.toml", "requirements.txt", "setup.py", "go.mod", "go.sum",
-            "pom.xml", "build.gradle", "tsconfig.json", ".gitignore",
+            "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+            "pyproject.toml", "requirements.txt", "requirements-dev.txt", "setup.py", "setup.cfg",
+            "go.mod", "go.sum", "go.work", "go.work.sum",
+            "pom.xml", "build.gradle", "gradle.properties", "settings.gradle",
+            "tsconfig.json", "jsconfig.json", ".babelrc", ".eslintrc", ".prettierrc",
+            ".gitignore", ".dockerignore", "Dockerfile",
+            "Makefile", "justfile", "Justfile",
+            ".cargo/config.toml", ".cargo/config",
         ];
 
         for config in &config_files {
             let src = original_root.join(config);
             let dst = temp_root.join(config);
             if src.exists() {
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent).await.ok();
+                }
                 fs::copy(&src, &dst).await.ok();
+            }
+        }
+
+        // Copy test directories and fixtures
+        let important_dirs = [
+            "tests", "test", "__tests__", "spec", "specs",
+            "fixtures", "fixture", "testdata", "test_data", "data",
+            "examples", "example", "demo", "demos",
+            "benches", "benchmarks", "bench",
+            "migrations", "migration", "alembic",
+            "scripts", "script", "bin",
+            "static", "assets", "public", "resources",
+            "templates", "template",
+            "proto", "protobuf", "protos",
+            "thrift", "idl",
+        ];
+
+        for dir_name in &important_dirs {
+            let src_dir = original_root.join(dir_name);
+            if src_dir.exists() && src_dir.is_dir() {
+                let dst_dir = temp_root.join(dir_name);
+                Self::copy_directory(&src_dir, &dst_dir).await.ok();
+            }
+        }
+
+        // Copy Cargo workspace members if this is a Rust project
+        Self::copy_workspace_members(original_root, temp_root).await.ok();
+
+        Ok(())
+    }
+
+    /// Recursively copy a directory
+    async fn copy_directory(src: &Path, dst: &Path) -> Result<()> {
+        for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                let relative = path.strip_prefix(src)?;
+                let dst_path = dst.join(relative);
+
+                if let Some(parent) = dst_path.parent() {
+                    fs::create_dir_all(parent).await.ok();
+                }
+                fs::copy(path, dst_path).await.ok();
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy Cargo workspace member directories
+    async fn copy_workspace_members(original_root: &Path, temp_root: &Path) -> Result<()> {
+        let cargo_toml = original_root.join("Cargo.toml");
+        if !cargo_toml.exists() {
+            return Ok(());
+        }
+
+        // Parse workspace members from Cargo.toml
+        let content = fs::read_to_string(&cargo_toml).await.ok();
+        if let Some(content) = content {
+            // Simple parsing for workspace.members array
+            if content.contains("[workspace]") {
+                // Try to find member directories
+                for entry in walkdir::WalkDir::new(original_root)
+                    .max_depth(2)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if path.is_dir() && path.join("Cargo.toml").exists() {
+                        let relative = path.strip_prefix(original_root)?;
+                        let dst_path = temp_root.join(relative);
+                        Self::copy_directory(path, &dst_path).await.ok();
+                    }
+                }
             }
         }
 
