@@ -29,6 +29,7 @@ pub enum FailureKind {
     ValidationFailed,
     PatchRolledBack,
     RollbackFailed,
+    CheckpointFailed,
     SyntaxError,
 }
 
@@ -108,6 +109,7 @@ impl FailureKind {
             FailureKind::ValidationFailed => FailureCategory::Semantic,
             FailureKind::PatchRolledBack => FailureCategory::Tooling,
             FailureKind::RollbackFailed => FailureCategory::Tooling,
+            FailureKind::CheckpointFailed => FailureCategory::Environmental,
             FailureKind::SyntaxError => FailureCategory::Syntax,
         }
     }
@@ -129,6 +131,7 @@ impl FailureKind {
             FailureKind::ValidationFailed => FailureSeverity::Error,
             FailureKind::PatchRolledBack => FailureSeverity::Warning,
             FailureKind::RollbackFailed => FailureSeverity::Critical,
+            FailureKind::CheckpointFailed => FailureSeverity::Error,
             FailureKind::SyntaxError => FailureSeverity::Error,
             _ => FailureSeverity::Info,
         }
