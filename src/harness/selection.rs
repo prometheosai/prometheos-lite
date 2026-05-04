@@ -61,6 +61,51 @@ impl Default for SelectionCriteria {
     }
 }
 
+/// Selection phase determines which criteria to apply
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SelectionPhase {
+    /// Pre-validation: candidates haven't been validated yet
+    /// - require_validation: false
+    /// - require_review_pass: false
+    /// - Higher risk tolerance for candidate generation
+    PreValidation,
+    /// Post-validation: candidates have been validated
+    /// - require_validation: true
+    /// - require_review_pass: true
+    /// - Stricter criteria for final selection
+    PostValidation,
+}
+
+impl SelectionPhase {
+    /// Create criteria appropriate for this phase
+    pub fn criteria(&self) -> SelectionCriteria {
+        match self {
+            SelectionPhase::PreValidation => SelectionCriteria {
+                require_validation: false,
+                require_review_pass: false,
+                max_risk_level: RiskLevel::High,
+                min_confidence_threshold: 0.50,
+                ..SelectionCriteria::default()
+            },
+            SelectionPhase::PostValidation => SelectionCriteria {
+                require_validation: true,
+                require_review_pass: true,
+                max_risk_level: RiskLevel::Medium,
+                min_confidence_threshold: 0.70,
+                ..SelectionCriteria::default()
+            },
+        }
+    }
+
+    /// Get the next phase in the lifecycle
+    pub fn next(&self) -> Option<SelectionPhase> {
+        match self {
+            SelectionPhase::PreValidation => Some(SelectionPhase::PostValidation),
+            SelectionPhase::PostValidation => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScoredCandidate {
     pub candidate: PatchCandidate,
