@@ -131,14 +131,8 @@ impl PartialEq for HarnessExecutionRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum HarnessMode {
-    Review,
-    ReviewOnly,
-    Assisted,
-    Autonomous,
-    Benchmark,
-}
+// HarnessMode is defined in mode_policy.rs - re-exported for convenience
+pub use crate::harness::mode_policy::HarnessMode;
 
 /// Policy for handling validation failures after patch application
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

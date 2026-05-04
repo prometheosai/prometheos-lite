@@ -6,13 +6,15 @@ use serde::{Deserialize, Serialize};
 /// Execution mode for the harness
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HarnessMode {
+    /// Legacy review mode - same as ReviewOnly, kept for backward compatibility
+    Review,
     /// Review-only mode: never modify repo, generate reports only
     ReviewOnly,
     /// Assisted mode: apply only if dry-run passes and no critical issues
     Assisted,
     /// Autonomous mode: apply if dry-run passes and risk is acceptable
     Autonomous,
-    /// Benchmark mode: apply if dry-run passes (disposable workspace)
+    /// Benchmark mode: apply if dry-run passed (disposable workspace)
     Benchmark,
 }
 
@@ -131,7 +133,7 @@ impl HarnessModePolicy {
     /// Get policy for a given mode
     pub fn for_mode(mode: HarnessMode) -> Self {
         match mode {
-            HarnessMode::ReviewOnly => Self::review_only(),
+            HarnessMode::Review | HarnessMode::ReviewOnly => Self::review_only(),
             HarnessMode::Assisted => Self::assisted(),
             HarnessMode::Autonomous => Self::autonomous(),
             HarnessMode::Benchmark => Self::benchmark(),
