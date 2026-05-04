@@ -26,6 +26,8 @@ pub struct PatchCandidate {
     pub validation: Option<ValidationResult>,
     pub review_issues: Vec<ReviewIssue>,
     pub semantic_diff: Option<SemanticDiff>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -180,7 +182,7 @@ impl SelectionEngine {
 
     fn calculate_risk_score(&self, candidate: &PatchCandidate) -> f32 {
         // Higher score for lower risk
-        match candidate.risk.level {
+        match candidate.risk.as_ref().map(|r| r.level).unwrap_or(RiskLevel::Low) {
             RiskLevel::None => 1.0,
             RiskLevel::Critical => 0.0,
             RiskLevel::High => 0.4,
@@ -253,7 +255,8 @@ impl SelectionEngine {
         }
 
         // Check risk level
-        let risk_level_value = match candidate.risk.level {
+        let risk_level = candidate.risk.as_ref().map(|r| r.level).unwrap_or(RiskLevel::Low);
+        let risk_level_value = match risk_level {
             RiskLevel::None => 0,
             RiskLevel::Low => 1,
             RiskLevel::Medium => 2,
@@ -271,7 +274,7 @@ impl SelectionEngine {
         if risk_level_value > max_risk_value {
             reasons.push(format!(
                 "Risk level {:?} exceeds maximum {:?}",
-                candidate.risk.level, self.criteria.max_risk_level
+                risk_level, self.criteria.max_risk_level
             ));
             eligible = false;
         }
@@ -350,6 +353,27 @@ pub fn rank_patches(candidates: Vec<PatchCandidate>) -> Vec<ScoredCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_test_candidate(id: &str, confidence: f32) -> PatchCandidate {
+        PatchCandidate {
+            id: id.to_string(),
+            edits: vec![],
+            source: "test".to_string(),
+            confidence: ConfidenceScore {
+                score: confidence,
+                factors: vec![],
+                explanation: "test".to_string(),
+                recommendation: None,
+            },
+            metadata: HashMap::new(),
+            risk: None,
+            validation: None,
+            review_issues: vec![],
+            semantic_diff: None,
+            lines_added: 10,
+            lines_removed: 5,
+        }
+    }
 
     #[test]
     fn test_selection_engine_ranks_by_confidence() {

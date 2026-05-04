@@ -13,7 +13,7 @@ use tree_sitter_typescript;
 
 /// Dependency graph representation for a repository
 /// Extracts dependencies from Cargo.toml, package.json, pyproject.toml, etc.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DependencyGraph {
     /// Direct dependencies: name -> version/path spec
     pub dependencies: HashMap<String, DependencySpec>,
@@ -33,7 +33,7 @@ pub struct DependencyGraph {
     pub package_manager: PackageManagerType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencySpec {
     pub version: Option<String>,
     pub path: Option<PathBuf>,
@@ -43,7 +43,7 @@ pub struct DependencySpec {
     pub target: Option<String>, // platform-specific dep
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PackageManagerType {
     Cargo,
     Npm,
@@ -95,7 +95,7 @@ pub struct RepoCache {
 const CACHE_VERSION: u32 = 1;
 const CACHE_FILENAME: &str = ".repomap_cache.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoContext {
     pub root: PathBuf,
     pub ranked_files: Vec<RankedFile>,
@@ -110,16 +110,24 @@ pub struct RepoContext {
 /// Alias for RepoContext - used by modules expecting RepoMap type
 pub type RepoMap = RepoContext;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RankedFile {
     pub path: PathBuf,
-    pub score: f32,
+    pub score: u32,
     pub reason: String,
     pub symbol_count: usize,
     pub language: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum Visibility {
+    Public,
+    Private,
+    Protected,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodeSymbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -130,6 +138,7 @@ pub struct CodeSymbol {
     pub column_end: usize,
     pub documentation: Option<String>,
     pub signature: Option<String>,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -150,7 +159,7 @@ pub enum SymbolKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SymbolEdge {
     pub from: String,
     pub to: String,
@@ -225,7 +234,7 @@ pub async fn build_repo_context(
             let lang = detect_language(&full_path);
             ranked_files.push(RankedFile {
                 path: full_path,
-                score: 100.0,
+                score: 100,
                 reason: "explicitly mentioned".into(),
                 symbol_count: 0,
                 language: lang,
@@ -233,7 +242,7 @@ pub async fn build_repo_context(
         }
     }
 
-    ranked_files.sort_by(|a, b| b.score.total_cmp(&a.score));
+    ranked_files.sort_by(|a, b| b.score.cmp(&a.score));
 
     let compressed_context = build_compressed_context(&ranked_files, &all_symbols, token_budget);
     let token_estimate = compressed_context.len() / 4;
@@ -318,7 +327,8 @@ fn extract_symbols_and_relationships(
     let ts_lang: tree_sitter::Language = match language {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "javascript" | "jsx" => tree_sitter_javascript::LANGUAGE.into(),
-        "typescript" | "tsx" => tree_sitter_typescript::LANGUAGE.into(),
+        "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "python" => tree_sitter_python::LANGUAGE.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
         "java" => tree_sitter_java::LANGUAGE.into(),
@@ -373,6 +383,7 @@ fn extract_from_node(
                     column_end: col_end,
                     documentation: extract_docs(content, node),
                     signature: Some(text.lines().next().unwrap_or(text).to_string()),
+                    visibility: Visibility::Public,
                 });
             }
         }
@@ -398,6 +409,7 @@ fn extract_from_node(
                     column_end: col_end,
                     documentation: extract_docs(content, node),
                     signature: None,
+                    visibility: Visibility::Public,
                 });
 
                 if let Some(body) = find_child_by_kind(node, "field_declaration_list") {
@@ -436,6 +448,7 @@ fn extract_from_node(
                     column_end: col_end,
                     documentation: extract_docs(content, node),
                     signature: None,
+                    visibility: Visibility::Public,
                 });
             }
         }
@@ -461,6 +474,7 @@ fn extract_from_node(
                     column_end: col_end,
                     documentation: extract_docs(content, node),
                     signature: None,
+                    visibility: Visibility::Public,
                 });
             }
         }
@@ -495,6 +509,7 @@ fn extract_from_node(
                 column_end: 0,
                 documentation: None,
                 signature: Some(import_text.clone()),
+                visibility: Visibility::Public,
             });
 
             let imported_names = extract_import_names(&import_text);
@@ -648,18 +663,18 @@ fn rank_files_by_relevance(
         let file_symbols_list = file_symbols.get(&file).cloned().unwrap_or_default();
         let symbol_count = file_symbols_list.len();
 
-        let mut score: f32 = 0.1;
+        let mut score: u32 = 0;
         let mut reasons: Vec<String> = Vec::new();
 
         if path_str.contains("test") {
-            score += 4.0;
+            score += 4;
             reasons.push("test file".to_string());
         }
 
         for keyword in &task_keywords {
             if keyword.len() > 2 {
                 if path_str.contains(keyword) {
-                    score += 12.0;
+                    score += 12;
                     reasons.push("path match".to_string());
                 }
 
@@ -667,11 +682,11 @@ fn rank_files_by_relevance(
                     let file_matches: Vec<_> = matching.iter().filter(|s| s.file == file).collect();
 
                     for sym in file_matches {
-                        score += 20.0;
+                        score += 20;
                         reasons.push(format!("symbol match: {}", sym.name));
 
                         if mentioned_set.contains(&sym.name) {
-                            score += 50.0;
+                            score += 50;
                             reasons.push("explicitly mentioned symbol".to_string());
                         }
                     }
@@ -683,7 +698,7 @@ fn rank_files_by_relevance(
             .iter()
             .any(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
         {
-            score += 2.0;
+            score += 2;
             reasons.push("has functions".to_string());
         }
 
@@ -703,8 +718,17 @@ fn rank_files_by_relevance(
         });
     }
 
-    ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
+    ranked.sort_by(|a, b| b.score.cmp(&a.score));
     ranked
+}
+
+/// Alias for extract_symbols_and_relationships
+fn extract_symbols_with_tree_sitter(
+    file: &Path,
+    content: &str,
+    language: &str,
+) -> Option<(Vec<CodeSymbol>, Vec<SymbolEdge>)> {
+    extract_symbols_and_relationships(file, content, language)
 }
 
 fn build_compressed_context(
@@ -1454,7 +1478,7 @@ impl RepoCache {
 
         let language = path.extension()
             .and_then(|e| e.to_str())
-            .map(|e| detect_language(e).to_string())
+            .map(|e| detect_language_from_ext(e).to_string())
             .unwrap_or_default();
 
         let entry = FileCacheEntry {
@@ -1499,8 +1523,8 @@ impl RepoCache {
             .map(|(path, _)| path.clone())
             .collect();
 
-        for path in to_remove {
-            self.files.remove(&path);
+        for path in &to_remove {
+            self.files.remove(path);
         }
 
         if !to_remove.is_empty() {
@@ -1568,7 +1592,7 @@ fn compute_string_hash(content: &str) -> String {
 }
 
 /// Detect language from file extension
-fn detect_language(ext: &str) -> &str {
+fn detect_language_from_ext(ext: &str) -> &str {
     match ext {
         "rs" => "rust",
         "js" => "javascript",
@@ -1654,16 +1678,22 @@ pub async fn build_repo_context_with_cache(
 
         // Update language breakdown
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let lang = detect_language(ext);
+            let lang = detect_language_from_ext(ext);
             *language_breakdown.entry(lang.to_string()).or_insert(0) += 1;
         }
 
         // Add to ranked files
         let score = calculate_file_relevance(&symbols, &relationships);
+        let lang = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| detect_language_from_ext(e).to_string())
+            .unwrap_or_default();
         ranked_files.push(RankedFile {
             path: path.to_path_buf(),
-            score,
+            score: score as u32,
             reason: generate_file_reason(&symbols),
+            symbol_count: symbols.len(),
+            language: lang,
         });
 
         all_symbols.extend(symbols);
@@ -1671,10 +1701,10 @@ pub async fn build_repo_context_with_cache(
     }
 
     // Sort ranked files by score
-    ranked_files.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    ranked_files.sort_by(|a, b| b.score.cmp(&a.score));
 
     // Generate compressed context
-    let compressed_context = generate_compressed_context(&all_symbols, max_tokens);
+    let compressed_context = build_compressed_context(&ranked_files, &all_symbols, max_tokens);
 
     let token_estimate = compressed_context.len() / 4;
 
@@ -1756,7 +1786,7 @@ async fn extract_symbols_from_file(path: &Path) -> Result<(Vec<CodeSymbol>, Vec<
     let content = tokio::fs::read_to_string(path).await?;
     
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let language = detect_language(ext);
+    let language = detect_language_from_ext(ext);
     
     let mut symbols = Vec::new();
     let mut relationships = Vec::new();
