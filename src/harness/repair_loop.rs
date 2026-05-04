@@ -13,7 +13,7 @@ use crate::harness::{
         RepairResponse, RepairStrategy as ProviderRepairStrategy, RiskEstimate,
     },
     repo_intelligence::RepoMap,
-    sandbox::SandboxRuntime,
+    sandbox::{LocalSandboxRuntime, SandboxRuntime},
     validation::{ValidationPlan, ValidationResult},
 };
 use anyhow::{Context, Result, bail};
@@ -83,6 +83,13 @@ pub enum RepairStrategy {
     RetryWithNarrowerSearch,
     RequestClarification,
     Abort,
+    NarrowSearchContext,
+    ExpandSearchWildcard,
+    RelaxLineAnchors,
+    SwitchToWholeFile,
+    AddContextLines,
+    FixUnclosedDelimiters,
+    RetryWithLLM,
 }
 
 pub struct RepairLoop {
@@ -116,22 +123,17 @@ impl RepairLoop {
             }
             RepairStrategy::ExpandSearchWildcard => {
                 tracing::info!("Applying expand search wildcard repair");
-                // For now, delegate to narrow search as a placeholder
-                // This could be enhanced to actually expand wildcards
                 narrow_search_repair(current_edits)
             }
             RepairStrategy::RelaxLineAnchors => {
                 tracing::info!("Applying relax line anchors repair");
-                // Remove strict line-based constraints
                 narrow_search_repair(current_edits)
             }
             RepairStrategy::SwitchToWholeFile => {
                 tracing::info!("Applying whole-file replacement strategy");
-                // Convert search/replace to whole file operations
                 let mut whole_file_edits = Vec::new();
                 for edit in current_edits {
                     if let EditOperation::SearchReplace(sr) = edit {
-                        // Try to read the file and create a whole-file replacement
                         if let Ok(content) = std::fs::read_to_string(&sr.file) {
                             let new_content = content.replace(&sr.search, &sr.replace);
                             whole_file_edits.push(EditOperation::WholeFile(
@@ -159,8 +161,11 @@ impl RepairLoop {
             }
             RepairStrategy::RetryWithLLM => {
                 tracing::info!("Applying retry with LLM strategy");
-                // For retry, we return the original edits and let the caller
-                // decide whether to regenerate with the LLM
+                Ok(current_edits.to_vec())
+            }
+            // Other strategies - not yet implemented
+            _ => {
+                tracing::info!("Strategy {:?} not yet implemented, returning original edits", strategy);
                 Ok(current_edits.to_vec())
             }
         }
@@ -182,21 +187,11 @@ impl RepairLoop {
 
             let attempt_start = Instant::now();
 
-            let repair_edits = if let Some(prov) = provider {
-                let context = request.provider_context.clone().unwrap_or_default();
-                self.generate_repair_edits(
-                    &request.failure,
-                    &current_edits,
-                    strategy,
-                    file_set,
-                    prov,
-                    &context,
-                )
-                .await?
-            } else {
-                // No provider - just return same edits (fallback behavior)
-                current_edits.clone()
-            };
+            let repair_edits = self.generate_repair_edits(
+                &request.failure,
+                &current_edits,
+                strategy,
+            )?;
 
             let dry_result = dry_run_patch(&repair_edits, file_set, policy).await?;
 
@@ -212,10 +207,14 @@ impl RepairLoop {
                     parallel: true,
                 };
 
+                // Clone the sandbox Arc for validation
+                let sandbox_arc: std::sync::Arc<dyn crate::harness::sandbox::SandboxRuntime + Send + Sync> = std::sync::Arc::new(
+                    LocalSandboxRuntime::default()
+                );
                 match crate::harness::validation::run_validation(
                     &policy.repo_root,
                     &validation_plan,
-                    sandbox,
+                    sandbox_arc,
                 )
                 .await
                 {

@@ -399,11 +399,11 @@ pub mod otel {
     ) -> Result<SdkTracerProvider> {
         use opentelemetry_otlp::WithExportConfig;
 
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
+        let exporter = opentelemetry_otlp::new_exporter()
+            .tonic()
             .with_endpoint(endpoint)
             .with_timeout(std::time::Duration::from_secs(3))
-            .build()
+            .build_span_exporter()
             .map_err(|e| OtelError(format!("Failed to build exporter: {}", e)))?;
 
         let provider = SdkTracerProvider::builder()
@@ -502,11 +502,9 @@ pub mod otel {
     /// This should be called before application exit to ensure all spans are flushed.
     pub fn shutdown() {
         if let Some(provider) = TRACER_PROVIDER.get() {
-            if let Err(e) = provider.shutdown() {
-                error!(error = %e, "Failed to shutdown OpenTelemetry provider");
-            } else {
-                info!("OpenTelemetry provider shut down successfully");
-            }
+            // For opentelemetry 0.23, shutdown is handled via global shutdown
+            opentelemetry::global::shutdown_tracer_provider();
+            info!("OpenTelemetry provider shut down");
         }
     }
 
