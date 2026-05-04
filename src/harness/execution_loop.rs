@@ -12,6 +12,7 @@ use crate::harness::{
     confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact, compute_confidence},
     edit_protocol::EditOperation,
     environment::{EnvironmentProfile, fingerprint_environment},
+    evidence::{EvidenceEntryKind, EvidenceLog},
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
@@ -27,9 +28,10 @@ use crate::harness::{
     risk::{RiskAssessment, RiskCategory, RiskLevel, RiskReason, RiskSeverity, assess_risk},
     sandbox::LocalSandboxRuntime,
     selection::{
-        PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine,
+        PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine, SelectionPhase,
     },
     semantic_diff::analyze_semantic_diff,
+    temp_workspace::{TempWorkspace, ValidationTarget, create_validation_target},
     trajectory::Trajectory,
     validation::{ValidationCategory, ValidationPlan, ValidationResult, run_validation},
     verification::{VerificationStrength, assess_verification_strength},
@@ -205,6 +207,8 @@ pub struct HarnessExecutionResult {
     pub step_count: u32,
     pub terminated_early: bool,
     pub termination_reason: Option<String>,
+    /// Complete evidence log of all side effects and decisions
+    pub evidence_log: EvidenceLog,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -415,6 +419,7 @@ pub async fn execute_harness_task(
 
     let mut traj = Trajectory::new(req.work_context_id.clone());
     let mut metrics = ExecutionMetrics::default();
+    let mut evidence_log = EvidenceLog::new(&req.work_context_id);
 
     let repo_start = Instant::now();
     let repo = build_repo_context(
@@ -426,6 +431,13 @@ pub async fn execute_harness_task(
     )
     .await?;
     metrics.repo_analysis_ms = repo_start.elapsed().as_millis() as u64;
+
+    // Record evidence of repo analysis
+    evidence_log.record_repo_map_built(
+        repo.ranked_files.len(),
+        repo.symbols.len(),
+        metrics.repo_analysis_ms,
+    );
 
     ctx.send_progress(HarnessProgress::RepoAnalysis {
         files_found: repo.ranked_files.len(),
@@ -492,7 +504,13 @@ pub async fn execute_harness_task(
                         .collect();
 
                     // Use SelectionEngine to pick the best
-                    let mut selection_engine = SelectionEngine::new(SelectionCriteria::default());
+                    // Use pre-validation criteria that doesn't require validation (candidates haven't been validated yet)
+                    let pre_validation_criteria = SelectionCriteria {
+                        require_validation: false,
+                        require_review_pass: false,
+                        ..SelectionCriteria::default()
+                    };
+                    let mut selection_engine = SelectionEngine::new(pre_validation_criteria);
                     let outcome = selection_engine.select_best_patch(selection_candidates);
 
                     ctx.send_progress(HarnessProgress::PatchGenerated {
@@ -515,6 +533,8 @@ pub async fn execute_harness_task(
         } else {
             // No edits provided and no provider available - block
             ctx.record_action("patch", "blocked", "No edits provided and no patch provider available");
+            evidence_log.record_side_effect_blocked("No edits provided and no patch provider available");
+            evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
                 trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
@@ -562,6 +582,7 @@ pub async fn execute_harness_task(
                 step_count: ctx.step_count,
                 terminated_early: true,
                 termination_reason: Some("No edits or provider".into()),
+                evidence_log,
             });
         }
     } else {
@@ -582,6 +603,8 @@ pub async fn execute_harness_task(
             error: "No structured edits supplied".into(),
         });
 
+        evidence_log.record_side_effect_blocked("No structured edits supplied");
+        evidence_log.complete();
         return Ok(HarnessExecutionResult {
             work_context_id: req.work_context_id,
             trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
@@ -629,6 +652,7 @@ pub async fn execute_harness_task(
             step_count: ctx.step_count,
             terminated_early: false,
             termination_reason: None,
+            evidence_log,
         });
     }
 
@@ -638,14 +662,14 @@ pub async fn execute_harness_task(
     }
 
     ctx.send_progress(HarnessProgress::Patching {
-        files_to_modify: req.proposed_edits.len(),
+        files_to_modify: selected_edits.len(),
         dry_run: true,
     });
 
     let patch_start = Instant::now();
 
     // STEP 1: Dry-run patch to verify it applies cleanly
-    let dry = dry_run_patch(&req.proposed_edits, &files, &policy)
+    let dry = dry_run_patch(&selected_edits, &files, &policy)
         .await
         .context("patch dry-run failed")?;
 
@@ -663,7 +687,7 @@ pub async fn execute_harness_task(
     }
 
     // STEP 2: Generate diff for review and semantic analysis
-    let diff = generate_diff_from_edits(&req.proposed_edits);
+    let diff = generate_diff_from_edits(&selected_edits);
 
     // STEP 3: Review the patch BEFORE applying
     let review_issues = if dry.failures.is_empty() {
@@ -715,75 +739,70 @@ pub async fn execute_harness_task(
     };
 
     // STEP 7: Create git checkpoint ONLY if we're going to apply
-    let checkpoint = if should_apply {
-        create_pre_task_checkpoint(&req.repo_root).await.ok()
+    // NOTE: Checkpoint failure is blocking in side-effect modes (see implementation below)
+    let checkpoint_result = if should_apply {
+        create_pre_task_checkpoint(&req.repo_root).await
     } else {
-        None
+        Ok(GitCheckpoint {
+            id: "review-only".to_string(),
+            work_context_id: req.work_context_id.clone(),
+            branch_name: "review-only".to_string(),
+            before_head: None,
+            after_head: None,
+            dirty_files: vec![],
+            touched_files: vec![],
+            diff_before: String::new(),
+            diff_after: String::new(),
+            committed: false,
+            commit_message: None,
+            created_at: chrono::Utc::now(),
+        })
     };
 
-    // STEP 7.5: Generate and select best patch if provider available
-    let selected_edits = if req.proposed_edits.is_empty() {
-        // Try to generate candidates using patch provider
-        if let Some(ref provider) = req.patch_provider {
-            let provider_req = ProviderGenerateRequest {
-                context: req.provider_context.clone().unwrap_or_default(),
-                preferred_strategies: vec!["search_replace".into(), "whole_file".into()],
-            };
-
-            match provider.generate(provider_req).await {
-                Ok(response) if !response.candidates.is_empty() => {
-                    ctx.send_progress(HarnessProgress::GeneratingPatch);
-
-                    // Convert provider candidates to selection candidates
-                    let selection_candidates: Vec<SelectionCandidate> = response
-                        .candidates
-                        .iter()
-                        .map(|c| SelectionCandidate {
-                            id: format!("candidate_{}", c.source),
-                            edits: c.edits.clone(),
-                            source: c.source.clone(),
-                            confidence: crate::harness::confidence::ConfidenceScore {
-                                score: c.confidence as f32 / 100.0,
-                                factors: vec![],
-                                explanation: "Provider confidence score".to_string(),
-                                recommendation: None,
-                            },
-                            metadata: Default::default(),
-                            risk: None,
-                            validation: None,
-                            review_issues: vec![],
-                            semantic_diff: None,
-                            lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
-                            lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
-                        })
-                        .collect();
-
-                    // Use SelectionEngine to pick the best
-                    let mut selection_engine = SelectionEngine::new(SelectionCriteria::default());
-                    let outcome = selection_engine.select_best_patch(selection_candidates);
-
-                    ctx.send_progress(HarnessProgress::PatchGenerated {
-                        files_changed: outcome
-                            .as_ref()
-                            .ok()
-                            .and_then(|o| o.as_ref())
-                            .map(|s| s.candidate.edits.len())
-                            .unwrap_or(0),
-                        total_files: files.editable.len(),
-                    });
-
-                    outcome.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
-                }
-                _ => {
-                    // No candidates generated, use empty
-                    Vec::new()
-                }
-            }
-        } else {
-            req.proposed_edits.clone()
+    // In side-effect modes (Autonomous, Assisted), checkpoint failure is blocking
+    let checkpoint = match (&req.mode, checkpoint_result) {
+        (HarnessMode::ReviewOnly, _) => None,
+        (_, Err(e)) => {
+            // Checkpoint failed in a mode that requires side effects - this is blocking
+            evidence_log.record_side_effect_blocked(&format!("Checkpoint creation failed: {}", e));
+            evidence_log.complete();
+            return Ok(HarnessExecutionResult {
+                work_context_id: req.work_context_id,
+                trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
+                repo_context: repo,
+                environment: env,
+                file_set: files,
+                acceptance,
+                patch_result: None,
+                validation_result: None,
+                review_issues,
+                risk_assessment: risk,
+                confidence: ConfidenceScore {
+                    score: 0.0,
+                    factors: vec![],
+                    explanation: "Checkpoint creation failed".into(),
+                    recommendation: Some(format!("Git checkpoint failed: {}", e)),
+                },
+                verification_strength: VerificationStrength::None,
+                completion_decision: CompletionDecision::Blocked(format!(
+                    "Git checkpoint creation failed (required in {:?} mode): {}",
+                    req.mode, e
+                )),
+                trajectory: traj,
+                git_checkpoint: None,
+                rollback_handle: None,
+                validation_failure_policy: req.validation_failure_policy,
+                artifacts: vec![],
+                failures: vec![FailureKind::CheckpointFailed],
+                summary: format!("Checkpoint creation failed in {:?} mode: {}", req.mode, e),
+                execution_metrics: metrics,
+                step_count: ctx.step_count,
+                terminated_early: true,
+                termination_reason: Some(format!("Checkpoint failure: {}", e)),
+                evidence_log,
+            });
         }
-    } else {
-        req.proposed_edits.clone()
+        (_, Ok(cp)) => Some(cp),
     };
 
     // STEP 8: Apply patch only if approved - with rollback support
@@ -819,7 +838,23 @@ pub async fn execute_harness_task(
         parallel: true,
     };
 
-    let validation = if patch.as_ref().is_some_and(|p| p.failures.is_empty()) {
+    // Determine validation target: real repo if patch applied, temp workspace otherwise
+    let validation_target = if patch.as_ref().is_some_and(|p| p.applied) {
+        ValidationTarget::RealRepo(req.repo_root.clone())
+    } else if !selected_edits.is_empty() && dry.failures.is_empty() {
+        // Create temp workspace for validation when patch not applied to real repo
+        match TempWorkspace::create_temp_copy(&req.repo_root, &selected_edits, &files, &policy).await {
+            Ok((workspace, _)) => ValidationTarget::TempWorkspace(workspace),
+            Err(e) => {
+                ctx.record_action("validation", "temp_workspace_failed", &format!("Failed to create temp workspace: {}", e));
+                ValidationTarget::None
+            }
+        }
+    } else {
+        ValidationTarget::None
+    };
+
+    let validation = if let Some(val_root) = validation_target.path() {
         ctx.send_progress(HarnessProgress::Validating {
             commands_to_run: plan.format_commands.len()
                 + plan.lint_commands.len()
@@ -827,7 +862,7 @@ pub async fn execute_harness_task(
         });
 
         let val_start = Instant::now();
-        let result = run_validation(&req.repo_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
+        let result = run_validation(val_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
         metrics.validation_ms = val_start.elapsed().as_millis() as u64;
 
         let tests_run = result.command_results.len();
@@ -842,6 +877,11 @@ pub async fn execute_harness_task(
             tests_run,
             tests_passed,
         });
+
+        // Cleanup temp workspace if used
+        if let ValidationTarget::TempWorkspace(ws) = validation_target {
+            let _ = ws.cleanup().await;
+        }
 
         Some(result)
     } else {
@@ -1084,6 +1124,9 @@ pub async fn execute_harness_task(
 
     let trace_id = crate::harness::observability::otel::generate_trace_id();
 
+    // Complete the evidence log
+    evidence_log.complete();
+
     let mut result = HarnessExecutionResult {
         work_context_id: req.work_context_id,
         trace_id: Some(trace_id.clone()),
@@ -1109,6 +1152,7 @@ pub async fn execute_harness_task(
         step_count: ctx.step_count,
         terminated_early: false,
         termination_reason: None,
+        evidence_log: evidence_log.clone(),
     };
 
     ctx.send_progress(HarnessProgress::Patching {
