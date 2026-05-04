@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tokio::fs;
 
 use prometheos_lite::harness::{
-    edit_protocol::{EditOperation, SearchReplaceEdit},
+    edit_protocol::{EditOperation, SearchReplaceEdit, CreateFileEdit, DeleteFileEdit},
     file_control::{FilePolicy, FileSet},
     patch_applier::{RollbackHandle, apply_patch_with_rollback, dry_run_patch},
 };
@@ -84,12 +84,14 @@ async fn test_rollback_file_edit() {
         file: file_path.clone(),
         search: "println!(\"Hello\");".to_string(),
         replace: "println!(\"World\");".to_string(),
-        context_lines: 3,
+        replace_all: Some(false),
+        context_lines: Some(3),
     })];
 
     // Build file set and policy
-    let file_set = FileSet::from_paths(vec![file_path.clone()]).await.unwrap();
-    let policy = FilePolicy::default();
+    let mut file_set = FileSet::default();
+    file_set.editable = vec![file_path.clone()];
+    let policy = FilePolicy::default_for_repo(repo_path);
 
     // Apply patch with rollback
     let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
@@ -143,16 +145,16 @@ async fn test_rollback_create_file() {
 
     // Create edit operation to create a new file
     let new_file_path = repo_path.join("new_file.rs");
-    let edits = vec![EditOperation::CreateFile {
+    let edits = vec![EditOperation::CreateFile(CreateFileEdit {
         file: new_file_path.clone(),
         content: "fn new_function() {}\n".to_string(),
-    }];
+        executable: None,
+    })];
 
     // Build file set and policy
-    let file_set = FileSet::from_paths(vec![new_file_path.clone()])
-        .await
-        .unwrap();
-    let policy = FilePolicy::default();
+    let mut file_set = FileSet::default();
+    file_set.editable = vec![new_file_path.clone()];
+    let policy = FilePolicy::default_for_repo(repo_path);
 
     // Apply patch with rollback
     let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
@@ -206,13 +208,14 @@ async fn test_rollback_delete_file() {
     commit_all(repo_path, "Initial commit with file to delete");
 
     // Create edit operation to delete the file
-    let edits = vec![EditOperation::DeleteFile {
+    let edits = vec![EditOperation::DeleteFile(DeleteFileEdit {
         file: file_path.clone(),
-    }];
+    })];
 
     // Build file set and policy
-    let file_set = FileSet::from_paths(vec![file_path.clone()]).await.unwrap();
-    let policy = FilePolicy::default();
+    let mut file_set = FileSet::default();
+    file_set.editable = vec![file_path.clone()];
+    let policy = FilePolicy::default_for_repo(repo_path);
 
     // Apply patch with rollback
     let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
@@ -267,12 +270,14 @@ async fn test_rollback_conflict_detection() {
         file: file_path.clone(),
         search: "println!(\"Hello\");".to_string(),
         replace: "println!(\"World\");".to_string(),
-        context_lines: 3,
+        replace_all: Some(false),
+        context_lines: Some(3),
     })];
 
     // Build file set and policy
-    let file_set = FileSet::from_paths(vec![file_path.clone()]).await.unwrap();
-    let policy = FilePolicy::default();
+    let mut file_set = FileSet::default();
+    file_set.editable = vec![file_path.clone()];
+    let policy = FilePolicy::default_for_repo(repo_path);
 
     // Apply patch with rollback
     let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
@@ -328,13 +333,15 @@ fn main() {
     let edits = vec![EditOperation::SearchReplace(SearchReplaceEdit {
         file: file_path.clone(),
         search: "let x = 5;".to_string(),
-        replace: "let x = 10; // Changed value".to_string(),
-        context_lines: 3,
+        replace: "fn helper() { println!(\"help\"); }".to_string(),
+        replace_all: Some(false),
+        context_lines: Some(3),
     })];
 
     // Build file set and policy
-    let file_set = FileSet::from_paths(vec![file_path.clone()]).await.unwrap();
-    let policy = FilePolicy::default();
+    let mut file_set = FileSet::default();
+    file_set.editable = vec![file_path.clone()];
+    let policy = FilePolicy::default_for_repo(repo_path);
 
     // Apply patch
     let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
