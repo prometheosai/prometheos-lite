@@ -4,6 +4,7 @@ use crate::harness::{
         ArtifactKind, ArtifactMetadata, CompressionType, HarnessArtifact,
         generate_completion_artifact,
     },
+    attempt_pool::AttemptPool,
     completion::{
         CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
         ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence, VerificationEvidence,
@@ -262,6 +263,7 @@ pub enum HarnessProgress {
         success: bool,
         files_changed: usize,
         failures: usize,
+        repaired: bool,
     },
     GeneratingPatch,
     PatchGenerated {
@@ -503,46 +505,106 @@ pub async fn execute_harness_task(
                 Ok(response) if !response.candidates.is_empty() => {
                     ctx.send_progress(HarnessProgress::GeneratingPatch);
 
-                    // Convert provider candidates to selection candidates
-                    let selection_candidates: Vec<SelectionCandidate> = response
-                        .candidates
-                        .iter()
-                        .map(|c| SelectionCandidate {
-                            id: format!("candidate_{}", c.source),
-                            edits: c.edits.clone(),
-                            source: c.source.clone(),
-                            confidence: crate::harness::confidence::ConfidenceScore {
-                                score: c.confidence as f32 / 100.0,
-                                factors: vec![],
-                                explanation: "Provider confidence score".to_string(),
-                                recommendation: None,
-                            },
-                            metadata: Default::default(),
-                            risk: None,
-                            validation: None,
-                            review_issues: vec![],
-                            semantic_diff: None,
-                            lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
-                            lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
-                        })
-                        .collect();
+                    // P1-FIX: Use AttemptPool for parallel validation when multiple candidates exist
+                    let candidates_count = response.candidates.len();
+                    let selected_edits = if candidates_count > 1 {
+                        // Multiple candidates - use AttemptPool for parallel validation
+                        tracing::info!("P1: Using AttemptPool to evaluate {} candidates in parallel", candidates_count);
 
-                    // Use SelectionEngine to pick the best
-                    // Use pre-validation criteria that doesn't require validation (candidates haven't been validated yet)
-                    let pre_validation_criteria = SelectionCriteria {
-                        require_validation: false,
-                        require_review_pass: false,
-                        ..SelectionCriteria::default()
+                        // Convert provider candidates to PatchCandidates for AttemptPool
+                        let patch_candidates: Vec<crate::harness::selection::PatchCandidate> = response
+                            .candidates
+                            .iter()
+                            .map(|c| crate::harness::selection::PatchCandidate {
+                                id: format!("candidate_{}", c.source),
+                                edits: c.edits.clone(),
+                                source: c.source.clone(),
+                                confidence: crate::harness::confidence::ConfidenceScore {
+                                    score: c.confidence as f32 / 100.0,
+                                    factors: vec![],
+                                    explanation: "Provider confidence score".to_string(),
+                                    recommendation: None,
+                                },
+                                metadata: Default::default(),
+                                risk: None,
+                                validation: None,
+                                review_issues: vec![],
+                                semantic_diff: None,
+                                lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
+                                lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
+                            })
+                            .collect();
+
+                        // Create validation plan for AttemptPool
+                        let validation_plan = ValidationPlan {
+                            format_commands: vec![],
+                            lint_commands: vec!["cargo check".into()],
+                            test_commands: vec!["cargo test --lib".into()],
+                            repro_commands: vec![],
+                            timeout_ms: Some(120000),
+                            parallel: true,
+                        };
+
+                        // Run AttemptPool for parallel evaluation
+                        let pool = AttemptPool::new(3); // Max 3 concurrent
+                        let records = pool.evaluate_candidates(
+                            patch_candidates,
+                            &repo,
+                            &files,
+                            &policy,
+                            &validation_plan,
+                            &req,
+                            &mut evidence_log,
+                            Some(trace_id.clone()),
+                        ).await;
+
+                        // Select best passing candidate
+                        if let Some(best) = pool.select_best(&records) {
+                            tracing::info!("P1: AttemptPool selected best candidate {} with score {:.2}",
+                                best.attempt_id, best.score);
+                            best.candidate.edits.clone()
+                        } else {
+                            tracing::warn!("P1: No passing candidates from AttemptPool");
+                            // Fall back to first candidate if none passed
+                            response.candidates.first().map(|c| c.edits.clone()).unwrap_or_default()
+                        }
+                    } else {
+                        // Single candidate - use original SelectionEngine path
+                        let selection_candidates: Vec<SelectionCandidate> = response
+                            .candidates
+                            .iter()
+                            .map(|c| SelectionCandidate {
+                                id: format!("candidate_{}", c.source),
+                                edits: c.edits.clone(),
+                                source: c.source.clone(),
+                                confidence: crate::harness::confidence::ConfidenceScore {
+                                    score: c.confidence as f32 / 100.0,
+                                    factors: vec![],
+                                    explanation: "Provider confidence score".to_string(),
+                                    recommendation: None,
+                                },
+                                metadata: Default::default(),
+                                risk: None,
+                                validation: None,
+                                review_issues: vec![],
+                                semantic_diff: None,
+                                lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
+                                lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
+                            })
+                            .collect();
+
+                        let pre_validation_criteria = SelectionCriteria {
+                            require_validation: false,
+                            require_review_pass: false,
+                            ..SelectionCriteria::default()
+                        };
+                        let mut selection_engine = SelectionEngine::new(pre_validation_criteria);
+                        let selected_candidate = selection_engine.select_best_patch(selection_candidates);
+
+                        selected_candidate.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
                     };
-                    let mut selection_engine = SelectionEngine::new(pre_validation_criteria);
-                    let selected_candidate = selection_engine.select_best_patch(selection_candidates);
 
-                    let files_changed = selected_candidate
-                        .as_ref()
-                        .ok()
-                        .and_then(|o| o.as_ref())
-                        .map(|s| s.candidate.edits.len())
-                        .unwrap_or(0);
+                    let files_changed = selected_edits.len();
 
                     ctx.send_progress(HarnessProgress::PatchGenerated {
                         files_changed,
@@ -550,16 +612,16 @@ pub async fn execute_harness_task(
                     });
 
                     // Record patch generation evidence
-                    if let Some(ref scored) = selected_candidate.as_ref().ok().and_then(|o| o.as_ref()) {
+                    if !selected_edits.is_empty() {
                         evidence_log.record_patch_generated(
-                            &scored.candidate.source,
-                            scored.candidate.edits.len(),
-                            scored.candidate.confidence.score,
+                            &format!("attempt_pool_selection_{}", candidates_count),
+                            selected_edits.len(),
+                            0.8, // Default confidence for AttemptPool selection
                             Some(trace_id.clone()),
                         );
                     }
 
-                    selected_candidate.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
+                    selected_edits
                 }
                 _ => {
                     // No candidates generated, use empty
@@ -716,10 +778,109 @@ pub async fn execute_harness_task(
 
     let dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
 
+    // P1-FIX: Attempt repair if dry-run failed and we have a provider
+    let (selected_edits, dry, repaired) = if !dry.failures.is_empty() && req.patch_provider.is_some() {
+        tracing::info!("P1: Dry-run failed with {} failures, attempting repair", dry.failures.len());
+
+        // Create repair context
+        let provider_context = crate::harness::patch_provider::PatchProviderContext {
+            task: req.task.clone(),
+            requirements: vec![],
+            repo_map: None,
+            mentioned_files: vec![],
+            mentioned_symbols: vec![],
+            attempt_history: vec![],
+            validation_output: Some(format!("Dry-run failures: {:?}", dry.failures)),
+            review_issues: vec![],
+            max_candidates: 3,
+        };
+
+        // Create repair request for each failure
+        let mut repaired_edits = selected_edits.clone();
+        let mut any_repaired = false;
+
+        for failure in &dry.failures {
+            // Convert PatchFailure to FailureDetails
+            let failure_details = crate::harness::failure::FailureDetails {
+                kind: classify_patch_failure(failure),
+                category: crate::harness::failure::FailureCategory::Tooling,
+                severity: crate::harness::failure::FailureSeverity::Error,
+                message: failure.reason.clone(),
+                context: crate::harness::failure::FailureContext {
+                    file: Some(failure.file.clone()),
+                    line: failure.line_number,
+                    column: None,
+                    operation: Some(failure.operation.clone()),
+                    command: None,
+                    nearby_code: failure.nearby_context.clone(),
+                    stack_trace: None,
+                },
+                suggestion: failure.nearby_context.clone(),
+                recovery_action: crate::harness::failure::RecoveryAction::Retry,
+            };
+
+            let repair_request = crate::harness::patch_provider::RepairRequest {
+                context: provider_context.clone(),
+                failure: failure_details,
+                failed_edits: repaired_edits.clone(),
+                repair_strategy: crate::harness::patch_provider::RepairStrategy::ExpandContextWindow,
+            };
+
+            // Try to repair using provider
+            if let Some(ref provider) = req.patch_provider {
+                match provider.repair(repair_request).await {
+                    Ok(repair_response) if !repair_response.repaired_edits.is_empty() => {
+                        tracing::info!("P1: Repair succeeded with {} edits", repair_response.repaired_edits.len());
+                        repaired_edits = repair_response.repaired_edits;
+                        any_repaired = true;
+
+                        // Re-run dry-run with repaired edits
+                        match dry_run_patch(&repaired_edits, &files, &policy).await {
+                            Ok(new_dry) => {
+                                if new_dry.failures.is_empty() {
+                                    tracing::info!("P1: Repaired patch passes dry-run");
+                                    break; // Success!
+                                } else {
+                                    tracing::warn!("P1: Repaired patch still has {} failures", new_dry.failures.len());
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("P1: Dry-run failed after repair: {}", e);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!("P1: Repair returned empty edits");
+                    }
+                    Err(e) => {
+                        tracing::error!("P1: Repair failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Final dry-run with repaired edits (or original if repair failed)
+        let final_dry = if any_repaired {
+            dry_run_patch(&repaired_edits, &files, &policy)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("P1: Final dry-run failed: {}", e);
+                    dry.clone()
+                })
+        } else {
+            dry.clone()
+        };
+
+        (repaired_edits, final_dry, any_repaired)
+    } else {
+        (selected_edits, dry, false)
+    };
+
     ctx.send_progress(HarnessProgress::PatchResult {
         success: dry.failures.is_empty(),
         files_changed: dry.changed_files.len(),
         failures: dry.failures.len(),
+        repaired,
     });
 
     ctx.increment_step();

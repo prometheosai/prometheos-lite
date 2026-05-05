@@ -403,6 +403,261 @@ impl LocalCommandRuntime {
     }
 }
 
+/// P1-FIX: Docker-based sandbox runtime for true process isolation
+///
+/// This provides actual containerization with:
+/// - Filesystem isolation (container rootfs)
+/// - Process isolation (PID namespace)
+/// - Resource limits (CPU/memory quotas)
+/// - Optional network isolation
+#[derive(Debug, Clone)]
+pub struct DockerSandboxRuntime {
+    /// Docker image to use (e.g., "rust:latest", "node:18")
+    image: String,
+    /// Container working directory (mounted from host)
+    workdir: String,
+    /// Additional volume mounts (host_path:container_path)
+    volumes: Vec<String>,
+    /// Environment variables to set in container
+    env_vars: Vec<(String, String)>,
+    /// Network mode ("none" for isolation, "host" for access)
+    network_mode: String,
+    /// CPU limit (e.g., "1.0" for 1 core)
+    cpus: Option<String>,
+    /// Memory limit (e.g., "512m")
+    memory: Option<String>,
+    /// Timeout for container operations
+    timeout_ms: u64,
+}
+
+impl DockerSandboxRuntime {
+    /// Create a new Docker sandbox with the specified image
+    pub fn new(image: impl Into<String>) -> Self {
+        Self {
+            image: image.into(),
+            workdir: "/workspace".to_string(),
+            volumes: vec![],
+            env_vars: vec![],
+            network_mode: "none".to_string(), // Secure default
+            cpus: Some("1.0".to_string()),
+            memory: Some("512m".to_string()),
+            timeout_ms: 300000, // 5 minutes
+        }
+    }
+
+    /// Set the working directory inside the container
+    pub fn with_workdir(mut self, workdir: impl Into<String>) -> Self {
+        self.workdir = workdir.into();
+        self
+    }
+
+    /// Add a volume mount
+    pub fn with_volume(mut self, host_path: impl Into<String>, container_path: impl Into<String>) -> Self {
+        self.volumes.push(format!("{}:{}", host_path.into(), container_path.into()));
+        self
+    }
+
+    /// Add an environment variable
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_vars.push((key.into(), value.into()));
+        self
+    }
+
+    /// Set network mode ("none" for isolation)
+    pub fn with_network_mode(mut self, mode: impl Into<String>) -> Self {
+        self.network_mode = mode.into();
+        self
+    }
+
+    /// Set resource limits
+    pub fn with_resources(mut self, cpus: Option<String>, memory: Option<String>) -> Self {
+        self.cpus = cpus;
+        self.memory = memory;
+        self
+    }
+
+    /// Check if Docker is available on the system
+    pub async fn is_docker_available() -> bool {
+        match Command::new("docker").arg("--version").output().await {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Build docker run command arguments
+    fn build_docker_args(&self, repo_root: &Path, cmd: &StructuredCommand) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "--rm".to_string(), // Remove container after run
+            "--interactive".to_string(),
+            "--workdir".to_string(),
+            self.workdir.clone(),
+        ];
+
+        // Add network isolation
+        args.push("--network".to_string());
+        args.push(self.network_mode.clone());
+
+        // Add resource limits
+        if let Some(ref cpus) = self.cpus {
+            args.push("--cpus".to_string());
+            args.push(cpus.clone());
+        }
+        if let Some(ref memory) = self.memory {
+            args.push("--memory".to_string());
+            args.push(memory.clone());
+        }
+
+        // Add volume mounts
+        // Mount the repo root to the working directory
+        args.push("--volume".to_string());
+        args.push(format!("{}:{}", repo_root.display(), self.workdir));
+
+        // Add additional volumes
+        for volume in &self.volumes {
+            args.push("--volume".to_string());
+            args.push(volume.clone());
+        }
+
+        // Add environment variables
+        for (key, value) in &self.env_vars {
+            args.push("--env".to_string());
+            args.push(format!("{}={}", key, value));
+        }
+
+        // Security options
+        args.push("--security-opt".to_string());
+        args.push("no-new-privileges:true".to_string());
+        args.push("--cap-drop".to_string());
+        args.push("ALL".to_string());
+
+        // Add the image
+        args.push(self.image.clone());
+
+        // Add the command to run
+        args.push(cmd.program.clone());
+        args.extend(cmd.args.clone());
+
+        args
+    }
+}
+
+#[async_trait]
+impl CommandRuntime for DockerSandboxRuntime {
+    async fn run_command(
+        &self,
+        repo_root: &Path,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<CommandResult> {
+        // Parse command into structured form
+        let structured = StructuredCommand::parse(command)?;
+
+        // Run via structured API
+        self.run_structured_command(repo_root, &structured, timeout_ms)
+            .await
+    }
+
+    async fn run_structured_command(
+        &self,
+        repo_root: &Path,
+        cmd: &StructuredCommand,
+        _timeout_ms: u64, // Docker has its own timeout handling
+    ) -> Result<CommandResult> {
+        // Check if Docker is available
+        if !Self::is_docker_available().await {
+            bail!("Docker is not available on this system");
+        }
+
+        let start = Instant::now();
+
+        // Build docker arguments
+        let docker_args = self.build_docker_args(repo_root, cmd);
+
+        tracing::info!(
+            "P1: Running in Docker container: docker {}",
+            docker_args.join(" ")
+        );
+
+        // Execute docker run
+        let child = Command::new("docker")
+            .args(&docker_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        let out = match timeout(Duration::from_millis(self.timeout_ms), child.wait_with_output()).await {
+            Ok(o) => o?,
+            Err(_) => {
+                return Ok(CommandResult {
+                    command: cmd.original.clone(),
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: "Docker container timed out".into(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    cached: false,
+                    cache_key: None,
+                    timed_out: true,
+                });
+            }
+        };
+
+        let stdout: String = String::from_utf8_lossy(&out.stdout).into();
+        let stderr: String = String::from_utf8_lossy(&out.stderr).into();
+
+        // Check for Docker-specific errors
+        if !out.status.success() && stderr.contains("Cannot connect to the Docker daemon") {
+            bail!("Docker daemon is not running");
+        }
+
+        Ok(CommandResult {
+            command: format!("docker run {} {} {}",
+                self.image,
+                cmd.program,
+                cmd.args.join(" ")
+            ),
+            exit_code: out.status.code(),
+            stdout,
+            stderr,
+            duration_ms: start.elapsed().as_millis() as u64,
+            cached: false,
+            cache_key: None,
+            timed_out: false,
+        })
+    }
+}
+
+/// P1-FIX: Sandbox runtime factory for selecting appropriate backend
+pub struct SandboxRuntimeFactory;
+
+impl SandboxRuntimeFactory {
+    /// Create the best available sandbox runtime
+    ///
+    /// Priority:
+    /// 1. Docker (if available and requested)
+    /// 2. LocalCommandRuntime (fallback)
+    pub async fn create(prefer_docker: bool, image: Option<String>) -> Box<dyn CommandRuntime> {
+        if prefer_docker && DockerSandboxRuntime::is_docker_available().await {
+            let image = image.unwrap_or_else(|| "rust:latest".to_string());
+            tracing::info!("P1: Using Docker sandbox with image: {}", image);
+            Box::new(DockerSandboxRuntime::new(image))
+        } else {
+            tracing::info!("P1: Using local command runtime (no containerization)");
+            Box::new(LocalCommandRuntime::default())
+        }
+    }
+
+    /// Create a Docker sandbox if available, otherwise fail
+    pub async fn create_docker(image: impl Into<String>) -> Result<Box<dyn CommandRuntime>> {
+        if DockerSandboxRuntime::is_docker_available().await {
+            Ok(Box::new(DockerSandboxRuntime::new(image)))
+        } else {
+            bail!("Docker is not available on this system")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
