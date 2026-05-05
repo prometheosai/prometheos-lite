@@ -206,6 +206,7 @@ impl RepairLoop {
                     repro_commands: vec![],
                     timeout_ms: Some(60000),
                     parallel: true,
+                    tool_ids: vec![],
                 };
 
                 // Clone the sandbox Arc for validation

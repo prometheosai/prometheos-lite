@@ -22,6 +22,20 @@ pub struct RuntimeTool {
     pub description: String,
     pub supported_extensions: Vec<String>,
     pub health_check_cmd: Option<String>,
+    /// P1-009: Command to get tool version (e.g., "cargo --version")
+    pub version_cmd: Option<String>,
+}
+
+impl RuntimeTool {
+    /// P1-009: Build the command string for this tool
+    pub fn command(&self) -> String {
+        let mut cmd = self.executable_path.to_string_lossy().to_string();
+        for arg in &self.args_template {
+            cmd.push(' ');
+            cmd.push_str(arg);
+        }
+        cmd
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +132,7 @@ impl RuntimeToolRegistry {
             description: "Format Rust code".to_string(),
             supported_extensions: vec!["rs".to_string()],
             health_check_cmd: Some("rustfmt --version".to_string()),
+            version_cmd: Some("rustfmt --version".to_string()),
         });
 
         self.register(RuntimeTool {
@@ -138,6 +153,7 @@ impl RuntimeToolRegistry {
             description: "Lint Rust code".to_string(),
             supported_extensions: vec!["rs".to_string()],
             health_check_cmd: Some("cargo clippy --version".to_string()),
+            version_cmd: Some("cargo --version".to_string()),
         });
 
         self.register(RuntimeTool {
@@ -153,6 +169,7 @@ impl RuntimeToolRegistry {
             description: "Check Rust code compiles".to_string(),
             supported_extensions: vec!["rs".to_string()],
             health_check_cmd: Some("cargo --version".to_string()),
+            version_cmd: Some("cargo --version".to_string()),
         });
 
         self.register(RuntimeTool {
@@ -168,6 +185,7 @@ impl RuntimeToolRegistry {
             description: "Run Rust tests".to_string(),
             supported_extensions: vec!["rs".to_string()],
             health_check_cmd: Some("cargo --version".to_string()),
+            version_cmd: Some("cargo --version".to_string()),
         });
     }
 
@@ -192,6 +210,16 @@ impl RuntimeToolRegistry {
             .values()
             .filter(|t| t.tool_type == tool_type)
             .collect()
+    }
+
+    /// P1-009: Find a tool by its command string
+    pub fn find_by_command(&self, command: &str) -> Option<&RuntimeTool> {
+        self.tools.values().find(|t| {
+            // Check if the command matches the tool's command or executable
+            t.command() == command
+                || t.executable_path.to_string_lossy() == command
+                || command.starts_with(&t.command())
+        })
     }
 
     pub async fn execute(
@@ -450,6 +478,63 @@ impl RuntimeToolRegistry {
             success_rate: successful as f64 / total as f64,
         })
     }
+
+    /// P1-009: Get tool version by running the version command
+    pub async fn get_tool_version(&self, tool_id: &str) -> Option<String> {
+        if let Some(tool) = self.tools.get(tool_id) {
+            if let Some(version_cmd) = &tool.version_cmd {
+                let parts: Vec<_> = version_cmd.split_whitespace().collect();
+                if parts.is_empty() {
+                    return None;
+                }
+
+                let output = Command::new(parts[0]).args(&parts[1..]).output().await.ok()?;
+                if output.status.success() {
+                    return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// P1-009: Run health checks for all tools referenced in a ValidationPlan
+    pub async fn health_check_plan(&self, plan: &crate::harness::validation::ValidationPlan) -> Vec<(String, bool)> {
+        let mut results = Vec::new();
+
+        // Check tools by ID
+        for tool_id in &plan.tool_ids {
+            let healthy = self.health_check(tool_id).await.unwrap_or(false);
+            results.push((tool_id.clone(), healthy));
+        }
+
+        // Also check tools referenced by raw commands
+        for cmd in &plan.format_commands {
+            if let Some(tool) = self.find_by_command(cmd) {
+                let healthy = self.health_check(&tool.id).await.unwrap_or(false);
+                if !results.iter().any(|(id, _)| id == &tool.id) {
+                    results.push((tool.id.clone(), healthy));
+                }
+            }
+        }
+        for cmd in &plan.lint_commands {
+            if let Some(tool) = self.find_by_command(cmd) {
+                let healthy = self.health_check(&tool.id).await.unwrap_or(false);
+                if !results.iter().any(|(id, _)| id == &tool.id) {
+                    results.push((tool.id.clone(), healthy));
+                }
+            }
+        }
+        for cmd in &plan.test_commands {
+            if let Some(tool) = self.find_by_command(cmd) {
+                let healthy = self.health_check(&tool.id).await.unwrap_or(false);
+                if !results.iter().any(|(id, _)| id == &tool.id) {
+                    results.push((tool.id.clone(), healthy));
+                }
+            }
+        }
+
+        results
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,6 +587,7 @@ mod tests {
             description: "Test tool".to_string(),
             supported_extensions: vec!["txt".to_string()],
             health_check_cmd: Some("echo --version".to_string()),
+            version_cmd: Some("echo --version".to_string()),
         };
 
         registry.register(tool);

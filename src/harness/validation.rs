@@ -21,6 +21,8 @@ pub struct ValidationPlan {
     pub repro_commands: Vec<String>,
     pub timeout_ms: Option<u64>,
     pub parallel: bool,
+    /// P1-009: Tool IDs from RuntimeToolRegistry (alternative to raw commands)
+    pub tool_ids: Vec<String>,
 }
 
 impl ValidationPlan {
@@ -32,6 +34,7 @@ impl ValidationPlan {
             repro_commands: vec![],
             timeout_ms: Some(120000),
             parallel: true,
+            tool_ids: vec![],
         }
     }
 
@@ -43,6 +46,49 @@ impl ValidationPlan {
     pub fn with_timeout(mut self, ms: u64) -> Self {
         self.timeout_ms = Some(ms);
         self
+    }
+
+    /// P1-009: Add a tool by ID from RuntimeToolRegistry
+    pub fn with_tool(mut self, tool_id: impl Into<String>) -> Self {
+        self.tool_ids.push(tool_id.into());
+        self
+    }
+
+    /// P1-009: Resolve tool IDs to commands using RuntimeToolRegistry
+    pub fn resolve_tools(&self, registry: &crate::harness::runtime_tools::RuntimeToolRegistry) -> Vec<String> {
+        let mut commands = Vec::new();
+        for tool_id in &self.tool_ids {
+            if let Some(tool) = registry.get(tool_id) {
+                commands.push(tool.command());
+            }
+        }
+        commands
+    }
+
+    /// P1-009: Build validation plan from RuntimeToolRegistry for environment
+    pub fn from_registry(env: &crate::harness::environment::EnvironmentProfile, registry: &crate::harness::runtime_tools::RuntimeToolRegistry) -> Self {
+        use crate::harness::runtime_tools::ToolType;
+
+        let mut plan = Self::default_for_repo(env);
+
+        // Map environment commands to registered tools
+        for cmd in &env.format_commands {
+            if let Some(tool) = registry.find_by_command(cmd) {
+                plan.tool_ids.push(tool.id.clone());
+            }
+        }
+        for cmd in &env.lint_commands {
+            if let Some(tool) = registry.find_by_command(cmd) {
+                plan.tool_ids.push(tool.id.clone());
+            }
+        }
+        for cmd in &env.test_commands {
+            if let Some(tool) = registry.find_by_command(cmd) {
+                plan.tool_ids.push(tool.id.clone());
+            }
+        }
+
+        plan
     }
 }
 
