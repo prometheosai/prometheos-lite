@@ -52,6 +52,8 @@ pub enum EvidenceEntryKind {
     ApprovalGranted,
     /// User approval denied
     ApprovalDenied,
+    /// Attempt pool candidate result
+    AttemptPoolResult,
 }
 
 /// A single entry in the evidence log
@@ -421,6 +423,42 @@ impl EvidenceLog {
             span_id: None,
             duration_ms: 0,
             success: false,
+        };
+        self.add_entry(entry.clone());
+        entry
+    }
+
+    /// Record attempt pool result
+    pub fn record_attempt_pool_result(
+        &mut self,
+        attempt_id: &str,
+        score: f32,
+        passed: bool,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
+        let entry = EvidenceEntry {
+            id: format!("{}_attempt_{}", self.execution_id, self.entries.len()),
+            timestamp: Utc::now(),
+            kind: EvidenceEntryKind::AttemptPoolResult,
+            description: format!("Attempt {} scored {:.2} - {}", attempt_id, score, if passed { "PASSED" } else { "FAILED" }),
+            input_summary: {
+                let mut map = HashMap::new();
+                map.insert("attempt_id".to_string(), attempt_id.to_string());
+                map
+            },
+            output_summary: {
+                let mut map = HashMap::new();
+                map.insert("score".to_string(), format!("{:.2}", score));
+                map.insert("passed".to_string(), passed.to_string());
+                map
+            },
+            command: None,
+            command_result: None,
+            files_touched: Vec::new(),
+            trace_id,
+            span_id: None,
+            duration_ms: 0,
+            success: passed,
         };
         self.add_entry(entry.clone());
         entry

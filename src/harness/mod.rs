@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod adversarial_validation;
 pub mod artifacts;
+pub mod attempt_pool;
 pub mod benchmark;
 pub mod completion;
 pub mod confidence;
