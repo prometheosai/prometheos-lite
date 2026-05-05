@@ -687,13 +687,18 @@ pub struct ProviderInfo {
 
 /// Static patch provider for deterministic testing
 ///
-/// This provider returns pre-defined edits for testing without requiring
-/// external API calls or model inference.
+/// Returns predefined edits based on task key. Useful for integration tests
+/// where you want predictable behavior without calling external APIs.
+///
+/// ⚠️ P0-FIX: This provider is TEST-ONLY and gated behind #[cfg(test)].
+/// It should never be used in production as it bypasses actual patch generation.
+#[cfg(test)]
 pub struct StaticPatchProvider {
     name: String,
     predefined_edits: HashMap<String, Vec<EditOperation>>,
 }
 
+#[cfg(test)]
 impl StaticPatchProvider {
     /// Create a new static provider with no edits
     pub fn new(name: impl Into<String>) -> Self {
@@ -718,6 +723,7 @@ impl StaticPatchProvider {
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl PatchProvider for StaticPatchProvider {
     fn name(&self) -> &str {

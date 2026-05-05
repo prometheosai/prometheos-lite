@@ -62,23 +62,44 @@ impl TempWorkspace {
     }
 
     /// Copy relevant files from original repo to temp workspace
+    ///
+    /// P0-FIX: Correctly handles absolute paths in FileSet by normalizing to relative
+    /// before joining with temp_root. Fails loudly on copy errors for required files.
     async fn copy_repo_files(
         original_root: &Path,
         temp_root: &Path,
         file_set: &FileSet,
     ) -> Result<()> {
+        // Canonicalize original_root for consistent path handling
+        let canonical_original = original_root.canonicalize()
+            .context("Failed to canonicalize original root")?;
+
         // Copy editable files
         for file in &file_set.editable {
-            let src = original_root.join(file);
-            let dst = temp_root.join(file);
+            // P0-FIX: Normalize file path to be relative to original_root
+            let relative_path = normalize_to_relative(&canonical_original, file)
+                .context(format!("Failed to normalize path: {:?}", file))?;
 
-            if src.exists() {
-                // Create parent directories
-                if let Some(parent) = dst.parent() {
-                    fs::create_dir_all(parent).await.ok();
-                }
-                fs::copy(&src, &dst).await.ok();
+            let src = canonical_original.join(&relative_path);
+            let dst = temp_root.join(&relative_path);
+
+            // P0-FIX: Fail loudly if source doesn't exist (required file)
+            if !src.exists() {
+                anyhow::bail!(
+                    "Required file does not exist: {:?} (normalized from {:?})",
+                    src, file
+                );
             }
+
+            // Create parent directories
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent).await
+                    .context(format!("Failed to create parent directories for {:?}", dst))?;
+            }
+
+            // P0-FIX: Fail loudly on copy errors for required files
+            fs::copy(&src, &dst).await
+                .context(format!("Failed to copy file from {:?} to {:?}", src, dst))?;
         }
 
         // Copy important config files
@@ -190,6 +211,35 @@ impl TempWorkspace {
         }
         Ok(())
     }
+}
+
+/// P0-FIX: Normalize a path to be relative to the base directory
+///
+/// Handles both absolute and relative paths correctly:
+/// - If path is absolute and under base, returns relative path
+/// - If path is already relative, validates it's under base and returns as-is
+/// - If path is absolute and outside base, returns error
+fn normalize_to_relative(base: &Path, path: &Path) -> Result<PathBuf> {
+    let canonical_path = if path.is_absolute() {
+        path.canonicalize()
+            .context(format!("Failed to canonicalize path: {:?}", path))?
+    } else {
+        base.join(path).canonicalize()
+            .context(format!("Failed to canonicalize relative path: {:?}", path))?
+    };
+
+    // Ensure the path is under the base directory (security check)
+    if !canonical_path.starts_with(base) {
+        anyhow::bail!(
+            "Path {:?} is outside base directory {:?}",
+            canonical_path, base
+        );
+    }
+
+    // Strip the base prefix to get relative path
+    Ok(canonical_path.strip_prefix(base)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// Determine the validation target based on execution mode and patch state
