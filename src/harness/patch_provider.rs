@@ -847,11 +847,34 @@ impl PatchProvider for StaticPatchProvider {
 pub struct LlmPatchProvider {
     client: crate::llm::LlmClient,
     model: String,
+    /// P0-FIX: When true, only accept strict JSON schema responses
+    /// When false, allows markdown fallback for compatibility
+    strict_mode: bool,
 }
 
 impl LlmPatchProvider {
     pub fn new(client: crate::llm::LlmClient, model: String) -> Self {
-        Self { client, model }
+        Self {
+            client,
+            model,
+            strict_mode: true, // P0-FIX: Default to strict mode for production safety
+        }
+    }
+
+    /// P0-FIX: Create with strict mode disabled (for tests/compatibility only)
+    #[cfg(test)]
+    pub fn with_fallback_mode(client: crate::llm::LlmClient, model: String) -> Self {
+        Self {
+            client,
+            model,
+            strict_mode: false,
+        }
+    }
+
+    /// P0-FIX: Explicitly set strict mode
+    pub fn with_strict_mode(mut self, strict: bool) -> Self {
+        self.strict_mode = strict;
+        self
     }
 
     fn build_repair_prompt(&self, request: &RepairRequest) -> String {
@@ -900,10 +923,9 @@ impl LlmPatchProvider {
     }
 
     fn parse_edits_from_response(&self, response: &str) -> Vec<EditOperation> {
-        let mut edits = Vec::new();
-
-        // First, try strict JSON schema parsing (preferred)
+        // P0-FIX: Try strict JSON schema parsing first (always attempted)
         if let Some(json) = Self::parse_json_schema_response(response) {
+            let mut edits = Vec::new();
             if let Some(edits_array) = json.get("edits").and_then(|v| v.as_array()) {
                 for edit_json in edits_array {
                     if let Some(edit) = Self::json_to_edit_operation(edit_json) {
@@ -916,7 +938,33 @@ impl LlmPatchProvider {
             }
         }
 
-        // Fall back to legacy markdown parsing for backward compatibility
+        // P0-FIX: If strict mode enabled, do NOT fall back to markdown parsing
+        if self.strict_mode {
+            tracing::warn!(
+                "P0: Strict JSON schema parsing failed and strict_mode is enabled. Rejecting provider response with {} characters.",
+                response.len()
+            );
+            return Vec::new();
+        }
+
+        // P0-FIX: Markdown fallback only allowed in non-strict mode (tests/compatibility)
+        #[cfg(test)]
+        {
+            tracing::info!("P0: Attempting markdown fallback parsing (test mode only)");
+            return self.parse_markdown_fallback(response);
+        }
+        #[cfg(not(test))]
+        {
+            tracing::warn!("P0: Markdown fallback disabled in production builds. Use LlmPatchProvider::with_fallback_mode() for compatibility.");
+            Vec::new()
+        }
+    }
+
+    /// P0-FIX: Legacy markdown parsing - test/gated use only
+    #[cfg(test)]
+    fn parse_markdown_fallback(&self, response: &str) -> Vec<EditOperation> {
+        let mut edits = Vec::new();
+
         // Parse search/replace blocks
         // Format: ```edit
         // FILE: path/to/file.rs
