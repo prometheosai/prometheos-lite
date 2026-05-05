@@ -117,6 +117,29 @@ impl Clone for HarnessExecutionRequest {
     }
 }
 
+impl HarnessExecutionRequest {
+    /// P0-FIX: Auto-create patch provider from config if not already set
+    ///
+    /// This is the production entry point for LLM-based patch generation.
+    /// Call this before execute_harness_task() to ensure a provider is available.
+    pub fn with_config_provider(mut self) -> Self {
+        if self.patch_provider.is_none() && self.proposed_edits.is_empty() {
+            // Try to load config and create LLM provider
+            if let Ok(config) = crate::config::AppConfig::load() {
+                if let Ok(registry) =
+                    crate::harness::patch_provider::ProviderRegistry::from_config(&config)
+                {
+                    // Store the registry's aggregate provider
+                    // Note: We need to keep the registry alive, so we store it in provider_context
+                    // and use a wrapper that delegates to the registry
+                    self.patch_provider = Some(Box::new(registry));
+                }
+            }
+        }
+        self
+    }
+}
+
 impl PartialEq for HarnessExecutionRequest {
     fn eq(&self, other: &Self) -> bool {
         self.work_context_id == other.work_context_id

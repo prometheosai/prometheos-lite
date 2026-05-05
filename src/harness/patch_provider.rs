@@ -659,6 +659,39 @@ impl ProviderRegistry {
         Ok(Self { aggregate })
     }
 
+    /// Create with LLM provider for production use
+    ///
+    /// P0-FIX: This is the production entry point for LLM-based patch generation.
+    /// Use this when you have an LLM client configured and want full generation capabilities.
+    pub fn with_llm_provider(client: crate::llm::LlmClient, model: String) -> anyhow::Result<Self> {
+        let mut aggregate = AggregatePatchProvider::new();
+        aggregate.add_provider(Box::new(LlmPatchProvider::new(client, model)));
+        aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
+
+        Ok(Self { aggregate })
+    }
+
+    /// Create from application configuration
+    ///
+    /// P0-FIX: Production factory that reads LLM configuration from app config.
+    /// Falls back to blocking behavior if LLM is not configured.
+    pub fn from_config(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
+        // Check if we have a valid LLM configuration
+        if config.provider.is_empty() || config.model.is_empty() {
+            bail!(
+                "No LLM provider configured. \
+                Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables \
+                or configure in settings file."
+            );
+        }
+
+        // Create LLM client from config
+        let client = crate::llm::LlmClient::new(&config.base_url, &config.model)
+            .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
+
+        Self::with_llm_provider(client, config.model.clone())
+    }
+
     /// Get the aggregate provider
     pub fn provider(&self) -> &AggregatePatchProvider {
         &self.aggregate
@@ -673,6 +706,29 @@ impl ProviderRegistry {
             can_repair: caps.can_repair,
             max_candidates: caps.max_candidates,
         }
+    }
+}
+
+#[async_trait]
+impl PatchProvider for ProviderRegistry {
+    fn name(&self) -> &str {
+        "provider_registry"
+    }
+
+    async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        self.aggregate.generate(request).await
+    }
+
+    async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
+        self.aggregate.repair(request).await
+    }
+
+    fn can_handle(&self, kind: FailureKind) -> bool {
+        self.aggregate.can_handle(kind)
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.aggregate.capabilities()
     }
 }
 
