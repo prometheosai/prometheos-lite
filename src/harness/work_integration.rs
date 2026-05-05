@@ -21,7 +21,7 @@ use std::{path::PathBuf, sync::Arc};
 ///
 /// Uses simple regex patterns to identify likely file paths and code symbols
 /// mentioned in the task description and requirements.
-fn extract_task_hints(task: &str, requirements: &[String]) -> (Vec<PathBuf>, Vec<String>) {
+pub fn extract_task_hints(task: &str, requirements: &[String]) -> (Vec<PathBuf>, Vec<String>) {
     use regex::Regex;
 
     let mut files = Vec::new();
