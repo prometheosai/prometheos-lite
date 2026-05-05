@@ -886,6 +886,63 @@ pub async fn execute_harness_task(
         .iter()
         .map(|_f| FailureKind::PatchApplyFailure)
         .collect();
+
+    // STEP 8.5: Post-validation selection with stricter criteria
+    // After validation, re-evaluate the patch using stricter post-validation criteria
+    let post_validation_criteria = SelectionPhase::PostValidation.criteria();
+    let validation_passed = validation.as_ref().map(|v| v.passed).unwrap_or(false);
+
+    // If we had a candidate, re-score it with post-validation criteria
+    if !selected_edits.is_empty() {
+        use crate::harness::confidence::{ConfidenceScore, ConfidenceFactor, FactorImpact};
+        use crate::harness::selection::SelectionEngine;
+
+        let lines_total: usize = selected_edits.iter()
+            .map(|e| e.lines_added() + e.lines_removed())
+            .sum();
+
+        let post_validation_candidate = SelectionCandidate {
+            id: format!("post_val_{}", req.work_context_id),
+            edits: selected_edits.clone(),
+            source: "post_validation".into(),
+            confidence: ConfidenceScore {
+                score: if validation_passed { 0.9 } else { 0.1 },
+                factors: vec![ConfidenceFactor {
+                    name: "validation_result".into(),
+                    weight: 1.0,
+                    score: if validation_passed { 0.9 } else { 0.1 },
+                    description: "post-validation assessment".into(),
+                    impact: if validation_passed { FactorImpact::Positive } else { FactorImpact::Negative },
+                }],
+                explanation: "post-validation selection".into(),
+                recommendation: None,
+            },
+            metadata: std::collections::HashMap::new(),
+            risk: Some(risk.clone()),
+            validation: validation.clone(),
+            review_issues: review_issues.clone(),
+            semantic_diff: None,
+            lines_added: lines_total,
+            lines_removed: 0,
+        };
+
+        // Use SelectionEngine to score with post-validation criteria
+        let mut selection_engine = SelectionEngine::new(post_validation_criteria);
+        let scored = selection_engine.rank_candidates(vec![post_validation_candidate]);
+
+        if let Some(first) = scored.first() {
+            if !first.is_eligible {
+                tracing::info!(
+                    "Post-validation selection rejected candidate: failed stricter criteria"
+                );
+                if validation_passed {
+                    // Validation passed but failed other criteria (risk, review issues)
+                    failures.push(FailureKind::SemanticFailure);
+                }
+            }
+        }
+    }
+
     if let Some(ref v) = validation {
         if !v.passed {
             failures.push(classify_validation_failure(v));

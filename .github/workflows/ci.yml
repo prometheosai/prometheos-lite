@@ -33,8 +33,14 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Lint (clippy)
-        run: cargo clippy --all-targets --all-features
+      - name: Lint (clippy - strict)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Doc tests
+        run: cargo test --doc --all-features
+
+      - name: Build verification (release)
+        run: cargo build --release --all-features
 
       - name: Tests
         run: cargo test --all-targets --all-features
@@ -51,3 +57,25 @@ jobs:
             exit 1
           fi
           echo "OK: No direct LLM calls in API handlers"
+
+      - name: Stub/placeholder detection
+        run: |
+          # Fail if production code contains TODO/FIXME/unimplemented!/todo! placeholders
+          # Excludes test files and comments about the patterns themselves
+          echo "Checking for stubs in production code..."
+
+          # Check for unimplemented!() and todo!() macros in src/ (excluding tests)
+          if grep -rn "unimplemented!\|todo!" src/ --include="*.rs" | grep -v "//.*unimplemented\|//.*todo\|review.rs.*todo!" | head -20; then
+            echo "ERROR: Found unimplemented!() or todo!() macros in production code."
+            echo "These must be resolved before merging to main."
+            exit 1
+          fi
+
+          # Check for TODO/FIXME comments in src/ (excluding legitimate detection patterns)
+          if grep -rn "TODO:\|FIXME:" src/ --include="*.rs" | grep -v "STYLE001\|BUG005\|BUG006\|reproduction.rs" | head -20; then
+            echo "WARNING: Found TODO/FIXME comments in production code."
+            echo "These should be resolved or converted to tracked issues."
+            # Allowing this as warning only - can be made strict after cleanup
+          fi
+
+          echo "OK: No critical stubs found in production code"

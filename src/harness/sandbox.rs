@@ -1,3 +1,14 @@
+//! Command Runtime with Security Policy
+//!
+//! ⚠️ IMPORTANT: This is NOT a true sandbox. It provides command filtering
+//! and security policy enforcement, but does NOT provide:
+//! - Process isolation (containers, namespaces)
+//! - Filesystem isolation (chroot, bind mounts)
+//! - Network isolation
+//! - Resource limits (CPU/memory quotas)
+//!
+//! For true sandboxing, use container runtime integration (Docker, etc.)
+
 use crate::harness::validation::CommandResult;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -104,8 +115,12 @@ impl StructuredCommand {
 }
 
 #[async_trait]
-pub trait SandboxRuntime: Send + Sync {
-    /// Run a command from a raw string (legacy API, now secure)
+/// Runtime for executing commands with security policy enforcement
+///
+/// ⚠️ WARNING: This provides command filtering only, NOT process isolation.
+/// Commands run directly on the host with the privileges of the PrometheOS process.
+pub trait CommandRuntime: Send + Sync {
+    /// Run a command from a raw string with policy enforcement
     async fn run_command(
         &self,
         repo_root: &Path,
@@ -121,9 +136,18 @@ pub trait SandboxRuntime: Send + Sync {
         timeout_ms: u64,
     ) -> Result<CommandResult>;
 }
+
+// Backward compatibility trait - will be removed in v2.0
+#[deprecated(since = "1.6.0", note = "Use CommandRuntime instead. This is not true sandboxing.")]
+pub trait SandboxRuntime: CommandRuntime {}
+
+// Auto-implement SandboxRuntime for any type that implements CommandRuntime
+#[allow(deprecated)]
+impl<T: CommandRuntime + ?Sized> SandboxRuntime for T {}
+
 /// Security policy for command execution
 #[derive(Debug, Clone)]
-pub struct SandboxSecurityPolicy {
+pub struct CommandSecurityPolicy {
     /// List of allowed program names (e.g., "cargo", "npm")
     pub allowed_programs: Vec<String>,
     /// List of blocked programs that are explicitly denied
@@ -136,7 +160,11 @@ pub struct SandboxSecurityPolicy {
     pub max_args: usize,
 }
 
-impl Default for SandboxSecurityPolicy {
+// Backward compatibility alias - will be removed in v2.0
+#[deprecated(since = "1.6.0", note = "Use CommandSecurityPolicy instead")]
+pub type SandboxSecurityPolicy = CommandSecurityPolicy;
+
+impl Default for CommandSecurityPolicy {
     fn default() -> Self {
         Self {
             allowed_programs: vec![
@@ -163,29 +191,37 @@ impl Default for SandboxSecurityPolicy {
 }
 
 #[derive(Debug, Clone)]
-pub struct LocalSandboxRuntime {
-    policy: SandboxSecurityPolicy,
+/// Local command runtime with security policy enforcement
+///
+/// ⚠️ WARNING: This runs commands directly on the host. It filters commands
+/// by program name but does NOT isolate the process.
+pub struct LocalCommandRuntime {
+    policy: CommandSecurityPolicy,
 }
 
-impl Default for LocalSandboxRuntime {
+// Backward compatibility alias - will be removed in v2.0
+#[deprecated(since = "1.6.0", note = "Use LocalCommandRuntime instead")]
+pub type LocalSandboxRuntime = LocalCommandRuntime;
+
+impl Default for LocalCommandRuntime {
     fn default() -> Self {
         Self {
-            policy: SandboxSecurityPolicy::default(),
+            policy: CommandSecurityPolicy::default(),
         }
     }
 }
 
-impl LocalSandboxRuntime {
+impl LocalCommandRuntime {
     pub fn new(allowed: Vec<String>) -> Self {
         Self {
-            policy: SandboxSecurityPolicy {
+            policy: CommandSecurityPolicy {
                 allowed_programs: allowed,
                 ..Default::default()
             },
         }
     }
 
-    pub fn with_policy(policy: SandboxSecurityPolicy) -> Self {
+    pub fn with_policy(policy: CommandSecurityPolicy) -> Self {
         Self { policy }
     }
 
@@ -254,7 +290,7 @@ impl LocalSandboxRuntime {
     }
 }
 #[async_trait]
-impl SandboxRuntime for LocalSandboxRuntime {
+impl CommandRuntime for LocalCommandRuntime {
     async fn run_command(
         &self,
         root: &Path,
@@ -318,7 +354,7 @@ impl SandboxRuntime for LocalSandboxRuntime {
     }
 }
 
-impl LocalSandboxRuntime {
+impl LocalCommandRuntime {
     /// Spawn a direct command without shell wrapper
     ///
     /// This is the secure path - args are passed directly to the program,

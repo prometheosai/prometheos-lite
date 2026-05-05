@@ -108,7 +108,16 @@ pub async fn apply_patch(
     set: &FileSet,
     policy: &FilePolicy,
 ) -> Result<PatchResult> {
-    run_with_transaction(edits, set, policy, false).await
+    // Capture snapshots for evidence log audit trail
+    let affected_files = extract_affected_files(edits);
+    let snapshots = capture_file_snapshots(&affected_files, policy).await?;
+
+    let mut result = run_with_transaction(edits, set, policy, false).await?;
+
+    // Populate snapshots in result for evidence log
+    result.snapshots = snapshots;
+
+    Ok(result)
 }
 
 /// Apply a patch with full rollback support
