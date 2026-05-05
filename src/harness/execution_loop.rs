@@ -438,21 +438,47 @@ pub async fn execute_harness_task(
     let mut metrics = ExecutionMetrics::default();
     let mut evidence_log = EvidenceLog::new(&req.work_context_id);
 
-    // P2: Generate trace ID for OpenTelemetry correlation
+    // P1-010: Generate ONE trace ID for entire harness execution
+    // All child spans and evidence entries will share this trace ID
     let trace_id = crate::harness::observability::otel::generate_trace_id();
+    tracing::info!(trace_id = %trace_id, "P1-010: Starting harness execution with trace propagation");
 
+    // P1-010: Create root span for harness execution
+    let _root_span = tracing::info_span!(
+        "harness.execute",
+        trace_id = %trace_id,
+        work_context_id = %req.work_context_id,
+        mode = ?req.mode,
+    );
+    let _enter = _root_span.enter();
+
+    // P1-010: Child span for repo analysis phase
+    let repo_span = tracing::info_span!(
+        "harness.repo_analysis",
+        trace_id = %trace_id,
+        phase = "repo_analysis",
+    );
     let repo_start = Instant::now();
-    let repo = build_repo_context(
-        &req.repo_root,
-        &req.task,
-        &req.mentioned_files,
-        &req.mentioned_symbols,
-        8000,
-    )
-    .await?;
+    let repo = {
+        let _enter = repo_span.enter();
+        build_repo_context(
+            &req.repo_root,
+            &req.task,
+            &req.mentioned_files,
+            &req.mentioned_symbols,
+            8000,
+        )
+        .await?
+    };
     metrics.repo_analysis_ms = repo_start.elapsed().as_millis() as u64;
+    tracing::info!(
+        trace_id = %trace_id,
+        files_found = repo.ranked_files.len(),
+        symbols_found = repo.symbols.len(),
+        "P1-010: Repo analysis complete"
+    );
 
-    // Record evidence of repo analysis
+    // Record evidence of repo analysis with trace ID
     evidence_log.record_repo_map_built(
         repo.ranked_files.len(),
         repo.symbols.len(),
@@ -496,6 +522,14 @@ pub async fn execute_harness_task(
     let selected_edits = if req.proposed_edits.is_empty() {
         // Try to generate candidates using patch provider
         if let Some(ref provider) = req.patch_provider {
+            // P1-010: Child span for provider generation phase
+            let provider_span = tracing::info_span!(
+                "harness.provider_generate",
+                trace_id = %trace_id,
+                phase = "provider_generation",
+            );
+            let _enter = provider_span.enter();
+
             let provider_req = ProviderGenerateRequest {
                 context: req.provider_context.clone().unwrap_or_default(),
                 preferred_strategies: vec!["search_replace".into(), "whole_file".into()],
@@ -508,7 +542,7 @@ pub async fn execute_harness_task(
                     // P0-FIX: AttemptPool is now the ONLY candidate evaluation path
                     // All candidates (even single ones) go through isolated temp workspace validation
                     let candidates_count = response.candidates.len();
-                    tracing::info!("P0: Using AttemptPool to evaluate {} candidate(s) in isolated workspaces", candidates_count);
+                    tracing::info!(trace_id = %trace_id, "P0: Using AttemptPool to evaluate {} candidate(s) in isolated workspaces", candidates_count);
 
                     // Convert provider candidates to PatchCandidates for AttemptPool
                     let patch_candidates: Vec<crate::harness::selection::PatchCandidate> = response
@@ -544,18 +578,29 @@ pub async fn execute_harness_task(
                         parallel: true,
                     };
 
+                    // P1-010: Child span for AttemptPool evaluation phase
+                    let attempt_pool_span = tracing::info_span!(
+                        "harness.attempt_pool",
+                        trace_id = %trace_id,
+                        phase = "attempt_pool",
+                        candidates_count = candidates_count,
+                    );
+
                     // Run AttemptPool for parallel evaluation in isolated workspaces
                     let pool = AttemptPool::new(3); // Max 3 concurrent
-                    let records = pool.evaluate_candidates(
-                        patch_candidates,
-                        &repo,
-                        &files,
-                        &policy,
-                        &validation_plan,
-                        &req,
-                        &mut evidence_log,
-                        Some(trace_id.clone()),
-                    ).await;
+                    let records = {
+                        let _enter = attempt_pool_span.enter();
+                        pool.evaluate_candidates(
+                            patch_candidates,
+                            &repo,
+                            &files,
+                            &policy,
+                            &validation_plan,
+                            &req,
+                            &mut evidence_log,
+                            Some(trace_id.clone()),
+                        ).await
+                    };
 
                     // P0-FIX: Select best passing candidate based on validation, not just confidence
                     let selected_edits = if let Some(best) = pool.select_best(&records) {
@@ -733,12 +778,29 @@ pub async fn execute_harness_task(
 
     let patch_start = Instant::now();
 
+    // P1-010: Child span for dry-run phase
+    let dry_run_span = tracing::info_span!(
+        "harness.dry_run",
+        trace_id = %trace_id,
+        phase = "dry_run",
+        files_to_modify = selected_edits.len(),
+    );
+
     // STEP 1: Dry-run patch to verify it applies cleanly
     let dry_start = Instant::now();
-    let dry = dry_run_patch(&selected_edits, &files, &policy)
-        .await
-        .context("patch dry-run failed")?;
+    let dry = {
+        let _enter = dry_run_span.enter();
+        dry_run_patch(&selected_edits, &files, &policy)
+            .await
+            .context("patch dry-run failed")?
+    };
     let dry_run_ms = dry_start.elapsed().as_millis() as u64;
+    tracing::info!(
+        trace_id = %trace_id,
+        dry_run_ms = dry_run_ms,
+        failures = dry.failures.len(),
+        "P1-010: Dry-run complete"
+    );
 
     // Record dry-run evidence
     evidence_log.record_dry_run(&dry, dry_run_ms, Some(trace_id.clone()));
@@ -858,19 +920,24 @@ pub async fn execute_harness_task(
     // STEP 2: Generate diff for review and semantic analysis
     let diff = generate_diff_from_edits(&selected_edits);
 
+    // P1-010: Child span for review phase
+    let review_span = tracing::info_span!(
+        "harness.review",
+        trace_id = %trace_id,
+        phase = "review",
+    );
+
     // STEP 3: Review the patch BEFORE applying
     let review_issues = if dry.failures.is_empty() {
-        review_diff(&diff)
+        let _enter = review_span.enter();
+        let issues = review_diff(&diff);
+        let critical = issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count();
+        let high = issues.iter().filter(|i| i.severity == ReviewSeverity::High).count();
+        tracing::info!(trace_id = %trace_id, "P1-010: Review found {} critical, {} high issues", critical, high);
+        issues
     } else {
         vec![] // No review performed if dry-run failed
     };
-
-    // Record review evidence (if review was performed)
-    if dry.failures.is_empty() && !review_issues.is_empty() {
-        let critical = review_issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count();
-        let high = review_issues.iter().filter(|i| i.severity == ReviewSeverity::High).count();
-        tracing::info!("Review found {} critical, {} high issues", critical, high);
-    }
 
     // Compute critical issue count for later use
     let critical_count = review_issues
@@ -878,11 +945,33 @@ pub async fn execute_harness_task(
         .filter(|i| i.severity == ReviewSeverity::Critical)
         .count();
 
+    // P1-010: Child span for semantic analysis phase
+    let semantic_span = tracing::info_span!(
+        "harness.semantic_analysis",
+        trace_id = %trace_id,
+        phase = "semantic_analysis",
+    );
+
     // STEP 4: Semantic diff analysis
-    let semantic = analyze_semantic_diff(&diff);
+    let semantic = {
+        let _enter = semantic_span.enter();
+        analyze_semantic_diff(&diff)
+    };
+
+    // P1-010: Child span for risk assessment phase
+    let risk_span = tracing::info_span!(
+        "harness.risk_assessment",
+        trace_id = %trace_id,
+        phase = "risk_assessment",
+    );
 
     // STEP 5: Risk assessment BEFORE applying
-    let risk = assess_risk(&semantic, &review_issues);
+    let risk = {
+        let _enter = risk_span.enter();
+        let r = assess_risk(&semantic, &review_issues);
+        tracing::info!(trace_id = %trace_id, risk_level = ?r.level, "P1-010: Risk assessment complete");
+        r
+    };
 
     // Record risk assessment evidence
     evidence_log.record_risk_assessed(&risk, Some(trace_id.clone()));
@@ -932,10 +1021,23 @@ pub async fn execute_harness_task(
         }
     }
 
+    // P1-010: Child span for checkpoint phase
+    let checkpoint_span = tracing::info_span!(
+        "harness.checkpoint",
+        trace_id = %trace_id,
+        phase = "checkpoint",
+        should_apply = should_apply,
+    );
+
     // STEP 7: Create git checkpoint ONLY if we're going to apply
     // NOTE: Checkpoint failure is blocking in side-effect modes (see implementation below)
     let checkpoint_result = if should_apply {
-        create_pre_task_checkpoint(&req.repo_root).await
+        let _enter = checkpoint_span.enter();
+        let result = create_pre_task_checkpoint(&req.repo_root).await;
+        if let Ok(ref cp) = result {
+            tracing::info!(trace_id = %trace_id, checkpoint_id = %cp.id, "P1-010: Checkpoint created");
+        }
+        result
     } else {
         Ok(GitCheckpoint {
             id: "review-only".to_string(),
@@ -1003,15 +1105,35 @@ pub async fn execute_harness_task(
         }
     };
 
+    // P1-010: Child span for patch apply phase
+    let patch_apply_span = tracing::info_span!(
+        "harness.patch_apply",
+        trace_id = %trace_id,
+        phase = "patch_apply",
+        should_apply = should_apply,
+    );
+
     // STEP 8: Apply patch only if approved - with rollback support
     let (patch, rollback_handle) =
         if should_apply && dry.failures.is_empty() && !selected_edits.is_empty() {
+            let _enter = patch_apply_span.enter();
             let (result, handle) =
                 apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
+            tracing::info!(
+                trace_id = %trace_id,
+                files_changed = result.changed_files.len(),
+                "P1-010: Patch applied to real repo"
+            );
             // Record patch application evidence (real repo)
             evidence_log.record_patch_applied(&result, false, Some(&handle), Some(trace_id.clone()));
             (Some(result), Some(handle))
         } else {
+            tracing::info!(
+                trace_id = %trace_id,
+                should_apply = should_apply,
+                dry_failures = dry.failures.len(),
+                "P1-010: Patch not applied (review-only or dry-run failed)"
+            );
             // Return dry-run result (patch not actually applied)
             // Record that patch was NOT applied to real repo
             evidence_log.record_patch_applied(&dry, true, None, Some(trace_id.clone()));
@@ -1056,6 +1178,13 @@ pub async fn execute_harness_task(
         ValidationTarget::None
     };
 
+    // P1-010: Child span for validation phase
+    let validation_span = tracing::info_span!(
+        "harness.validation",
+        trace_id = %trace_id,
+        phase = "validation",
+    );
+
     let validation = if let Some(val_root) = validation_target.path() {
         ctx.send_progress(HarnessProgress::Validating {
             commands_to_run: plan.format_commands.len()
@@ -1064,7 +1193,17 @@ pub async fn execute_harness_task(
         });
 
         let val_start = Instant::now();
-        let result = run_validation(val_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
+        let result = {
+            let _enter = validation_span.enter();
+            let r = run_validation(val_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
+            tracing::info!(
+                trace_id = %trace_id,
+                passed = r.passed,
+                commands_run = r.command_results.len(),
+                "P1-010: Validation complete"
+            );
+            r
+        };
         metrics.validation_ms = val_start.elapsed().as_millis() as u64;
 
         // Record validation completion evidence
@@ -1202,10 +1341,23 @@ pub async fn execute_harness_task(
 
             if should_rollback {
                 if let Some(ref handle) = rollback_handle {
+                    // P1-010: Child span for rollback phase
+                    let rollback_span = tracing::info_span!(
+                        "harness.rollback",
+                        trace_id = %trace_id,
+                        phase = "rollback",
+                    );
+                    let _enter = rollback_span.enter();
+
                     match handle.clone().rollback().await {
                         Ok(result) => {
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::PatchRolledBack);
+                            tracing::info!(
+                                trace_id = %trace_id,
+                                restored = result.restored.len(),
+                                "P1-010: Rollback successful"
+                            );
                             // Record rollback evidence
                             evidence_log.record_rollback("validation failed - automatic rollback", Some(trace_id.clone()));
                             ctx.send_progress(HarnessProgress::RolledBack {
@@ -1217,6 +1369,7 @@ pub async fn execute_harness_task(
                         Err(e) => {
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::RollbackFailed);
+                            tracing::error!(trace_id = %trace_id, error = %e, "P1-010: Rollback failed");
                             // Record rollback failure
                             evidence_log.record_rollback(&format!("rollback failed: {}", e), Some(trace_id.clone()));
                             ctx.send_progress(HarnessProgress::RollbackFailed {
