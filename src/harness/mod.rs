@@ -36,6 +36,7 @@ pub mod semantic_diff;
 pub mod temp_workspace;
 pub mod time_travel;
 pub mod trajectory;
+pub mod trust_report;
 pub mod validation;
 pub mod verification;
 pub mod workspace;
