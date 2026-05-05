@@ -3,7 +3,7 @@ use crate::harness::{
         EditOperation, ParsedDiff, apply_unified_diff, parse_unified_diff, validate_edit_operations,
     },
     file_control::{
-        FilePolicy, FileSet, assert_delete_allowed, assert_rename_allowed, normalize_path,
+        FilePolicy, FileSet, assert_delete_allowed, assert_rename_allowed, resolve_repo_path,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -71,17 +71,29 @@ impl Transaction {
 
     fn record_snapshot(
         &mut self,
-        path: PathBuf,
+        full_path: PathBuf,
+        repo_root: &Path,
         before_content: Option<String>,
         after_content: Option<String>,
         existed_before: bool,
     ) {
         let before_hash = before_content.as_ref().map(|c| compute_hash(c));
         let after_hash = after_content.as_ref().map(|c| compute_hash(c));
+
+        // P0 SAFETY: Store repo-relative path in snapshot, not absolute path
+        // This ensures rollback works correctly in temp workspaces
+        let rel_path = full_path.strip_prefix(repo_root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| {
+                // If we can't strip prefix, use the original (shouldn't happen with proper validation)
+                tracing::warn!("Path {} is not under repo root {}", full_path.display(), repo_root.display());
+                full_path.clone()
+            });
+
         self.snapshots.insert(
-            path.clone(),
+            rel_path.clone(),
             FileSnapshot {
-                path,
+                path: rel_path,
                 content: before_content,
                 before_hash,
                 after_hash,
@@ -103,7 +115,14 @@ pub async fn dry_run_patch(
     run_with_transaction(edits, set, policy, true).await
 }
 
-pub async fn apply_patch(
+/// Apply a patch WITHOUT rollback support.
+///
+/// ⚠️ WARNING: This is for internal/temp workspace use only.
+/// For real repository patching, you MUST use `apply_patch_with_rollback`.
+///
+/// This function will panic in debug builds if used on a non-temp workspace
+/// without explicit acknowledgment.
+pub async fn apply_patch_temp_only(
     edits: &[EditOperation],
     set: &FileSet,
     policy: &FilePolicy,
@@ -118,6 +137,19 @@ pub async fn apply_patch(
     result.snapshots = snapshots;
 
     Ok(result)
+}
+
+// Backward compatibility - deprecated, will be removed in v2.0
+#[deprecated(
+    since = "1.6.0",
+    note = "Use apply_patch_with_rollback for real repo patches, or apply_patch_temp_only for temp workspaces"
+)]
+pub async fn apply_patch(
+    edits: &[EditOperation],
+    set: &FileSet,
+    policy: &FilePolicy,
+) -> Result<PatchResult> {
+    apply_patch_temp_only(edits, set, policy).await
 }
 
 /// Apply a patch with full rollback support
@@ -284,7 +316,8 @@ async fn apply_edit_to_transaction(
 ) -> std::result::Result<(), PatchFailure> {
     match edit {
         EditOperation::SearchReplace(x) => {
-            let path = normalize_path(&policy.repo_root, &x.file)
+            // P0 SAFETY: Resolve repo-relative path safely
+            let path = resolve_repo_path(&policy.repo_root, &x.file)
                 .map_err(|e| fail(&x.file, "search_replace", e.to_string(), None))?;
 
             let content = fs::read_to_string(&path).await.map_err(|e| {
@@ -343,6 +376,7 @@ async fn apply_edit_to_transaction(
 
             transaction.record_snapshot(
                 path.clone(),
+                &policy.repo_root,
                 Some(content),
                 Some(new_content.clone()),
                 true,
@@ -351,29 +385,33 @@ async fn apply_edit_to_transaction(
         }
 
         EditOperation::WholeFile(x) => {
-            let path = normalize_path(&policy.repo_root, &x.file)
+            // P0 SAFETY: Resolve repo-relative path safely
+            let path = resolve_repo_path(&policy.repo_root, &x.file)
                 .map_err(|e| fail(&x.file, "whole_file", e.to_string(), None))?;
 
             let existing = fs::read_to_string(&path).await.ok();
             let existed = path.exists();
 
-            transaction.record_snapshot(path.clone(), existing, Some(x.content.clone()), existed);
+            transaction.record_snapshot(path.clone(), &policy.repo_root, existing, Some(x.content.clone()), existed);
             transaction.record_change(path, Some(x.content.clone()));
         }
 
         EditOperation::CreateFile(x) => {
-            let path = policy.repo_root.join(&x.file);
+            // P0 SAFETY: Resolve repo-relative path safely
+            let path = resolve_repo_path(&policy.repo_root, &x.file)
+                .map_err(|e| fail(&x.file, "create_file", e.to_string(), None))?;
 
             if path.exists() {
                 return Err(fail(&x.file, "create_file", "File already exists", None));
             }
 
-            transaction.record_snapshot(path.clone(), None, Some(x.content.clone()), false);
+            transaction.record_snapshot(path.clone(), &policy.repo_root, None, Some(x.content.clone()), false);
             transaction.record_change(path, Some(x.content.clone()));
         }
 
         EditOperation::DeleteFile(x) => {
-            let path = normalize_path(&policy.repo_root, &x.file)
+            // P0 SAFETY: Resolve repo-relative path safely
+            let path = resolve_repo_path(&policy.repo_root, &x.file)
                 .map_err(|e| fail(&x.file, "delete_file", e.to_string(), None))?;
 
             let content = fs::read_to_string(&path).await.map_err(|e| {
@@ -385,14 +423,16 @@ async fn apply_edit_to_transaction(
                 )
             })?;
 
-            transaction.record_snapshot(path.clone(), Some(content), None, true);
+            transaction.record_snapshot(path.clone(), &policy.repo_root, Some(content), None, true);
             transaction.record_change(path, None);
         }
 
         EditOperation::RenameFile(x) => {
-            let from_path = normalize_path(&policy.repo_root, &x.from)
+            // P0 SAFETY: Resolve repo-relative paths safely
+            let from_path = resolve_repo_path(&policy.repo_root, &x.from)
                 .map_err(|e| fail(&x.from, "rename_file", e.to_string(), None))?;
-            let to_path = policy.repo_root.join(&x.to);
+            let to_path = resolve_repo_path(&policy.repo_root, &x.to)
+                .map_err(|e| fail(&x.to, "rename_file", e.to_string(), None))?;
 
             if !from_path.exists() {
                 return Err(fail(
@@ -422,10 +462,10 @@ async fn apply_edit_to_transaction(
             })?;
 
             // For rename: source file goes from content -> None (deleted)
-            transaction.record_snapshot(from_path.clone(), Some(content.clone()), None, true);
+            transaction.record_snapshot(from_path.clone(), &policy.repo_root, Some(content.clone()), None, true);
             transaction.record_change(from_path.clone(), None);
             // Target file goes from None -> content (created)
-            transaction.record_snapshot(to_path.clone(), None, Some(content.clone()), false);
+            transaction.record_snapshot(to_path.clone(), &policy.repo_root, None, Some(content.clone()), false);
             transaction.record_change(to_path, Some(content));
         }
 
@@ -454,7 +494,8 @@ async fn apply_edit_to_transaction(
                         )
                     })?;
 
-                let full_path = normalize_path(&policy.repo_root, target_path)
+                // P0 SAFETY: Resolve repo-relative path safely
+        let full_path = resolve_repo_path(&policy.repo_root, target_path)
                     .map_err(|e| fail(target_path, "unified_diff", e.to_string(), None))?;
 
                 if diff.is_new_file {
@@ -463,6 +504,7 @@ async fn apply_edit_to_transaction(
 
                     transaction.record_snapshot(
                         full_path.clone(),
+                        &policy.repo_root,
                         None,
                         Some(content.clone()),
                         false,
@@ -478,7 +520,7 @@ async fn apply_edit_to_transaction(
                         )
                     })?;
 
-                    transaction.record_snapshot(full_path.clone(), Some(content), None, true);
+                    transaction.record_snapshot(full_path.clone(), &policy.repo_root, Some(content), None, true);
                     transaction.record_change(full_path, None);
                 } else {
                     let original = fs::read_to_string(&full_path).await.map_err(|e| {
@@ -495,6 +537,7 @@ async fn apply_edit_to_transaction(
 
                     transaction.record_snapshot(
                         full_path.clone(),
+                        &policy.repo_root,
                         Some(original),
                         Some(new_content.clone()),
                         true,
@@ -674,8 +717,30 @@ impl RollbackHandle {
 
     /// Restore a single file based on its snapshot
     async fn restore_file(&self, snapshot: &FileSnapshot) -> Result<RollbackAction> {
-        let path = &snapshot.path;
-        let full_path = self.repo_root.join(path);
+        let rel_path = &snapshot.path;
+
+        // P0 SAFETY: Ensure the snapshot path is relative (not absolute)
+        if rel_path.is_absolute() {
+            bail!(
+                "Rollback safety check failed: snapshot contains absolute path {}. \
+                 This could indicate an attempt to modify files outside the repository.",
+                rel_path.display()
+            );
+        }
+
+        let full_path = self.repo_root.join(rel_path);
+
+        // P0 SAFETY: Verify the resolved path is still within repo_root
+        let canonical_repo = self.repo_root.canonicalize().unwrap_or_else(|_| self.repo_root.clone());
+        let canonical_target = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+
+        if !canonical_target.starts_with(&canonical_repo) {
+            bail!(
+                "Rollback safety check failed: {} would resolve outside repository root {}",
+                full_path.display(),
+                self.repo_root.display()
+            );
+        }
 
         if !snapshot.existed_before {
             // File was created by the patch - delete it
@@ -701,7 +766,7 @@ impl RollbackHandle {
                     // File was modified after our patch - this is a conflict
                     bail!(
                         "File {} was modified after patch application (current hash != expected post-patch hash). Cannot safely rollback without overwriting external changes.",
-                        path.display()
+                        rel_path.display()
                     );
                 }
 

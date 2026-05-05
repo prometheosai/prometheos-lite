@@ -562,27 +562,31 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 pub fn assert_edit_allowed(path: &Path, set: &FileSet, policy: &FilePolicy) -> Result<()> {
-    let normalized = normalize_path(&policy.repo_root, path)?;
+    // P0 SAFETY: Validate path is repo-relative (not absolute, no traversal)
+    let rel_path = validate_repo_relative_path(path)?;
 
-    if let Some((_, reason)) = set.denied.iter().find(|(p, _)| p == &normalized) {
+    // Resolve to absolute path for FileSet checks
+    let resolved = resolve_repo_path(&policy.repo_root, &rel_path)?;
+
+    if let Some((_, reason)) = set.denied.iter().find(|(p, _)| p == &resolved) {
         bail!("Edit not allowed for {}: {}", path.display(), reason);
     }
 
-    if set.binary.contains(&normalized) && !policy.allow_binary_edit {
+    if set.binary.contains(&resolved) && !policy.allow_binary_edit {
         bail!(
             "Edit not allowed for {}: binary file editing is disabled",
             path.display()
         );
     }
 
-    if set.generated.contains(&normalized) && !policy.allow_generated_edits {
+    if set.generated.contains(&resolved) && !policy.allow_generated_edits {
         bail!(
             "Edit not allowed for {}: generated file editing is disabled",
             path.display()
         );
     }
 
-    if !set.editable.contains(&normalized) && normalized.exists() {
+    if !set.editable.contains(&resolved) && resolved.exists() {
         bail!(
             "Edit not allowed for {}: file is not in editable set",
             path.display()
@@ -612,15 +616,100 @@ pub fn assert_rename_allowed(
 
     assert_edit_allowed(from, set, policy)?;
 
-    let to_normalized = normalize_path(&policy.repo_root, to)?;
-    if is_path_denied(&to_normalized, policy)? {
+    // P0 SAFETY: Validate destination path is repo-relative
+    let to_rel = validate_repo_relative_path(to)?;
+    let to_resolved = resolve_repo_path(&policy.repo_root, &to_rel)?;
+
+    if is_path_denied(&to_resolved, policy)? {
         bail!("Cannot rename to {}: target path is denied", to.display());
     }
 
     Ok(())
 }
 
+/// Validates that a path is safe for editing:
+/// - Must be relative (not absolute)
+/// - Must not contain ".." components that escape the repo
+/// - Must not target sensitive/denied paths
+///
+/// Returns the cleaned relative path or an error.
+pub fn validate_repo_relative_path(path: &Path) -> Result<PathBuf> {
+    // Reject absolute paths entirely - they could leak original repo locations
+    if path.is_absolute() {
+        bail!(
+            "Absolute paths are not allowed in edit operations: {}. \
+             All paths must be relative to the repository root.",
+            path.display()
+        );
+    }
+
+    // Normalize the path by resolving . and removing redundant separators
+    let mut cleaned = PathBuf::new();
+    let mut depth: i32 = 0;
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                cleaned.push(name);
+                depth += 1;
+            }
+            std::path::Component::CurDir => {
+                // Skip "./" components
+                continue;
+            }
+            std::path::Component::ParentDir => {
+                // Track depth to detect path traversal
+                depth -= 1;
+                if depth < 0 {
+                    bail!(
+                        "Path traversal detected in {}: attempts to escape repository root",
+                        path.display()
+                    );
+                }
+                cleaned.pop();
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                // These shouldn't appear in relative paths, but reject if they do
+                bail!("Invalid path component in relative path: {}", path.display());
+            }
+        }
+    }
+
+    if cleaned.as_os_str().is_empty() {
+        bail!("Path resolves to empty after normalization: {}", path.display());
+    }
+
+    Ok(cleaned)
+}
+
+/// Validates and joins a repo-relative path to a root directory.
+/// This is the safe way to convert edit paths to filesystem paths.
+pub fn resolve_repo_path(root: &Path, rel_path: &Path) -> Result<PathBuf> {
+    // First validate the relative path is safe
+    let cleaned = validate_repo_relative_path(rel_path)?;
+
+    // Join with the root
+    let resolved = root.join(&cleaned);
+
+    // Final safety check: verify the resolved path is actually under root
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_resolved = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+
+    if !canonical_resolved.starts_with(&canonical_root) {
+        bail!(
+            "Path resolution safety check failed: {} is not under {}",
+            canonical_resolved.display(),
+            canonical_root.display()
+        );
+    }
+
+    Ok(resolved)
+}
+
+#[deprecated(since = "1.6.0", note = "Use validate_repo_relative_path and resolve_repo_path instead")]
 pub(crate) fn normalize_path(root: &Path, path: &Path) -> Result<PathBuf> {
+    // Legacy behavior preserved for backward compatibility during transition
+    // This will be removed in v2.0
     let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {

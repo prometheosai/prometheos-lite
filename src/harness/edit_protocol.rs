@@ -1,4 +1,4 @@
-use crate::harness::file_control::{FilePolicy, FileSet, assert_edit_allowed, normalize_path};
+use crate::harness::file_control::{FilePolicy, FileSet, assert_edit_allowed, resolve_repo_path, validate_repo_relative_path};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -467,11 +467,15 @@ pub fn validate_edit_operations(
                 *seen_files.entry(x.file.clone()).or_insert(0) += 1;
             }
             EditOperation::CreateFile(x) => {
-                let normalized = normalize_path(&policy.repo_root, &x.file)?;
-                if normalized.exists() {
+                // P0 SAFETY: Validate path is repo-relative first
+                let rel_path = validate_repo_relative_path(&x.file)?;
+
+                // Resolve to check if file exists and is denied
+                let resolved = resolve_repo_path(&policy.repo_root, &rel_path)?;
+                if resolved.exists() {
                     bail!("Cannot create {}: file already exists", x.file.display());
                 }
-                if is_path_denied(&normalized, policy)? {
+                if is_path_denied_for_create(&rel_path, policy)? {
                     bail!("Cannot create {}: path is denied", x.file.display());
                 }
                 *seen_files.entry(x.file.clone()).or_insert(0) += 1;
@@ -489,8 +493,9 @@ pub fn validate_edit_operations(
                 }
                 assert_edit_allowed(&x.from, set, policy)?;
 
-                let to_normalized = normalize_path(&policy.repo_root, &x.to)?;
-                if is_path_denied(&to_normalized, policy)? {
+                // P0 SAFETY: Validate destination path is repo-relative
+                let to_rel = validate_repo_relative_path(&x.to)?;
+                if is_path_denied_for_create(&to_rel, policy)? {
                     bail!("Cannot rename to {}: target path is denied", x.to.display());
                 }
             }
@@ -533,6 +538,7 @@ pub fn validate_edit_operations(
 }
 
 fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
+    // For existing paths, use canonicalization
     let canonical = path.canonicalize()?;
     let repo_root = policy.repo_root.canonicalize()?;
 
@@ -548,6 +554,25 @@ fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
         if relative.starts_with(denied) {
             return Ok(true);
         }
+    }
+
+    Ok(false)
+}
+
+/// Check if a repo-relative path is denied (for CreateFile where file doesn't exist yet)
+fn is_path_denied_for_create(rel_path: &Path, policy: &FilePolicy) -> Result<bool> {
+    // P0 SAFETY: Check denied paths against the relative path directly
+    // This works for non-existing files since we don't need to canonicalize
+    for denied in &policy.denied_paths {
+        if rel_path.starts_with(denied) {
+            return Ok(true);
+        }
+    }
+
+    // Also check if the path tries to escape the repo (should already be caught by validate_repo_relative_path)
+    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        // Path contains ".." - this should have been rejected by validate_repo_relative_path
+        return Ok(true);
     }
 
     Ok(false)

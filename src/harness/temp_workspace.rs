@@ -3,7 +3,7 @@ pub use crate::harness::mode_policy::WorkspaceStrategy;
 use crate::harness::{
     edit_protocol::EditOperation,
     file_control::{FilePolicy, FileSet},
-    patch_applier::{PatchResult, apply_patch},
+    patch_applier::{PatchResult, apply_patch_temp_only},
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -46,9 +46,9 @@ impl TempWorkspace {
             .await
             .context("Failed to copy repo files to temp workspace")?;
 
-        // Apply edits in temp workspace
+        // Apply edits in temp workspace (safe - temp_only version)
         let temp_policy = FilePolicy::default_for_repo(temp_root.clone());
-        let patch_result = apply_patch(edits, file_set, &temp_policy)
+        let patch_result = apply_patch_temp_only(edits, file_set, &temp_policy)
             .await
             .context("Failed to apply patch in temp workspace")?;
 

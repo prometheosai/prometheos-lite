@@ -5,7 +5,7 @@ use crate::harness::{
         classify_validation_failure,
     },
     file_control::{FilePolicy, FileSet},
-    patch_applier::{PatchFailure, PatchResult, apply_patch, dry_run_patch},
+    patch_applier::{PatchFailure, PatchResult, RollbackHandle, apply_patch_with_rollback, dry_run_patch},
     patch_provider::{
         AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
         HeuristicPatchProvider, LlmPatchProvider, PatchProvider, PatchProviderContext,
@@ -195,8 +195,9 @@ impl RepairLoop {
 
             let dry_result = dry_run_patch(&repair_edits, file_set, policy).await?;
 
-            let result = if dry_result.failures.is_empty() {
-                let patch = apply_patch(&repair_edits, file_set, policy).await?;
+            let (patch_result, attempt_result) = if dry_result.failures.is_empty() {
+                // P0 SAFETY: Use apply_patch_with_rollback so failed repairs can be undone
+                let (patch, rollback) = apply_patch_with_rollback(&repair_edits, file_set, policy).await?;
 
                 let validation_plan = ValidationPlan {
                     format_commands: vec![],
@@ -211,13 +212,14 @@ impl RepairLoop {
                 let sandbox_arc: std::sync::Arc<dyn crate::harness::sandbox::SandboxRuntime + Send + Sync> = std::sync::Arc::new(
                     LocalSandboxRuntime::default()
                 );
-                match crate::harness::validation::run_validation(
+                let validation_result = crate::harness::validation::run_validation(
                     &policy.repo_root,
                     &validation_plan,
                     sandbox_arc,
                 )
-                .await
-                {
+                .await;
+
+                let result = match &validation_result {
                     Ok(validation) => {
                         if validation.passed {
                             AttemptResult::Success
@@ -235,13 +237,29 @@ impl RepairLoop {
                         reason: e.to_string(),
                         failure: create_failure_from_kind(FailureKind::ToolFailure, &e.to_string()),
                     },
+                };
+
+                // P0 SAFETY: Rollback failed repair attempts to avoid partial/corrupt state
+                let should_rollback = match &validation_result {
+                    Ok(v) => !v.passed,
+                    Err(_) => true,
+                };
+
+                if should_rollback {
+                    tracing::info!("Repair validation failed, rolling back patch");
+                    if let Err(e) = rollback.rollback().await {
+                        tracing::error!("Failed to rollback repair patch: {}", e);
+                    }
                 }
+
+                (Some(patch), result)
             } else {
                 let failure = classify_patch_failure(&dry_result.failures[0]);
-                AttemptResult::Failure {
+                let result = AttemptResult::Failure {
                     reason: format!("Patch dry-run failed: {:?}", dry_result.failures[0]),
                     failure: create_failure_from_kind(failure, &dry_result.failures[0].reason),
-                }
+                };
+                (None, result)
             };
 
             let attempt_record = RepairAttempt {
@@ -249,7 +267,7 @@ impl RepairLoop {
                 strategy,
                 prompt,
                 edits: repair_edits.clone(),
-                result: result.clone(),
+                result: attempt_result.clone(),
                 duration_ms: attempt_start.elapsed().as_millis() as u64,
             };
 
@@ -260,7 +278,7 @@ impl RepairLoop {
                 self.attempt_history.pop_front();
             }
 
-            match &result {
+            match &attempt_result {
                 AttemptResult::Success => {
                     return Ok(RepairResult {
                         success: true,
