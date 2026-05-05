@@ -126,7 +126,7 @@ pub use reproduction::{
 };
 pub use review::{
     ReviewEngine, ReviewIssue, ReviewIssueType, ReviewReport, ReviewSeverity, format_review_report,
-    generate_review_report, has_critical_issues, review_diff, review_file,
+    generate_review_report, has_critical_issues, review_diff, review_diff_with_context, review_file,
 };
 pub use risk::{
     OverridePolicy, OverrideResult, RiskAssessment, RiskCategory, RiskEngine, RiskLevel,

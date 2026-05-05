@@ -1033,6 +1033,112 @@ impl ReviewEngine {
             _ => Some("Follow style guide".to_string()),
         }
     }
+
+    /// P1-007: Review using tree-sitter extracted symbols from RepoContext
+    ///
+    /// This method uses the AST symbols already extracted by tree-sitter in repo_intelligence.rs
+    /// instead of relying solely on regex patterns. This provides more accurate review results.
+    pub fn review_with_repo_context(
+        &self,
+        diff: &str,
+        repo_context: &crate::harness::repo_intelligence::RepoContext,
+    ) -> Vec<ReviewIssue> {
+        use crate::harness::repo_intelligence::{CodeSymbol, SymbolKind};
+
+        let mut issues = Vec::new();
+
+        // First get regex-based issues
+        let regex_issues = self.review_diff(diff, None);
+        issues.extend(regex_issues);
+
+        // P1-007: Use tree-sitter extracted symbols for enhanced review
+        // Look for public API changes
+        for symbol in &repo_context.symbols {
+            // Check for public function signature changes
+            if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method | SymbolKind::Trait) {
+                // Check if the symbol is in a modified file (mentioned in diff)
+                let file_path_str = symbol.file.to_string_lossy().to_string();
+                if diff.contains(&file_path_str) {
+                    // This is a modified symbol - add AST-based review
+                    if self.is_public_api_change(symbol, diff) {
+                        issues.push(ReviewIssue {
+                            issue_type: ReviewIssueType::ApiChange,
+                            severity: ReviewSeverity::Medium,
+                            file: Some(file_path_str.to_string()),
+                            line: Some(symbol.line_start),
+                            message: format!(
+                                "P1-007: Public {} '{}' was modified (detected via tree-sitter AST)",
+                                self.kind_to_string(symbol.kind),
+                                symbol.name
+                            ),
+                            suggestion: Some(
+                                "Ensure backward compatibility or document breaking changes".to_string()
+                            ),
+                            rule_id: "AST001".to_string(),
+                        });
+                    }
+
+                    // Check for complex functions (high cyclomatic complexity indicator)
+                    let line_count = symbol.line_end.saturating_sub(symbol.line_start);
+                    if line_count > 100 {
+                        issues.push(ReviewIssue {
+                            issue_type: ReviewIssueType::Maintainability,
+                            severity: ReviewSeverity::Low,
+                            file: Some(file_path_str.to_string()),
+                            line: Some(symbol.line_start),
+                            message: format!(
+                                "P1-007: {} '{}' is {} lines long (AST-based complexity check)",
+                                self.kind_to_string(symbol.kind),
+                                symbol.name,
+                                line_count
+                            ),
+                            suggestion: Some(
+                                "Consider breaking this into smaller functions".to_string()
+                            ),
+                            rule_id: "AST002".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Deduplicate issues by rule_id and line
+        let mut seen = std::collections::HashSet::new();
+        issues.retain(|issue| {
+            let key = format!("{}:{:?}", issue.rule_id, issue.line);
+            seen.insert(key)
+        });
+
+        issues
+    }
+
+    /// P1-007: Check if a symbol represents a public API change
+    fn is_public_api_change(&self, symbol: &crate::harness::repo_intelligence::CodeSymbol, diff: &str) -> bool {
+        // Simple heuristic: if the symbol name appears in the diff
+        // and the symbol is a public-facing type (Function, Method, Trait, etc.)
+        diff.contains(&symbol.name)
+    }
+
+    /// P1-007: Convert SymbolKind to human-readable string
+    fn kind_to_string(&self, kind: crate::harness::repo_intelligence::SymbolKind) -> &'static str {
+        use crate::harness::repo_intelligence::SymbolKind;
+        match kind {
+            SymbolKind::Function => "function",
+            SymbolKind::Method => "method",
+            SymbolKind::Struct => "struct",
+            SymbolKind::Class => "class",
+            SymbolKind::Enum => "enum",
+            SymbolKind::Trait => "trait",
+            SymbolKind::Interface => "interface",
+            SymbolKind::Module => "module",
+            SymbolKind::Import => "import",
+            SymbolKind::Variable => "variable",
+            SymbolKind::Type => "type",
+            SymbolKind::Constant => "constant",
+            SymbolKind::Field => "field",
+            SymbolKind::Unknown => "symbol",
+        }
+    }
 }
 
 pub fn review_diff(diff: &str) -> Vec<ReviewIssue> {
@@ -1180,4 +1286,15 @@ pub fn get_issues_by_severity(
         .iter()
         .filter(|i| i.severity == severity)
         .collect()
+}
+
+/// P1-007: Review diff using tree-sitter extracted symbols from RepoContext
+///
+/// This is the preferred review method as it uses actual AST data instead of just regex patterns.
+pub fn review_diff_with_context(
+    diff: &str,
+    repo_context: &crate::harness::repo_intelligence::RepoContext,
+) -> Vec<ReviewIssue> {
+    let engine = ReviewEngine::new();
+    engine.review_with_repo_context(diff, repo_context)
 }

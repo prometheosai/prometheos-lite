@@ -23,6 +23,8 @@ pub struct ValidationPlan {
     pub parallel: bool,
     /// P1-009: Tool IDs from RuntimeToolRegistry (alternative to raw commands)
     pub tool_ids: Vec<String>,
+    /// P1-008: Disable validation cache (force fresh runs)
+    pub disable_cache: bool,
 }
 
 impl ValidationPlan {
@@ -35,7 +37,14 @@ impl ValidationPlan {
             timeout_ms: Some(120000),
             parallel: true,
             tool_ids: vec![],
+            disable_cache: false,
         }
+    }
+
+    /// P1-008: Disable validation cache for this plan
+    pub fn with_no_cache(mut self) -> Self {
+        self.disable_cache = true;
+        self
     }
 
     pub fn sequential(mut self) -> Self {
@@ -160,6 +169,8 @@ async fn compute_file_hash(path: &Path) -> Result<String> {
 /// Uses WalkDir to recursively find all source and config files,
 /// respecting .gitignore patterns. This ensures the validation cache
 /// correctly invalidates when any nested file changes.
+///
+/// P1-008: Expanded to include toolchain files, Docker files, migrations, and more.
 async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String>> {
     let mut hashes = HashMap::new();
 
@@ -168,11 +179,43 @@ async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String
         ["rs", "js", "ts", "py", "go", "java", "cpp", "c", "h", "hpp"]
             .iter().copied().collect();
 
-    // Config files that affect validation
+    // Config files that affect validation (original set)
     let config_files: std::collections::HashSet<&str> = 
         ["Cargo.toml", "package.json", "Makefile", "pytest.ini", 
          ".eslintrc", "tsconfig.json", "Cargo.lock", "package-lock.json", 
          "yarn.lock", "pnpm-lock.yaml", "pyproject.toml", "poetry.lock"]
+            .iter().copied().collect();
+
+    // P1-008: Additional toolchain and environment files
+    let toolchain_files: std::collections::HashSet<&str> = 
+        [".rust-toolchain", ".rust-toolchain.toml", ".node-version", ".python-version",
+         ".nvmrc", "runtime.txt", "Pipfile", "Pipfile.lock", "requirements.txt",
+         "requirements-dev.txt", "go.mod", "go.sum", "Gemfile", "Gemfile.lock"]
+            .iter().copied().collect();
+
+    // P1-008: Cargo configuration files
+    let cargo_config_files: std::collections::HashSet<&str> = 
+        [".cargo/config.toml", ".cargo/config"]
+            .iter().copied().collect();
+
+    // P1-008: Docker files
+    let docker_files: std::collections::HashSet<&str> = 
+        ["Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".dockerignore"]
+            .iter().copied().collect();
+
+    // P1-008: NPM/Yarn/PNPM configuration
+    let npm_config_files: std::collections::HashSet<&str> = 
+        [".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", "pnpm-workspace.yaml"]
+            .iter().copied().collect();
+
+    // P1-008: Environment and secrets templates
+    let env_files: std::collections::HashSet<&str> = 
+        [".env.example", ".env.template", ".env.sample", ".env.local.example"]
+            .iter().copied().collect();
+
+    // P1-008: Build configuration
+    let build_files: std::collections::HashSet<&str> = 
+        ["build.rs", "build.gradle", "pom.xml", "CMakeLists.txt", "configure.ac", "configure.in"]
             .iter().copied().collect();
 
     // Use WalkDir for recursive directory traversal
@@ -199,6 +242,10 @@ async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String
             continue;
         }
 
+        let file_name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
         // Check if this is a source file by extension
         let is_source = path.extension()
             .and_then(|e| e.to_str())
@@ -206,12 +253,40 @@ async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String
             .unwrap_or(false);
 
         // Check if this is a config file by name
-        let is_config = path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| config_files.contains(n))
-            .unwrap_or(false);
+        let is_config = config_files.contains(file_name);
 
-        if is_source || is_config {
+        // P1-008: Check for toolchain files
+        let is_toolchain = toolchain_files.contains(file_name);
+
+        // P1-008: Check for Cargo config files (by full relative path)
+        let relative_path_str = path.strip_prefix(root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let is_cargo_config = cargo_config_files.iter().any(|&cfg| relative_path_str == cfg);
+
+        // P1-008: Check for Docker files
+        let is_docker = docker_files.contains(file_name) || 
+            file_name.starts_with("Dockerfile.") || 
+            file_name.ends_with(".dockerfile");
+
+        // P1-008: Check for NPM config
+        let is_npm_config = npm_config_files.contains(file_name);
+
+        // P1-008: Check for env files
+        let is_env = env_files.contains(file_name);
+
+        // P1-008: Check for build files
+        let is_build = build_files.contains(file_name);
+
+        // P1-008: Check for migration files (by directory)
+        let is_migration = relative_path_str.contains("/migrations/") ||
+            relative_path_str.contains("/migration/") ||
+            relative_path_str.starts_with("migrations/") ||
+            relative_path_str.starts_with("migration/") ||
+            relative_path_str.contains("/db/migrate/"); // Rails-style
+
+        if is_source || is_config || is_toolchain || is_cargo_config || 
+           is_docker || is_npm_config || is_env || is_build || is_migration {
             let relative_path = path.strip_prefix(root).unwrap_or(path);
             
             if let Ok(hash) = compute_file_hash(path).await {

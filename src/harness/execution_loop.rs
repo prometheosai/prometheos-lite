@@ -577,6 +577,7 @@ pub async fn execute_harness_task(
                         timeout_ms: Some(120000),
                         parallel: true,
                         tool_ids: vec![],
+                        disable_cache: false,
                     };
 
                     // P1-010: Child span for AttemptPool evaluation phase
@@ -1162,6 +1163,7 @@ pub async fn execute_harness_task(
         timeout_ms: Some(120000),
         parallel: true,
         tool_ids: vec![],
+        disable_cache: false,
     };
 
     // Determine validation target: real repo if patch applied, temp workspace otherwise
