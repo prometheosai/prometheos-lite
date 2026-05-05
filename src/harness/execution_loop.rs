@@ -413,6 +413,9 @@ pub async fn execute_harness_task(
     let mut metrics = ExecutionMetrics::default();
     let mut evidence_log = EvidenceLog::new(&req.work_context_id);
 
+    // P2: Generate trace ID for OpenTelemetry correlation
+    let trace_id = crate::harness::observability::otel::generate_trace_id();
+
     let repo_start = Instant::now();
     let repo = build_repo_context(
         &req.repo_root,
@@ -429,6 +432,7 @@ pub async fn execute_harness_task(
         repo.ranked_files.len(),
         repo.symbols.len(),
         metrics.repo_analysis_ms,
+        Some(trace_id.clone()),
     );
 
     // P0: Validate evidence is being recorded before proceeding
@@ -528,6 +532,7 @@ pub async fn execute_harness_task(
                             &scored.candidate.source,
                             scored.candidate.edits.len(),
                             scored.candidate.confidence.score,
+                            Some(trace_id.clone()),
                         );
                     }
 
@@ -541,7 +546,7 @@ pub async fn execute_harness_task(
         } else {
             // No edits provided and no provider available - block
             ctx.record_action("patch", "blocked", "No edits provided and no patch provider available");
-            evidence_log.record_side_effect_blocked("No edits provided and no patch provider available");
+            evidence_log.record_side_effect_blocked("No edits provided and no patch provider available", Some(trace_id.clone()));
             evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
@@ -611,7 +616,7 @@ pub async fn execute_harness_task(
             error: "No structured edits supplied".into(),
         });
 
-        evidence_log.record_side_effect_blocked("No structured edits supplied");
+        evidence_log.record_side_effect_blocked("No structured edits supplied", Some(trace_id.clone()));
         evidence_log.complete();
         return Ok(HarnessExecutionResult {
             work_context_id: req.work_context_id,
@@ -684,7 +689,7 @@ pub async fn execute_harness_task(
     let dry_run_ms = dry_start.elapsed().as_millis() as u64;
 
     // Record dry-run evidence
-    evidence_log.record_dry_run(&dry, dry_run_ms);
+    evidence_log.record_dry_run(&dry, dry_run_ms, Some(trace_id.clone()));
 
     let dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
 
@@ -729,7 +734,7 @@ pub async fn execute_harness_task(
     let risk = assess_risk(&semantic, &review_issues);
 
     // Record risk assessment evidence
-    evidence_log.record_risk_assessed(&risk);
+    evidence_log.record_risk_assessed(&risk, Some(trace_id.clone()));
 
     // STEP 6: Hard policy gate - determine if patch should be applied
     // P0: This is the single point of authority for side-effect decisions
@@ -768,11 +773,11 @@ pub async fn execute_harness_task(
         }
         GateDecision::Block(reason) => {
             tracing::warn!("Policy gate: BLOCK patch application - {}", reason);
-            evidence_log.record_side_effect_blocked(format!("Policy gate: {}", reason));
+            evidence_log.record_side_effect_blocked(format!("Policy gate: {}", reason), Some(trace_id.clone()));
         }
         GateDecision::RequireApproval(reason) => {
             tracing::warn!("Policy gate: REQUIRE APPROVAL - {}", reason);
-            evidence_log.record_side_effect_blocked(format!("Policy gate requires approval: {}", reason));
+            evidence_log.record_side_effect_blocked(format!("Policy gate requires approval: {}", reason), Some(trace_id.clone()));
         }
     }
 
@@ -802,7 +807,7 @@ pub async fn execute_harness_task(
         (HarnessMode::ReviewOnly, _) => None,
         (_, Err(e)) => {
             // Checkpoint failed in a mode that requires side effects - this is blocking
-            evidence_log.record_side_effect_blocked(&format!("Checkpoint creation failed: {}", e));
+            evidence_log.record_side_effect_blocked(&format!("Checkpoint creation failed: {}", e), Some(trace_id.clone()));
             evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
@@ -842,7 +847,7 @@ pub async fn execute_harness_task(
         }
         (_, Ok(cp)) => {
             // Record checkpoint creation evidence
-            evidence_log.record_checkpoint_created(&cp);
+            evidence_log.record_checkpoint_created(&cp, Some(trace_id.clone()));
             Some(cp)
         }
     };
@@ -853,12 +858,12 @@ pub async fn execute_harness_task(
             let (result, handle) =
                 apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
             // Record patch application evidence (real repo)
-            evidence_log.record_patch_applied(&result, false, Some(&handle));
+            evidence_log.record_patch_applied(&result, false, Some(&handle), Some(trace_id.clone()));
             (Some(result), Some(handle))
         } else {
             // Return dry-run result (patch not actually applied)
             // Record that patch was NOT applied to real repo
-            evidence_log.record_patch_applied(&dry, true, None);
+            evidence_log.record_patch_applied(&dry, true, None, Some(trace_id.clone()));
             (Some(dry.clone()), None)
         };
     let dry_failures = dry.failures.clone();
@@ -912,11 +917,11 @@ pub async fn execute_harness_task(
         metrics.validation_ms = val_start.elapsed().as_millis() as u64;
 
         // Record validation completion evidence
-        evidence_log.record_validation_completed(&result);
+        evidence_log.record_validation_completed(&result, Some(trace_id.clone()));
 
         // Record individual validation command results
         for cmd_result in &result.command_results {
-            evidence_log.record_validation_command(cmd_result);
+            evidence_log.record_validation_command(cmd_result, Some(trace_id.clone()));
         }
 
         let tests_run = result.command_results.len();
@@ -946,7 +951,7 @@ pub async fn execute_harness_task(
     if validation.is_none() {
         let bypass_check = policy_gate.check_validation_bypass("No validation target available");
         if matches!(bypass_check, GateDecision::Block(_)) {
-            evidence_log.record_side_effect_blocked("Validation bypass blocked by policy gate");
+            evidence_log.record_side_effect_blocked("Validation bypass blocked by policy gate", Some(trace_id.clone()));
             // In strict modes, this would block completion
             tracing::warn!("Validation was required but bypassed");
         }
@@ -1051,7 +1056,7 @@ pub async fn execute_harness_task(
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::PatchRolledBack);
                             // Record rollback evidence
-                            evidence_log.record_rollback("validation failed - automatic rollback");
+                            evidence_log.record_rollback("validation failed - automatic rollback", Some(trace_id.clone()));
                             ctx.send_progress(HarnessProgress::RolledBack {
                                 restored_files: result.restored.len(),
                                 deleted_files: result.deleted.len(),
@@ -1062,7 +1067,7 @@ pub async fn execute_harness_task(
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::RollbackFailed);
                             // Record rollback failure
-                            evidence_log.record_rollback(&format!("rollback failed: {}", e));
+                            evidence_log.record_rollback(&format!("rollback failed: {}", e), Some(trace_id.clone()));
                             ctx.send_progress(HarnessProgress::RollbackFailed {
                                 error: e.to_string(),
                             });
@@ -1241,6 +1246,7 @@ pub async fn execute_harness_task(
     evidence_log.record_completion_evaluated(
         format!("{:?}", decision),
         validation.as_ref().map(|v| v.passed).unwrap_or(false),
+        Some(trace_id.clone()),
     );
 
     ctx.send_progress(HarnessProgress::Completing {

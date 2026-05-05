@@ -116,6 +116,7 @@ impl EvidenceLog {
         files_found: usize,
         symbols_found: usize,
         duration_ms: u64,
+        trace_id: Option<String>,
     ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_repo_{}", self.execution_id, self.entries.len()),
@@ -132,7 +133,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms,
             success: true,
@@ -147,6 +148,7 @@ impl EvidenceLog {
         source: impl Into<String>,
         edits_count: usize,
         confidence: f32,
+        trace_id: Option<String>,
     ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_gen_{}", self.execution_id, self.entries.len()),
@@ -163,7 +165,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: true,
@@ -173,7 +175,7 @@ impl EvidenceLog {
     }
 
     /// Record dry-run result
-    pub fn record_dry_run(&mut self, patch_result: &PatchResult, duration_ms: u64) -> EvidenceEntry {
+    pub fn record_dry_run(&mut self, patch_result: &PatchResult, duration_ms: u64, trace_id: Option<String>) -> EvidenceEntry {
         let success = patch_result.failures.is_empty();
         let entry = EvidenceEntry {
             id: format!("{}_dry_{}", self.execution_id, self.entries.len()),
@@ -194,7 +196,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: patch_result.changed_files.clone(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms,
             success,
@@ -204,7 +206,7 @@ impl EvidenceLog {
     }
 
     /// Record risk assessment
-    pub fn record_risk_assessed(&mut self, risk: &RiskAssessment) -> EvidenceEntry {
+    pub fn record_risk_assessed(&mut self, risk: &RiskAssessment, trace_id: Option<String>) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_risk_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -221,7 +223,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: true,
@@ -231,7 +233,7 @@ impl EvidenceLog {
     }
 
     /// Record checkpoint creation
-    pub fn record_checkpoint_created(&mut self, checkpoint: &GitCheckpoint) -> EvidenceEntry {
+    pub fn record_checkpoint_created(&mut self, checkpoint: &GitCheckpoint, trace_id: Option<String>) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_checkpoint_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -248,7 +250,7 @@ impl EvidenceLog {
             command: Some("git checkout -b".to_string()),
             command_result: None,
             files_touched: checkpoint.dirty_files.clone(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: true,
@@ -263,6 +265,7 @@ impl EvidenceLog {
         patch_result: &PatchResult,
         to_temp_workspace: bool,
         rollback_handle: Option<&RollbackHandle>,
+        trace_id: Option<String>,
     ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_apply_{}", self.execution_id, self.entries.len()),
@@ -284,7 +287,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: patch_result.changed_files.clone(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: patch_result.applied,
@@ -294,7 +297,7 @@ impl EvidenceLog {
     }
 
     /// Record validation command run
-    pub fn record_validation_command(&mut self, result: &CommandResult) -> EvidenceEntry {
+    pub fn record_validation_command(&mut self, result: &CommandResult, trace_id: Option<String>) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_valcmd_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -311,7 +314,7 @@ impl EvidenceLog {
             command: Some(result.command.clone()),
             command_result: Some(result.clone()),
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: result.duration_ms,
             success: result.exit_code == Some(0),
@@ -321,7 +324,7 @@ impl EvidenceLog {
     }
 
     /// Record validation completion
-    pub fn record_validation_completed(&mut self, validation: &ValidationResult) -> EvidenceEntry {
+    pub fn record_validation_completed(&mut self, validation: &ValidationResult, trace_id: Option<String>) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_val_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -338,7 +341,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: validation.duration_ms,
             success: validation.passed,
@@ -348,7 +351,7 @@ impl EvidenceLog {
     }
 
     /// Record rollback
-    pub fn record_rollback(&mut self, reason: impl Into<String>) -> EvidenceEntry {
+    pub fn record_rollback(&mut self, reason: impl Into<String>, trace_id: Option<String>) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_rollback_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -359,7 +362,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: true,
@@ -373,6 +376,7 @@ impl EvidenceLog {
         &mut self,
         completion_status: impl Into<String>,
         passed_validation: bool,
+        trace_id: Option<String>,
     ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_complete_{}", self.execution_id, self.entries.len()),
@@ -388,7 +392,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: passed_validation,
@@ -401,6 +405,7 @@ impl EvidenceLog {
     pub fn record_side_effect_blocked(
         &mut self,
         reason: impl Into<String>,
+        trace_id: Option<String>,
     ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_blocked_{}", self.execution_id, self.entries.len()),
@@ -412,7 +417,7 @@ impl EvidenceLog {
             command: None,
             command_result: None,
             files_touched: Vec::new(),
-            trace_id: None,
+            trace_id,
             span_id: None,
             duration_ms: 0,
             success: false,
@@ -457,17 +462,18 @@ mod tests {
     #[test]
     fn test_record_repo_map() {
         let mut log = EvidenceLog::new("test");
-        let entry = log.record_repo_map_built(10, 50, 100);
+        let entry = log.record_repo_map_built(10, 50, 100, Some("trace-123".into()));
         assert_eq!(entry.kind, EvidenceEntryKind::RepoMapBuilt);
         assert!(entry.success);
+        assert_eq!(entry.trace_id, Some("trace-123".into()));
         assert_eq!(log.entries.len(), 1);
     }
 
     #[test]
     fn test_entries_of_kind() {
         let mut log = EvidenceLog::new("test");
-        log.record_repo_map_built(10, 50, 100);
-        log.record_repo_map_built(20, 100, 200);
+        log.record_repo_map_built(10, 50, 100, None);
+        log.record_repo_map_built(20, 100, 200, None);
 
         let repo_entries = log.entries_of_kind(EvidenceEntryKind::RepoMapBuilt);
         assert_eq!(repo_entries.len(), 2);
@@ -478,7 +484,7 @@ mod tests {
         let mut log = EvidenceLog::new("test");
         assert!(!log.has_failures());
 
-        log.record_side_effect_blocked("test");
+        log.record_side_effect_blocked("test", None);
         assert!(log.has_failures());
     }
 }
