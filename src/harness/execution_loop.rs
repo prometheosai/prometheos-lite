@@ -505,103 +505,70 @@ pub async fn execute_harness_task(
                 Ok(response) if !response.candidates.is_empty() => {
                     ctx.send_progress(HarnessProgress::GeneratingPatch);
 
-                    // P1-FIX: Use AttemptPool for parallel validation when multiple candidates exist
+                    // P0-FIX: AttemptPool is now the ONLY candidate evaluation path
+                    // All candidates (even single ones) go through isolated temp workspace validation
                     let candidates_count = response.candidates.len();
-                    let selected_edits = if candidates_count > 1 {
-                        // Multiple candidates - use AttemptPool for parallel validation
-                        tracing::info!("P1: Using AttemptPool to evaluate {} candidates in parallel", candidates_count);
+                    tracing::info!("P0: Using AttemptPool to evaluate {} candidate(s) in isolated workspaces", candidates_count);
 
-                        // Convert provider candidates to PatchCandidates for AttemptPool
-                        let patch_candidates: Vec<crate::harness::selection::PatchCandidate> = response
-                            .candidates
-                            .iter()
-                            .map(|c| crate::harness::selection::PatchCandidate {
-                                id: format!("candidate_{}", c.source),
-                                edits: c.edits.clone(),
-                                source: c.source.clone(),
-                                confidence: crate::harness::confidence::ConfidenceScore {
-                                    score: c.confidence as f32 / 100.0,
-                                    factors: vec![],
-                                    explanation: "Provider confidence score".to_string(),
-                                    recommendation: None,
-                                },
-                                metadata: Default::default(),
-                                risk: None,
-                                validation: None,
-                                review_issues: vec![],
-                                semantic_diff: None,
-                                lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
-                                lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
-                            })
-                            .collect();
+                    // Convert provider candidates to PatchCandidates for AttemptPool
+                    let patch_candidates: Vec<crate::harness::selection::PatchCandidate> = response
+                        .candidates
+                        .iter()
+                        .map(|c| crate::harness::selection::PatchCandidate {
+                            id: format!("candidate_{}", c.source),
+                            edits: c.edits.clone(),
+                            source: c.source.clone(),
+                            confidence: crate::harness::confidence::ConfidenceScore {
+                                score: c.confidence as f32 / 100.0,
+                                factors: vec![],
+                                explanation: "Provider confidence score".to_string(),
+                                recommendation: None,
+                            },
+                            metadata: Default::default(),
+                            risk: None,
+                            validation: None,
+                            review_issues: vec![],
+                            semantic_diff: None,
+                            lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
+                            lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
+                        })
+                        .collect();
 
-                        // Create validation plan for AttemptPool
-                        let validation_plan = ValidationPlan {
-                            format_commands: vec![],
-                            lint_commands: vec!["cargo check".into()],
-                            test_commands: vec!["cargo test --lib".into()],
-                            repro_commands: vec![],
-                            timeout_ms: Some(120000),
-                            parallel: true,
-                        };
+                    // Create validation plan for AttemptPool
+                    let validation_plan = ValidationPlan {
+                        format_commands: vec![],
+                        lint_commands: vec!["cargo check".into()],
+                        test_commands: vec!["cargo test --lib".into()],
+                        repro_commands: vec![],
+                        timeout_ms: Some(120000),
+                        parallel: true,
+                    };
 
-                        // Run AttemptPool for parallel evaluation
-                        let pool = AttemptPool::new(3); // Max 3 concurrent
-                        let records = pool.evaluate_candidates(
-                            patch_candidates,
-                            &repo,
-                            &files,
-                            &policy,
-                            &validation_plan,
-                            &req,
-                            &mut evidence_log,
-                            Some(trace_id.clone()),
-                        ).await;
+                    // Run AttemptPool for parallel evaluation in isolated workspaces
+                    let pool = AttemptPool::new(3); // Max 3 concurrent
+                    let records = pool.evaluate_candidates(
+                        patch_candidates,
+                        &repo,
+                        &files,
+                        &policy,
+                        &validation_plan,
+                        &req,
+                        &mut evidence_log,
+                        Some(trace_id.clone()),
+                    ).await;
 
-                        // Select best passing candidate
-                        if let Some(best) = pool.select_best(&records) {
-                            tracing::info!("P1: AttemptPool selected best candidate {} with score {:.2}",
-                                best.attempt_id, best.score);
-                            best.candidate.edits.clone()
-                        } else {
-                            tracing::warn!("P1: No passing candidates from AttemptPool");
-                            // Fall back to first candidate if none passed
-                            response.candidates.first().map(|c| c.edits.clone()).unwrap_or_default()
-                        }
+                    // P0-FIX: Select best passing candidate based on validation, not just confidence
+                    let selected_edits = if let Some(best) = pool.select_best(&records) {
+                        tracing::info!("P0: AttemptPool selected best candidate {} with score {:.2} (validation passed: {:?})",
+                            best.attempt_id, best.score, best.validation_result.as_ref().map(|v| v.passed));
+                        best.candidate.edits.clone()
                     } else {
-                        // Single candidate - use original SelectionEngine path
-                        let selection_candidates: Vec<SelectionCandidate> = response
-                            .candidates
-                            .iter()
-                            .map(|c| SelectionCandidate {
-                                id: format!("candidate_{}", c.source),
-                                edits: c.edits.clone(),
-                                source: c.source.clone(),
-                                confidence: crate::harness::confidence::ConfidenceScore {
-                                    score: c.confidence as f32 / 100.0,
-                                    factors: vec![],
-                                    explanation: "Provider confidence score".to_string(),
-                                    recommendation: None,
-                                },
-                                metadata: Default::default(),
-                                risk: None,
-                                validation: None,
-                                review_issues: vec![],
-                                semantic_diff: None,
-                                lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
-                                lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
-                            })
-                            .collect();
-
-                        let pre_validation_criteria = SelectionCriteria {
-                            require_validation: false,
-                            require_review_pass: false,
-                            ..SelectionCriteria::default()
-                        };
-                        let mut selection_engine = SelectionEngine::new(pre_validation_criteria);
-                        let selected_candidate = selection_engine.select_best_patch(selection_candidates);
-
-                        selected_candidate.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
+                        tracing::warn!("P0: No passing candidates from AttemptPool - falling back to highest confidence");
+                        // Fall back to highest confidence candidate if none passed validation
+                        response.candidates.iter()
+                            .max_by_key(|c| c.confidence)
+                            .map(|c| c.edits.clone())
+                            .unwrap_or_default()
                     };
 
                     let files_changed = selected_edits.len();
@@ -611,10 +578,10 @@ pub async fn execute_harness_task(
                         total_files: files.editable.len(),
                     });
 
-                    // Record patch generation evidence
+                    // Record patch generation evidence with AttemptPool details
                     if !selected_edits.is_empty() {
                         evidence_log.record_patch_generated(
-                            &format!("attempt_pool_selection_{}", candidates_count),
+                            &format!("attempt_pool_selection_{}_candidates", candidates_count),
                             selected_edits.len(),
                             0.8, // Default confidence for AttemptPool selection
                             Some(trace_id.clone()),
