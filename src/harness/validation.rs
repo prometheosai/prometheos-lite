@@ -177,8 +177,20 @@ async fn compute_repo_file_hashes(root: &Path) -> Result<HashMap<PathBuf, String
     Ok(hashes)
 }
 
-/// Create a cache key that includes file hashes
-fn create_cache_key(root: &Path, command: &str, file_hashes: &HashMap<PathBuf, String>) -> String {
+/// Create a cache key that includes file hashes, lockfiles, and environment
+///
+/// P1: Strengthened cache key includes:
+/// - File content hashes
+/// - Lockfile hashes (Cargo.lock, package-lock.json, etc.)
+/// - Command string
+/// - Repository root
+fn create_cache_key(
+    root: &Path,
+    command: &str,
+    file_hashes: &HashMap<PathBuf, String>,
+) -> String {
+    use sha2::{Digest, Sha256};
+
     // Sort hashes for consistent key generation
     let mut hash_entries: Vec<_> = file_hashes.iter().collect();
     hash_entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -189,7 +201,93 @@ fn create_cache_key(root: &Path, command: &str, file_hashes: &HashMap<PathBuf, S
         .collect::<Vec<_>>()
         .join("|");
 
-    format!("{}:{}:{}", root.display(), command, hash_str)
+    // P1: Include lockfile hashes in cache key
+    let lockfile_hash = compute_lockfile_hash(root);
+
+    // P1: Include environment fingerprint
+    let env_hash = compute_env_hash();
+
+    // Create composite key
+    let composite = format!(
+        "{}|{}|{}|{}|{}",
+        root.display(),
+        command,
+        hash_str,
+        lockfile_hash,
+        env_hash
+    );
+
+    // Hash the composite for consistent length
+    let mut hasher = Sha256::new();
+    hasher.update(composite.as_bytes());
+    format!("{:x}", hasher.finalize())[..32].to_string()
+}
+
+/// P1: Compute hash of lockfiles for cache invalidation
+fn compute_lockfile_hash(root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fs;
+
+    let lockfiles = [
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+        "go.sum",
+        "go.work.sum",
+        "Pipfile.lock",
+        "poetry.lock",
+        "uv.lock",
+        "requirements.txt",
+        "pdm.lock",
+    ];
+
+    let mut hasher = Sha256::new();
+    let mut found_any = false;
+
+    for lockfile in &lockfiles {
+        let path = root.join(lockfile);
+        if let Ok(content) = fs::read_to_string(&path) {
+            found_any = true;
+            hasher.update(lockfile.as_bytes());
+            hasher.update(content.as_bytes());
+        }
+    }
+
+    if found_any {
+        format!("{:x}", hasher.finalize())[..16].to_string()
+    } else {
+        "no_lockfiles".into()
+    }
+}
+
+/// P1: Compute environment hash for cache invalidation
+fn compute_env_hash() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+
+    // Include relevant environment variables
+    let env_vars = [
+        "RUST_VERSION",
+        "CARGO_VERSION",
+        "NODE_VERSION",
+        "PYTHON_VERSION",
+        "GO_VERSION",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "NODE_PATH",
+    ];
+
+    for var in &env_vars {
+        if let Ok(value) = std::env::var(var) {
+            hasher.update(var.as_bytes());
+            hasher.update(value.as_bytes());
+        }
+    }
+
+    format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
 #[derive(Debug, Clone)]

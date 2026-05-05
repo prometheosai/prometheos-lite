@@ -23,6 +23,7 @@ pub mod permissions;
 pub mod regression_memory;
 pub mod repair_loop;
 pub mod repo_intelligence;
+pub mod report;
 pub mod reproduction;
 pub mod review;
 pub mod risk;
@@ -36,6 +37,7 @@ pub mod time_travel;
 pub mod trajectory;
 pub mod validation;
 pub mod verification;
+pub mod workspace;
 pub mod work_integration;
 
 pub use acceptance::{

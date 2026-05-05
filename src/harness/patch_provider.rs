@@ -4,6 +4,7 @@
 //! This is the core abstraction that enables the repair loop to generate
 //! actual edits rather than returning the same edits repeatedly.
 
+use anyhow::bail;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -616,6 +617,167 @@ impl PatchProvider for AggregatePatchProvider {
         }
 
         caps
+    }
+}
+
+/// Provider registry that ensures at least one generator is available
+///
+/// This is the production entry point for patch generation. It validates
+/// that at least one `can_generate = true` provider is registered.
+pub struct ProviderRegistry {
+    aggregate: AggregatePatchProvider,
+}
+
+impl ProviderRegistry {
+    /// Create a new provider registry
+    ///
+    /// Fails if no generator provider is registered (only repair-only providers)
+    pub fn new() -> anyhow::Result<Self> {
+        let aggregate = AggregatePatchProvider::new();
+
+        // Validate at least one provider can generate
+        if !aggregate.capabilities().can_generate {
+            bail!(
+                "No patch generation provider registered. \
+                At least one provider with can_generate=true is required. \
+                Add an LLM provider, local model provider, or scripted provider."
+            );
+        }
+
+        Ok(Self { aggregate })
+    }
+
+    /// Create with a specific provider
+    pub fn with_provider(provider: Box<dyn PatchProvider>) -> anyhow::Result<Self> {
+        let mut aggregate = AggregatePatchProvider::new();
+        aggregate.add_provider(provider);
+
+        if !aggregate.capabilities().can_generate {
+            bail!("Provider cannot generate - at least one generator required");
+        }
+
+        Ok(Self { aggregate })
+    }
+
+    /// Get the aggregate provider
+    pub fn provider(&self) -> &AggregatePatchProvider {
+        &self.aggregate
+    }
+
+    /// Get provider info for evidence log
+    pub fn provider_info(&self) -> ProviderInfo {
+        let caps = self.aggregate.capabilities();
+        ProviderInfo {
+            name: "aggregate".into(),
+            can_generate: caps.can_generate,
+            can_repair: caps.can_repair,
+            max_candidates: caps.max_candidates,
+        }
+    }
+}
+
+/// Provider information for evidence log
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub can_generate: bool,
+    pub can_repair: bool,
+    pub max_candidates: usize,
+}
+
+/// Static patch provider for deterministic testing
+///
+/// This provider returns pre-defined edits for testing without requiring
+/// external API calls or model inference.
+pub struct StaticPatchProvider {
+    name: String,
+    predefined_edits: HashMap<String, Vec<EditOperation>>,
+}
+
+impl StaticPatchProvider {
+    /// Create a new static provider with no edits
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            predefined_edits: HashMap::new(),
+        }
+    }
+
+    /// Add a predefined edit set for a specific task
+    pub fn with_edits(mut self, task_key: impl Into<String>, edits: Vec<EditOperation>) -> Self {
+        self.predefined_edits.insert(task_key.into(), edits);
+        self
+    }
+
+    /// Create a test provider that always returns specific edits
+    pub fn test_provider(edits: Vec<EditOperation>) -> Self {
+        Self {
+            name: "test_static".into(),
+            predefined_edits: [("default".into(), edits)].into(),
+        }
+    }
+}
+
+#[async_trait]
+impl PatchProvider for StaticPatchProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        // Try to find edits for this task
+        let task_key = &request.context.task;
+
+        let edits = if let Some(predefined) = self.predefined_edits.get(task_key) {
+            predefined.clone()
+        } else if let Some(default) = self.predefined_edits.get("default") {
+            default.clone()
+        } else {
+            vec![]
+        };
+
+        let candidates = if edits.is_empty() {
+            vec![]
+        } else {
+            vec![ProviderCandidate {
+                edits,
+                source: self.name.clone(),
+                strategy: "static_predefined".into(),
+                confidence: 100,
+                reasoning: "Predefined test edits".into(),
+                estimated_risk: RiskEstimate::Low,
+            }]
+        };
+
+        Ok(GenerateResponse {
+            candidates,
+            generation_time_ms: 0,
+            provider_notes: Some(format!("Static provider '{}' returned edits", self.name)),
+        })
+    }
+
+    async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
+        // Static provider doesn't repair - return original
+        Ok(RepairResponse {
+            repaired_edits: request.failed_edits,
+            repair_applied: false,
+            repair_notes: "Static provider does not repair".into(),
+            repair_time_ms: 0,
+        })
+    }
+
+    fn can_handle(&self, _kind: FailureKind) -> bool {
+        false // Static provider doesn't handle repairs
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: false,
+            max_candidates: 1,
+            supported_operations: vec!["search_replace".into(), "whole_file".into(), "create_file".into()],
+            typical_latency_ms: 0,
+        }
     }
 }
 
