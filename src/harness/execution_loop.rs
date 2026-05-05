@@ -433,6 +433,11 @@ pub async fn execute_harness_task(
         metrics.repo_analysis_ms,
     );
 
+    // P0: Validate evidence is being recorded before proceeding
+    if evidence_log.entries.is_empty() {
+        bail!("EvidenceLog is empty - cannot proceed without evidence recording");
+    }
+
     ctx.send_progress(HarnessProgress::RepoAnalysis {
         files_found: repo.ranked_files.len(),
         symbols_found: repo.symbols.len(),
@@ -505,19 +510,30 @@ pub async fn execute_harness_task(
                         ..SelectionCriteria::default()
                     };
                     let mut selection_engine = SelectionEngine::new(pre_validation_criteria);
-                    let outcome = selection_engine.select_best_patch(selection_candidates);
+                    let selected_candidate = selection_engine.select_best_patch(selection_candidates);
+
+                    let files_changed = selected_candidate
+                        .as_ref()
+                        .ok()
+                        .and_then(|o| o.as_ref())
+                        .map(|s| s.candidate.edits.len())
+                        .unwrap_or(0);
 
                     ctx.send_progress(HarnessProgress::PatchGenerated {
-                        files_changed: outcome
-                            .as_ref()
-                            .ok()
-                            .and_then(|o| o.as_ref())
-                            .map(|s| s.candidate.edits.len())
-                            .unwrap_or(0),
+                        files_changed,
                         total_files: files.editable.len(),
                     });
 
-                    outcome.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
+                    // Record patch generation evidence
+                    if let Some(ref scored) = selected_candidate.as_ref().ok().and_then(|o| o.as_ref()) {
+                        evidence_log.record_patch_generated(
+                            &scored.candidate.source,
+                            scored.candidate.edits.len(),
+                            scored.candidate.confidence.score,
+                        );
+                    }
+
+                    selected_candidate.ok().flatten().map(|s| s.candidate.edits).unwrap_or_default()
                 }
                 _ => {
                     // No candidates generated, use empty
@@ -663,9 +679,14 @@ pub async fn execute_harness_task(
     let patch_start = Instant::now();
 
     // STEP 1: Dry-run patch to verify it applies cleanly
+    let dry_start = Instant::now();
     let dry = dry_run_patch(&selected_edits, &files, &policy)
         .await
         .context("patch dry-run failed")?;
+    let dry_run_ms = dry_start.elapsed().as_millis() as u64;
+
+    // Record dry-run evidence
+    evidence_log.record_dry_run(&dry, dry_run_ms);
 
     let dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
 
@@ -690,6 +711,13 @@ pub async fn execute_harness_task(
         vec![] // No review performed if dry-run failed
     };
 
+    // Record review evidence (if review was performed)
+    if dry.failures.is_empty() && !review_issues.is_empty() {
+        let critical = review_issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count();
+        let high = review_issues.iter().filter(|i| i.severity == ReviewSeverity::High).count();
+        tracing::info!("Review found {} critical, {} high issues", critical, high);
+    }
+
     // Compute critical issue count for later use
     let critical_count = review_issues
         .iter()
@@ -701,6 +729,9 @@ pub async fn execute_harness_task(
 
     // STEP 5: Risk assessment BEFORE applying
     let risk = assess_risk(&semantic, &review_issues);
+
+    // Record risk assessment evidence
+    evidence_log.record_risk_assessed(&risk);
 
     // STEP 6: Approval gate - determine if patch should be applied
     let should_apply = match req.mode {
@@ -796,7 +827,11 @@ pub async fn execute_harness_task(
                 evidence_log,
             });
         }
-        (_, Ok(cp)) => Some(cp),
+        (_, Ok(cp)) => {
+            // Record checkpoint creation evidence
+            evidence_log.record_checkpoint_created(&cp);
+            Some(cp)
+        }
     };
 
     // STEP 8: Apply patch only if approved - with rollback support
@@ -804,9 +839,13 @@ pub async fn execute_harness_task(
         if should_apply && dry.failures.is_empty() && !selected_edits.is_empty() {
             let (result, handle) =
                 apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
+            // Record patch application evidence (real repo)
+            evidence_log.record_patch_applied(&result, false, Some(&handle));
             (Some(result), Some(handle))
         } else {
             // Return dry-run result (patch not actually applied)
+            // Record that patch was NOT applied to real repo
+            evidence_log.record_patch_applied(&dry, true, None);
             (Some(dry.clone()), None)
         };
     let dry_failures = dry.failures.clone();
@@ -858,6 +897,14 @@ pub async fn execute_harness_task(
         let val_start = Instant::now();
         let result = run_validation(val_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
         metrics.validation_ms = val_start.elapsed().as_millis() as u64;
+
+        // Record validation completion evidence
+        evidence_log.record_validation_completed(&result);
+
+        // Record individual validation command results
+        for cmd_result in &result.command_results {
+            evidence_log.record_validation_command(cmd_result);
+        }
 
         let tests_run = result.command_results.len();
         let tests_passed = result
@@ -980,6 +1027,8 @@ pub async fn execute_harness_task(
                         Ok(result) => {
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::PatchRolledBack);
+                            // Record rollback evidence
+                            evidence_log.record_rollback("validation failed - automatic rollback");
                             ctx.send_progress(HarnessProgress::RolledBack {
                                 restored_files: result.restored.len(),
                                 deleted_files: result.deleted.len(),
@@ -989,6 +1038,8 @@ pub async fn execute_harness_task(
                         Err(e) => {
                             failures.push(FailureKind::ValidationFailed);
                             failures.push(FailureKind::RollbackFailed);
+                            // Record rollback failure
+                            evidence_log.record_rollback(&format!("rollback failed: {}", e));
                             ctx.send_progress(HarnessProgress::RollbackFailed {
                                 error: e.to_string(),
                             });
@@ -1162,6 +1213,12 @@ pub async fn execute_harness_task(
     };
 
     let decision = evaluate_completion(&evidence, req.mode)?;
+
+    // Record completion evaluation evidence
+    evidence_log.record_completion_evaluated(
+        format!("{:?}", decision),
+        validation.as_ref().map(|v| v.passed).unwrap_or(false),
+    );
 
     ctx.send_progress(HarnessProgress::Completing {
         decision: format!("{:?}", decision),
