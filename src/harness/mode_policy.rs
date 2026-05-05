@@ -156,6 +156,117 @@ impl HarnessModePolicy {
     }
 }
 
+/// Hard policy gate that enforces execution rules
+/// This is the single point of authority for side-effect decisions
+pub struct HarnessPolicyGate {
+    mode: HarnessMode,
+    policy: HarnessModePolicy,
+}
+
+/// Gate decision result
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    Allow,
+    Block(String),
+    RequireApproval(String),
+}
+
+impl HarnessPolicyGate {
+    /// Create a new policy gate for the given mode
+    pub fn for_mode(mode: HarnessMode) -> Self {
+        let policy = HarnessModePolicy::for_mode(mode);
+        Self { mode, policy }
+    }
+
+    /// Check if dry-run is required before real patch application
+    pub fn require_dry_run(&self) -> bool {
+        // All modes except ReviewOnly require dry-run before real patch
+        !matches!(self.mode, HarnessMode::ReviewOnly)
+    }
+
+    /// Check if review is required before patch application
+    pub fn require_review(&self) -> bool {
+        // All modes require review before patch application
+        // ReviewOnly still runs review for reporting
+        true
+    }
+
+    /// Check if risk assessment is required before patch application  
+    pub fn require_risk_assessment(&self) -> bool {
+        // All modes require risk assessment
+        true
+    }
+
+    /// Check if validation is required after patch application
+    pub fn require_validation(&self) -> bool {
+        // All modes except ReviewOnly require validation
+        !matches!(self.mode, HarnessMode::ReviewOnly)
+    }
+
+    /// Gate check: Can we apply a real patch given the current state?
+    pub fn check_patch_application(
+        &self,
+        dry_run_passed: bool,
+        has_critical_review_issues: bool,
+        risk_level: crate::harness::risk::RiskLevel,
+        has_rollback: bool,
+    ) -> GateDecision {
+        // P0: ReviewOnly never applies real patches
+        if matches!(self.mode, HarnessMode::ReviewOnly) {
+            return GateDecision::Block("ReviewOnly mode: real patch application is disabled".into());
+        }
+
+        // P0: Dry-run must pass before real patch application
+        if self.require_dry_run() && !dry_run_passed {
+            return GateDecision::Block("Dry-run failed: cannot apply real patch".into());
+        }
+
+        // P0: Critical review issues block application in all modes
+        if has_critical_review_issues {
+            return GateDecision::Block("Critical review issues found: cannot apply patch".into());
+        }
+
+        // P0: Check risk level against mode policy
+        if !self.policy.should_apply_for_risk(risk_level) {
+            return match self.mode {
+                HarnessMode::Assisted => {
+                    GateDecision::RequireApproval(format!("High risk ({:?}) requires explicit approval in Assisted mode", risk_level))
+                }
+                HarnessMode::Autonomous => {
+                    GateDecision::Block(format!("Critical risk ({:?}) blocked in Autonomous mode", risk_level))
+                }
+                _ => GateDecision::Block(format!("Risk level ({:?}) exceeds mode policy", risk_level)),
+            };
+        }
+
+        // P0: Rollback handle is required for real repo patching (except Benchmark with BestEffort)
+        if matches!(self.policy.checkpoint_policy, CheckpointPolicy::Required) && !has_rollback {
+            return GateDecision::Block("Rollback handle required for real repo patching but not available".into());
+        }
+
+        GateDecision::Allow
+    }
+
+    /// Gate check: Can we proceed without validation?
+    pub fn check_validation_bypass(&self, reason: &str) -> GateDecision {
+        if self.require_validation() {
+            GateDecision::Block(format!("Validation cannot be bypassed in {:?} mode: {}", self.mode, reason))
+        } else {
+            GateDecision::Allow
+        }
+    }
+
+    /// Get the mode
+    pub fn mode(&self) -> HarnessMode {
+        self.mode
+    }
+
+    /// Get the underlying policy
+    pub fn policy(&self) -> &HarnessModePolicy {
+        &self.policy
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +319,113 @@ mod tests {
         let assisted = HarnessModePolicy::assisted();
         assert!(assisted.should_apply_for_risk(crate::harness::risk::RiskLevel::Medium));
         assert!(!assisted.should_apply_for_risk(crate::harness::risk::RiskLevel::High));
+    }
+
+    #[test]
+    fn test_policy_gate_review_only_blocks_real_patch() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::ReviewOnly);
+        let decision = gate.check_patch_application(
+            true,  // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::Low,
+            true,  // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_policy_gate_assisted_allows_low_risk() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Assisted);
+        let decision = gate.check_patch_application(
+            true,  // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::Low,
+            true,  // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::Allow));
+    }
+
+    #[test]
+    fn test_policy_gate_assisted_blocks_high_risk() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Assisted);
+        let decision = gate.check_patch_application(
+            true,  // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::High,
+            true,  // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn test_policy_gate_autonomous_blocks_critical_risk() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Autonomous);
+        let decision = gate.check_patch_application(
+            true,  // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::Critical,
+            true,  // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_policy_gate_blocks_failed_dry_run() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Autonomous);
+        let decision = gate.check_patch_application(
+            false, // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::Low,
+            true,  // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_policy_gate_blocks_critical_review_issues() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Autonomous);
+        let decision = gate.check_patch_application(
+            true, // dry_run_passed
+            true, // has_critical_issues
+            crate::harness::risk::RiskLevel::Low,
+            true, // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_policy_gate_requires_rollback() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Autonomous);
+        let decision = gate.check_patch_application(
+            true,  // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::Low,
+            false, // NO rollback
+        );
+        assert!(matches!(decision, GateDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_policy_gate_benchmark_allows_critical_risk() {
+        let gate = HarnessPolicyGate::for_mode(HarnessMode::Benchmark);
+        let decision = gate.check_patch_application(
+            true,  // dry_run_passed
+            false, // has_critical_issues
+            crate::harness::risk::RiskLevel::Critical,
+            true,  // has_rollback
+        );
+        assert!(matches!(decision, GateDecision::Allow));
+    }
+
+    #[test]
+    fn test_policy_gate_require_validation() {
+        let review_gate = HarnessPolicyGate::for_mode(HarnessMode::ReviewOnly);
+        let autonomous_gate = HarnessPolicyGate::for_mode(HarnessMode::Autonomous);
+
+        // ReviewOnly doesn't require validation
+        assert!(!review_gate.require_validation());
+
+        // Autonomous requires validation
+        assert!(autonomous_gate.require_validation());
     }
 }

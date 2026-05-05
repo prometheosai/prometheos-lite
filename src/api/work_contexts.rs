@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::api::state::AppState;
 use crate::harness::{
-    HarnessMode, HarnessWorkContextService, edit_protocol::EditOperation, parse_edit_response,
+    mode_policy::HarnessMode, HarnessWorkContextService, edit_protocol::EditOperation, parse_edit_response,
 };
 use crate::work::{
     WorkContextService,

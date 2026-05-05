@@ -3,9 +3,10 @@ use crate::{
         completion::CompletionDecision,
         edit_protocol::EditOperation,
         execution_loop::{
-            HarnessExecutionRequest, HarnessExecutionResult, HarnessMode, ValidationFailurePolicy,
+            HarnessExecutionRequest, HarnessExecutionResult, ValidationFailurePolicy,
             execute_harness_task,
         },
+        mode_policy::HarnessMode,
     },
     work::{
         artifact::{Artifact, ArtifactKind},

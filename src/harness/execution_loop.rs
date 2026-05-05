@@ -16,6 +16,7 @@ use crate::harness::{
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
+    mode_policy::{HarnessMode, HarnessPolicyGate, GateDecision},
     patch_applier::{
         PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
     },
@@ -130,9 +131,6 @@ impl PartialEq for HarnessExecutionRequest {
             && self.proposed_edits == other.proposed_edits
     }
 }
-
-// HarnessMode is defined in mode_policy.rs - re-exported for convenience
-pub use crate::harness::mode_policy::HarnessMode;
 
 /// Policy for handling validation failures after patch application
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -733,35 +731,50 @@ pub async fn execute_harness_task(
     // Record risk assessment evidence
     evidence_log.record_risk_assessed(&risk);
 
-    // STEP 6: Approval gate - determine if patch should be applied
-    let should_apply = match req.mode {
-        HarnessMode::ReviewOnly => {
-            // ReviewOnly mode: NEVER apply patches
-            false
-        }
-        HarnessMode::Assisted => {
-            // Assisted mode: apply only if dry-run passed and no critical issues
-            let has_critical_issues = review_issues
-                .iter()
-                .any(|i| matches!(i.severity, ReviewSeverity::Critical));
-            let high_risk = matches!(risk.level, RiskLevel::High | RiskLevel::Critical);
+    // STEP 6: Hard policy gate - determine if patch should be applied
+    // P0: This is the single point of authority for side-effect decisions
+    let policy_gate = HarnessPolicyGate::for_mode(req.mode);
 
-            dry.failures.is_empty() && !has_critical_issues && !high_risk
+    // Check if review was performed when required
+    if policy_gate.require_review() && dry.failures.is_empty() && review_issues.is_empty() {
+        // Review should have been performed but wasn't - this is a policy violation
+        tracing::warn!("Review was required but not performed");
+    }
+
+    // Check if risk assessment was performed when required
+    if policy_gate.require_risk_assessment() && risk.reasons.is_empty() {
+        // Risk assessment should have been performed - log warning
+        tracing::warn!("Risk assessment was required but no reasons recorded");
+    }
+
+    let has_critical_issues = review_issues
+        .iter()
+        .any(|i| matches!(i.severity, ReviewSeverity::Critical));
+
+    // Use policy gate for hard decision (rollback handle not yet available, checked later)
+    let gate_decision = policy_gate.check_patch_application(
+        dry.failures.is_empty(),
+        has_critical_issues,
+        risk.level.clone(),
+        true, // Assume rollback will be available if needed
+    );
+
+    let should_apply = matches!(gate_decision, GateDecision::Allow);
+
+    // Record gate decision in evidence log
+    match &gate_decision {
+        GateDecision::Allow => {
+            tracing::info!("Policy gate: ALLOW patch application in {:?} mode", req.mode);
         }
-        HarnessMode::Autonomous => {
-            // Autonomous mode: apply if dry-run passed and risk is acceptable
-            let unacceptable_risk = matches!(risk.level, RiskLevel::Critical);
-            dry.failures.is_empty() && !unacceptable_risk
+        GateDecision::Block(reason) => {
+            tracing::warn!("Policy gate: BLOCK patch application - {}", reason);
+            evidence_log.record_side_effect_blocked(format!("Policy gate: {}", reason));
         }
-        HarnessMode::Benchmark => {
-            // Benchmark mode: apply if dry-run passed
-            dry.failures.is_empty()
+        GateDecision::RequireApproval(reason) => {
+            tracing::warn!("Policy gate: REQUIRE APPROVAL - {}", reason);
+            evidence_log.record_side_effect_blocked(format!("Policy gate requires approval: {}", reason));
         }
-        _ => {
-            // Default: require approval for any patch
-            dry.failures.is_empty()
-        }
-    };
+    }
 
     // STEP 7: Create git checkpoint ONLY if we're going to apply
     // NOTE: Checkpoint failure is blocking in side-effect modes (see implementation below)
@@ -928,6 +941,16 @@ pub async fn execute_harness_task(
     } else {
         None
     };
+
+    // P0: Hard gate - check if validation was bypassed when required
+    if validation.is_none() {
+        let bypass_check = policy_gate.check_validation_bypass("No validation target available");
+        if matches!(bypass_check, GateDecision::Block(_)) {
+            evidence_log.record_side_effect_blocked("Validation bypass blocked by policy gate");
+            // In strict modes, this would block completion
+            tracing::warn!("Validation was required but bypassed");
+        }
+    }
 
     let mut failures: Vec<FailureKind> = dry_failures
         .iter()

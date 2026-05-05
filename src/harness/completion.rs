@@ -1,5 +1,5 @@
 use crate::harness::{
-    confidence::ConfidenceScore, execution_loop::HarnessMode, review::ReviewReport,
+    confidence::ConfidenceScore, mode_policy::HarnessMode, review::ReviewReport,
     risk::RiskAssessment, semantic_diff::SemanticDiff, validation::ValidationResult,
     verification::VerificationStrength,
 };
