@@ -61,7 +61,7 @@ pub use benchmark::{
     format_anti_overfitting_report, format_benchmark_result, format_comparison,
 };
 pub use completion::{
-    CompletionDecision, CompletionEvaluator, CompletionEvidence, ConfidenceEvidence, PatchEvidence,
+    CompletionDecision, CompletionEvaluator, CompletionEvidence, CompletionInvariant, ConfidenceEvidence, PatchEvidence,
     ProcessEvidence, ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence,
     VerificationEvidence, create_evidence_from_components, evaluate_completion,
     format_completion_decision,

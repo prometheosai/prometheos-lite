@@ -54,6 +54,20 @@ pub enum EvidenceEntryKind {
     ApprovalDenied,
     /// Attempt pool candidate result
     AttemptPoolResult,
+    /// P2-011: Repair loop started
+    RepairLoopStarted,
+    /// P2-011: Repair strategy selected
+    RepairStrategySelected,
+    /// P2-011: Repair edits generated
+    RepairEditsGenerated,
+    /// P2-011: Repair dry-run result
+    RepairDryRunResult,
+    /// P2-011: Repair validation result
+    RepairValidationResult,
+    /// P2-011: Repair completed successfully
+    RepairCompleted,
+    /// P2-011: Repair failed after max attempts
+    RepairFailed,
 }
 
 /// A single entry in the evidence log
@@ -423,6 +437,41 @@ impl EvidenceLog {
             span_id: None,
             duration_ms: 0,
             success: false,
+        };
+        self.add_entry(entry.clone());
+        entry
+    }
+
+    /// P2-011: Record a repair loop action
+    pub fn record_repair_action(
+        &mut self,
+        action: impl Into<String>,
+        status: impl Into<String>,
+        description: impl Into<String>,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
+        let entry = EvidenceEntry {
+            id: format!("{}_repair_{}", self.execution_id, self.entries.len()),
+            timestamp: Utc::now(),
+            kind: EvidenceEntryKind::RepairLoopStarted, // Generic kind for repair actions
+            description: description.into(),
+            input_summary: {
+                let mut map = HashMap::new();
+                map.insert("action".to_string(), action.into());
+                map
+            },
+            output_summary: {
+                let mut map = HashMap::new();
+                map.insert("status".to_string(), status.into());
+                map
+            },
+            command: None,
+            command_result: None,
+            files_touched: Vec::new(),
+            trace_id,
+            span_id: None,
+            duration_ms: 0,
+            success: true,
         };
         self.add_entry(entry.clone());
         entry

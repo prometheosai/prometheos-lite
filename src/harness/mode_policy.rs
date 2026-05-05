@@ -74,7 +74,12 @@ pub struct HarnessModePolicy {
 }
 
 impl HarnessModePolicy {
-    /// Policy for ReviewOnly mode - never modifies repo
+    /// P2-012: Policy for ReviewOnly mode - never modifies repo
+    ///
+    /// Workspace Strategy: TempCopy
+    /// - Uses isolated temp workspace for validation
+    /// - No real repo writes ever occur
+    /// - EvidenceLog records workspace root and cleanup result
     pub fn review_only() -> Self {
         Self {
             may_apply_real_patch: false,
@@ -84,11 +89,16 @@ impl HarnessModePolicy {
             validation_target: ValidationTarget::TempWorkspace,
             allow_high_risk: false,
             allow_critical_risk: false,
-            workspace_strategy: WorkspaceStrategy::TempCopy,
+            workspace_strategy: WorkspaceStrategy::TempCopy, // P2-012: Isolated temp workspace
         }
     }
 
-    /// Policy for Assisted mode - requires approval for high risk
+    /// P2-012: Policy for Assisted mode - requires approval for high risk
+    ///
+    /// Workspace Strategy: GitWorktree
+    /// - Uses git worktree for lightweight isolation
+    /// - Temp validation + approval required before real repo write
+    /// - Checkpoint required before side effects
     pub fn assisted() -> Self {
         Self {
             may_apply_real_patch: true,
@@ -98,11 +108,16 @@ impl HarnessModePolicy {
             validation_target: ValidationTarget::RealRepo,
             allow_high_risk: false, // Requires explicit approval
             allow_critical_risk: false,
-            workspace_strategy: WorkspaceStrategy::GitWorktree,
+            workspace_strategy: WorkspaceStrategy::GitWorktree, // P2-012: Worktree for temp validation
         }
     }
 
-    /// Policy for Autonomous mode - applies if acceptable risk
+    /// P2-012: Policy for Autonomous mode - applies if acceptable risk
+    ///
+    /// Workspace Strategy: GitWorktree
+    /// - Uses git worktree for lightweight isolation
+    /// - Temp validation + checkpoint + auto-patch if risk acceptable
+    /// - No real repo writes occur before dry-run, review, risk, and checkpoint
     pub fn autonomous() -> Self {
         Self {
             may_apply_real_patch: true,
@@ -112,11 +127,16 @@ impl HarnessModePolicy {
             validation_target: ValidationTarget::RealRepo,
             allow_high_risk: true,
             allow_critical_risk: false, // Never auto-apply critical risk
-            workspace_strategy: WorkspaceStrategy::GitWorktree,
+            workspace_strategy: WorkspaceStrategy::GitWorktree, // P2-012: Worktree for temp validation
         }
     }
 
-    /// Policy for Benchmark mode - disposable workspace
+    /// P2-012: Policy for Benchmark mode - disposable workspace
+    ///
+    /// Workspace Strategy: TempCopy
+    /// - Uses fully isolated temp copy
+    /// - Can test high/critical risk patches safely
+    /// - Artifacts recorded, no persistent repo changes
     pub fn benchmark() -> Self {
         Self {
             may_apply_real_patch: true,
@@ -126,7 +146,7 @@ impl HarnessModePolicy {
             validation_target: ValidationTarget::RealRepo,
             allow_high_risk: true,
             allow_critical_risk: true, // In benchmark, we want to test everything
-            workspace_strategy: WorkspaceStrategy::TempCopy,
+            workspace_strategy: WorkspaceStrategy::TempCopy, // P2-012: Isolated temp workspace
         }
     }
 

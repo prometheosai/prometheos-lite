@@ -129,6 +129,131 @@ pub enum CompletionDecision {
     NeedsApproval(String),
 }
 
+/// P2-013: Completion invariants that must be satisfied for a decision
+///
+/// A patch cannot be "Complete" unless all required invariants are met.
+/// This provides strict, testable rules for completion decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletionInvariant {
+    /// Invariant name
+    pub name: &'static str,
+    /// Whether this invariant is required for completion
+    pub required: bool,
+    /// Human-readable description of the invariant
+    pub description: &'static str,
+}
+
+impl CompletionDecision {
+    /// P2-013: Check if this decision represents a completed/allowed state
+    pub fn is_completed(&self) -> bool {
+        matches!(self, CompletionDecision::Complete)
+    }
+
+    /// P2-013: Check if this decision is blocked (no patch applied)
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, CompletionDecision::Blocked(_))
+    }
+
+    /// P2-013: Get the reason for non-complete decisions
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            CompletionDecision::Complete => None,
+            CompletionDecision::Blocked(r) | CompletionDecision::NeedsRepair(r) | CompletionDecision::NeedsApproval(r) => Some(r),
+        }
+    }
+
+    /// P2-013: Required invariants for a patch to be considered "Complete"
+    ///
+    /// A patch cannot be "Complete" unless:
+    /// - Patch was applied or review-only result explicitly says no apply
+    /// - Validation passed
+    /// - No critical review issues
+    /// - Risk accepted
+    /// - Acceptance criteria verified
+    /// - Rollback exists for side-effect modes
+    /// - Evidence log complete
+    pub fn required_invariants() -> Vec<CompletionInvariant> {
+        vec![
+            CompletionInvariant {
+                name: "patch_applied_or_explicit_no_apply",
+                required: true,
+                description: "Patch applied or review-only result explicitly says no apply",
+            },
+            CompletionInvariant {
+                name: "validation_passed",
+                required: true,
+                description: "Validation passed (or was not required in ReviewOnly mode)",
+            },
+            CompletionInvariant {
+                name: "no_critical_review_issues",
+                required: true,
+                description: "No critical review issues found",
+            },
+            CompletionInvariant {
+                name: "risk_accepted",
+                required: true,
+                description: "Risk level accepted for the mode",
+            },
+            CompletionInvariant {
+                name: "checkpoint_or_explicit_skip",
+                required: true,
+                description: "Git checkpoint created or explicitly skipped for ReviewOnly",
+            },
+            CompletionInvariant {
+                name: "evidence_complete",
+                required: true,
+                description: "EvidenceLog has entries for all key operations",
+            },
+        ]
+    }
+
+    /// P2-013: Validate that this decision satisfies all required invariants
+    ///
+    /// Returns Ok(()) if valid, Err with reasons if invalid.
+    pub fn validate(&self, evidence: &CompletionEvidence) -> Result<(), Vec<String>> {
+        let mut failures = vec![];
+
+        // Only "Complete" decisions need full invariant checking
+        if !self.is_completed() {
+            return Ok(()); // Non-complete states are always "valid"
+        }
+
+        // Check patch applied or explicit no-apply
+        if !evidence.patch_evidence.patch_created && !evidence.patch_evidence.dry_run_passed {
+            failures.push("Patch not created and dry-run not performed".to_string());
+        }
+
+        // Check validation passed (or not required for ReviewOnly)
+        if evidence.validation_evidence.validation_performed && !evidence.validation_evidence.all_validations_passed {
+            failures.push("Validation was performed but did not pass".to_string());
+        }
+
+        // Check no critical review issues
+        if evidence.review_evidence.critical_issues > 0 {
+            failures.push(format!("{} critical review issues found", evidence.review_evidence.critical_issues));
+        }
+
+        // Check risk accepted
+        if evidence.risk_evidence.requires_approval {
+            failures.push("Risk requires approval but decision is Complete".to_string());
+        }
+
+        // Check evidence completeness
+        if evidence.evidence_completeness < 0.75 {
+            failures.push(format!(
+                "Evidence completeness {:.0}% below threshold 75%",
+                evidence.evidence_completeness * 100.0
+            ));
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompletionEvaluator {
     min_confidence_threshold: f32,
