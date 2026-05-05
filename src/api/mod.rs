@@ -12,6 +12,7 @@ pub mod projects;
 pub mod router;
 pub mod server;
 pub mod state;
+pub mod validation;
 pub mod websocket;
 pub mod work_contexts;
 
