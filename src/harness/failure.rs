@@ -33,6 +33,16 @@ pub enum FailureKind {
     SyntaxError,
 }
 
+impl FailureKind {
+    /// Returns true if this failure kind is critical
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            Self::Fatal | Self::Critical | Self::SandboxFailure | Self::PermissionFailure
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FailureDetails {
     pub kind: FailureKind,
