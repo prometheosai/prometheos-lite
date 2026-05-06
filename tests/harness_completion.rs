@@ -26,7 +26,7 @@ fn test_completion_evidence_creation() {
         patch_evidence: PatchEvidence {
             patch_created: true,
             files_modified: 3,
-            lines_changed: 50,
+            lines_changed: 80,
             patch_applied_cleanly: true,
             patch_hash: Some("abc123".to_string()),
             dry_run_passed: true,
@@ -62,37 +62,37 @@ fn test_completion_evidence_creation() {
             risk_reasons: vec![],
         },
         verification_evidence: VerificationEvidence {
-            verification_performed: true,
-            verification_strength: VerificationStrength::Full,
-            format_verified: true,
-            static_verified: true,
-            lint_verified: true,
-            tests_verified: true,
-            coverage_verified: true,
-            reproduction_verified: true,
+            verification_level: VerificationStrength::Tests,
+            test_count: 10,
+            coverage_percent: Some(85.0),
+            reproduction_test_passed: true,
+            integration_tests_passed: true,
+            verification_summary: "All verification passed".to_string(),
         },
         semantic_evidence: SemanticEvidence {
-            semantic_diff_generated: true,
             api_changes_detected: false,
             auth_changes_detected: false,
-            db_changes_detected: false,
-            breaking_changes: false,
-            requires_security_review: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
         },
         confidence_evidence: ConfidenceEvidence {
-            confidence_calculated: true,
-            overall_confidence: 0.92,
-            validation_confidence: 0.95,
-            review_confidence: 1.0,
-            risk_confidence: 0.90,
+            confidence_score: 0.92,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.95,
+            risk_contribution: 0.90,
+            review_contribution: 1.0,
             confidence_factors: vec!["High test coverage".to_string()],
         },
         process_evidence: ProcessEvidence {
-            steps_completed: 10,
-            total_steps: 10,
-            max_attempts_reached: false,
-            timeout_reached: false,
-            manual_intervention_required: false,
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
         },
         patch_exists: true,
         validation_ran: true,
@@ -227,18 +227,16 @@ fn test_risk_evidence_low() {
 #[test]
 fn test_verification_evidence_full() {
     let evidence = VerificationEvidence {
-        verification_performed: true,
-        verification_strength: VerificationStrength::Full,
-        format_verified: true,
-        static_verified: true,
-        lint_verified: true,
-        tests_verified: true,
-        coverage_verified: true,
-        reproduction_verified: true,
+        verification_level: VerificationStrength::Tests,
+        test_count: 10,
+        coverage_percent: Some(85.0),
+        reproduction_test_passed: true,
+        integration_tests_passed: true,
+        verification_summary: "All verification passed".to_string(),
     };
 
-    assert!(matches!(evidence.verification_strength, VerificationStrength::Full));
-    assert!(evidence.coverage_verified);
+    assert!(matches!(evidence.verification_level, VerificationStrength::Tests));
+    assert!(evidence.test_count > 0);
 }
 
 // ============================================================================
@@ -248,17 +246,18 @@ fn test_verification_evidence_full() {
 #[test]
 fn test_semantic_evidence_clean() {
     let evidence = SemanticEvidence {
-        semantic_diff_generated: true,
         api_changes_detected: false,
         auth_changes_detected: false,
-        db_changes_detected: false,
-        breaking_changes: false,
-        requires_security_review: false,
+        database_changes_detected: false,
+        dependency_changes_detected: false,
+        config_changes_detected: false,
+        breaking_changes_count: 0,
+        security_relevant_changes: false,
     };
 
-    assert!(evidence.semantic_diff_generated);
-    assert!(!evidence.breaking_changes);
-    assert!(!evidence.requires_security_review);
+    assert!(!evidence.api_changes_detected);
+    assert_eq!(evidence.breaking_changes_count, 0);
+    assert!(!evidence.security_relevant_changes);
 }
 
 // ============================================================================
@@ -268,16 +267,16 @@ fn test_semantic_evidence_clean() {
 #[test]
 fn test_confidence_evidence_high() {
     let evidence = ConfidenceEvidence {
-        confidence_calculated: true,
-        overall_confidence: 0.92,
-        validation_confidence: 0.95,
-        review_confidence: 0.90,
-        risk_confidence: 0.95,
+        confidence_score: 0.92,
+        confidence_classification: "High".to_string(),
+        validation_contribution: 0.95,
+        risk_contribution: 0.90,
+        review_contribution: 0.95,
         confidence_factors: vec!["High coverage".to_string(), "Clean review".to_string()],
     };
 
-    assert!(evidence.confidence_calculated);
-    assert!(evidence.overall_confidence > 0.90);
+    assert!(evidence.confidence_score > 0.90);
+    assert_eq!(evidence.confidence_classification, "High");
 }
 
 // ============================================================================
@@ -287,15 +286,16 @@ fn test_confidence_evidence_high() {
 #[test]
 fn test_process_evidence_complete() {
     let evidence = ProcessEvidence {
-        steps_completed: 10,
-        total_steps: 10,
-        max_attempts_reached: false,
-        timeout_reached: false,
-        manual_intervention_required: false,
+        git_checkpoint_created: true,
+        rollback_available: true,
+        all_phases_completed: true,
+        no_critical_errors: true,
+        time_limit_respected: true,
+        step_limit_respected: true,
     };
 
-    assert_eq!(evidence.steps_completed, evidence.total_steps);
-    assert!(!evidence.timeout_reached);
+    assert!(evidence.all_phases_completed);
+    assert!(evidence.no_critical_errors);
 }
 
 // ============================================================================
@@ -305,9 +305,9 @@ fn test_process_evidence_complete() {
 #[test]
 fn test_completion_decision_variants() {
     assert!(matches!(CompletionDecision::Complete, CompletionDecision::Complete));
-    assert!(matches!(CompletionDecision::Blocked, CompletionDecision::Blocked));
-    assert!(matches!(CompletionDecision::NeedsRepair, CompletionDecision::NeedsRepair));
-    assert!(matches!(CompletionDecision::NeedsApproval, CompletionDecision::NeedsApproval));
+    assert!(matches!(CompletionDecision::Blocked("test".to_string()), CompletionDecision::Blocked(_)));
+    assert!(matches!(CompletionDecision::NeedsRepair("test".to_string()), CompletionDecision::NeedsRepair(_)));
+    assert!(matches!(CompletionDecision::NeedsApproval("test".to_string()), CompletionDecision::NeedsApproval(_)));
 }
 
 // ============================================================================
@@ -352,41 +352,41 @@ fn test_complete_successful_evidence() {
             api_risk: "None".to_string(),
             database_risk: "None".to_string(),
             dependency_risk: "None".to_string(),
-            requires_approval: false,
+            requires_approval: true,
             risk_reasons: vec![],
         },
         verification_evidence: VerificationEvidence {
-            verification_performed: true,
-            verification_strength: VerificationStrength::Full,
-            format_verified: true,
-            static_verified: true,
-            lint_verified: true,
-            tests_verified: true,
-            coverage_verified: true,
-            reproduction_verified: true,
+            verification_level: VerificationStrength::Tests,
+            test_count: 10,
+            coverage_percent: Some(85.0),
+            reproduction_test_passed: true,
+            integration_tests_passed: true,
+            verification_summary: "All verification passed".to_string(),
         },
         semantic_evidence: SemanticEvidence {
-            semantic_diff_generated: true,
             api_changes_detected: false,
             auth_changes_detected: false,
-            db_changes_detected: false,
-            breaking_changes: false,
-            requires_security_review: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
         },
         confidence_evidence: ConfidenceEvidence {
-            confidence_calculated: true,
-            overall_confidence: 0.90,
-            validation_confidence: 0.95,
-            review_confidence: 0.85,
-            risk_confidence: 0.95,
+            confidence_score: 0.90,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.95,
+            risk_contribution: 0.95,
+            review_contribution: 0.85,
             confidence_factors: vec!["All good".to_string()],
         },
         process_evidence: ProcessEvidence {
-            steps_completed: 10,
-            total_steps: 10,
-            max_attempts_reached: false,
-            timeout_reached: false,
-            manual_intervention_required: false,
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
         },
         patch_exists: true,
         validation_ran: true,

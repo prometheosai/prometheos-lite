@@ -147,6 +147,8 @@ fn test_validation_plan_with_tools() {
         repro_commands: vec![],
         timeout_ms: Some(60000),
         parallel: true,
+        disable_cache: false,
+        tool_ids: vec!["cargo".to_string()],
     };
 
     assert_eq!(plan.format_commands.len(), 1);

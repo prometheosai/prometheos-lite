@@ -13,9 +13,10 @@
 use std::path::PathBuf;
 
 use prometheos_lite::harness::repair_loop::{
-    AttemptResult, FailureDetails, RepairAttempt, RepairRequest, RepairResult,
+    AttemptResult, RepairAttempt, RepairRequest, RepairResult,
     RepairStrategy, format_repair_report,
 };
+use prometheos_lite::harness::failure::FailureDetails;
 use prometheos_lite::harness::edit_protocol::EditOperation;
 
 // ============================================================================
@@ -26,10 +27,14 @@ use prometheos_lite::harness::edit_protocol::EditOperation;
 fn test_repair_request_creation() {
     let request = RepairRequest {
         failure: FailureDetails {
-            error_message: "Syntax error at line 10".to_string(),
-            file: Some(PathBuf::from("src/main.rs")),
-            line: Some(10),
-        },
+            kind: prometheos_lite::harness::failure::FailureKind::SyntaxError,
+            category: prometheos_lite::harness::failure::FailureCategory::Syntax,
+            severity: prometheos_lite::harness::failure::FailureSeverity::Error,
+            message: "Syntax error at line 10".to_string(),
+            context: prometheos_lite::harness::failure::FailureContext {
+                file_path: Some(PathBuf::from("src/main.rs")),
+                line: Some(10),
+            },
         original_edits: vec![],
         patch_result: None,
     };

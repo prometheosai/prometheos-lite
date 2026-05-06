@@ -157,12 +157,12 @@ fn test_pattern_match_creation() {
 
     let match_result = PatternMatch {
         pattern,
-        confidence: 0.85,
-        matched_fields: vec!["error_signature".to_string()],
+        similarity: 0.85,
+        recommended_solutions: vec![],
     };
 
-    assert_eq!(match_result.confidence, 0.85);
-    assert_eq!(match_result.matched_fields.len(), 1);
+    assert_eq!(match_result.similarity, 0.85);
+    assert_eq!(match_result.recommended_solutions.len(), 1);
 }
 
 // ============================================================================

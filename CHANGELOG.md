@@ -1072,55 +1072,55 @@ The following critical issues were identified during code audit:
 **Implementation Plan:** `docs/v1.6-implementation-plan.md`
 
 ### Epic 1 — Foundation: Repo Intelligence, File Control & Patch Safety
-- [ ] Issue #1: Repo Intelligence Engine (`src/harness/repo_intelligence.rs`)
-- [ ] Issue #2: Environment Fingerprinting (`src/harness/environment.rs`)
-- [ ] Issue #3: File Control System (`src/harness/file_control.rs`)
-- [ ] Issue #4: Edit Protocol (`src/harness/edit_protocol.rs`)
-- [ ] Issue #5: Patch Applier + Transaction Safety (`src/harness/patch_applier.rs`)
+- [x] Issue #1: Repo Intelligence Engine (`src/harness/repo_intelligence.rs`)
+- [x] Issue #2: Environment Fingerprinting (`src/harness/environment.rs`)
+- [x] Issue #3: File Control System (`src/harness/file_control.rs`)
+- [x] Issue #4: Edit Protocol (`src/harness/edit_protocol.rs`)
+- [x] Issue #5: Patch Applier + Transaction Safety (`src/harness/patch_applier.rs`)
 
 ### Epic 2 — Execution: Harness Loop, Validation, Repair & Reproduction
-- [ ] Issue #6: Harness Execution Loop (`src/harness/execution_loop.rs`)
-- [ ] Issue #7: Validation Layer (`src/harness/validation.rs`)
-- [ ] Issue #8: Failure Taxonomy (`src/harness/failure.rs`)
-- [ ] Issue #9: Reproduction-First Mode (`src/harness/reproduction.rs`)
-- [ ] Issue #10: Repair Loop (`src/harness/repair_loop.rs`)
-- [ ] Issue #11: Task-Local Knowledge Cache (`src/harness/task_cache.rs`)
-- [ ] Issue #12: Acceptance Criteria Compiler (`src/harness/acceptance.rs`)
+- [x] Issue #6: Harness Execution Loop (`src/harness/execution_loop.rs`)
+- [x] Issue #7: Validation Layer (`src/harness/validation.rs`)
+- [x] Issue #8: Failure Taxonomy (`src/harness/failure.rs`)
+- [x] Issue #9: Reproduction-First Mode (`src/harness/reproduction.rs`)
+- [x] Issue #10: Repair Loop (`src/harness/repair_loop.rs`)
+- [x] Issue #11: Task-Local Knowledge Cache (`src/harness/task_cache.rs`)
+- [x] Issue #12: Acceptance Criteria Compiler (`src/harness/acceptance.rs`)
 
 ### Epic 3 — Quality: Review, Risk, Selection, Attempts & Verification
-- [ ] Issue #13: Review Layer (`src/harness/review.rs`)
-- [ ] Issue #14: Semantic Diff Analyzer (`src/harness/semantic_diff.rs`)
-- [ ] Issue #15: Patch Minimality Enforcement (`src/harness/minimality.rs`)
-- [ ] Issue #16: Risk-Based Approval Gates (`src/harness/risk.rs`)
-- [ ] Issue #17: Verification Strength Levels (`src/harness/verification.rs`)
-- [ ] Issue #18: Adversarial Validation (`src/harness/adversarial_validation.rs`)
-- [ ] Issue #19: Confidence Calibration (`src/harness/confidence.rs`)
-- [ ] Issue #20: Selection Engine (`src/harness/selection.rs`)
-- [ ] Issue #21: Scaling Engine / Attempt Pool (`src/harness/scaling.rs`)
+- [x] Issue #13: Review Layer (`src/harness/review.rs`)
+- [x] Issue #14: Semantic Diff Analyzer (`src/harness/semantic_diff.rs`)
+- [x] Issue #15: Patch Minimality Enforcement (`src/harness/minimality.rs`)
+- [x] Issue #16: Risk-Based Approval Gates (`src/harness/risk.rs`)
+- [x] Issue #17: Verification Strength Levels (`src/harness/verification.rs`)
+- [x] Issue #18: Adversarial Validation (`src/harness/adversarial_validation.rs`)
+- [x] Issue #19: Confidence Calibration (`src/harness/confidence.rs`)
+- [x] Issue #20: Selection Engine (`src/harness/selection.rs`)
+- [x] Issue #21: Scaling Engine / Attempt Pool (`src/harness/scaling.rs`)
 
 ### Epic 4 — Infrastructure: Sandbox, Permissions, Git, Trajectory & Observability
-- [ ] Issue #22: Sandbox Runtime (`src/harness/sandbox.rs`)
-- [ ] Issue #23: Tool Permission Ledger (`src/harness/permissions.rs`)
-- [ ] Issue #24: Git Checkpoint System (`src/harness/git_checkpoint.rs`)
-- [ ] Issue #25: Trajectory Recorder (`src/harness/trajectory.rs`)
-- [ ] Issue #26: Observability Layer / OpenTelemetry (`src/harness/observability.rs`)
-- [ ] Issue #27: Runtime Tool Extension (`src/harness/runtime_tools.rs`)
-- [ ] Issue #28: Time-Travel Debugging (`src/harness/time_travel.rs`)
+- [x] Issue #22: Sandbox Runtime (`src/harness/sandbox.rs`)
+- [x] Issue #23: Tool Permission Ledger (`src/harness/permissions.rs`)
+- [x] Issue #24: Git Checkpoint System (`src/harness/git_checkpoint.rs`)
+- [x] Issue #25: Trajectory Recorder (`src/harness/trajectory.rs`)
+- [x] Issue #26: Observability Layer / OpenTelemetry (`src/harness/observability.rs`)
+- [x] Issue #27: Runtime Tool Extension (`src/harness/runtime_tools.rs`)
+- [x] Issue #28: Time-Travel Debugging (`src/harness/time_travel.rs`)
 
 ### Epic 5 — Intelligence: WorkContext Integration, Memory, Models, Benchmarks & Completion
-- [ ] Issue #29: WorkContext Integration (`src/work/execution_service.rs`, `src/harness/mod.rs`)
-- [ ] Issue #30: Multi-Model Strategy (`src/harness/model_strategy.rs`)
-- [ ] Issue #31: Golden Path Templates (`src/harness/golden_paths.rs`)
-- [ ] Issue #32: Regression Memory (`src/harness/regression_memory.rs`)
-- [ ] Issue #33: Benchmark Anti-Overfitting (`src/harness/benchmark.rs`)
-- [ ] Issue #34: Artifact Generator (`src/harness/artifacts.rs`)
-- [ ] Issue #35: Evidence-Based Completion Policy (`src/harness/completion.rs`)
+- [x] Issue #29: WorkContext Integration (`src/work/execution_service.rs`, `src/harness/mod.rs`)
+- [x] Issue #30: Multi-Model Strategy (`src/harness/model_strategy.rs`)
+- [x] Issue #31: Golden Path Templates (`src/harness/golden_paths.rs`)
+- [x] Issue #32: Regression Memory (`src/harness/regression_memory.rs`)
+- [x] Issue #33: Benchmark Anti-Overfitting (`src/harness/benchmark.rs`)
+- [x] Issue #34: Artifact Generator (`src/harness/artifacts.rs`)
+- [x] Issue #35: Evidence-Based Completion Policy (`src/harness/completion.rs`)
 
 ### Final Integration
-- [ ] API Endpoints (7): `POST /api/work-contexts/:id/harness/run`, `GET /api/work-contexts/:id/harness/trajectory`, `GET /api/work-contexts/:id/harness/artifacts`, `GET /api/work-contexts/:id/harness/confidence`, `GET /api/work-contexts/:id/harness/replay`, `GET /api/work-contexts/:id/harness/risk`, `GET /api/work-contexts/:id/harness/completion`
-- [ ] CLI Commands (6): `prometheos work harness run|replay|benchmark|artifact|risk|completion`
-- [ ] Documentation (7 files): `docs/v1.6-harness-engine.md`, `docs/harness-execution-flow.md`, `docs/harness-benchmarking.md`, `docs/harness-patch-protocol.md`, `docs/harness-sandboxing.md`, `docs/harness-evidence-completion.md`, `docs/harness-api-cli.md`
-- [ ] Test Suites: 35 test files (one per issue) covering full lifecycle
+- [x] API Endpoints (7): `POST /api/work-contexts/:id/harness/run`, `GET /api/work-contexts/:id/harness/trajectory`, `GET /api/work-contexts/:id/harness/artifacts`, `GET /api/work-contexts/:id/harness/confidence`, `GET /api/work-contexts/:id/harness/replay`, `GET /api/work-contexts/:id/harness/risk`, `GET /api/work-contexts/:id/harness/completion`
+- [x] CLI Commands (6): `prometheos work harness run|replay|benchmark|artifact|risk|completion`
+- [x] Documentation (7 files): `docs/v1.6-harness-engine.md`, `docs/harness-execution-flow.md`, `docs/harness-benchmarking.md`, `docs/harness-patch-protocol.md`, `docs/harness-sandboxing.md`, `docs/harness-evidence-completion.md`, `docs/harness-api-cli.md`
+- [x] Test Suites: 35 test files (one per issue) covering full lifecycle
 
 **Definition of Done:**
 - A coding WorkContext can run through the Harness Engine end-to-end
@@ -1128,7 +1128,7 @@ The following critical issues were identified during code audit:
 - Completion evidence is produced with confidence scores
 - Trajectory recorded, artifacts attached, no stubs/TODOs
 
-**Status:** v1.6 - Planning Complete, Implementation Pending
+**Status:** v1.6 - Implementation Complete, Testing Verified
 **See:** `docs/prd/prometheos-lite-v1.6-harness-engine.md` for full specification
 
 ---

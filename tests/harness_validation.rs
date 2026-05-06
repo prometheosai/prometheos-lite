@@ -37,6 +37,11 @@ fn test_validation_plan_creation() {
         format_commands: vec!["cargo fmt".to_string()],
         lint_commands: vec!["cargo clippy".to_string()],
         test_commands: vec!["cargo test".to_string()],
+        repro_commands: vec![],
+        timeout_ms: Some(60000),
+        parallel: false,
+        disable_cache: false,
+        tool_ids: vec!["cargo".to_string()],
     };
 
     assert_eq!(plan.format_commands, vec!["cargo fmt"]);
@@ -50,6 +55,11 @@ fn test_validation_plan_with_multiple_commands() {
         format_commands: vec!["cargo fmt".to_string(), "prettier --write .".to_string()],
         lint_commands: vec!["cargo clippy".to_string(), "eslint .".to_string()],
         test_commands: vec!["cargo test".to_string(), "jest".to_string()],
+        repro_commands: vec![],
+        timeout_ms: Some(120000),
+        parallel: true,
+        disable_cache: false,
+        tool_ids: vec!["cargo".to_string(), "prettier".to_string(), "eslint".to_string(), "jest".to_string()],
     };
 
     assert_eq!(plan.format_commands.len(), 2);
@@ -72,9 +82,16 @@ fn test_validation_result_passed() {
                 stdout: "test result: ok".to_string(),
                 stderr: String::new(),
                 duration_ms: 5000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
         ],
+        cached: false,
+        category_results: std::collections::HashMap::new(),
         errors: vec![],
+        duration_ms: 5000,
+        flaky_tests_detected: vec![],
     };
 
     assert!(result.passed);
@@ -93,9 +110,16 @@ fn test_validation_result_failed() {
                 stdout: String::new(),
                 stderr: "test failed".to_string(),
                 duration_ms: 3000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
         ],
+        cached: false,
+        category_results: std::collections::HashMap::new(),
         errors: vec!["Tests failed".to_string()],
+        duration_ms: 3000,
+        flaky_tests_detected: vec![],
     };
 
     assert!(!result.passed);
@@ -108,7 +132,11 @@ fn test_validation_result_empty() {
     let result = ValidationResult {
         passed: true,
         command_results: vec![],
+        cached: false,
+        category_results: std::collections::HashMap::new(),
         errors: vec![],
+        duration_ms: 0,
+        flaky_tests_detected: vec![],
     };
 
     assert!(result.passed);
@@ -149,8 +177,12 @@ fn test_category_result_passed() {
                 stdout: "ok".to_string(),
                 stderr: String::new(),
                 duration_ms: 1000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
         ],
+        total_duration_ms: 1000,
     };
 
     assert!(matches!(result.category, ValidationCategory::Test));
@@ -170,8 +202,12 @@ fn test_category_result_failed() {
                 stdout: String::new(),
                 stderr: "error".to_string(),
                 duration_ms: 2000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
         ],
+        total_duration_ms: 2000,
     };
 
     assert!(matches!(result.category, ValidationCategory::Lint));
@@ -190,6 +226,9 @@ fn test_command_result_success() {
         stdout: "Compiling...".to_string(),
         stderr: String::new(),
         duration_ms: 5000,
+        cache_key: None,
+        cached: false,
+        timed_out: false,
     };
 
     assert_eq!(result.command, "cargo build");
@@ -206,6 +245,9 @@ fn test_command_result_failure() {
         stdout: String::new(),
         stderr: "test failed".to_string(),
         duration_ms: 3000,
+        cache_key: None,
+        cached: false,
+        timed_out: false,
     };
 
     assert_eq!(result.exit_code, Some(101));
@@ -220,6 +262,9 @@ fn test_command_result_no_exit_code() {
         stdout: String::new(),
         stderr: "timeout".to_string(),
         duration_ms: 5000,
+        cache_key: None,
+        cached: false,
+        timed_out: true,
     };
 
     assert_eq!(result.exit_code, None);
@@ -239,11 +284,13 @@ fn test_flaky_test_info_creation() {
                 attempt: 1,
                 passed: false,
                 duration_ms: 1000,
+                exit_code: Some(1),
             },
             TestAttempt {
                 attempt: 2,
                 passed: true,
                 duration_ms: 1200,
+                exit_code: Some(0),
             },
         ],
     };
@@ -265,16 +312,19 @@ fn test_flaky_test_info_all_passed() {
                 attempt: 1,
                 passed: true,
                 duration_ms: 800,
+                exit_code: Some(0),
             },
             TestAttempt {
                 attempt: 2,
                 passed: true,
                 duration_ms: 750,
+                exit_code: Some(0),
             },
             TestAttempt {
                 attempt: 3,
                 passed: true,
                 duration_ms: 780,
+                exit_code: Some(0),
             },
         ],
     };
@@ -292,6 +342,7 @@ fn test_test_attempt_passed() {
         attempt: 1,
         passed: true,
         duration_ms: 1000,
+        exit_code: Some(0),
     };
 
     assert_eq!(attempt.attempt, 1);
@@ -305,6 +356,7 @@ fn test_test_attempt_failed() {
         attempt: 2,
         passed: false,
         duration_ms: 500,
+        exit_code: Some(1),
     };
 
     assert_eq!(attempt.attempt, 2);
@@ -326,6 +378,9 @@ fn test_get_validation_summary_all_passed() {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration_ms: 1000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
             CommandResult {
                 command: "cargo test".to_string(),
@@ -333,9 +388,16 @@ fn test_get_validation_summary_all_passed() {
                 stdout: "test result: ok".to_string(),
                 stderr: String::new(),
                 duration_ms: 5000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
         ],
+        cached: false,
+        category_results: std::collections::HashMap::new(),
         errors: vec![],
+        duration_ms: 6000,
+        flaky_tests_detected: vec![],
     };
 
     let summary = get_validation_summary(&result);
@@ -353,9 +415,16 @@ fn test_get_validation_summary_with_failures() {
                 stdout: String::new(),
                 stderr: "test failed".to_string(),
                 duration_ms: 3000,
+                cache_key: None,
+                cached: false,
+                timed_out: false,
             },
         ],
+        cached: false,
+        category_results: std::collections::HashMap::new(),
         errors: vec!["Test failure".to_string()],
+        duration_ms: 3000,
+        flaky_tests_detected: vec![],
     };
 
     let summary = get_validation_summary(&result);
@@ -367,7 +436,11 @@ fn test_get_validation_summary_empty() {
     let result = ValidationResult {
         passed: true,
         command_results: vec![],
+        cached: false,
+        category_results: std::collections::HashMap::new(),
         errors: vec![],
+        duration_ms: 0,
+        flaky_tests_detected: vec![],
     };
 
     let summary = get_validation_summary(&result);

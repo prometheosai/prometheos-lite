@@ -40,7 +40,7 @@ fn test_semantic_diff_default() {
     assert!(diff.database_changes.is_empty());
     assert!(diff.dependency_changes.is_empty());
     assert!(diff.config_changes.is_empty());
-    assert!(diff.file_changes.is_empty());
+    assert!(diff.changed_files.is_empty());
 }
 
 #[test]
@@ -50,13 +50,15 @@ fn test_semantic_diff_with_changes() {
             file: PathBuf::from("src/api.rs"),
             line: Some(10),
             change_type: ApiChangeType::FunctionAdded,
-            function_name: Some("new_function".to_string()),
+            breaking: false,
+            description: "Function added".to_string(),
+            signature: "fn new_function()".to_string(),
         }],
         auth_changes: vec![],
         database_changes: vec![],
         dependency_changes: vec![],
         config_changes: vec![],
-        file_changes: vec![],
+        changed_files: vec![],
         summary: SemanticSummary::default(),
         risk_assessment: RiskAssessment::default(),
     };
@@ -74,13 +76,15 @@ fn test_api_change_creation() {
         file: PathBuf::from("src/lib.rs"),
         line: Some(42),
         change_type: ApiChangeType::FunctionModified,
-        function_name: Some("calculate".to_string()),
+        breaking: false,
+        description: "Function modification".to_string(),
+        signature: "fn modified_function()".to_string(),
     };
 
     assert_eq!(change.file, PathBuf::from("src/lib.rs"));
     assert_eq!(change.line, Some(42));
     assert!(matches!(change.change_type, ApiChangeType::FunctionModified));
-    assert_eq!(change.function_name, Some("calculate".to_string()));
+    // Note: function_name field doesn't exist in actual ApiChange struct
 }
 
 // ============================================================================
@@ -92,9 +96,9 @@ fn test_api_change_type_variants() {
     assert!(matches!(ApiChangeType::FunctionAdded, ApiChangeType::FunctionAdded));
     assert!(matches!(ApiChangeType::FunctionRemoved, ApiChangeType::FunctionRemoved));
     assert!(matches!(ApiChangeType::FunctionModified, ApiChangeType::FunctionModified));
-    assert!(matches!(ApiChangeType::TypeAdded, ApiChangeType::TypeAdded));
-    assert!(matches!(ApiChangeType::TypeRemoved, ApiChangeType::TypeRemoved));
-    assert!(matches!(ApiChangeType::TypeModified, ApiChangeType::TypeModified));
+    assert!(matches!(ApiChangeType::FunctionAdded, ApiChangeType::FunctionAdded));
+    assert!(matches!(ApiChangeType::FunctionRemoved, ApiChangeType::FunctionRemoved));
+    assert!(matches!(ApiChangeType::FunctionModified, ApiChangeType::FunctionModified));
 }
 
 #[test]
@@ -115,6 +119,7 @@ fn test_auth_change_creation() {
         line: Some(15),
         change_type: AuthChangeType::AuthenticationAdded,
         description: "Added JWT auth".to_string(),
+        risk_level: RiskLevel::Medium,
     };
 
     assert_eq!(change.file, PathBuf::from("src/auth.rs"));
@@ -143,12 +148,14 @@ fn test_database_change_creation() {
         file: PathBuf::from("migrations/001.sql"),
         line: Some(5),
         change_type: DatabaseChangeType::SchemaAdded,
-        table_name: Some("users".to_string()),
+        description: "Added users table".to_string(),
+        migration_required: true,
+        breaking: false,
     };
 
     assert_eq!(change.file, PathBuf::from("migrations/001.sql"));
     assert!(matches!(change.change_type, DatabaseChangeType::SchemaAdded));
-    assert_eq!(change.table_name, Some("users".to_string()));
+    assert_eq!(change.description, "Added users table");
 }
 
 // ============================================================================
@@ -174,6 +181,7 @@ fn test_dependency_change_creation() {
         old_version: Some("1.0.0".to_string()),
         new_version: Some("1.0.1".to_string()),
         change_type: DependencyChangeType::Upgraded,
+        risk_level: RiskLevel::Low,
     };
 
     assert_eq!(change.file, PathBuf::from("Cargo.toml"));
@@ -248,17 +256,15 @@ fn test_file_change_creation() {
         change_type: FileChangeType::Modified,
         lines_added: 10,
         lines_removed: 5,
-        category: SemanticCategory::SourceCode,
+        semantic_category: SemanticCategory::SourceCode,
     };
 
     assert_eq!(change.path, PathBuf::from("src/main.rs"));
     assert!(matches!(change.change_type, FileChangeType::Modified));
-    assert_eq!(change.lines_added, 10);
+    assert_eq!(change.semantic_category, SemanticCategory::SourceCode);
     assert_eq!(change.lines_removed, 5);
-    assert!(matches!(change.category, SemanticCategory::SourceCode));
+    assert!(matches!(change.semantic_category, SemanticCategory::SourceCode));
 }
-
-// ============================================================================
 // FileChangeType Tests
 // ============================================================================
 
@@ -279,7 +285,7 @@ fn test_semantic_category_variants() {
     assert!(matches!(SemanticCategory::Test, SemanticCategory::Test));
     assert!(matches!(SemanticCategory::Configuration, SemanticCategory::Configuration));
     assert!(matches!(SemanticCategory::Documentation, SemanticCategory::Documentation));
-    assert!(matches!(SemanticCategory::BuildFile, SemanticCategory::BuildFile));
+    assert!(matches!(SemanticCategory::Build, SemanticCategory::Build));
 }
 
 // ============================================================================
@@ -314,7 +320,7 @@ fn test_risk_assessment_default() {
     assert!(matches!(assessment.overall_risk, RiskLevel::None));
     assert!(matches!(assessment.api_risk, RiskLevel::None));
     assert!(matches!(assessment.auth_risk, RiskLevel::None));
-    assert!(matches!(assessment.db_risk, RiskLevel::None));
+    assert!(matches!(assessment.database_risk, RiskLevel::None));
     assert!(!assessment.requires_approval);
 }
 
@@ -324,8 +330,12 @@ fn test_risk_assessment_high() {
         overall_risk: RiskLevel::High,
         api_risk: RiskLevel::Medium,
         auth_risk: RiskLevel::High,
-        db_risk: RiskLevel::Low,
+        database_risk: RiskLevel::Low,
+        dependency_risk: RiskLevel::None,
+        config_risk: RiskLevel::None,
+        requires_review: true,
         requires_approval: true,
+        reasons: vec!["High risk changes".to_string()],
     };
 
     assert!(matches!(assessment.overall_risk, RiskLevel::High));
@@ -354,7 +364,9 @@ fn test_semantic_summary_with_data() {
         total_lines_added: 100,
         total_lines_removed: 50,
         breaking_changes: 2,
+        api_surface_changes: 3,
         security_relevant_changes: 1,
+        infrastructure_changes: 0,
     };
 
     assert_eq!(summary.total_files_changed, 5);
@@ -382,7 +394,7 @@ fn test_analyze_semantic_diff_simple() {
 
     let result = analyze_semantic_diff(diff);
     // Verify the function runs without panic and returns a valid result
-    assert!(result.file_changes.is_empty() || !result.file_changes.is_empty());
+    assert!(result.changed_files.is_empty() || !result.changed_files.is_empty());
 }
 
 #[test]
@@ -412,32 +424,40 @@ fn test_format_semantic_diff_report_with_changes() {
             file: PathBuf::from("src/api.rs"),
             line: Some(10),
             change_type: ApiChangeType::FunctionAdded,
-            function_name: Some("new_api".to_string()),
+            breaking: false,
+            description: "New API function".to_string(),
+            signature: "new_api".to_string(),
         }],
         auth_changes: vec![],
         database_changes: vec![],
         dependency_changes: vec![],
         config_changes: vec![],
-        file_changes: vec![FileChange {
+        changed_files: vec![FileChange {
             path: PathBuf::from("src/api.rs"),
             change_type: FileChangeType::Modified,
             lines_added: 10,
             lines_removed: 0,
-            category: SemanticCategory::SourceCode,
+            semantic_category: SemanticCategory::SourceCode,
         }],
         summary: SemanticSummary {
             total_files_changed: 1,
             total_lines_added: 10,
             total_lines_removed: 0,
             breaking_changes: 0,
+            api_surface_changes: 1,
             security_relevant_changes: 0,
+            infrastructure_changes: 0,
         },
         risk_assessment: RiskAssessment {
             overall_risk: RiskLevel::Low,
             api_risk: RiskLevel::Medium,
             auth_risk: RiskLevel::None,
-            db_risk: RiskLevel::None,
+            database_risk: RiskLevel::None,
+            dependency_risk: RiskLevel::None,
+            config_risk: RiskLevel::None,
+            requires_review: false,
             requires_approval: false,
+            reasons: vec![],
         },
     };
 

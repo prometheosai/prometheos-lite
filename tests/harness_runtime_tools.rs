@@ -35,6 +35,7 @@ fn test_runtime_tool_creation() {
         description: "Rust linter".to_string(),
         supported_extensions: vec!["rs".to_string()],
         health_check_cmd: Some("cargo clippy --version".to_string()),
+        version_cmd: Some("cargo clippy --version".to_string()),
     };
 
     assert_eq!(tool.id, "clippy-1");
@@ -62,6 +63,7 @@ fn test_runtime_tool_compiler() {
         description: "Rust compiler".to_string(),
         supported_extensions: vec!["rs".to_string()],
         health_check_cmd: Some("rustc --version".to_string()),
+        version_cmd: Some("rustc --version".to_string()),
     };
 
     assert!(matches!(tool.tool_type, ToolType::Compiler));
@@ -240,6 +242,7 @@ fn test_tool_workflow() {
         description: "Rust formatter".to_string(),
         supported_extensions: vec!["rs".to_string()],
         health_check_cmd: None,
+        version_cmd: Some("rustfmt --version".to_string()),
     };
 
     // Simulate execution result

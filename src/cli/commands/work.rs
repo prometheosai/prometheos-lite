@@ -78,6 +78,66 @@ enum WorkSubcommand {
         /// New status (draft, in_progress, awaiting_approval, completed, blocked)
         status: String,
     },
+    /// Harness commands for v1.6 integration
+    Harness {
+        #[command(subcommand)]
+        command: HarnessSubcommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HarnessSubcommand {
+    /// Run harness on a WorkContext
+    Run {
+        /// WorkContext ID
+        id: String,
+        /// Harness mode (auto, assisted, dry_run)
+        #[arg(short, long, default_value = "auto")]
+        mode: String,
+        /// Repository root path
+        #[arg(short, long)]
+        repo_root: Option<String>,
+    },
+    /// Replay harness execution from trajectory
+    Replay {
+        /// WorkContext ID
+        id: String,
+        /// Step number to replay from (optional)
+        #[arg(short, long)]
+        step: Option<usize>,
+    },
+    /// Run benchmark on WorkContext
+    Benchmark {
+        /// WorkContext ID
+        id: String,
+        /// Benchmark type (performance, accuracy, quality)
+        #[arg(short, long, default_value = "performance")]
+        benchmark_type: String,
+    },
+    /// Show artifacts for WorkContext
+    Artifact {
+        /// WorkContext ID
+        id: String,
+        /// Artifact type (all, patches, evidence, trajectory)
+        #[arg(short, long, default_value = "all")]
+        artifact_type: String,
+    },
+    /// Show risk assessment for WorkContext
+    Risk {
+        /// WorkContext ID
+        id: String,
+        /// Risk level threshold (low, medium, high, critical)
+        #[arg(short, long, default_value = "medium")]
+        threshold: String,
+    },
+    /// Show completion status and evidence
+    Completion {
+        /// WorkContext ID
+        id: String,
+        /// Show detailed completion evidence
+        #[arg(short, long)]
+        detailed: bool,
+    },
 }
 
 impl WorkCommand {
@@ -256,6 +316,129 @@ impl WorkCommand {
                 work_context_service.update_status(&mut context, new_status)?;
 
                 println!("Updated WorkContext status to {:?}", new_status);
+            }
+            WorkSubcommand::Harness { command } => {
+                match command {
+                    HarnessSubcommand::Run { id, mode, repo_root } => {
+                        // Create harness service
+                        let harness_service = prometheos_lite::harness::HarnessWorkContextService::new(
+                            work_context_service.clone()
+                        );
+                        
+                        let harness_mode = match mode.to_lowercase().as_str() {
+                            "auto" => prometheos_lite::harness::mode_policy::HarnessMode::Auto,
+                            "assisted" => prometheos_lite::harness::mode_policy::HarnessMode::Assisted,
+                            "dry_run" => prometheos_lite::harness::mode_policy::HarnessMode::DryRun,
+                            _ => return Err(anyhow::anyhow!("Invalid mode: {}", mode)),
+                        };
+                        
+                        let repo_path = repo_root.unwrap_or_else(|| ".".to_string());
+                        
+                        println!("Running harness on WorkContext {} with mode {:?}", id, harness_mode);
+                        println!("Repository root: {}", repo_path);
+                        
+                        // Check if context exists
+                        let context = work_context_service
+                            .get_context(&id)?
+                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                        
+                        println!("WorkContext found: {} - {}", context.title, context.goal);
+                        
+                        // For now, just show the harness metadata
+                        let metadata = context.metadata.get("harness").cloned().unwrap_or(serde_json::Value::Null);
+                        println!("Harness metadata: {}", serde_json::to_string_pretty(&metadata)?);
+                    }
+                    HarnessSubcommand::Replay { id, step } => {
+                        println!("Replaying harness execution for WorkContext {}", id);
+                        if let Some(step_num) = step {
+                            println!("From step: {}", step_num);
+                        }
+                        
+                        let context = work_context_service
+                            .get_context(&id)?
+                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                        
+                        if let Some(harness_data) = context.metadata.get("harness") {
+                            if let Some(trajectory) = harness_data.get("trajectory") {
+                                println!("Trajectory data: {}", serde_json::to_string_pretty(trajectory)?);
+                            } else {
+                                println!("No trajectory data found");
+                            }
+                        } else {
+                            println!("No harness metadata found");
+                        }
+                    }
+                    HarnessSubcommand::Benchmark { id, benchmark_type } => {
+                        println!("Running benchmark on WorkContext {}", id);
+                        println!("Benchmark type: {}", benchmark_type);
+                        
+                        let context = work_context_service
+                            .get_context(&id)?
+                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                        
+                        println!("WorkContext: {} - {}", context.title, context.goal);
+                        println!("Benchmark would run here with type: {}", benchmark_type);
+                    }
+                    HarnessSubcommand::Artifact { id, artifact_type } => {
+                        println!("Showing artifacts for WorkContext {}", id);
+                        println!("Artifact type: {}", artifact_type);
+                        
+                        let context = work_context_service
+                            .get_context(&id)?
+                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                        
+                        if let Some(harness_data) = context.metadata.get("harness") {
+                            if let Some(artifacts) = harness_data.get("artifacts") {
+                                println!("Artifacts: {}", serde_json::to_string_pretty(artifacts)?);
+                            } else {
+                                println!("No artifacts found");
+                            }
+                        } else {
+                            println!("No harness metadata found");
+                        }
+                    }
+                    HarnessSubcommand::Risk { id, threshold } => {
+                        println!("Showing risk assessment for WorkContext {}", id);
+                        println!("Risk threshold: {}", threshold);
+                        
+                        let context = work_context_service
+                            .get_context(&id)?
+                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                        
+                        if let Some(harness_data) = context.metadata.get("harness") {
+                            if let Some(risk) = harness_data.get("risk_assessment") {
+                                println!("Risk assessment: {}", serde_json::to_string_pretty(risk)?);
+                            } else {
+                                println!("No risk assessment found");
+                            }
+                        } else {
+                            println!("No harness metadata found");
+                        }
+                    }
+                    HarnessSubcommand::Completion { id, detailed } => {
+                        println!("Showing completion status for WorkContext {}", id);
+                        if detailed {
+                            println!("Showing detailed completion evidence");
+                        }
+                        
+                        let context = work_context_service
+                            .get_context(&id)?
+                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                        
+                        if let Some(harness_data) = context.metadata.get("harness") {
+                            if let Some(completion) = harness_data.get("completion_decision") {
+                                println!("Completion decision: {}", serde_json::to_string_pretty(completion)?);
+                            } else {
+                                println!("No completion decision found");
+                            }
+                        } else {
+                            println!("No harness metadata found");
+                        }
+                        
+                        println!("WorkContext status: {:?}", context.status);
+                        println!("Current phase: {:?}", context.current_phase);
+                    }
+                }
             }
         }
 

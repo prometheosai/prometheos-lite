@@ -38,6 +38,7 @@ fn test_review_issue_creation() {
         line: Some(42),
         message: "Potential null pointer dereference".to_string(),
         suggestion: Some("Add null check".to_string()),
+        rule_id: "null_check".to_string(),
     };
 
     assert!(matches!(issue.issue_type, ReviewIssueType::Bug));
@@ -57,6 +58,7 @@ fn test_review_issue_without_location() {
         line: None,
         message: "General style issue".to_string(),
         suggestion: None,
+        rule_id: "style_general".to_string(),
     };
 
     assert!(issue.file.is_none());
@@ -128,8 +130,13 @@ fn test_review_report_passed() {
             total_issues: 0,
             by_type: HashMap::new(),
             by_severity: HashMap::new(),
+            files_reviewed: 0,
+            files_with_issues: 0,
         },
         passed: true,
+        ast_analysis_enabled: false,
+        critical_count: 0,
+        high_count: 0,
     };
 
     assert!(report.passed);
@@ -147,6 +154,7 @@ fn test_review_report_failed() {
                 line: Some(10),
                 message: "Bug found".to_string(),
                 suggestion: None,
+                rule_id: "bug_found".to_string(),
             },
         ],
         summary: ReviewSummary {
@@ -161,8 +169,13 @@ fn test_review_report_failed() {
                 map.insert(ReviewSeverity::High, 1);
                 map
             },
+            files_reviewed: 1,
+            files_with_issues: 1,
         },
         passed: false,
+        ast_analysis_enabled: false,
+        critical_count: 1,
+        high_count: 1,
     };
 
     assert!(!report.passed);
@@ -197,6 +210,8 @@ fn test_review_summary_with_data() {
         total_issues: 5,
         by_type,
         by_severity,
+        files_reviewed: 3,
+        files_with_issues: 2,
     };
 
     assert_eq!(summary.total_issues, 5);
@@ -216,7 +231,7 @@ fn test_language_variants() {
     assert!(matches!(Language::TypeScript, Language::TypeScript));
     assert!(matches!(Language::Go, Language::Go));
     assert!(matches!(Language::Java, Language::Java));
-    assert!(matches!(Language::Cpp, Language::Cpp));
+    assert!(matches!(Language::Other, Language::Other));
 }
 
 #[test]
@@ -237,6 +252,7 @@ fn test_review_context_creation() {
         file_path: PathBuf::from("src/main.rs"),
         file_content: "fn main() {}".to_string(),
         language: Language::Rust,
+        ast: None,
     };
 
     assert_eq!(ctx.file_path, PathBuf::from("src/main.rs"));
@@ -328,6 +344,9 @@ fn test_format_review_report_empty() {
         issues: vec![],
         summary: ReviewSummary::default(),
         passed: true,
+        critical_count: 0,
+        high_count: 0,
+        ast_analysis_enabled: false,
     };
 
     let formatted = format_review_report(&report);
@@ -345,10 +364,20 @@ fn test_format_review_report_with_issues() {
                 line: Some(10),
                 message: "Test issue".to_string(),
                 suggestion: Some("Fix it".to_string()),
+                rule_id: "test_rule".to_string(),
+            },
+            ReviewIssue {
+                issue_type: ReviewIssueType::Style,
+                severity: ReviewSeverity::Low,
+                file: Some("src/style.rs".to_string()),
+                line: Some(20),
+                message: "Style issue".to_string(),
+                suggestion: Some("Fix style".to_string()),
+                rule_id: "style_rule".to_string(),
             },
         ],
         summary: ReviewSummary {
-            total_issues: 1,
+            total_issues: 2,
             by_type: {
                 let mut map = HashMap::new();
                 map.insert(ReviewIssueType::Bug, 1);
@@ -359,8 +388,13 @@ fn test_format_review_report_with_issues() {
                 map.insert(ReviewSeverity::High, 1);
                 map
             },
+            files_reviewed: 1,
+            files_with_issues: 1,
         },
         passed: false,
+        critical_count: 1,
+        high_count: 1,
+        ast_analysis_enabled: false,
     };
 
     let formatted = format_review_report(&report);
@@ -383,6 +417,7 @@ fn test_has_critical_issues_true() {
                 line: None,
                 message: "Critical security issue".to_string(),
                 suggestion: None,
+                rule_id: "security_rule".to_string(),
             },
         ],
         summary: ReviewSummary {
@@ -393,8 +428,13 @@ fn test_has_critical_issues_true() {
                 map.insert(ReviewSeverity::Critical, 1);
                 map
             },
+            files_reviewed: 1,
+            files_with_issues: 1,
         },
         passed: false,
+        critical_count: 1,
+        high_count: 0,
+        ast_analysis_enabled: false,
     };
 
     assert!(has_critical_issues(&report));
@@ -411,6 +451,7 @@ fn test_has_critical_issues_false() {
                 line: None,
                 message: "Minor style issue".to_string(),
                 suggestion: None,
+                rule_id: "style_rule".to_string(),
             },
         ],
         summary: ReviewSummary {
@@ -421,8 +462,13 @@ fn test_has_critical_issues_false() {
                 map.insert(ReviewSeverity::Low, 1);
                 map
             },
+            files_reviewed: 1,
+            files_with_issues: 1,
         },
         passed: false,
+        critical_count: 0,
+        high_count: 1,
+        ast_analysis_enabled: false,
     };
 
     assert!(!has_critical_issues(&report));
@@ -443,6 +489,7 @@ fn test_get_issues_by_type() {
                 line: None,
                 message: "Bug 1".to_string(),
                 suggestion: None,
+                rule_id: "bug_rule".to_string(),
             },
             ReviewIssue {
                 issue_type: ReviewIssueType::Bug,
@@ -451,6 +498,7 @@ fn test_get_issues_by_type() {
                 line: None,
                 message: "Bug 2".to_string(),
                 suggestion: None,
+                rule_id: "bug_rule".to_string(),
             },
             ReviewIssue {
                 issue_type: ReviewIssueType::Style,
@@ -459,10 +507,14 @@ fn test_get_issues_by_type() {
                 line: None,
                 message: "Style issue".to_string(),
                 suggestion: None,
+                rule_id: "style_rule".to_string(),
             },
         ],
         summary: ReviewSummary::default(),
         passed: false,
+        critical_count: 0,
+        high_count: 2,
+        ast_analysis_enabled: false,
     };
 
     let bugs = get_issues_by_type(&report, ReviewIssueType::Bug);
@@ -487,6 +539,7 @@ fn test_get_issues_by_severity() {
                 line: None,
                 message: "High severity".to_string(),
                 suggestion: None,
+                rule_id: "severity_rule".to_string(),
             },
             ReviewIssue {
                 issue_type: ReviewIssueType::Bug,
@@ -495,6 +548,7 @@ fn test_get_issues_by_severity() {
                 line: None,
                 message: "Another high".to_string(),
                 suggestion: None,
+                rule_id: "severity_rule".to_string(),
             },
             ReviewIssue {
                 issue_type: ReviewIssueType::Style,
@@ -503,10 +557,14 @@ fn test_get_issues_by_severity() {
                 line: None,
                 message: "Low severity".to_string(),
                 suggestion: None,
+                rule_id: "style_rule".to_string(),
             },
         ],
         summary: ReviewSummary::default(),
         passed: false,
+        critical_count: 0,
+        high_count: 2,
+        ast_analysis_enabled: false,
     };
 
     let high = get_issues_by_severity(&report, ReviewSeverity::High);

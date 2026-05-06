@@ -72,6 +72,7 @@ pub use confidence::{
 };
 pub use edit_protocol::*;
 pub use environment::*;
+pub use evidence::*;
 pub use execution_loop::*;
 pub use failure::{
     FailureCategory, FailureContext, FailureDetails, FailureKind, analyze_failure_pattern,
@@ -154,6 +155,7 @@ pub use time_travel::{
     TimeTravelSession, VariableState, create_time_travel_debugger, format_debug_state,
     format_diff_view,
 };
+pub use trajectory::*;
 pub use validation::*;
 pub use verification::{
     VerificationAssessment, VerificationLevel, VerificationStrength, assess_verification_strength,

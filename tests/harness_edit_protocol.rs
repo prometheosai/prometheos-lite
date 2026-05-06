@@ -33,6 +33,8 @@ fn test_edit_operation_variants() {
         file: PathBuf::from("src/main.rs"),
         search: "old_code".to_string(),
         replace: "new_code".to_string(),
+        context_lines: Some(3),
+        replace_all: Some(false),
     };
     let op = EditOperation::SearchReplace(sr);
     assert!(matches!(op, EditOperation::SearchReplace(_)));
@@ -60,6 +62,8 @@ fn test_search_replace_edit_creation() {
         file: PathBuf::from("src/lib.rs"),
         search: "fn old()".to_string(),
         replace: "fn new()".to_string(),
+        context_lines: Some(3),
+        replace_all: Some(false),
     };
 
     assert_eq!(edit.file, PathBuf::from("src/lib.rs"));
@@ -94,12 +98,12 @@ fn test_create_file_edit_creation() {
     let edit = CreateFileEdit {
         file: PathBuf::from("new_file.rs"),
         content: "// New file content".to_string(),
-        open_after_create: Some(true),
+        executable: Some(false),
     };
 
     assert_eq!(edit.file, PathBuf::from("new_file.rs"));
     assert_eq!(edit.content, "// New file content");
-    assert_eq!(edit.open_after_create, Some(true));
+    // Note: open_after_create field doesn't exist in actual CreateFileEdit struct
 }
 
 #[test]
@@ -205,7 +209,10 @@ fn test_apply_unified_diff_simple() {
     let diff = ParsedDiff {
         old_file: Some(PathBuf::from("file.rs")),
         new_file: PathBuf::from("file.rs"),
+        is_deleted: false,
+        is_new_file: false,
         hunks: vec![DiffHunk {
+            header: "@@ -1,3 +1,3 @@".to_string(),
             old_start: 1,
             old_lines: 3,
             new_start: 1,
@@ -230,7 +237,10 @@ fn test_apply_unified_diff_add_line() {
     let diff = ParsedDiff {
         old_file: Some(PathBuf::from("file.rs")),
         new_file: PathBuf::from("file.rs"),
+        is_deleted: false,
+        is_new_file: false,
         hunks: vec![DiffHunk {
+            header: "@@ -1,2 +1,3 @@".to_string(),
             old_start: 1,
             old_lines: 2,
             new_start: 1,
@@ -254,7 +264,10 @@ fn test_apply_unified_diff_remove_line() {
     let diff = ParsedDiff {
         old_file: Some(PathBuf::from("file.rs")),
         new_file: PathBuf::from("file.rs"),
+        is_deleted: false,
+        is_new_file: false,
         hunks: vec![DiffHunk {
+            header: "@@ -1,3 +1,2 @@".to_string(),
             old_start: 1,
             old_lines: 3,
             new_start: 1,
@@ -321,11 +334,13 @@ fn test_get_edit_summary_with_edits() {
             file: PathBuf::from("src/main.rs"),
             search: "old".to_string(),
             replace: "new".to_string(),
+            context_lines: Some(3),
+            replace_all: Some(false),
         }),
         EditOperation::CreateFile(CreateFileEdit {
             file: PathBuf::from("new.rs"),
             content: "content".to_string(),
-            open_after_create: None,
+            executable: Some(false),
         }),
         EditOperation::DeleteFile(DeleteFileEdit {
             file: PathBuf::from("old.rs"),
@@ -349,11 +364,15 @@ fn test_merge_edits_same_file() {
             file: PathBuf::from("src/main.rs"),
             search: "old1".to_string(),
             replace: "new1".to_string(),
+            context_lines: Some(3),
+            replace_all: Some(false),
         }),
         EditOperation::SearchReplace(SearchReplaceEdit {
             file: PathBuf::from("src/main.rs"),
             search: "old2".to_string(),
             replace: "new2".to_string(),
+            context_lines: Some(3),
+            replace_all: Some(false),
         }),
     ];
 
@@ -369,11 +388,15 @@ fn test_merge_edits_different_files() {
             file: PathBuf::from("src/main.rs"),
             search: "old".to_string(),
             replace: "new".to_string(),
+            context_lines: Some(3),
+            replace_all: Some(false),
         }),
         EditOperation::SearchReplace(SearchReplaceEdit {
             file: PathBuf::from("src/lib.rs"),
             search: "old".to_string(),
             replace: "new".to_string(),
+            context_lines: Some(3),
+            replace_all: Some(false),
         }),
     ];
 

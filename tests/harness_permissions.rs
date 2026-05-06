@@ -259,5 +259,5 @@ fn test_permission_with_regex_pattern() {
 
     assert!(grant.pattern.is_some());
     let pattern = grant.pattern.unwrap();
-    assert!(pattern.contains("\.rs"));
+    assert!(pattern.contains(r"\.rs"));
 }
