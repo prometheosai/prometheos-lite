@@ -15,6 +15,8 @@ pub struct RiskAssessment {
     pub requires_approval: bool,
     pub can_override: bool,
     pub override_conditions: Vec<String>,
+    // P0-4 FIX: Add assessed field for completion evidence
+    pub assessed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,6 +293,8 @@ impl RiskEngine {
             requires_approval,
             can_override,
             override_conditions,
+            // P0-4 FIX: Add assessed field for completion evidence
+            assessed: true,
         }
     }
 

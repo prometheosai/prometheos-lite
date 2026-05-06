@@ -44,6 +44,8 @@ pub struct ReviewReport {
     pub critical_count: usize,
     pub high_count: usize,
     pub ast_analysis_enabled: bool,
+    // P0-4 FIX: Add review_performed field for completion evidence
+    pub review_performed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1198,6 +1200,8 @@ pub fn generate_review_report(files: &[(PathBuf, String)]) -> ReviewReport {
         critical_count,
         high_count,
         ast_analysis_enabled: true,
+        // P0-4 FIX: Add review_performed field for completion evidence
+        review_performed: true,
     }
 }
 

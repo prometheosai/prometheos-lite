@@ -107,8 +107,17 @@ pub struct RepoContext {
     pub dependency_graph: DependencyGraph,
 }
 
-/// Alias for RepoContext - used by modules expecting RepoMap type
-pub type RepoMap = RepoContext;
+/// P0-1 FIX: Create separate RepoMap struct for PatchProviderContext
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoMap {
+    pub files: Vec<RankedFile>,
+    pub symbols: Vec<CodeSymbol>,
+    pub relationships: Vec<SymbolEdge>,
+    pub compressed_context: String,
+    pub token_estimate: usize,
+    pub language_breakdown: HashMap<String, usize>,
+    pub dependency_graph: DependencyGraph,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RankedFile {
@@ -259,6 +268,16 @@ pub async fn build_repo_context(
         token_estimate,
         language_breakdown,
         dependency_graph,
+        // P0-1 FIX: Add repo_map field for PatchProviderContext
+        repo_map: RepoMap {
+            files: ranked_files,
+            symbols: all_symbols,
+            relationships: all_relationships,
+            compressed_context,
+            token_estimate,
+            language_breakdown,
+            dependency_graph,
+        },
     })
 }
 
