@@ -285,6 +285,7 @@ pub enum HarnessProgress {
     RiskAssessment {
         level: String,
         requires_approval: bool,
+        assessed: bool, // Manual construction - not actually assessed
     },
     Completing {
         decision: String,
@@ -681,6 +682,7 @@ pub async fn execute_harness_task(
                     requires_approval: false,
                     can_override: true,
                     override_conditions: vec!["manual review".into()],
+                    assessed: false, // Manual construction - not actually assessed
                 },
                 confidence: ConfidenceScore {
                     score: 0.0,
@@ -753,6 +755,7 @@ pub async fn execute_harness_task(
                 requires_approval: false,
                 can_override: true,
                 override_conditions: vec!["manual review".into()],
+                assessed: false, // Manual construction - not actually assessed
             },
             confidence: ConfidenceScore {
                 score: 0.0,
@@ -826,18 +829,21 @@ pub async fn execute_harness_task(
     let (selected_edits, dry, repaired) = if !dry.failures.is_empty() && req.patch_provider.is_some() {
         tracing::info!("P1: Dry-run failed with {} failures, attempting repair", dry.failures.len());
 
-        // Create repair context
-        let provider_context = crate::harness::patch_provider::PatchProviderContext {
-            task: req.task.clone(),
-            requirements: vec![],
-            repo_map: None,
-            mentioned_files: vec![],
-            mentioned_symbols: vec![],
-            attempt_history: vec![],
-            validation_output: Some(format!("Dry-run failures: {:?}", dry.failures)),
-            review_issues: vec![],
-            max_candidates: 3,
-        };
+        // P0-003: Preserve full PatchProviderContext during repair
+        // Don't lose context - reuse the original rich context
+        let provider_context = real_provider_context.clone().unwrap_or_else(|| {
+            crate::harness::patch_provider::PatchProviderContext {
+                task: req.task.clone(),
+                requirements: req.requirements.clone(),
+                repo_map: Some(repo.repo_map.clone()),
+                mentioned_files: req.mentioned_files.clone(),
+                mentioned_symbols: req.mentioned_symbols.clone(),
+                attempt_history: vec![],
+                validation_output: Some(format!("Dry-run failures: {:?}", dry.failures)),
+                review_issues: vec![],
+                max_candidates: req.limits.max_patch_attempts as usize,
+            }
+        });
 
         // Create repair request for each failure
         let mut repaired_edits = selected_edits.clone();
@@ -1574,7 +1580,7 @@ pub async fn execute_harness_task(
         process_evidence: ProcessEvidence {
             git_checkpoint_created: checkpoint.is_some(),
             rollback_available: rollback_handle.is_some(),
-            all_phases_completed: trajectory.completed,
+            all_phases_completed: traj.completed_at.is_some(),
             no_critical_errors: failures.iter().all(|f| !f.is_critical()),
             time_limit_respected: true, // TODO: Pass actual time limit status from metrics
             step_limit_respected: true, // TODO: Pass actual step limit status from metrics
