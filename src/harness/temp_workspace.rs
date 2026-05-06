@@ -5,7 +5,7 @@ use crate::harness::{
     file_control::{FilePolicy, FileSet},
     patch_applier::{PatchResult, apply_patch_temp_only},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
