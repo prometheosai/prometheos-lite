@@ -212,12 +212,9 @@ impl Default for LocalCommandRuntime {
 }
 
 impl LocalCommandRuntime {
-    pub fn new(allowed: Vec<String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            policy: CommandSecurityPolicy {
-                allowed_programs: allowed,
-                ..Default::default()
-            },
+            policy: CommandSecurityPolicy::default(),
         }
     }
 
@@ -428,6 +425,7 @@ pub struct DockerSandboxRuntime {
     memory: Option<String>,
     /// Timeout for container operations
     timeout_ms: u64,
+    policy: CommandSecurityPolicy,
 }
 
 impl DockerSandboxRuntime {
@@ -436,6 +434,13 @@ impl DockerSandboxRuntime {
         Self {
             image: image.into(),
             workdir: "/workspace".to_string(),
+            policy: CommandSecurityPolicy {
+                allowed_programs: vec![],
+                blocked_programs: vec![],
+                allow_shell: false,
+                max_command_length: 8192,
+                max_args: 100,
+            },
             volumes: vec![],
             env_vars: vec![],
             network_mode: "none".to_string(), // Secure default
@@ -637,21 +642,21 @@ impl SandboxRuntimeFactory {
     /// Priority:
     /// 1. Docker (if available and requested)
     /// 2. LocalCommandRuntime (fallback)
-    pub async fn create(prefer_docker: bool, image: Option<String>) -> Box<dyn CommandRuntime> {
+    pub async fn create(prefer_docker: bool, image: Option<String>) -> std::sync::Arc<dyn SandboxRuntime + Send + Sync> {
         if prefer_docker && DockerSandboxRuntime::is_docker_available().await {
             let image = image.unwrap_or_else(|| "rust:latest".to_string());
             tracing::info!("P1: Using Docker sandbox with image: {}", image);
-            Box::new(DockerSandboxRuntime::new(image))
+            std::sync::Arc::new(DockerSandboxRuntime::new(image))
         } else {
-            tracing::info!("P1: Using local command runtime (no containerization)");
-            Box::new(LocalCommandRuntime::default())
+            tracing::info!("P1: Using local command runtime");
+            std::sync::Arc::new(LocalCommandRuntime::new())
         }
     }
 
     /// Create a Docker sandbox if available, otherwise fail
-    pub async fn create_docker(image: impl Into<String>) -> Result<Box<dyn CommandRuntime>> {
+    pub async fn create_docker(image: impl Into<String>) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
         if DockerSandboxRuntime::is_docker_available().await {
-            Ok(Box::new(DockerSandboxRuntime::new(image)))
+            Ok(std::sync::Arc::new(DockerSandboxRuntime::new(image)))
         } else {
             bail!("Docker is not available on this system")
         }
