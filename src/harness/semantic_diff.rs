@@ -2,17 +2,42 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use crate::harness::risk::RiskAssessment;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SemanticDiff {
     pub api_changes: Vec<ApiChange>,
     pub auth_changes: Vec<AuthChange>,
     pub database_changes: Vec<DatabaseChange>,
     pub dependency_changes: Vec<DependencyChange>,
     pub config_changes: Vec<ConfigChange>,
+    pub file_changes: Vec<FileChange>,
     pub changed_files: Vec<FileChange>,
     pub risk_assessment: RiskAssessment,
     pub summary: SemanticSummary,
+}
+
+impl Default for SemanticDiff {
+    fn default() -> Self {
+        Self {
+            api_changes: Vec::new(),
+            auth_changes: Vec::new(),
+            database_changes: Vec::new(),
+            dependency_changes: Vec::new(),
+            config_changes: Vec::new(),
+            file_changes: Vec::new(),
+            changed_files: Vec::new(),
+            risk_assessment: RiskAssessment {
+                level: crate::harness::risk::RiskLevel::None,
+                reasons: Vec::new(),
+                requires_approval: false,
+                can_override: false,
+                override_conditions: Vec::new(),
+                assessed: false,
+            },
+            summary: SemanticSummary::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,24 +81,20 @@ pub struct AuthChange {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuthChangeType {
-    AuthenticationAdded,
-    AuthenticationRemoved,
+    Authentication,
     AuthenticationModified,
-    AuthorizationAdded,
-    AuthorizationRemoved,
-    AuthorizationModified,
-    PermissionCheckAdded,
-    PermissionCheckRemoved,
-    PermissionCheckModified,
-    TokenHandlingAdded,
-    TokenHandlingRemoved,
-    TokenHandlingModified,
-    SecretAccessAdded,
-    SecretAccessRemoved,
-    SecretAccessModified,
-    CredentialValidationAdded,
-    CredentialValidationRemoved,
-    CredentialValidationModified,
+    Authorization,
+    Permission,
+    Token,
+    Jwt,
+    OAuth,
+    Session,
+    Credential,
+    Secret,
+    Hash,
+    Login,
+    Logout,
+    SignOut,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,14 +109,13 @@ pub struct DatabaseChange {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DatabaseChangeType {
-    SchemaAdded,
-    SchemaRemoved,
-    SchemaModified,
-    MigrationAdded,
-    MigrationModified,
+    TableCreated,
+    TableDropped,
+    TableModified,
     TableAdded,
     TableRemoved,
-    TableModified,
+    Migration,
+    MigrationAdded,
     ColumnAdded,
     ColumnRemoved,
     ColumnModified,
@@ -106,6 +126,20 @@ pub enum DatabaseChangeType {
     ConstraintRemoved,
     ConstraintModified,
     QueryModified,
+    ViewCreated,
+    ViewRemoved,
+    ViewModified,
+    TriggerCreated,
+    TriggerRemoved,
+    TriggerModified,
+    StoredProcedureCreated,
+    StoredProcedureRemoved,
+    StoredProcedureModified,
+    FunctionCreated,
+    FunctionRemoved,
+    FunctionModified,
+    SchemaModified,
+    SchemaRemoved,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,18 +228,6 @@ pub enum RiskLevel {
     Critical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct RiskAssessment {
-    pub overall_risk: RiskLevel,
-    pub api_risk: RiskLevel,
-    pub auth_risk: RiskLevel,
-    pub database_risk: RiskLevel,
-    pub dependency_risk: RiskLevel,
-    pub config_risk: RiskLevel,
-    pub requires_review: bool,
-    pub requires_approval: bool,
-    pub reasons: Vec<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SemanticSummary {
@@ -245,91 +267,253 @@ impl SemanticDiffAnalyzer {
                 Regex::new(r"(?i)pub\s+trait\s+(\w+)").unwrap(),
                 Regex::new(r"(?i)pub\s+type\s+(\w+)").unwrap(),
                 Regex::new(r"(?i)pub\s+mod\s+(\w+)").unwrap(),
-                Regex::new(r"(?i)pub\s+use\s+").unwrap(),
-                Regex::new(r"(?i)fn\s+(\w+)\s*\([^)]*\)\s*(?:->\s*[^\{]+)?\s*\{").unwrap(),
             ],
             auth_patterns: vec![
-                Regex::new(r"(?i)auth").unwrap(),
-                Regex::new(r"(?i)authenticat").unwrap(),
-                Regex::new(r"(?i)authoriz").unwrap(),
-                Regex::new(r"(?i)permission").unwrap(),
-                Regex::new(r"(?i)token").unwrap(),
-                Regex::new(r"(?i)jwt").unwrap(),
-                Regex::new(r"(?i)oauth").unwrap(),
-                Regex::new(r"(?i)session").unwrap(),
-                Regex::new(r"(?i)credential").unwrap(),
-                Regex::new(r"(?i)password").unwrap(),
-                Regex::new(r"(?i)secret").unwrap(),
-                Regex::new(r"(?i)hash").unwrap(),
-                Regex::new(r"(?i)bcrypt|argon2|pbkdf2|scrypt").unwrap(),
-                Regex::new(r"(?i)login|logout|signin|signout").unwrap(),
+                Regex::new(r"(?i)(?:auth|login|password|token|jwt|session|credential|secret|hash|bcrypt|argon2|pbkdf2|scrypt)").unwrap(),
+                Regex::new(r"(?i)(?:oauth|bearer|basic|digest)").unwrap(),
+                Regex::new(r"(?i)(?:signin|signout|logout|permission|role|access)").unwrap(),
             ],
             db_patterns: vec![
-                Regex::new(r"(?i)schema").unwrap(),
-                Regex::new(r"(?i)migration").unwrap(),
-                Regex::new(r"(?i)CREATE\s+TABLE").unwrap(),
-                Regex::new(r"(?i)DROP\s+TABLE").unwrap(),
-                Regex::new(r"(?i)ALTER\s+TABLE").unwrap(),
-                Regex::new(r"(?i)CREATE\s+INDEX").unwrap(),
-                Regex::new(r"(?i)DROP\s+INDEX").unwrap(),
-                Regex::new(r"(?i)INSERT\s+INTO").unwrap(),
-                Regex::new(r"(?i)UPDATE\s+").unwrap(),
-                Regex::new(r"(?i)DELETE\s+FROM").unwrap(),
-                Regex::new(r"(?i)SELECT\s+.*\s+FROM").unwrap(),
-                Regex::new(r"(?i)\.sql").unwrap(),
-                Regex::new(r"(?i)diesel::|sqlx::|sea_orm::").unwrap(),
-                Regex::new(r"(?i)db\.").unwrap(),
-                Regex::new(r"(?i)database|postgres|mysql|sqlite").unwrap(),
+                Regex::new(r"(?i)(?:create|drop|alter|table|column|index|constraint|schema|migration)").unwrap(),
+                Regex::new(r"(?i)(?:insert|update|delete|select|from|where|join)").unwrap(),
+                Regex::new(r"(?i)(?:sql|query|database|db|pool|connection)").unwrap(),
             ],
             dep_patterns: vec![
-                Regex::new(r"(?i)cargo\.toml").unwrap(),
-                Regex::new(r"(?i)package\.json").unwrap(),
-                Regex::new(r"(?i)requirements\.txt").unwrap(),
-                Regex::new(r"(?i)pyproject\.toml").unwrap(),
-                Regex::new(r"(?i)go\.mod").unwrap(),
-                Regex::new(r"(?i)gemfile").unwrap(),
-                Regex::new(r"(?i)gemfile\.lock").unwrap(),
-                Regex::new(r"(?i)composer\.json").unwrap(),
-                Regex::new(r"(?i)pom\.xml").unwrap(),
-                Regex::new(r"(?i)build\.gradle").unwrap(),
-                Regex::new(r"(?i)\.lock$").unwrap(),
+                Regex::new(r"(?i)(?:add|remove|upgrade|downgrade|dependency|package|module|import)").unwrap(),
+                Regex::new(r"(?i)(?:npm|pip|cargo|yarn|composer|maven|gradle)").unwrap(),
+                Regex::new(r"(?i)(?:require|include|use|import|from)").unwrap(),
             ],
             config_patterns: vec![
-                Regex::new(r"(?i)\.env").unwrap(),
-                Regex::new(r"(?i)config").unwrap(),
-                Regex::new(r"(?i)settings").unwrap(),
-                Regex::new(r"(?i)\.toml$").unwrap(),
-                Regex::new(r"(?i)\.yaml$").unwrap(),
-                Regex::new(r"(?i)\.yml$").unwrap(),
-                Regex::new(r"(?i)\.json$").unwrap(),
-                Regex::new(r"(?i)production").unwrap(),
-                Regex::new(r"(?i)staging").unwrap(),
-                Regex::new(r"(?i)docker").unwrap(),
-                Regex::new(r"(?i)kubernetes|k8s").unwrap(),
-                Regex::new(r"(?i)\.ini$").unwrap(),
+                Regex::new(r"(?i)(?:config|setting|option|parameter|variable)").unwrap(),
+                Regex::new(r"(?i)(?:env|environment|dev|prod|test)").unwrap(),
+                Regex::new(r"(?i)(?:toml|yaml|json|xml|ini|cfg)").unwrap(),
             ],
             breaking_patterns: vec![
-                Regex::new(r"(?i)breaking|BREAKING").unwrap(),
-                Regex::new(r"(?i)removed|deleted").unwrap(),
-                Regex::new(r"(?i)renamed").unwrap(),
-                Regex::new(r"(?i)changed\s+signature").unwrap(),
-                Regex::new(r"(?i)deprecated").unwrap(),
-                Regex::new(r"(?i)#[\s]*\[deprecated").unwrap(),
+                Regex::new(r"(?i)(?:remove|delete|drop|break|breaking|deprecate)").unwrap(),
+                Regex::new(r"(?i)(?:signature|interface|api|contract)").unwrap(),
+                Regex::new(r"(?i)(?:major|version|v[2-9])").unwrap(),
             ],
             secret_patterns: vec![
-                Regex::new(r"(?i)password\s*=").unwrap(),
-                Regex::new(r"(?i)secret\s*=").unwrap(),
-                Regex::new(r"(?i)api_key\s*=").unwrap(),
-                Regex::new(r"(?i)private_key").unwrap(),
-                Regex::new(r"(?i)\.pem$").unwrap(),
-                Regex::new(r"(?i)\.key$").unwrap(),
-                Regex::new(r"(?i)id_rsa").unwrap(),
-                Regex::new(r"(?i)id_ed25519").unwrap(),
-                Regex::new(r"(?i)\.env\.local").unwrap(),
+                Regex::new(r"(?i)(?:secret|password|token|key|credential|private)").unwrap(),
+                Regex::new(r"(?i)(?:api[_-]?key|access[_-]?token|secret[_-]?key)").unwrap(),
+                Regex::new(r"(?i)(?:aws|azure|gcp|github|gitlab)").unwrap(),
             ],
         }
     }
 
+    // Additional helper methods for semantic analysis
+    fn infer_api_change_type(&self, diff: &str, name: &str) -> ApiChangeType {
+        match name {
+            "fn" => {
+                if self.is_addition(&diff, name) {
+                    ApiChangeType::FunctionAdded
+                } else if self.is_removal(&diff, name) {
+                    ApiChangeType::FunctionRemoved
+                } else {
+                    ApiChangeType::FunctionModified
+                }
+            }
+            "struct" => {
+                if self.is_addition(&diff, name) {
+                    ApiChangeType::StructAdded
+                } else if self.is_removal(&diff, name) {
+                    ApiChangeType::StructRemoved
+                } else {
+                    ApiChangeType::StructModified
+                }
+            }
+            "enum" => {
+                if self.is_addition(&diff, name) {
+                    ApiChangeType::EnumAdded
+                } else if self.is_removal(&diff, name) {
+                    ApiChangeType::EnumRemoved
+                } else {
+                    ApiChangeType::EnumModified
+                }
+            }
+            "trait" => {
+                if self.is_addition(&diff, name) {
+                    ApiChangeType::TraitAdded
+                } else if self.is_removal(&diff, name) {
+                    ApiChangeType::TraitRemoved
+                } else {
+                    ApiChangeType::TraitModified
+                }
+            }
+            "type" => {
+                if self.is_addition(&diff, name) {
+                    ApiChangeType::TypeAliasAdded
+                } else if self.is_removal(&diff, name) {
+                    ApiChangeType::TypeAliasRemoved
+                } else {
+                    ApiChangeType::TypeAliasModified
+                }
+            }
+            _ => ApiChangeType::FunctionModified,
+        }
+    }
+
+    fn infer_auth_change_type(&self, diff: &str, pattern: &str) -> AuthChangeType {
+        match pattern {
+            p if p.contains("auth") => AuthChangeType::Authentication,
+            p if p.contains("authoriz") => AuthChangeType::Authorization,
+            p if p.contains("permission") => AuthChangeType::Permission,
+            p if p.contains("token") => AuthChangeType::Token,
+            p if p.contains("jwt") => AuthChangeType::Jwt,
+            p if p.contains("oauth") => AuthChangeType::OAuth,
+            p if p.contains("session") => AuthChangeType::Session,
+            p if p.contains("credential") => AuthChangeType::Credential,
+            p if p.contains("secret") => AuthChangeType::Secret,
+            p if p.contains("hash") => AuthChangeType::Hash,
+            p if p.contains("bcrypt") => AuthChangeType::Hash,
+            p if p.contains("argon2") => AuthChangeType::Hash,
+            p if p.contains("pbkdf2") => AuthChangeType::Hash,
+            p if p.contains("scrypt") => AuthChangeType::Hash,
+            p if p.contains("login") => AuthChangeType::Login,
+            p if p.contains("logout") => AuthChangeType::Logout,
+            p if p.contains("signin") => AuthChangeType::Login,
+            p if p.contains("signout") => AuthChangeType::SignOut,
+            _ => AuthChangeType::Authentication,
+        }
+    }
+
+    fn infer_db_change_type(&self, diff: &str, pattern: &str) -> DatabaseChangeType {
+        match pattern {
+            p if p.contains("create") => DatabaseChangeType::TableCreated,
+            p if p.contains("drop") => DatabaseChangeType::TableDropped,
+            p if p.contains("alter") => DatabaseChangeType::TableModified,
+            p if p.contains("migration") => DatabaseChangeType::Migration,
+            _ => DatabaseChangeType::TableModified,
+        }
+    }
+
+    fn infer_config_change_type(&self, diff: &str, pattern: &str) -> ConfigChangeType {
+        match pattern {
+            p if p.contains("add") => ConfigChangeType::Added,
+            p if p.contains("remove") => ConfigChangeType::Removed,
+            p if p.contains("modify") => ConfigChangeType::Modified,
+            p if p.contains("default") => ConfigChangeType::DefaultChanged,
+            _ => ConfigChangeType::Modified,
+        }
+    }
+
+    fn infer_config_environment(&self, diff: &str, pattern: &str) -> ConfigEnvironment {
+        match pattern {
+            p if p.contains("prod") => ConfigEnvironment::Production,
+            p if p.contains("production") => ConfigEnvironment::Production,
+            p if p.contains("test") => ConfigEnvironment::Test,
+            p if p.contains("dev") => ConfigEnvironment::Development,
+            _ => ConfigEnvironment::Development,
+        }
+    }
+
+    fn infer_dep_change_type(&self, diff: &str, pattern: &str) -> DependencyChangeType {
+        match pattern {
+            p if p.contains("add") => DependencyChangeType::Added,
+            p if p.contains("remove") => DependencyChangeType::Removed,
+            p if p.contains("upgrade") => DependencyChangeType::Upgraded,
+            p if p.contains("downgrade") => DependencyChangeType::Downgraded,
+            _ => DependencyChangeType::Modified,
+        }
+    }
+
+    fn infer_file_change_type(&self, diff: &str, file: &Path) -> FileChangeType {
+        // Look at the diff to determine change type
+        if diff.contains(&format!("+++ b/{}", file.to_string_lossy())) {
+            FileChangeType::Added
+        } else if diff.contains(&format!("--- a/{}", file.to_string_lossy())) {
+            FileChangeType::Removed
+        } else if diff.contains(&format!("rename from")) {
+            FileChangeType::Renamed
+        } else {
+            FileChangeType::Modified
+        }
+    }
+
+    fn categorize_file(&self, file: &Path) -> SemanticCategory {
+        let path_str = file.to_string_lossy().to_lowercase();
+        let extension = file.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+        match extension {
+            "rs" | "py" | "js" | "ts" | "go" | "java" => SemanticCategory::SourceCode,
+            "toml" | "yaml" | "json" | "xml" | "ini" | "cfg" => SemanticCategory::Configuration,
+            "md" | "rst" | "txt" | "adoc" => SemanticCategory::Documentation,
+            "dockerfile" | "Dockerfile" | "docker-compose" | "containerfile" => SemanticCategory::Build,
+            "sql" | "migration" | "seed" => SemanticCategory::Migration,
+            _ => SemanticCategory::Unknown,
+        }
+    }
+
+    fn is_addition(&self, diff: &str, name: &str) -> bool {
+        diff.contains(&format!("+ {}", name)) || diff.contains(&format!("pub {}", name))
+    }
+
+    fn is_removal(&self, diff: &str, name: &str) -> bool {
+        diff.contains(&format!("- {}", name)) || diff.contains(&format!("pub use {}", name))
+    }
+
+    fn is_breaking_change(&self, diff: &str, name: &str) -> bool {
+        // Check for breaking change indicators
+        let breaking_patterns = [
+            "pub fn ",
+            "pub struct ",
+            "pub enum ",
+            "pub trait ",
+            "#[deprecated(",
+        ];
+
+        breaking_patterns.iter().any(|pattern| {
+            diff.contains(pattern)
+        })
+    }
+
+    fn requires_migration(&self, diff: &str, pattern: &str) -> bool {
+        pattern.contains("migration") || pattern.contains("create") || pattern.contains("drop")
+    }
+
+    fn assess_auth_risk(&self, diff: &str, pattern: &str) -> RiskLevel {
+        match pattern {
+            p if p.contains("secret") || p.contains("hash") || p.contains("bcrypt") || p.contains("argon2") || p.contains("pbkdf2") || p.contains("scrypt") => RiskLevel::High,
+            p if p.contains("jwt") || p.contains("oauth") || p.contains("session") => RiskLevel::Medium,
+            p if p.contains("credential") => RiskLevel::High,
+            _ => RiskLevel::Low,
+        }
+    }
+
+    fn assess_dep_risk(&self, diff: &str, pattern: &str) -> RiskLevel {
+        match pattern {
+            p if p.contains("major") => RiskLevel::High,
+            p if p.contains("minor") => RiskLevel::Medium,
+            _ => RiskLevel::Low,
+        }
+    }
+
+    // Missing extract_* methods
+    fn extract_api_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<ApiChange> {
+        self.detect_api_changes(diff, files)
+    }
+
+    fn extract_auth_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<AuthChange> {
+        self.detect_auth_changes(diff, files)
+    }
+
+    fn extract_database_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<DatabaseChange> {
+        self.detect_database_changes(diff, files)
+    }
+
+    fn extract_config_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<ConfigChange> {
+        self.detect_config_changes(diff, files)
+    }
+
+    fn extract_dependency_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<DependencyChange> {
+        self.detect_dependency_changes(diff, files)
+    }
+
+    fn extract_file_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<FileChange> {
+        self.analyze_file_changes(diff, files)
+    }
+
+    
     pub fn analyze(&self, diff: &str, changed_files: &[PathBuf]) -> SemanticDiff {
         let api_changes = self.detect_api_changes(diff, changed_files);
         let auth_changes = self.detect_auth_changes(diff, changed_files);
@@ -342,8 +526,8 @@ impl SemanticDiffAnalyzer {
             &api_changes,
             &auth_changes,
             &database_changes,
-            &dependency_changes,
             &config_changes,
+            &dependency_changes,
             &file_changes,
         );
         let risk_assessment = self.assess_risk(
@@ -354,13 +538,15 @@ impl SemanticDiffAnalyzer {
             &config_changes,
         );
 
+        let changed_files = file_changes.clone();
         SemanticDiff {
             api_changes,
             auth_changes,
             database_changes,
             dependency_changes,
             config_changes,
-            changed_files: file_changes,
+            file_changes,
+            changed_files,
             risk_assessment,
             summary,
         }
@@ -421,8 +607,9 @@ impl SemanticDiffAnalyzer {
         for pattern in &self.auth_patterns {
             for cap in pattern.find_iter(&diff_lower) {
                 let line = self.estimate_line(diff, cap.start());
-                let change_type = self.infer_auth_change_type(&diff, cap.start());
-                let risk_level = self.assess_auth_risk(&diff, cap.start());
+                let matched_text = cap.as_str();
+                let change_type = self.infer_auth_change_type(&diff, matched_text);
+                let risk_level = self.assess_auth_risk(&diff, matched_text);
                 let description = format!("Authentication/authorization change at line {}", line);
 
                 for file in files.iter().take(1) {
@@ -454,7 +641,8 @@ impl SemanticDiffAnalyzer {
                 for pattern in &self.db_patterns {
                     for cap in pattern.find_iter(&diff_lower) {
                         let line = self.estimate_line(diff, cap.start());
-                        let change_type = self.infer_db_change_type(&diff, cap.start());
+                        let matched_text = cap.as_str();
+                        let change_type = self.infer_db_change_type(&diff, matched_text);
                         let migration_required = matches!(
                             change_type,
                             DatabaseChangeType::SchemaModified
@@ -521,13 +709,13 @@ impl SemanticDiffAnalyzer {
                 .any(|p| p.is_match(&file.to_string_lossy()) || p.is_match(&diff_lower));
 
             if is_config {
-                let environment = self.infer_config_environment(&diff, file);
+                let environment = self.infer_config_environment(&diff, file.to_string_lossy().as_ref());
 
                 // Detect key-value changes
                 let key_pattern = Regex::new(r"(?i)([a-z_][a-z0-9_]*)\s*=\s*([^\n]+)").unwrap();
                 for cap in key_pattern.captures_iter(&diff) {
                     if let (Some(key), Some(value)) = (cap.get(1), cap.get(2)) {
-                        let change_type = self.infer_config_change_type(&diff, key.start());
+                        let change_type = self.infer_config_change_type(&diff, key.as_str());
 
                         changes.push(ConfigChange {
                             file: file.clone(),
@@ -581,7 +769,7 @@ impl SemanticDiffAnalyzer {
                     DependencyChangeType::Modified
                 };
 
-                let risk_level = self.assess_dep_risk(name.as_str());
+                let risk_level = self.assess_dep_risk(&diff, name.as_str());
 
                 changes.push(DependencyChange {
                     file: PathBuf::from("Cargo.toml"),
@@ -612,7 +800,7 @@ impl SemanticDiffAnalyzer {
                     DependencyChangeType::Modified
                 };
 
-                let risk_level = self.assess_dep_risk(name.as_str());
+                let risk_level = self.assess_dep_risk(&diff, name.as_str());
 
                 changes.push(DependencyChange {
                     file: PathBuf::from("package.json"),
@@ -643,7 +831,7 @@ impl SemanticDiffAnalyzer {
                     DependencyChangeType::Modified
                 };
 
-                let risk_level = self.assess_dep_risk(name.as_str());
+                let risk_level = self.assess_dep_risk(&diff, name.as_str());
 
                 changes.push(DependencyChange {
                     file: PathBuf::from("requirements.txt"),
@@ -659,175 +847,16 @@ impl SemanticDiffAnalyzer {
         changes
     }
 
-    fn infer_api_change_type(&self, diff: &str, name: &str) -> ApiChangeType {
-        let diff_lower = diff.to_lowercase();
-        let name_lower = name.to_lowercase();
-
-        if diff_lower.contains(&format!("pub fn {}", name_lower)) && diff_lower.contains("removed")
-            || diff_lower.contains("-")
-        {
-            return ApiChangeType::FunctionRemoved;
-        }
-        if diff_lower.contains(&format!("pub fn {}", name_lower)) && diff_lower.contains("added")
-            || diff_lower.contains("+")
-        {
-            return ApiChangeType::FunctionAdded;
-        }
-
-        ApiChangeType::FunctionModified
-    }
-
-    fn infer_auth_change_type(&self, _diff: &str, _pos: usize) -> AuthChangeType {
-        // Simplified inference - would need more context
-        AuthChangeType::AuthenticationModified
-    }
-
-    fn infer_db_change_type(&self, diff: &str, _pos: usize) -> DatabaseChangeType {
-        let diff_lower = diff.to_lowercase();
-
-        if diff_lower.contains("create table") {
-            DatabaseChangeType::TableAdded
-        } else if diff_lower.contains("drop table") {
-            DatabaseChangeType::TableRemoved
-        } else if diff_lower.contains("alter table") {
-            DatabaseChangeType::TableModified
-        } else if diff_lower.contains("migration") {
-            DatabaseChangeType::MigrationAdded
-        } else {
-            DatabaseChangeType::QueryModified
-        }
-    }
-
-    fn infer_config_change_type(&self, diff: &str, _pos: usize) -> ConfigChangeType {
-        let line = diff.lines().next().unwrap_or("");
-        if line.starts_with('+') {
-            ConfigChangeType::Added
-        } else if line.starts_with('-') {
-            ConfigChangeType::Removed
-        } else {
-            ConfigChangeType::Modified
-        }
-    }
-
-    fn infer_config_environment(&self, diff: &str, file: &Path) -> ConfigEnvironment {
-        let path_lower = file.to_string_lossy().to_lowercase();
-        let diff_lower = diff.to_lowercase();
-
-        if path_lower.contains("production")
-            || path_lower.contains("prod")
-            || diff_lower.contains("production")
-        {
-            ConfigEnvironment::Production
-        } else if path_lower.contains("development")
-            || path_lower.contains("dev")
-            || diff_lower.contains("development")
-        {
-            ConfigEnvironment::Development
-        } else if path_lower.contains("test") || diff_lower.contains("test") {
-            ConfigEnvironment::Test
-        } else {
-            ConfigEnvironment::Unknown
-        }
-    }
-
-    fn infer_file_change_type(&self, diff: &str, _file: &Path) -> FileChangeType {
-        if diff.starts_with("new file") || diff.starts_with("+++ /dev/null") {
-            FileChangeType::Removed
-        } else if diff.contains("rename from") {
-            FileChangeType::Renamed
-        } else if diff.contains("--- /dev/null") {
-            FileChangeType::Added
-        } else {
-            FileChangeType::Modified
-        }
-    }
-
-    fn categorize_file(&self, file: &Path) -> SemanticCategory {
-        let path_str = file.to_string_lossy().to_lowercase();
-
-        if path_str.contains("test")
-            || path_str.contains("spec")
-            || file
-                .file_name()
-                .map(|f| f.to_str().unwrap_or("").starts_with("test_"))
-                .unwrap_or(false)
-        {
-            SemanticCategory::Test
-        } else if path_str.contains("migration") || path_str.ends_with(".sql") {
-            SemanticCategory::Migration
-        } else if path_str.contains("config")
-            || self.config_patterns.iter().any(|p| p.is_match(&path_str))
-        {
-            SemanticCategory::Configuration
-        } else if path_str.contains("cargo.toml")
-            || path_str.contains("package.json")
-            || path_str.contains("makefile")
-            || path_str.contains("dockerfile")
-        {
-            SemanticCategory::Build
-        } else if path_str.contains(".md")
-            || path_str.contains("readme")
-            || path_str.contains("docs")
-        {
-            SemanticCategory::Documentation
-        } else if self.secret_patterns.iter().any(|p| p.is_match(&path_str)) {
-            SemanticCategory::Secret
-        } else if file
-            .extension()
-            .map(|e| {
-                matches!(
-                    e.to_str(),
-                    Some("rs") | Some("py") | Some("js") | Some("ts")
-                )
-            })
-            .unwrap_or(false)
-        {
-            SemanticCategory::SourceCode
-        } else {
-            SemanticCategory::Unknown
-        }
-    }
-
-    fn is_breaking_change(&self, diff: &str, _name: &str) -> bool {
-        let diff_lower = diff.to_lowercase();
-
-        self.breaking_patterns
-            .iter()
-            .any(|p| p.is_match(&diff_lower))
-            || diff_lower.contains("removed")
-            || diff_lower.contains("signature")
-    }
-
-    fn assess_auth_risk(&self, diff: &str, _pos: usize) -> RiskLevel {
-        let diff_lower = diff.to_lowercase();
-
-        if self.secret_patterns.iter().any(|p| p.is_match(&diff_lower)) {
-            RiskLevel::Critical
-        } else if diff_lower.contains("password") || diff_lower.contains("secret") {
-            RiskLevel::High
-        } else if diff_lower.contains("token") || diff_lower.contains("auth") {
-            RiskLevel::Medium
-        } else {
-            RiskLevel::Low
-        }
-    }
-
-    fn assess_dep_risk(&self, name: &str) -> RiskLevel {
-        let name_lower = name.to_lowercase();
-
-        // High-risk dependency categories
-        let high_risk = ["crypto", "auth", "security", "openssl", "tls", "ssl"];
-        let medium_risk = ["http", "web", "server", "net"];
-
-        if high_risk.iter().any(|r| name_lower.contains(r)) {
-            RiskLevel::High
-        } else if medium_risk.iter().any(|r| name_lower.contains(r)) {
-            RiskLevel::Medium
-        } else {
-            RiskLevel::Low
-        }
-    }
-
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     fn assess_risk(
         &self,
         api: &[ApiChange],
@@ -906,26 +935,37 @@ impl SemanticDiffAnalyzer {
             reasons.push(format!("Configuration changes with {:?} risk", config_risk));
         }
 
+        let risk_reasons: Vec<crate::harness::risk::RiskReason> = reasons.into_iter().map(|s| crate::harness::risk::RiskReason {
+            category: crate::harness::risk::RiskCategory::ApiBreaking,
+            description: s,
+            severity: crate::harness::risk::RiskSeverity::Medium,
+            mitigation: None,
+        }).collect();
+
         RiskAssessment {
-            overall_risk,
-            api_risk,
-            auth_risk,
-            database_risk: RiskLevel::None,
-            dependency_risk: RiskLevel::None,
-            config_risk,
-            requires_review,
+            level: match overall_risk {
+            RiskLevel::None => crate::harness::risk::RiskLevel::None,
+            RiskLevel::Low => crate::harness::risk::RiskLevel::Low,
+            RiskLevel::Medium => crate::harness::risk::RiskLevel::Medium,
+            RiskLevel::High => crate::harness::risk::RiskLevel::High,
+            RiskLevel::Critical => crate::harness::risk::RiskLevel::Critical,
+        },
+            reasons: risk_reasons,
             requires_approval,
-            reasons,
+            can_override: false,
+            override_conditions: vec![],
+            assessed: true,
         }
     }
 
+    
     fn generate_summary(
         &self,
         api: &[ApiChange],
         auth: &[AuthChange],
         db: &[DatabaseChange],
-        deps: &[DependencyChange],
         config: &[ConfigChange],
+        deps: &[DependencyChange],
         files: &[FileChange],
     ) -> SemanticSummary {
         let total_files_changed = files.len();
@@ -1042,31 +1082,19 @@ pub fn format_semantic_diff_report(diff: &SemanticDiff) -> String {
     output.push_str("Risk Assessment:\n");
     output.push_str(&format!(
         "  Overall risk: {:?}\n",
-        diff.risk_assessment.overall_risk
+        diff.risk_assessment.level
     ));
     output.push_str(&format!(
-        "  API risk: {:?}\n",
-        diff.risk_assessment.api_risk
+        "  Requires approval: {:?}\n",
+        diff.risk_assessment.requires_approval
     ));
     output.push_str(&format!(
-        "  Auth risk: {:?}\n",
-        diff.risk_assessment.auth_risk
+        "  Can override: {:?}\n",
+        diff.risk_assessment.can_override
     ));
     output.push_str(&format!(
-        "  Database risk: {:?}\n",
-        diff.risk_assessment.database_risk
-    ));
-    output.push_str(&format!(
-        "  Dependency risk: {:?}\n",
-        diff.risk_assessment.dependency_risk
-    ));
-    output.push_str(&format!(
-        "  Config risk: {:?}\n",
-        diff.risk_assessment.config_risk
-    ));
-    output.push_str(&format!(
-        "  Requires review: {}\n",
-        diff.risk_assessment.requires_review
+        "  Assessed: {:?}\n",
+        diff.risk_assessment.assessed
     ));
     output.push_str(&format!(
         "  Requires approval: {}\n\n",
@@ -1076,7 +1104,7 @@ pub fn format_semantic_diff_report(diff: &SemanticDiff) -> String {
     if !diff.risk_assessment.reasons.is_empty() {
         output.push_str("Risk Reasons:\n");
         for reason in &diff.risk_assessment.reasons {
-            output.push_str(&format!("  - {}\n", reason));
+            output.push_str(&format!("  - {}\n", reason.description));
         }
         output.push('\n');
     }
@@ -1153,7 +1181,7 @@ pub fn format_semantic_diff_report(diff: &SemanticDiff) -> String {
 }
 
 pub fn has_breaking_changes(diff: &SemanticDiff) -> bool {
-    diff.summary.breaking_changes > 0 || diff.risk_assessment.overall_risk >= RiskLevel::High
+    diff.summary.breaking_changes > 0 || diff.risk_assessment.level >= crate::harness::risk::RiskLevel::High
 }
 
 pub fn requires_approval(diff: &SemanticDiff) -> bool {
@@ -1161,7 +1189,7 @@ pub fn requires_approval(diff: &SemanticDiff) -> bool {
 }
 
 pub fn requires_security_review(diff: &SemanticDiff) -> bool {
-    diff.risk_assessment.auth_risk >= RiskLevel::High
+    diff.risk_assessment.level >= crate::harness::risk::RiskLevel::High
         || diff.summary.security_relevant_changes > 0
-        || diff.risk_assessment.overall_risk == RiskLevel::Critical
+        || diff.risk_assessment.level == crate::harness::risk::RiskLevel::Critical
 }
