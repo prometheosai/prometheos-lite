@@ -19,7 +19,7 @@ use crate::harness::{
     trajectory::Trajectory,
     validation::{run_validation, ValidationPlan},
 };
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::task::JoinSet;
