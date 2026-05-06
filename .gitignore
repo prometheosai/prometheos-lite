@@ -36,3 +36,4 @@ prometheos-output/
 
 # Database files
 *.db
+*.txt
