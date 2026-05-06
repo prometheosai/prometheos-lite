@@ -489,6 +489,10 @@ pub fn create_evidence_from_components(
     risk: &RiskAssessment,
     semantic: &SemanticDiff,
     confidence: &ConfidenceScore,
+    git_checkpoint_available: bool,
+    rollback_available: bool,
+    time_limit_respected: bool,
+    step_limit_respected: bool,
 ) -> CompletionEvidence {
     let review_evidence = ReviewEvidence {
         review_performed: true,
@@ -621,12 +625,12 @@ pub fn create_evidence_from_components(
         semantic_evidence,
         confidence_evidence,
         process_evidence: ProcessEvidence {
-            git_checkpoint_created: false,
-            rollback_available: false,
-            all_phases_completed: true,
-            no_critical_errors: true,
-            time_limit_respected: true,
-            step_limit_respected: true,
+            git_checkpoint_created: git_checkpoint_available,
+            rollback_available: rollback_available,
+            all_phases_completed: validation.validation_performed && review.review_performed,
+            no_critical_errors: validation.all_validations_passed && review.review_passed,
+            time_limit_respected: time_limit_respected,
+            step_limit_respected: step_limit_respected,
         },
         patch_exists: patch.patch_created,
         validation_ran: true,
@@ -637,6 +641,57 @@ pub fn create_evidence_from_components(
         verification_strength: crate::harness::verification::VerificationStrength::Tests,
         requires_approval: risk.requires_approval,
         decision_factors: vec![],
-        evidence_completeness: 0.8,
+        evidence_completeness: calculate_evidence_completeness(validation, review, risk),
+    }
+}
+
+/// P0-4 FIX: Calculate evidence completeness from actual validation, review, and risk results
+/// This replaces the hardcoded 0.8 value with real evidence assessment
+fn calculate_evidence_completeness(
+    validation: &ValidationResult,
+    review: &ReviewReport,
+    risk: &RiskAssessment,
+) -> f32 {
+    let mut completeness = 0.0;
+    let mut total_weight = 0.0;
+    
+    // Validation evidence (40% weight)
+    if validation.validation_performed {
+        completeness += 0.4;
+        if validation.passed {
+            completeness += 0.1; // Bonus for passing validation
+        }
+    }
+    total_weight += 0.5;
+    
+    // Review evidence (30% weight)
+    if review.review_performed {
+        completeness += 0.3;
+        if review.passed {
+            completeness += 0.1; // Bonus for passing review
+        }
+    }
+    total_weight += 0.4;
+    
+    // Risk assessment (20% weight)
+    if risk.assessed {
+        completeness += 0.2;
+        if !risk.requires_approval {
+            completeness += 0.05; // Bonus for low risk
+        }
+    }
+    total_weight += 0.25;
+    
+    // Command execution evidence (10% weight)
+    if !validation.command_results.is_empty() {
+        completeness += 0.1;
+    }
+    total_weight += 0.1;
+    
+    // Normalize by total weight used
+    if total_weight > 0.0 {
+        (completeness / total_weight as f32).min(1.0)
+    } else {
+        0.0
     }
 }
