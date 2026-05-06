@@ -32,8 +32,8 @@ impl Default for SemanticDiff {
                 reasons: Vec::new(),
                 requires_approval: false,
                 can_override: false,
-                override_conditions: Vec::new(),
-                assessed: false,
+                override_conditions: vec![],
+                assessed: false, // Default construction - not actually assessed
             },
             summary: SemanticSummary::default(),
         }

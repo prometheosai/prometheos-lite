@@ -628,7 +628,7 @@ pub fn create_evidence_from_components(
             git_checkpoint_created: git_checkpoint_available,
             rollback_available: rollback_available,
             all_phases_completed: validation.validation_performed && review.review_performed,
-            no_critical_errors: validation.all_validations_passed && review.review_passed,
+            no_critical_errors: validation.passed && review.passed,
             time_limit_respected: time_limit_respected,
             step_limit_respected: step_limit_respected,
         },
