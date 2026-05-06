@@ -518,6 +518,28 @@ pub async fn execute_harness_task(
         &req.acceptance_criteria
     });
 
+    // P0-FIX: Build real PatchProviderContext with task, requirements, RepoMap, files, symbols
+    // This ensures the LLM provider receives rich context instead of empty defaults
+    let real_provider_context = Some(crate::harness::patch_provider::PatchProviderContext {
+        task: req.task.clone(),
+        requirements: req.requirements.clone(),
+        repo_map: Some(repo.repo_map.clone()),
+        mentioned_files: req.mentioned_files.clone(),
+        mentioned_symbols: req.mentioned_symbols.clone(),
+        attempt_history: vec![],
+        validation_output: None,
+        review_issues: vec![],
+        max_candidates: req.limits.max_patch_attempts as usize,
+    });
+
+    tracing::info!(
+        trace_id = %trace_id,
+        repo_files = repo.repo_map.files.len(),
+        mentioned_files_count = req.mentioned_files.len(),
+        mentioned_symbols_count = req.mentioned_symbols.len(),
+        "P0-1: Built real PatchProviderContext with rich repository context"
+    );
+
     // Determine which edits to use: provided edits or generate from provider
     let selected_edits = if req.proposed_edits.is_empty() {
         // Try to generate candidates using patch provider
@@ -531,7 +553,7 @@ pub async fn execute_harness_task(
             let _enter = provider_span.enter();
 
             let provider_req = ProviderGenerateRequest {
-                context: req.provider_context.clone().unwrap_or_default(),
+                context: real_provider_context.clone().unwrap(),
                 preferred_strategies: vec!["search_replace".into(), "whole_file".into()],
             };
 
@@ -568,17 +590,8 @@ pub async fn execute_harness_task(
                         })
                         .collect();
 
-                    // Create validation plan for AttemptPool
-                    let validation_plan = ValidationPlan {
-                        format_commands: vec![],
-                        lint_commands: vec!["cargo check".into()],
-                        test_commands: vec!["cargo test --lib".into()],
-                        repro_commands: vec![],
-                        timeout_ms: Some(120000),
-                        parallel: true,
-                        tool_ids: vec![],
-                        disable_cache: false,
-                    };
+                    // P0-6 FIX: Use environment-derived validation plan instead of hardcoded Rust commands
+                    let validation_plan = ValidationPlan::default_for_repo(&env);
 
                     // P1-010: Child span for AttemptPool evaluation phase
                     let attempt_pool_span = tracing::info_span!(
@@ -649,7 +662,7 @@ pub async fn execute_harness_task(
             evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
-                trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
+                trace_id: Some(trace_id.clone()),
                 repo_context: repo,
                 environment: env,
                 file_set: files,
@@ -719,7 +732,7 @@ pub async fn execute_harness_task(
         evidence_log.complete();
         return Ok(HarnessExecutionResult {
             work_context_id: req.work_context_id,
-            trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
+            trace_id: Some(trace_id.clone()),
             repo_context: repo,
             environment: env,
             file_set: files,
@@ -919,8 +932,41 @@ pub async fn execute_harness_task(
         return create_terminated_result(&req, started.elapsed().as_millis() as u64, &reason, &ctx);
     }
 
-    // STEP 2: Generate diff for review and semantic analysis
-    let diff = generate_diff_from_edits(&selected_edits);
+    // STEP 2: Generate REAL diff for review and semantic analysis
+    // P0-2 FIX: Compute actual diff from workspace changes, not synthetic from edits
+    let diff = {
+        // Create a temporary workspace to apply edits and compute real diff
+        let temp_workspace_root = req.repo_root.join(format!("prometheos_temp_diff_{}", uuid::Uuid::new_v4()));
+        let temp_workspace_result = TempWorkspace::create_temp_copy(
+            &req.repo_root,
+            &selected_edits,
+            &files,
+            &policy,
+        ).await;
+        
+        match temp_workspace_result {
+            Ok((temp_workspace, _patch_result)) => {
+                let real_diff = match compute_real_workspace_diff(&req.repo_root, &temp_workspace.root).await {
+                    Ok(diff) => {
+                        tracing::info!(trace_id = %trace_id, "P0-2: Computed real workspace diff with {} characters", diff.len());
+                        diff
+                    }
+                    Err(e) => {
+                        tracing::warn!(trace_id = %trace_id, "Failed to compute real diff, falling back to synthetic: {}", e);
+                        generate_diff_from_edits(&selected_edits)
+                    }
+                };
+                
+                // Cleanup temp workspace
+                let _ = temp_workspace.cleanup().await;
+                real_diff
+            }
+            Err(e) => {
+                tracing::warn!(trace_id = %trace_id, "Failed to create temp workspace for diff, falling back to synthetic: {}", e);
+                generate_diff_from_edits(&selected_edits)
+            }
+        }
+    };
 
     // P1-010: Child span for review phase
     let review_span = tracing::info_span!(
@@ -1066,7 +1112,7 @@ pub async fn execute_harness_task(
             evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
-                trace_id: Some(crate::harness::observability::otel::generate_trace_id()),
+                trace_id: Some(trace_id.clone()),
                 repo_context: repo,
                 environment: env,
                 file_set: files,
@@ -1199,12 +1245,15 @@ pub async fn execute_harness_task(
         let val_start = Instant::now();
         let result = {
             let _enter = validation_span.enter();
-            let r = run_validation(val_root, &plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
+            // P0-7 FIX: Use fresh validation plan with cache disabled for final validation
+            let fresh_plan = plan.clone().with_no_cache();
+            let r = run_validation(val_root, &fresh_plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
             tracing::info!(
                 trace_id = %trace_id,
                 passed = r.passed,
                 commands_run = r.command_results.len(),
-                "P1-010: Validation complete"
+                cache_disabled = fresh_plan.disable_cache,
+                "P0-7: Fresh validation complete (no cache)"
             );
             r
         };
@@ -1524,11 +1573,11 @@ pub async fn execute_harness_task(
         },
         process_evidence: ProcessEvidence {
             git_checkpoint_created: checkpoint.is_some(),
-            rollback_available: checkpoint.is_some(),
-            all_phases_completed: true,
-            no_critical_errors: failures.is_empty(),
-            time_limit_respected: true,
-            step_limit_respected: true,
+            rollback_available: rollback_handle.is_some(),
+            all_phases_completed: trajectory.completed,
+            no_critical_errors: failures.iter().all(|f| !f.is_critical()),
+            time_limit_respected: true, // TODO: Pass actual time limit status from metrics
+            step_limit_respected: true, // TODO: Pass actual step limit status from metrics
         },
 
         // Legacy fields
@@ -1545,7 +1594,13 @@ pub async fn execute_harness_task(
 
         // Decision metadata
         decision_factors: vec!["harness execution completed".into()],
-        evidence_completeness: 1.0,
+        evidence_completeness: calculate_evidence_completeness_from_state(
+            validation.as_ref(),
+            &review_issues,
+            &risk,
+            checkpoint.is_some(),
+            rollback_handle.is_some(),
+        ),
     };
 
     let decision = evaluate_completion(&evidence, req.mode)?;
@@ -1566,8 +1621,6 @@ pub async fn execute_harness_task(
     traj.complete();
 
     metrics.total_duration_ms = started.elapsed().as_millis() as u64;
-
-    let trace_id = crate::harness::observability::otel::generate_trace_id();
 
     // Complete the evidence log
     evidence_log.complete();
@@ -1727,7 +1780,112 @@ pub fn check_resource_limits(
     Ok(())
 }
 
-/// Generate a unified diff representation from edit operations for review purposes
+/// P0-2 FIX: Compute real workspace diff by comparing before/after workspaces
+/// This replaces synthetic diff generation with actual file comparison
+async fn compute_real_workspace_diff(
+    original_repo: &std::path::Path,
+    modified_workspace: &std::path::Path,
+) -> Result<String> {
+    use std::process::Command;
+    
+    // Use git diff --no-index to compute real diff between directories
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--no-index",
+            "--unified=3",
+            original_repo.to_str().ok_or_else(|| anyhow::anyhow!("Invalid original repo path"))?,
+            modified_workspace.to_str().ok_or_else(|| anyhow::anyhow!("Invalid workspace path"))?,
+        ])
+        .output()
+        .context("Failed to run git diff --no-index")?;
+
+    if !output.status.success() {
+        // git diff --no-index returns exit code 1 when differences are found
+        // but still provides valid diff output
+        if output.status.code() == Some(1) {
+            return Ok(String::from_utf8(output.stdout)
+                .context("Diff output is not valid UTF-8")?);
+        } else {
+            let stderr = String::from_utf8(output.stderr)
+                .unwrap_or_else(|_| "Invalid UTF-8".to_string());
+            bail!("Git diff failed: {}", stderr);
+        }
+    }
+
+    Ok(String::from_utf8(output.stdout)
+        .context("Diff output is not valid UTF-8")?)
+}
+
+/// P0-4 FIX: Calculate evidence completeness from actual execution state
+fn calculate_evidence_completeness_from_state(
+    validation: Option<&crate::harness::validation::ValidationResult>,
+    review_issues: &[crate::harness::review::ReviewIssue],
+    risk: &crate::harness::risk::RiskAssessment,
+    checkpoint_available: bool,
+    rollback_available: bool,
+) -> f32 {
+    let mut completeness = 0.0;
+    let mut total_weight = 0.0;
+    
+    // Validation evidence (30% weight)
+    if let Some(v) = validation {
+        if v.validation_performed {
+            completeness += 0.3;
+            if v.passed {
+                completeness += 0.1; // Bonus for passing validation
+            }
+        }
+        total_weight += 0.4;
+    } else {
+        total_weight += 0.4;
+    }
+    
+    // Review evidence (25% weight)
+    if !review_issues.is_empty() {
+        completeness += 0.25;
+        let critical_count = review_issues.iter().filter(|i| i.severity == crate::harness::review::ReviewSeverity::Critical).count();
+        if critical_count == 0 {
+            completeness += 0.05; // Bonus for no critical issues
+        }
+    }
+    total_weight += 0.3;
+    
+    // Risk assessment (20% weight)
+    if risk.assessed {
+        completeness += 0.2;
+        if !risk.requires_approval {
+            completeness += 0.05; // Bonus for low risk
+        }
+    }
+    total_weight += 0.25;
+    
+    // Safety infrastructure (15% weight)
+    if checkpoint_available {
+        completeness += 0.1;
+    }
+    if rollback_available {
+        completeness += 0.05;
+    }
+    total_weight += 0.15;
+    
+    // Command execution evidence (10% weight)
+    if let Some(v) = validation {
+        if !v.command_results.is_empty() {
+            completeness += 0.1;
+        }
+    }
+    total_weight += 0.1;
+    
+    // Normalize by total weight used
+    if total_weight > 0.0 {
+        (completeness / total_weight as f32).min(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Generate a unified diff representation from edit operations for review purposes (fallback only)
 fn generate_diff_from_edits(edits: &[EditOperation]) -> String {
     use std::fmt::Write;
 
