@@ -41,12 +41,6 @@ impl ValidationPlan {
         }
     }
 
-    /// P1-008: Disable validation cache for this plan
-    pub fn with_no_cache(mut self) -> Self {
-        self.disable_cache = true;
-        self
-    }
-
     pub fn sequential(mut self) -> Self {
         self.parallel = false;
         self
@@ -72,6 +66,12 @@ impl ValidationPlan {
             }
         }
         commands
+    }
+
+    /// P0-7 FIX: Create validation plan with cache disabled for fresh validation
+    pub fn with_no_cache(mut self) -> Self {
+        self.disable_cache = true;
+        self
     }
 
     /// P1-009: Build validation plan from RuntimeToolRegistry for environment
@@ -110,6 +110,8 @@ pub struct ValidationResult {
     pub cached: bool,
     pub flaky_tests_detected: Vec<FlakyTestInfo>,
     pub category_results: HashMap<ValidationCategory, CategoryResult>,
+    // P0-4 FIX: Add validation_performed field for completion evidence
+    pub validation_performed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -575,6 +577,8 @@ pub async fn run_validation_with_cache(
         cached,
         flaky_tests_detected: flaky_tests,
         category_results,
+        // P0-4 FIX: Add validation_performed field for completion evidence
+        validation_performed: true,
     })
 }
 

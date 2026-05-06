@@ -191,19 +191,32 @@ async fn evaluate_single_candidate(
         }
     };
 
-    // Step 2: Review the patch
-    let diff = generate_diff_from_edits(&edits);
+    // Step 2: Review the patch using REAL diff from workspace changes
+    let diff = match compute_real_workspace_diff(&repo_root, &workspace.root).await {
+        Ok(real_diff) => {
+            tracing::debug!("Computed real workspace diff with {} characters", real_diff.len());
+            real_diff
+        }
+        Err(e) => {
+            tracing::warn!("Failed to compute real diff, falling back to synthetic: {}", e);
+            generate_diff_from_edits(&edits)
+        }
+    };
     let review_issues = review_diff(&diff);
 
-    // Step 3: Risk assessment
+    // Step 3: Risk assessment using real diff
     let semantic = analyze_semantic_diff(&diff);
     let risk = assess_risk(&semantic, &review_issues);
 
-    // Step 4: Run validation
+    // Step 4: Run validation using runtime factory (P0-5 FIX)
+    let sandbox_runtime = crate::harness::sandbox::SandboxRuntimeFactory::create(
+        false, // prefer_docker - can be made configurable later
+        None,  // image - can be made configurable later
+    ).await;
     let validation = run_validation(
         &workspace.root,
         &validation_plan,
-        Arc::new(crate::harness::sandbox::LocalSandboxRuntime::default()),
+        sandbox_runtime, // P0-5 FIX: Use runtime factory result directly
     )
     .await
     .ok();
@@ -278,7 +291,44 @@ fn compute_attempt_score(record: &AttemptRecord) -> f32 {
     }
 }
 
-/// Generate diff from edits for review
+/// P0-2 FIX: Compute real workspace diff by comparing before/after workspaces
+/// This replaces synthetic diff generation with actual file comparison
+async fn compute_real_workspace_diff(
+    original_repo: &std::path::Path,
+    modified_workspace: &std::path::Path,
+) -> Result<String> {
+    use std::process::Command;
+    
+    // Use git diff --no-index to compute real diff between directories
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--no-index",
+            "--unified=3",
+            original_repo.to_str().ok_or_else(|| anyhow::anyhow!("Invalid original repo path"))?,
+            modified_workspace.to_str().ok_or_else(|| anyhow::anyhow!("Invalid workspace path"))?,
+        ])
+        .output()
+        .context("Failed to run git diff --no-index")?;
+
+    if !output.status.success() {
+        // git diff --no-index returns exit code 1 when differences are found
+        // but still provides valid diff output
+        if output.status.code() == Some(1) {
+            return Ok(String::from_utf8(output.stdout)
+                .context("Diff output is not valid UTF-8")?);
+        } else {
+            let stderr = String::from_utf8(output.stderr)
+                .unwrap_or_else(|_| "Invalid UTF-8".to_string());
+            bail!("Git diff failed: {}", stderr);
+        }
+    }
+
+    Ok(String::from_utf8(output.stdout)
+        .context("Diff output is not valid UTF-8")?)
+}
+
+/// Generate diff from edits for review (fallback only)
 fn generate_diff_from_edits(edits: &[EditOperation]) -> String {
     use crate::harness::edit_protocol::EditOperation;
 
