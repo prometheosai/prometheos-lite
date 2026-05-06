@@ -77,6 +77,8 @@ pub enum ArtifactKind {
     Other,
     // V1.4 artifact types
     CodePatch,
+    // P0-8 FIX: EvidenceLog as first-class artifact
+    EvidenceLog,
     TestResult,
     Diff,
     CommandOutput,
