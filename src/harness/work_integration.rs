@@ -109,7 +109,7 @@ impl HarnessWorkContextService {
         );
 
         // P0-FIX: Build request with config provider auto-resolution
-        let req = HarnessExecutionRequest {
+        let mut req = HarnessExecutionRequest {
             work_context_id: ctx.id.clone(),
             repo_root: repo_root.clone(),
             task: ctx.goal.clone(),
@@ -125,7 +125,7 @@ impl HarnessWorkContextService {
             mentioned_symbols: mentioned_symbols.clone(),
             proposed_edits: proposed_edits.clone(),
             patch_provider: None,
-            provider_context: None,
+            provider_context: None, // Will be set after repo analysis in execution loop
             progress_callback: None,
             validation_failure_policy: crate::harness::ValidationFailurePolicy::default(),
         }
@@ -149,6 +149,19 @@ impl HarnessWorkContextService {
 
         let result = execute_harness_task(req).await?;
         ctx.metadata = serde_json::json!({"harness":serde_json::to_value(&result)?});
+        
+        // P0-8 FIX: Persist EvidenceLog as first-class artifact
+        let evidence_log_artifact = Artifact::new(
+            uuid::Uuid::new_v4().to_string(),
+            ctx.id.clone(),
+            ArtifactKind::EvidenceLog,
+            "evidence-log".to_string(),
+            serde_json::to_value(&result.evidence_log)?,
+            "harness".into(),
+        );
+        self.work_context_service.add_artifact(&mut ctx, evidence_log_artifact)?;
+        
+        // Persist other harness artifacts
         for h in &result.artifacts {
             let context_id = ctx.id.clone();
             let artifact = Artifact::new(
