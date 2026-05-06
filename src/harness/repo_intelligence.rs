@@ -105,6 +105,7 @@ pub struct RepoContext {
     pub token_estimate: usize,
     pub language_breakdown: HashMap<String, usize>,
     pub dependency_graph: DependencyGraph,
+    pub repo_map: RepoMap,
 }
 
 /// P0-1 FIX: Create separate RepoMap struct for PatchProviderContext
@@ -261,13 +262,13 @@ pub async fn build_repo_context(
 
     Ok(RepoContext {
         root,
-        ranked_files,
-        symbols: all_symbols,
-        relationships: all_relationships,
-        compressed_context,
+        ranked_files: ranked_files.clone(),
+        symbols: all_symbols.clone(),
+        relationships: all_relationships.clone(),
+        compressed_context: compressed_context.clone(),
         token_estimate,
-        language_breakdown,
-        dependency_graph,
+        language_breakdown: language_breakdown.clone(),
+        dependency_graph: dependency_graph.clone(),
         // P0-1 FIX: Add repo_map field for PatchProviderContext
         repo_map: RepoMap {
             files: ranked_files,
@@ -1729,13 +1730,22 @@ pub async fn build_repo_context_with_cache(
 
     let context = RepoContext {
         root: root.to_path_buf(),
-        ranked_files,
-        symbols: all_symbols,
-        relationships: all_relationships,
-        compressed_context,
+        ranked_files: ranked_files.clone(),
+        symbols: all_symbols.clone(),
+        relationships: all_relationships.clone(),
+        compressed_context: compressed_context.clone(),
         token_estimate,
-        language_breakdown,
-        dependency_graph,
+        language_breakdown: language_breakdown.clone(),
+        dependency_graph: dependency_graph.clone(),
+        repo_map: RepoMap {
+            files: ranked_files,
+            symbols: all_symbols,
+            relationships: all_relationships,
+            compressed_context,
+            token_estimate,
+            language_breakdown,
+            dependency_graph,
+        },
     };
 
     // Save cache if enabled
