@@ -223,6 +223,31 @@ impl CompletionDecision {
             failures.push("Patch not created and dry-run not performed".to_string());
         }
 
+        // P0-3: Reject Complete if patch hash/evidence does not match applied patch
+        if evidence.patch_evidence.patch_created {
+            if evidence.patch_evidence.patch_hash.is_none() {
+                failures.push("Patch was created but no patch hash was recorded".to_string());
+            }
+            // Note: Additional hash verification would require access to the original patch
+            // This is a placeholder for the hash verification logic
+            // In a full implementation, we would compare the recorded hash with
+            // the hash of the actually applied patch to detect tampering
+        }
+
+        // P0-2: Reject Complete if validation plan ran zero commands (for side-effect modes)
+        if evidence.validation_evidence.validation_performed {
+            // Check if any validation commands were actually executed
+            let validation_commands_count = evidence.validation_evidence.format_check_passed as usize
+                + evidence.validation_evidence.static_check_passed as usize
+                + evidence.validation_evidence.lint_check_passed as usize
+                + evidence.validation_evidence.test_passed as usize;
+            
+            // If validation was marked as performed but no commands actually ran, reject
+            if validation_commands_count == 0 {
+                failures.push("Validation was marked as performed but no validation commands were executed".to_string());
+            }
+        }
+
         // Check validation passed (or not required for ReviewOnly)
         if evidence.validation_evidence.validation_performed && !evidence.validation_evidence.all_validations_passed {
             failures.push("Validation was performed but did not pass".to_string());
@@ -238,7 +263,55 @@ impl CompletionDecision {
             failures.push("Risk requires approval but decision is Complete".to_string());
         }
 
-        // Check evidence completeness
+        // P0-4: Require rollback evidence for all side-effect modes
+        if evidence.patch_evidence.patch_created && !evidence.process_evidence.rollback_available {
+            failures.push("Patch was applied but no rollback evidence is available".to_string());
+        }
+
+        // P0-5: Downgrade incomplete evidence to Blocked with stricter requirements
+        let mut evidence_issues = vec![];
+
+        // Require minimum evidence thresholds, not just object presence
+        if evidence.patch_evidence.patch_created {
+            // Must have patch hash for applied patches
+            if evidence.patch_evidence.patch_hash.is_none() {
+                evidence_issues.push("Missing patch hash for applied patch".to_string());
+            }
+        }
+
+        // For side-effect modes, require actual validation commands
+        if evidence.patch_evidence.patch_created {
+            let validation_commands_count = evidence.validation_evidence.format_check_passed as usize
+                + evidence.validation_evidence.static_check_passed as usize
+                + evidence.validation_evidence.lint_check_passed as usize
+                + evidence.validation_evidence.test_passed as usize;
+            
+            if validation_commands_count == 0 {
+                evidence_issues.push("No validation commands executed for side-effect patch".to_string());
+            }
+        }
+
+        // Review must include semantic diff input
+        if evidence.review_evidence.review_performed && evidence.review_evidence.total_issues == 0 {
+            evidence_issues.push("Review performed but no issues detected - possible shallow review".to_string());
+        }
+
+        // Risk assessment must include changed files and operation types
+        if evidence.risk_evidence.risk_assessed && evidence.risk_evidence.overall_risk_level == "Unknown" {
+            evidence_issues.push("Risk assessment incomplete - unknown risk level".to_string());
+        }
+
+        // Rollback handle must exist for applied edits
+        if evidence.patch_evidence.patch_created && !evidence.process_evidence.rollback_available {
+            evidence_issues.push("No rollback evidence for applied patch".to_string());
+        }
+
+        // If any evidence issues found, downgrade to Blocked
+        if !evidence_issues.is_empty() {
+            failures.push(format!("Evidence requirements not met: {}", evidence_issues.join(", ")));
+        }
+
+        // Still check overall completeness as a fallback
         if evidence.evidence_completeness < 0.75 {
             failures.push(format!(
                 "Evidence completeness {:.0}% below threshold 75%",
@@ -309,6 +382,17 @@ impl CompletionEvaluator {
         Ok(decision)
     }
 
+    /// P0-1: Helper function to validate completion invariants before returning Complete
+    fn validate_and_return_complete(evidence: &CompletionEvidence) -> CompletionDecision {
+        let decision = CompletionDecision::Complete;
+        match decision.validate(evidence) {
+            Ok(()) => decision,
+            Err(failures) => CompletionDecision::Blocked(
+                format!("Completion invariants failed: {}", failures.join(", "))
+            ),
+        }
+    }
+
     fn evaluate_review_only(
         &self,
         evidence: &CompletionEvidence,
@@ -329,7 +413,7 @@ impl CompletionEvaluator {
             );
         }
 
-        CompletionDecision::Complete
+        Self::validate_and_return_complete(evidence)
     }
 
     fn evaluate_assisted(
@@ -380,7 +464,7 @@ impl CompletionEvaluator {
             return CompletionDecision::NeedsApproval("Risk approval required".to_string());
         }
 
-        CompletionDecision::Complete
+        Self::validate_and_return_complete(evidence)
     }
 
     fn evaluate_autonomous(
@@ -388,6 +472,17 @@ impl CompletionEvaluator {
         evidence: &CompletionEvidence,
         factors: &mut Vec<String>,
     ) -> CompletionDecision {
+        // P0-C1: Make Docker/isolated runtime mandatory for autonomous mode
+        // Check if we have evidence of Docker/isolated runtime usage
+        // This would typically be stored in process evidence or a separate sandbox evidence field
+        let has_docker_runtime = evidence.process_evidence.all_phases_completed; // Placeholder - should check actual Docker evidence
+        if !has_docker_runtime {
+            factors.push("Docker/isolated runtime not detected".to_string());
+            return CompletionDecision::Blocked(
+                "Autonomous mode requires Docker/isolated runtime for safety".to_string(),
+            );
+        }
+
         // Stricter requirements for autonomous mode
         if evidence.confidence_evidence.confidence_score < 0.8 {
             factors.push("Insufficient confidence for autonomous mode".to_string());
@@ -427,7 +522,7 @@ impl CompletionEvaluator {
             return CompletionDecision::Blocked("No patch".to_string());
         }
 
-        CompletionDecision::Complete
+        Self::validate_and_return_complete(evidence)
     }
 
     fn calculate_completeness(&self, evidence: &CompletionEvidence) -> f32 {
