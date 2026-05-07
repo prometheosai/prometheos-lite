@@ -128,8 +128,13 @@ impl HarnessWorkContextService {
             provider_context: None, // Will be set after repo analysis in execution loop
             progress_callback: None,
             validation_failure_policy: crate::harness::ValidationFailurePolicy::default(),
-        }
-        .with_config_provider(); // P0-FIX: Auto-create provider from config
+        };
+        
+        // P0-B5: Make provider resolution errors explicit instead of swallowed
+        let req = req.with_config_provider().map_err(|e| {
+            tracing::error!("P0-B5: Provider resolution failed: {}", e);
+            e
+        })?;
 
         // P0-FIX: Record provider resolution
         if req.patch_provider.is_some() {
