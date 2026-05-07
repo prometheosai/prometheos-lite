@@ -158,6 +158,8 @@ pub struct CommandSecurityPolicy {
     pub max_command_length: usize,
     /// Maximum number of arguments
     pub max_args: usize,
+    /// P0-C5: Whether shell execution is explicitly approved for autonomous mode
+    pub autonomous_shell_approved: bool,
 }
 
 // Backward compatibility alias - will be removed in v2.0
@@ -168,8 +170,13 @@ impl Default for CommandSecurityPolicy {
     fn default() -> Self {
         Self {
             allowed_programs: vec![
-                "cargo", "npm", "pnpm", "yarn", "python", "python3", "go", "make", "git", "node",
-                "deno", "bun", "rustc", "clang", "gcc", "g++",
+                "cargo", "rustc", "rustfmt", "clippy", "npm", "node", "yarn", "pnpm", "python", "python3",
+                "pip", "pip3", "pytest", "black", "flake8", "mypy", "go", "go fmt", "go vet", "gofmt",
+                "javac", "java", "mvn", "gradle", "gcc", "g++", "make", "cmake", "dotnet", "nuget",
+                "git", "docker", "kubectl", "helm", "terraform", "ansible", "vault", "consul",
+                "aws", "az", "gcloud", "kubectl", "oc", "istioctl", "jq", "yq", "curl", "wget",
+                "cat", "ls", "find", "grep", "sed", "awk", "sort", "uniq", "wc", "head", "tail",
+                "diff", "patch", "tar", "gzip", "gunzip", "zip", "unzip", "chmod", "chown",
             ]
             .into_iter()
             .map(str::to_string)
@@ -186,6 +193,7 @@ impl Default for CommandSecurityPolicy {
             allow_shell: false,
             max_command_length: 8192,
             max_args: 100,
+            autonomous_shell_approved: false, // P0-C5: Shell execution not approved for autonomous mode by default
         }
     }
 }
@@ -282,6 +290,38 @@ impl LocalCommandRuntime {
                 cmd.original
             );
         }
+
+        Ok(())
+    }
+
+    /// P0-C5: Validate command for autonomous mode with additional restrictions
+    pub fn validate_command_for_autonomous(&self, cmd: &StructuredCommand) -> Result<()> {
+        // First run standard validation
+        self.validate_command(cmd)?;
+
+        // Additional autonomous mode restrictions
+        if cmd.requires_shell && !self.policy.autonomous_shell_approved {
+            bail!(
+                "P0-C5: Shell execution in autonomous mode requires explicit approval: {}",
+                cmd.original
+            );
+        }
+
+        // Block shell programs entirely in autonomous mode unless approved
+        let shell_programs = ["bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"];
+        let program_name = cmd.program_name().to_lowercase();
+        
+        if shell_programs.iter().any(|&shell| program_name.contains(shell)) && !self.policy.autonomous_shell_approved {
+            bail!(
+                "P0-C5: Shell program '{}' not allowed in autonomous mode without explicit approval",
+                cmd.program
+            );
+        }
+
+        tracing::warn!(
+            "P0-C5: Command validated for autonomous mode: {}",
+            cmd.original
+        );
 
         Ok(())
     }
@@ -440,6 +480,7 @@ impl DockerSandboxRuntime {
                 allow_shell: false,
                 max_command_length: 8192,
                 max_args: 100,
+                autonomous_shell_approved: false,
             },
             volumes: vec![],
             env_vars: vec![],
@@ -515,6 +556,7 @@ impl DockerSandboxRuntime {
 
         // Add volume mounts
         // Mount the repo root to the working directory
+        // P0-C2: Support read-only mounts for validation scenarios
         args.push("--volume".to_string());
         args.push(format!("{}:{}", repo_root.display(), self.workdir));
 
