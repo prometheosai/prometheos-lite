@@ -46,6 +46,8 @@ pub enum EvidenceEntryKind {
     CompletionEvaluated,
     /// Side effect blocked
     SideEffectBlocked,
+    /// P0-C3: Sandbox backend used for execution
+    SandboxBackendUsed,
     /// User approval requested
     ApprovalRequested,
     /// User approval granted
@@ -508,6 +510,43 @@ impl EvidenceLog {
             span_id: None,
             duration_ms: 0,
             success: passed,
+        };
+        self.add_entry(entry.clone());
+        entry
+    }
+
+    /// P0-C3: Record sandbox backend used for execution
+    pub fn record_sandbox_backend_used(
+        &mut self,
+        backend_type: impl Into<String>,
+        backend_details: impl Into<String>,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
+        let backend_type_str = backend_type.into();
+        let backend_details_str = backend_details.into();
+        
+        let entry = EvidenceEntry {
+            id: format!("{}_sandbox_{}", self.execution_id, self.entries.len()),
+            timestamp: Utc::now(),
+            kind: EvidenceEntryKind::SandboxBackendUsed,
+            description: format!("Sandbox backend used: {}", backend_type_str),
+            input_summary: {
+                let mut map = HashMap::new();
+                map.insert("backend_type".to_string(), backend_type_str);
+                map
+            },
+            output_summary: {
+                let mut map = HashMap::new();
+                map.insert("backend_details".to_string(), backend_details_str);
+                map
+            },
+            command: None,
+            command_result: None,
+            files_touched: Vec::new(),
+            trace_id,
+            span_id: None,
+            duration_ms: 0,
+            success: true,
         };
         self.add_entry(entry.clone());
         entry
