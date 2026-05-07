@@ -11,12 +11,33 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use walkdir::WalkDir;
 
+/// P0-C4: Resource and file limits for temp workspace creation
+#[derive(Debug, Clone)]
+pub struct TempWorkspaceLimits {
+    pub max_files: usize,
+    pub max_size_mb: usize,
+    pub max_subdirectories: usize,
+    pub max_file_size_mb: usize,
+}
+
+impl Default for TempWorkspaceLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 1000,           // Maximum 1000 files
+            max_size_mb: 100,          // Maximum 100MB total
+            max_subdirectories: 50,    // Maximum 50 subdirectories
+            max_file_size_mb: 10,      // Maximum 10MB per file
+        }
+    }
+}
+
 /// A temporary workspace for validation without mutating the real repo
 #[derive(Debug, Clone)]
 pub struct TempWorkspace {
     pub root: PathBuf,
     pub original_root: PathBuf,
     pub strategy: WorkspaceStrategy,
+    pub limits: TempWorkspaceLimits,
 }
 
 impl TempWorkspace {
@@ -27,6 +48,17 @@ impl TempWorkspace {
         file_set: &FileSet,
         policy: &FilePolicy,
     ) -> Result<(Self, PatchResult)> {
+        Self::create_temp_copy_with_limits(original_root, edits, file_set, policy, TempWorkspaceLimits::default()).await
+    }
+
+    /// P0-C4: Create a new temp workspace with explicit resource/file limits
+    pub async fn create_temp_copy_with_limits(
+        original_root: &Path,
+        edits: &[EditOperation],
+        file_set: &FileSet,
+        policy: &FilePolicy,
+        limits: TempWorkspaceLimits,
+    ) -> Result<(Self, PatchResult)> {
         let temp_dir = std::env::temp_dir();
         // Use UUID + timestamp for unique, collision-safe naming
         let workspace_name = format!(
@@ -36,13 +68,16 @@ impl TempWorkspace {
         );
         let temp_root = temp_dir.join(&workspace_name);
 
+        // P0-C4: Check file set against limits before creating workspace
+        Self::check_file_set_limits(file_set, &limits)?;
+
         // Create temp directory
         fs::create_dir_all(&temp_root)
             .await
             .context("Failed to create temp workspace directory")?;
 
-        // Copy relevant files to temp workspace
-        Self::copy_repo_files(original_root, &temp_root, file_set)
+        // Copy relevant files to temp workspace with limits enforcement
+        Self::copy_repo_files_with_limits(original_root, &temp_root, file_set, &limits)
             .await
             .context("Failed to copy repo files to temp workspace")?;
 
@@ -56,9 +91,132 @@ impl TempWorkspace {
             root: temp_root,
             original_root: original_root.to_path_buf(),
             strategy: WorkspaceStrategy::TempCopy,
+            limits,
         };
 
         Ok((workspace, patch_result))
+    }
+
+    /// P0-C4: Check file set against resource limits before workspace creation
+    fn check_file_set_limits(file_set: &FileSet, limits: &TempWorkspaceLimits) -> Result<()> {
+        if file_set.editable.len() > limits.max_files {
+            bail!(
+                "File set exceeds maximum files limit: {} > {}",
+                file_set.editable.len(),
+                limits.max_files
+            );
+        }
+
+        // Check if any file is too large (quick check using metadata)
+        for file_path in &file_set.editable {
+            if let Ok(metadata) = std::fs::metadata(file_path) {
+                let file_size_mb = metadata.len() / (1024 * 1024);
+                if file_size_mb > limits.max_file_size_mb as u64 {
+                    bail!(
+                        "File {} exceeds maximum size limit: {}MB > {}MB",
+                        file_path.display(),
+                        file_size_mb,
+                        limits.max_file_size_mb
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            "P0-C4: File set passed limits check: {} files, max {} allowed",
+            file_set.editable.len(),
+            limits.max_files
+        );
+
+        Ok(())
+    }
+
+    /// P0-C4: Copy relevant files from original repo to temp workspace with limits enforcement
+    async fn copy_repo_files_with_limits(
+        original_root: &Path,
+        temp_root: &Path,
+        file_set: &FileSet,
+        limits: &TempWorkspaceLimits,
+    ) -> Result<()> {
+        let mut files_copied = 0;
+        let mut total_size_mb = 0;
+        let mut subdirectories_created = 0;
+
+        for file_path in &file_set.editable {
+            // Check file count limit
+            if files_copied >= limits.max_files {
+                bail!(
+                    "Reached maximum file limit during copy: {} files",
+                    files_copied
+                );
+            }
+
+            // Normalize path to be relative to original root
+            let relative_path = file_path
+                .strip_prefix(original_root)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|_| {
+                    // If strip_prefix fails, use the original path as relative
+                    file_path.to_path_buf()
+                });
+
+            let target_path = temp_root.join(&relative_path);
+
+            // Create parent directories if needed
+            if let Some(parent) = target_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent).await
+                        .context("Failed to create parent directory in temp workspace")?;
+                    
+                    subdirectories_created += 1;
+                    if subdirectories_created > limits.max_subdirectories {
+                        bail!(
+                            "Reached maximum subdirectory limit during copy: {} directories",
+                            subdirectories_created
+                        );
+                    }
+                }
+            }
+
+            // Copy file with size check
+            let file_size = fs::metadata(file_path).await
+                .context("Failed to get file metadata")?
+                .len();
+            
+            let file_size_mb = file_size / (1024 * 1024);
+            total_size_mb += file_size_mb;
+
+            if total_size_mb > limits.max_size_mb as u64 {
+                bail!(
+                    "Reached maximum total size limit during copy: {}MB > {}MB",
+                    total_size_mb,
+                    limits.max_size_mb
+                );
+            }
+
+            if file_size_mb > limits.max_file_size_mb as u64 {
+                bail!(
+                    "File {} exceeds maximum size limit: {}MB > {}MB",
+                    file_path.display(),
+                    file_size_mb,
+                    limits.max_file_size_mb
+                );
+            }
+
+            fs::copy(file_path, &target_path).await
+                .with_context(|| format!("Failed to copy file {} to temp workspace", file_path.display()))?;
+
+            files_copied += 1;
+        }
+
+        tracing::info!(
+            "P0-C4: Successfully copied {} files ({}MB, {} directories) to temp workspace",
+            files_copied,
+            total_size_mb,
+            subdirectories_created
+        );
+
+        Ok(())
     }
 
     /// Copy relevant files from original repo to temp workspace
