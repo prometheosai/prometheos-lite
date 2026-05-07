@@ -123,21 +123,32 @@ impl HarnessExecutionRequest {
     ///
     /// This is the production entry point for LLM-based patch generation.
     /// Call this before execute_harness_task() to ensure a provider is available.
-    pub fn with_config_provider(mut self) -> Self {
+    /// P0-B5: Make provider resolution errors explicit instead of swallowed
+    pub fn with_config_provider(mut self) -> anyhow::Result<Self> {
         if self.patch_provider.is_none() && self.proposed_edits.is_empty() {
             // Try to load config and create LLM provider
-            if let Ok(config) = crate::config::AppConfig::load() {
-                if let Ok(registry) =
-                    crate::harness::patch_provider::ProviderRegistry::from_config(&config)
-                {
-                    // Store the registry's aggregate provider
-                    // Note: We need to keep the registry alive, so we store it in provider_context
-                    // and use a wrapper that delegates to the registry
-                    self.patch_provider = Some(Box::new(registry));
-                }
-            }
+            let config = crate::config::AppConfig::load().map_err(|e| {
+                anyhow::anyhow!("Failed to load provider config: {}", e)
+            })?;
+            
+            let registry = crate::harness::patch_provider::ProviderRegistry::from_config(&config)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create provider registry from config: {}", e)
+                })?;
+            
+            // Store the registry's aggregate provider
+            // Note: We need to keep the registry alive, so we store it in provider_context
+            // and use a wrapper that delegates to the registry
+            self.patch_provider = Some(Box::new(registry));
+            
+            tracing::info!("P0-B5: Provider successfully resolved from config");
+        } else if self.patch_provider.is_some() {
+            tracing::info!("P0-B5: Provider already available, skipping config resolution");
+        } else {
+            tracing::info!("P0-B5: Proposed edits provided, skipping provider resolution");
         }
-        self
+        
+        Ok(self)
     }
 }
 
@@ -651,8 +662,62 @@ pub async fn execute_harness_task(
 
                     selected_edits
                 }
-                _ => {
-                    // No candidates generated, use empty
+                Ok(response) => {
+                    // P0-B4: Add provider parse failure diagnostics
+                    let diagnostic_info = format!(
+                        "Provider generated {} candidates (expected >0), generation_time_ms: {}, notes: {:?}",
+                        response.candidates.len(),
+                        response.generation_time_ms,
+                        response.provider_notes
+                    );
+                    
+                    tracing::warn!(trace_id = %trace_id, "P0-B4: {}", diagnostic_info);
+                    ctx.record_action("provider", "parse_failure", &diagnostic_info);
+                    
+                    // Check if provider notes contain specific failure patterns
+                    if let Some(ref notes) = response.provider_notes {
+                        if notes.contains("parse") || notes.contains("invalid") || notes.contains("syntax") {
+                            tracing::error!(trace_id = %trace_id, "P0-B4: Provider parse error detected: {}", notes);
+                            ctx.record_action("provider", "parse_error", notes);
+                        } else if notes.contains("timeout") || notes.contains("time") {
+                            tracing::warn!(trace_id = %trace_id, "P0-B4: Provider timeout detected: {}", notes);
+                            ctx.record_action("provider", "timeout", notes);
+                        } else if notes.contains("memory") || notes.contains("resource") {
+                            tracing::warn!(trace_id = %trace_id, "P0-B4: Provider resource issue detected: {}", notes);
+                            ctx.record_action("provider", "resource_error", notes);
+                        }
+                    }
+                    
+                    Vec::new()
+                }
+                Err(e) => {
+                    // P0-B4: Add provider error diagnostics
+                    let error_context = format!(
+                        "Provider generation failed: {} - context: repo_files={}, mentioned_files={}",
+                        e,
+                        repo.repo_map.files.len(),
+                        req.mentioned_files.len()
+                    );
+                    
+                    tracing::error!(trace_id = %trace_id, "P0-B4: {}", error_context);
+                    ctx.record_action("provider", "generation_error", &error_context);
+                    
+                    // Check for specific error patterns
+                    let error_str = e.to_string().to_lowercase();
+                    if error_str.contains("parse") || error_str.contains("syntax") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider parse error in generation");
+                        ctx.record_action("provider", "parse_error", &e.to_string());
+                    } else if error_str.contains("timeout") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider timeout during generation");
+                        ctx.record_action("provider", "timeout", &e.to_string());
+                    } else if error_str.contains("network") || error_str.contains("connection") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider network error during generation");
+                        ctx.record_action("provider", "network_error", &e.to_string());
+                    } else if error_str.contains("model") || error_str.contains("llm") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider model error during generation");
+                        ctx.record_action("provider", "model_error", &e.to_string());
+                    }
+                    
                     Vec::new()
                 }
             }
