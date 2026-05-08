@@ -45,11 +45,15 @@ impl Default for ValidationCacheConfig {
     }
 }
 
-/// P0-Issue3: Validation status to distinguish between passed, failed, and inconclusive
+/// P0-3.1: Validation status to distinguish between passed, failed, and other states
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ValidationStatus {
     Passed,
     Failed,
+    SkippedNoCommands,
+    NotApplicable,
+    TimedOut,
+    Errored,
     Inconclusive,
     SkippedExplicitly,
 }
@@ -198,9 +202,39 @@ pub struct ValidationResult {
 }
 
 impl ValidationResult {
-    /// P0-Issue3: Helper method to check if validation passed (backward compatibility)
+    /// P0-3.1: Helper method to check if validation passed (backward compatibility)
     pub fn passed(&self) -> bool {
         matches!(self.status, ValidationStatus::Passed)
+    }
+
+    /// P0-3.1: Check if validation was skipped due to no commands
+    pub fn skipped_no_commands(&self) -> bool {
+        matches!(self.status, ValidationStatus::SkippedNoCommands)
+    }
+
+    /// P0-3.1: Check if validation is not applicable
+    pub fn not_applicable(&self) -> bool {
+        matches!(self.status, ValidationStatus::NotApplicable)
+    }
+
+    /// P0-3.1: Check if validation timed out
+    pub fn timed_out(&self) -> bool {
+        matches!(self.status, ValidationStatus::TimedOut)
+    }
+
+    /// P0-3.1: Check if validation had an error
+    pub fn errored(&self) -> bool {
+        matches!(self.status, ValidationStatus::Errored)
+    }
+
+    /// P0-3.1: Check if validation can be considered successful for completion
+    pub fn can_complete(&self) -> bool {
+        matches!(self.status, ValidationStatus::Passed)
+    }
+
+    /// P0-3.1: Check if validation was actually performed (not skipped)
+    pub fn was_performed(&self) -> bool {
+        !matches!(self.status, ValidationStatus::SkippedNoCommands | ValidationStatus::NotApplicable)
     }
 
     /// P0-Issue3: Helper method to check if validation failed
@@ -619,6 +653,8 @@ impl ValidationCache {
         }
 
         let mut entries = self.entries.lock().await;
+        let key_clone = key.clone();
+        let category_clone = category.clone();
         entries.insert(
             key,
             CachedResult {
@@ -632,7 +668,7 @@ impl ValidationCache {
         
         tracing::debug!(
             "Cached result for {} (category: {:?}, post_apply: {})",
-            key, category, is_post_apply
+            key_clone, category_clone, is_post_apply
         );
     }
 
@@ -650,7 +686,7 @@ impl ValidationCache {
         let mut total_cache_hits = 0;
         
         for cached in entries.values() {
-            *category_counts.entry(cached.validation_category).or_insert(0) += 1;
+            *category_counts.entry(cached.validation_category.clone()).or_insert(0) += 1;
             total_cache_hits += cached.cache_hit_count;
         }
         
@@ -767,7 +803,7 @@ pub async fn run_validation_with_cache(
         .map(|(cmd, _)| cmd.clone())
         .collect();
 
-    // P0-Issue3: Fix zero-command validation false positives
+    // P0-3.1: Fix zero-command validation false positives with explicit status
     let all_commands: Vec<String> = plan.format_commands
         .iter()
         .chain(plan.lint_commands.iter())
@@ -777,7 +813,7 @@ pub async fn run_validation_with_cache(
         .collect();
 
     let status = if all_commands.is_empty() {
-        ValidationStatus::Inconclusive
+        ValidationStatus::SkippedNoCommands
     } else if errors.is_empty() {
         ValidationStatus::Passed
     } else {
@@ -792,21 +828,30 @@ pub async fn run_validation_with_cache(
         vec![]
     };
 
+    // P0-2.1: Calculate command execution counters before moving results
+    let commands_executed = results.len();
+    
     let command_results: Vec<_> = results.into_iter().map(|(_, r)| r).collect();
 
-    // P0-2.1: Calculate command execution counters
-    let commands_planned = all_commands.len();
-    let commands_executed = results.len();
+    let commands_with_categories: Vec<(String, ValidationCategory)> = plan
+        .format_commands
+        .iter()
+        .map(|c| (c.clone(), ValidationCategory::Format))
+        .chain(plan.lint_commands.iter().map(|c| (c.clone(), ValidationCategory::Lint)))
+        .chain(plan.test_commands.iter().map(|c| (c.clone(), ValidationCategory::Test)))
+        .collect();
+    
+    let commands_planned = commands_with_categories.len();
     let commands_skipped = commands_planned.saturating_sub(commands_executed);
     
     // P0-2.1: Track which categories were actually executed
     let mut categories_executed = Vec::new();
-    for (cmd, _) in &results {
-        // Find the category for this command by looking through all_commands
-        for (_, cat) in &all_commands {
-            if cat.0 == *cmd {
-                if !categories_executed.contains(&cat.1) {
-                    categories_executed.push(cat.1.clone());
+    for result in &command_results {
+        // Find the category for this command by looking through commands_with_categories
+        for (cmd_str, cat) in &commands_with_categories {
+            if cmd_str == &result.command {
+                if !categories_executed.contains(cat) {
+                    categories_executed.push(cat.clone());
                 }
                 break;
             }
@@ -857,7 +902,7 @@ async fn run_parallel(
         let root = root.to_path_buf();
         let cache_key = create_cache_key(&root, &cmd, &file_hashes);
 
-        if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
+        if let Some(cached) = cache.get(&cache_key, &file_hashes, &_cat, false).await {
             cached_results.push((cmd, cached));
         } else {
             // This command needs to run - create a task for it
@@ -910,7 +955,7 @@ async fn run_parallel(
     let mut results = cached_results;
     for task in tasks {
         let (cmd, cache_key, cmd_result, file_hashes) = task.await?;
-        cache.set(cache_key, cmd_result.clone(), file_hashes).await;
+        cache.set(cache_key, cmd_result.clone(), file_hashes, ValidationCategory::Format, false).await;
         results.push((cmd, cmd_result));
     }
 
@@ -932,7 +977,7 @@ async fn run_sequential(
     for (cmd, _cat) in commands {
         let cache_key = create_cache_key(root, cmd, &file_hashes);
 
-        if let Some(cached) = cache.get(&cache_key, &file_hashes).await {
+        if let Some(cached) = cache.get(&cache_key, &file_hashes, _cat, false).await {
             results.push((cmd.clone(), cached));
             continue;
         }
@@ -965,7 +1010,7 @@ async fn run_sequential(
         };
 
         cache
-            .set(cache_key, cmd_result.clone(), file_hashes.clone())
+            .set(cache_key, cmd_result.clone(), file_hashes.clone(), _cat.clone(), false)
             .await;
         results.push((cmd.clone(), cmd_result));
     }
