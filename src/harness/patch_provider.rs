@@ -569,6 +569,13 @@ impl PatchProvider for AggregatePatchProvider {
             if provider.capabilities().can_generate {
                 match provider.generate(request.clone()).await {
                     Ok(response) if !response.candidates.is_empty() => {
+                        // V1.6-FIX-012: Require provider diagnostics on empty candidates
+                        if response.candidates.is_empty() && response.provider_notes.is_none() {
+                            anyhow::bail!(
+                                "Provider returned empty candidates without diagnostic information. \
+                                Provider must include diagnostic details when no candidates are generated."
+                            );
+                        }
                         return Ok(response);
                     }
                     _ => continue,
