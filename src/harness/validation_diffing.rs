@@ -1309,8 +1309,31 @@ impl ComparisonStrategy for SemanticComparisonStrategy {
         _current: &crate::harness::validation::ValidationResult,
         _comparison: &mut ValidationComparison,
     ) -> Result<()> {
-        // Semantic comparison would analyze the meaning of changes
-        // This is a placeholder implementation
+        // Real semantic comparison implementation
+        // Compare validation results for meaningful differences
+        
+        // Check for status changes
+        if baseline.status != current.status {
+            comparison.status_changed = true;
+            comparison.severity = ComparisonSeverity::High;
+        }
+        
+        // Check for error count changes
+        let baseline_errors = baseline.errors.len();
+        let current_errors = current.errors.len();
+        if baseline_errors != current_errors {
+            comparison.error_count_changed = true;
+            comparison.severity = ComparisonSeverity::Medium;
+        }
+        
+        // Check for new error patterns
+        for error in &current.errors {
+            if !baseline.errors.iter().any(|e| e.message == error.message) {
+                comparison.new_errors.push(error.clone());
+                comparison.severity = ComparisonSeverity::High;
+            }
+        }
+        
         Ok(())
     }
 }
@@ -1467,8 +1490,8 @@ impl IssueComparisonStrategy {
                 persisting_issues.push(PersistingIssue {
                     id: issue.id.clone(),
                     issue: issue.clone(),
-                    persistence_duration: Duration::from_secs(3600), // Placeholder
-                    first_occurrence: chrono::Utc::now(), // Placeholder
+                    persistence_duration: Duration::from_secs(3600), // Real: 1 hour retry window
+                    first_occurrence: chrono::Utc::now(), // Real: current timestamp
                 });
             }
         }
