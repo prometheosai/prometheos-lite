@@ -46,7 +46,9 @@ pub struct PatchEvidence {
     pub patch_applied_cleanly: bool,
     pub patch_hash: Option<String>,
     pub dry_run_passed: bool,
-    // P0-3.1: Comprehensive patch hash verification fields
+    // P0-3.1: Real patch identity verification for audit-grade integrity
+    pub patch_identity: Option<crate::harness::patch_applier::PatchIdentity>,
+    // Legacy fields for backward compatibility
     pub generated_patch_hash: Option<String>,
     pub dry_run_patch_hash: Option<String>,
     pub applied_patch_hash: Option<String>,
@@ -249,28 +251,42 @@ impl CompletionDecision {
             failures.push("Patch not created and dry-run not performed".to_string());
         }
 
-        // P0-2.1: Real patch hash verification
+        // P0-3.1: Real patch identity verification - audit-grade integrity check
         if evidence.patch_evidence.patch_created {
-            if evidence.patch_evidence.patch_hash.is_none() {
-                failures.push("Patch was created but no patch hash was recorded".to_string());
-            }
-            
-            // Verify that applied patch hash matches recorded patch hash
-            if let (Some(recorded_hash), Some(applied_hash)) = (&evidence.patch_evidence.patch_hash, &evidence.patch_evidence.applied_patch_hash) {
-                if recorded_hash != applied_hash {
-                    failures.push(format!(
-                        "Patch hash mismatch: recorded={}, applied={} - possible tampering detected", 
-                        recorded_hash, applied_hash
-                    ));
-                } else if !evidence.patch_evidence.hash_verification_passed {
-                    failures.push("Patch hash verification was not performed".to_string());
+            // Check if we have the new PatchIdentity system
+            if let Some(ref patch_identity) = evidence.patch_evidence.patch_identity {
+                if !patch_identity.can_complete() {
+                    failures.push("Patch identity verification failed - cannot complete".to_string());
+                    if let Some(ref details) = patch_identity.mismatch_details {
+                        failures.push(format!("Patch identity mismatch details: {}", details));
+                    }
+                    if !patch_identity.has_complete_hashes() {
+                        failures.push("Incomplete patch identity - missing hash stages".to_string());
+                    }
                 }
             } else {
-                failures.push("Missing patch hash for verification".to_string());
+                // Fallback to legacy hash verification for backward compatibility
+                if evidence.patch_evidence.patch_hash.is_none() {
+                    failures.push("Patch was created but no patch hash was recorded".to_string());
+                }
+                
+                // Verify that applied patch hash matches recorded patch hash
+                if let (Some(recorded_hash), Some(applied_hash)) = (&evidence.patch_evidence.patch_hash, &evidence.patch_evidence.applied_patch_hash) {
+                    if recorded_hash != applied_hash {
+                        failures.push(format!(
+                            "Patch hash mismatch: recorded={}, applied={} - possible tampering detected", 
+                            recorded_hash, applied_hash
+                        ));
+                    } else if !evidence.patch_evidence.hash_verification_passed {
+                        failures.push("Patch hash verification was not performed".to_string());
+                    }
+                } else {
+                    failures.push("Missing patch hash for verification".to_string());
+                }
             }
         }
 
-        // P0-2: Reject Complete if validation plan ran zero commands (for side-effect modes)
+        // P0-3.1: Reject Complete if validation plan ran zero commands (for side-effect modes)
         if evidence.validation_evidence.validation_performed {
             // Check if any validation commands were actually executed
             let validation_commands_count = evidence.validation_evidence.format_check_passed as usize
@@ -281,6 +297,11 @@ impl CompletionDecision {
             // If validation was marked as performed but no commands actually ran, reject
             if validation_commands_count == 0 {
                 failures.push("Validation was marked as performed but no validation commands were executed".to_string());
+            }
+            
+            // P0-3.1: Additional check - validation with zero commands should not be considered "performed"
+            if evidence.validation_evidence.commands_executed == 0 {
+                failures.push("Validation had zero commands executed - cannot complete".to_string());
             }
         }
 
@@ -995,7 +1016,9 @@ pub fn create_evidence_from_components(
             patch_applied_cleanly: patch.patch_applied_cleanly,
             patch_hash: patch.patch_hash.clone(),
             dry_run_passed: patch.dry_run_passed,
-            // P0-3.1: Comprehensive patch hash verification fields
+            // P0-3.1: Real patch identity verification for audit-grade integrity
+            patch_identity: None, // Will be populated during actual patch application
+            // Legacy fields for backward compatibility
             generated_patch_hash: patch.patch_hash.clone(),
             dry_run_patch_hash: None, // Would need dry-run result to compute this
             applied_patch_hash: patch.patch_hash.clone(),
