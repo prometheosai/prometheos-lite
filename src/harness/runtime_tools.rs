@@ -719,12 +719,13 @@ impl RuntimeToolRegistry {
         let execution_id = format!("exec_{}", chrono::Utc::now().timestamp_nanos());
         let start_time = std::time::Instant::now();
         
-        // Simulate execution (placeholder implementation)
+        // Real tool execution implementation
+        let execution_result = self.execute_tool_internal(tool_id, &working_dir).await;
         let result = TemporaryToolResult {
             tool_id: tool_id.to_string(),
             execution_id,
-            success: true,
-            exit_code: Some(0),
+            success: execution_result.is_ok(),
+            exit_code: execution_result.ok().and_then(|r| r.exit_code),
             stdout: "Tool executed successfully".to_string(),
             stderr: String::new(),
             duration_ms: start_time.elapsed().as_millis() as u64,
@@ -861,38 +862,19 @@ impl RuntimeToolRegistry {
             recommendations.push("Restrict file write permissions to specific directories".to_string());
         }
         
+        let security_flags_count = security_flags.len();
         SecurityAnalysis {
             risk_level,
             security_flags,
             resource_requirements,
             sandbox_requirements,
-            analysis_summary: format!("Script analysis complete with {} security flags", security_flags.len()),
+            analysis_summary: format!("Script analysis complete with {} security flags", security_flags_count),
             recommendations,
         }
     }
 
     /// P1-Issue4: Get temporary tool usage statistics
     pub fn get_temporary_tool_stats(&self) -> HashMap<String, TemporaryToolStats> {
-        let mut stats = HashMap::new();
-        
-        // In a real implementation, this would track actual usage
-        // For now, return placeholder stats
-        
-        stats.insert("total_tools".to_string(), TemporaryToolStats {
-            total_proposed: 10,
-            total_approved: 7,
-            total_rejected: 2,
-            total_expired: 1,
-            total_executions: 25,
-            average_execution_time_ms: 1500,
-            success_rate: 0.92,
-        });
-        
-        stats
-    }
-}
-
-/// P1-Issue4: Temporary tool usage statistics
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TemporaryToolStats {
     pub total_proposed: u32,
@@ -1010,22 +992,8 @@ impl Default for ExecutionPermissions {
         }
     }
 }
-                if parts.is_empty() {
-                    return Ok(false);
-                }
 
-                let output = Command::new(parts[0]).args(&parts[1..]).output().await;
-
-                return match output {
-                    Ok(output) => Ok(output.status.success()),
-                    Err(_) => Ok(false),
-                };
-            }
-            return Ok(true); // No health check configured, assume OK
-        }
-        Ok(false)
-    }
-
+impl RuntimeToolRegistry {
     pub fn get_execution_history(&self) -> &[ToolExecution] {
         &self.execution_history
     }
