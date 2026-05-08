@@ -13,7 +13,7 @@ use crate::harness::{
     confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact, compute_confidence},
     edit_protocol::EditOperation,
     environment::{EnvironmentProfile, fingerprint_environment},
-    evidence::{EvidenceEntryKind, EvidenceLog},
+    evidence::{EvidenceEntryKind, EvidenceLog, SandboxEvidence},
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
@@ -51,6 +51,98 @@ use std::{
 use tokio::time::timeout;
 use tokio::sync::mpsc;
 use tracing::instrument;
+
+/// P0-Issue1: Extract sandbox evidence from evidence log for completion verification
+fn extract_sandbox_evidence_from_log(evidence_log: &EvidenceLog) -> Vec<SandboxEvidence> {
+    let mut sandbox_evidence = Vec::new();
+    
+    for entry in &evidence_log.entries {
+        if entry.kind == EvidenceEntryKind::SandboxBackendUsed {
+            // Extract sandbox evidence from the input summary
+            if let Some(runtime_kind_str) = entry.input_summary.get("runtime_kind") {
+                let runtime_kind = match runtime_kind_str.as_str() {
+                    "Docker" => crate::harness::sandbox::SandboxRuntimeKind::Docker,
+                    "Local" => crate::harness::sandbox::SandboxRuntimeKind::Local,
+                    "Mock" => crate::harness::sandbox::SandboxRuntimeKind::Mock,
+                    _ => crate::harness::sandbox::SandboxRuntimeKind::Local,
+                };
+                
+                let isolated_process = entry.input_summary
+                    .get("isolated_process")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let isolated_filesystem = entry.input_summary
+                    .get("isolated_filesystem")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let network_disabled = entry.input_summary
+                    .get("network_disabled")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let cpu_limited = entry.input_summary
+                    .get("cpu_limited")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let memory_limited = entry.input_summary
+                    .get("memory_limited")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let resource_limits_applied = entry.input_summary
+                    .get("resource_limits_applied")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let no_new_privileges = entry.input_summary
+                    .get("no_new_privileges")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let capabilities_dropped = entry.input_summary
+                    .get("capabilities_dropped")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let seccomp_enabled = entry.input_summary
+                    .get("seccomp_enabled")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+                
+                let mount_mode = entry.input_summary
+                    .get("mount_mode")
+                    .and_then(|s| match s.as_str() {
+                        "ReadOnly" => Some(crate::harness::evidence::SandboxMountMode::ReadOnly),
+                        "ReadWrite" => Some(crate::harness::evidence::SandboxMountMode::ReadWrite),
+                        _ => None,
+                    })
+                    .unwrap_or(crate::harness::evidence::SandboxMountMode::ReadWrite);
+                
+                let container_id = entry.input_summary.get("container_id").cloned();
+                
+                sandbox_evidence.push(SandboxEvidence {
+                    runtime_kind,
+                    isolated_process,
+                    isolated_filesystem,
+                    network_disabled,
+                    cpu_limited,
+                    memory_limited,
+                    container_id,
+                    mount_mode,
+                    resource_limits_applied,
+                    no_new_privileges,
+                    capabilities_dropped,
+                    seccomp_enabled,
+                });
+            }
+        }
+    }
+    
+    sandbox_evidence
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct HarnessExecutionRequest {
@@ -1709,7 +1801,9 @@ pub async fn execute_harness_task(
                 .as_ref()
                 .map(|p| format!("{:x}", md5::compute(&p.diff))),
             dry_run_passed: dry.failures.is_empty(),
-            // P0-3.1: Comprehensive patch hash verification fields
+            // P0-3.1: Real patch identity verification for audit-grade integrity
+            patch_identity: None, // P0-3.1: Will be populated by real verification
+            // Legacy fields for backward compatibility
             generated_patch_hash: patch
                 .as_ref()
                 .map(|p| format!("{:x}", md5::compute(&p.diff))),
@@ -1900,8 +1994,8 @@ pub async fn execute_harness_task(
             time_limit_respected: true, // TODO: Pass actual time limit status from metrics
             step_limit_respected: true, // TODO: Pass actual step limit status from metrics
         },
-        // P0-Issue1: Sandbox evidence - empty for now, should be populated during execution
-        sandbox_evidence: vec![],
+        // P0-Issue1: Extract sandbox evidence from evidence log for completion verification
+        sandbox_evidence: extract_sandbox_evidence_from_log(&evidence_log),
 
         // Legacy fields
         patch_exists: patch
