@@ -634,10 +634,105 @@ fn compute_content_hashes(transaction: &Transaction) -> HashMap<PathBuf, String>
     hashes
 }
 
+/// Compute a hash for content
 fn compute_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    format!("{:x}", hasher.finalize())
+}
+
+/// P0-3.1: Compute hash of a patch diff for integrity verification
+pub fn compute_patch_hash(diff: &str) -> String {
+    compute_hash(diff)
+}
+
+/// P0-3.1: Verify patch integrity by comparing hashes at different stages
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PatchHashVerification {
+    pub generated_patch_hash: Option<String>,
+    pub dry_run_patch_hash: Option<String>,
+    pub applied_patch_hash: Option<String>,
+    pub hash_verification_passed: bool,
+    pub hash_mismatch_details: Option<String>,
+}
+
+impl PatchHashVerification {
+    pub fn new() -> Self {
+        Self {
+            generated_patch_hash: None,
+            dry_run_patch_hash: None,
+            applied_patch_hash: None,
+            hash_verification_passed: false,
+            hash_mismatch_details: None,
+        }
+    }
+
+    /// P0-3.1: Record generated patch hash
+    pub fn record_generated_hash(&mut self, diff: &str) {
+        self.generated_patch_hash = Some(compute_patch_hash(diff));
+    }
+
+    /// P0-3.1: Record dry-run patch hash
+    pub fn record_dry_run_hash(&mut self, diff: &str) {
+        self.dry_run_patch_hash = Some(compute_patch_hash(diff));
+    }
+
+    /// P0-3.1: Record applied patch hash
+    pub fn record_applied_hash(&mut self, diff: &str) {
+        self.applied_patch_hash = Some(compute_patch_hash(diff));
+    }
+
+    /// P0-3.1: Verify all patch hashes match
+    pub fn verify_hashes(&mut self) -> Result<()> {
+        match (&self.generated_patch_hash, &self.dry_run_patch_hash, &self.applied_patch_hash) {
+            (Some(gen), Some(dry), Some(app)) => {
+                if gen == dry && dry == app {
+                    self.hash_verification_passed = true;
+                    Ok(())
+                } else {
+                    self.hash_verification_passed = false;
+                    let details = format!(
+                        "Hash mismatch - generated: {}, dry-run: {}, applied: {}",
+                        gen, dry, app
+                    );
+                    self.hash_mismatch_details = Some(details.clone());
+                    anyhow::bail!("Patch hash verification failed: {}", details)
+                }
+            }
+            (Some(gen), Some(dry), None) => {
+                // Partial verification (dry-run only)
+                if gen == dry {
+                    tracing::warn!("Partial hash verification passed (generated == dry-run), but applied hash missing");
+                    Ok(())
+                } else {
+                    self.hash_verification_passed = false;
+                    let details = format!(
+                        "Hash mismatch between generated and dry-run - generated: {}, dry-run: {}",
+                        gen, dry
+                    );
+                    self.hash_mismatch_details = Some(details.clone());
+                    anyhow::bail!("Partial hash verification failed: {}", details)
+                }
+            }
+            _ => {
+                self.hash_verification_passed = false;
+                let missing = vec![
+                    if self.generated_patch_hash.is_none() { "generated" } else { "" },
+                    if self.dry_run_patch_hash.is_none() { "dry-run" } else { "" },
+                    if self.applied_patch_hash.is_none() { "applied" } else { "" },
+                ].iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
+                self.hash_mismatch_details = Some(format!("Missing hash stages: {}", missing));
+                anyhow::bail!("Incomplete hash verification: missing {}", missing)
+            }
+        }
+    }
+
+    /// P0-3.1: Check if verification is complete
+    pub fn is_complete(&self) -> bool {
+        self.generated_patch_hash.is_some() && 
+        self.dry_run_patch_hash.is_some() && 
+        self.applied_patch_hash.is_some()
+    }
 }
 
 fn fail(path: &Path, op: &str, reason: impl Into<String>, context: Option<String>) -> PatchFailure {

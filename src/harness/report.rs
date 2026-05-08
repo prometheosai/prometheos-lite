@@ -149,7 +149,7 @@ pub fn generate_patch_report(result: &HarnessExecutionResult) -> PatchReport {
     // Validation summary
     let validation = if let Some(ref val) = result.validation_result {
         ValidationSummary {
-            passed: val.passed,
+            passed: val.passed(),
             commands_run: val.command_results.len(),
             commands_passed: val.command_results.iter().filter(|r| r.exit_code == Some(0)).count(),
             commands_failed: val.command_results.iter().filter(|r| r.exit_code != Some(0)).count(),

@@ -127,7 +127,8 @@ impl HarnessWorkContextService {
             patch_provider: None,
             provider_context: None, // Will be set after repo analysis in execution loop
             progress_callback: None,
-            validation_failure_policy: crate::harness::ValidationFailurePolicy::default(),
+            validation_failure_policy: crate::harness::execution_loop::default_validation_failure_policy(),
+            sandbox_policy: None, // Use default policy
         };
         
         // P0-B5: Make provider resolution errors explicit instead of swallowed

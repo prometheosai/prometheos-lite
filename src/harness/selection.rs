@@ -272,7 +272,7 @@ impl SelectionEngine {
         match &candidate.validation {
             None => 0.0,
             Some(v) => {
-                if !v.passed {
+                if !v.passed() {
                     0.0
                 } else {
                     let command_count = v.command_results.len();

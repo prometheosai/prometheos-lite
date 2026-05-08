@@ -109,7 +109,7 @@ impl ConfidenceCalibrator {
         let mut factors = vec![];
 
         // Factor 1: Validation Result (25%)
-        let validation_score = if validation.is_some_and(|v| v.passed) {
+        let validation_score = if validation.is_some_and(|v| v.passed()) {
             1.0
         } else if validation.is_some() {
             0.3
@@ -121,7 +121,7 @@ impl ConfidenceCalibrator {
             name: "Validation Pass".to_string(),
             weight: self.weights.validation_pass,
             score: validation_score,
-            description: if validation.is_some_and(|v| v.passed) {
+            description: if validation.is_some_and(|v| v.passed()) {
                 "All validation commands passed".to_string()
             } else if validation.is_some() {
                 "Some validation commands failed".to_string()
@@ -234,7 +234,7 @@ impl ConfidenceCalibrator {
         // Factor 6: Test Coverage (10%)
         let test_score = if test_files_touched > 0 {
             1.0
-        } else if validation.is_some_and(|v| !v.passed) {
+        } else if validation.is_some_and(|v| !v.passed()) {
             0.0
         } else {
             0.5

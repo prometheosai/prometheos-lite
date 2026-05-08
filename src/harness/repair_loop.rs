@@ -268,7 +268,7 @@ impl RepairLoop {
 
                 let result = match &validation_result {
                     Ok(validation) => {
-                        if validation.passed {
+                        if validation.passed() {
                             // P2-011: Record successful validation
                             evidence_log.record_validation_completed(validation, trace_id.clone());
                             AttemptResult::Success
@@ -306,7 +306,7 @@ impl RepairLoop {
 
                 // P0 SAFETY: Rollback failed repair attempts to avoid partial/corrupt state
                 let should_rollback = match &validation_result {
-                    Ok(v) => !v.passed,
+                    Ok(v) => !v.passed(),
                     Err(_) => true,
                 };
 

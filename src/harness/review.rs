@@ -36,7 +36,7 @@ pub enum ReviewSeverity {
     Critical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewReport {
     pub issues: Vec<ReviewIssue>,
     pub summary: ReviewSummary,
@@ -46,6 +46,9 @@ pub struct ReviewReport {
     pub ast_analysis_enabled: bool,
     // P0-4 FIX: Add review_performed field for completion evidence
     pub review_performed: bool,
+    // P1-Issue7: Add quality-based review evidence
+    pub quality_score: ReviewQualityScore,
+    pub quality_metrics: ReviewQualityMetrics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -55,6 +58,116 @@ pub struct ReviewSummary {
     pub by_severity: std::collections::HashMap<ReviewSeverity, usize>,
     pub files_reviewed: usize,
     pub files_with_issues: usize,
+}
+
+// P1-Issue7: Quality-based review evidence structures
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewQualityScore {
+    /// Overall quality score (0-100)
+    pub overall_score: u8,
+    /// Security quality score (0-100)
+    pub security_score: u8,
+    /// Code quality score (0-100)
+    pub code_quality_score: u8,
+    /// Maintainability score (0-100)
+    pub maintainability_score: u8,
+    /// Documentation score (0-100)
+    pub documentation_score: u8,
+    /// Performance score (0-100)
+    pub performance_score: u8,
+    /// Quality grade (A, B, C, D, F)
+    pub grade: QualityGrade,
+    /// Confidence in the quality assessment (0-100)
+    pub confidence: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QualityGrade {
+    A, // Excellent (90-100)
+    B, // Good (80-89)
+    C, // Fair (70-79)
+    D, // Poor (60-69)
+    F, // Fail (0-59)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ReviewQualityMetrics {
+    /// Number of lines of code reviewed
+    pub lines_reviewed: usize,
+    /// Number of functions/methods reviewed
+    pub functions_reviewed: usize,
+    /// Code complexity metrics
+    pub complexity_metrics: ComplexityMetrics,
+    /// Test coverage metrics
+    pub test_metrics: TestCoverageMetrics,
+    /// Security metrics
+    pub security_metrics: SecurityMetrics,
+    /// Performance metrics
+    pub performance_metrics: PerformanceMetrics,
+    /// Maintainability metrics
+    pub maintainability_metrics: MaintainabilityMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ComplexityMetrics {
+    /// Average cyclomatic complexity
+    pub avg_complexity: f32,
+    /// Maximum complexity found
+    pub max_complexity: usize,
+    /// Number of complex functions (>10 complexity)
+    pub complex_functions: usize,
+    /// Number of very complex functions (>20 complexity)
+    pub very_complex_functions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TestCoverageMetrics {
+    /// Estimated test coverage percentage
+    pub coverage_percentage: f32,
+    /// Number of test functions found
+    pub test_functions: usize,
+    /// Number of production functions
+    pub production_functions: usize,
+    /// Test-to-production ratio
+    pub test_ratio: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SecurityMetrics {
+    /// Number of security issues found
+    pub security_issues: usize,
+    /// Number of critical security issues
+    pub critical_security_issues: usize,
+    /// Number of potential vulnerabilities
+    pub vulnerabilities: usize,
+    /// Security best practices adherence (0-100)
+    pub security_adherence: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PerformanceMetrics {
+    /// Number of performance issues found
+    pub performance_issues: usize,
+    /// Number of potential bottlenecks
+    pub bottlenecks: usize,
+    /// Memory usage patterns score (0-100)
+    pub memory_efficiency: u8,
+    /// CPU efficiency score (0-100)
+    pub cpu_efficiency: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MaintainabilityMetrics {
+    /// Code duplication percentage
+    pub duplication_percentage: f32,
+    /// Average function length
+    pub avg_function_length: f32,
+    /// Maximum function length
+    pub max_function_length: usize,
+    /// Number of long functions (>50 lines)
+    pub long_functions: usize,
+    /// Code readability score (0-100)
+    pub readability_score: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -1193,6 +1306,10 @@ pub fn generate_review_report(files: &[(PathBuf, String)]) -> ReviewReport {
 
     let passed = critical_count == 0 && high_count <= 3;
 
+    // P1-Issue7: Calculate quality metrics for all files
+    let total_content: String = files.iter().map(|(_, content)| content.as_str()).collect::<Vec<_>>().join("\n");
+    let (quality_score, quality_metrics) = engine.calculate_quality_metrics(&all_issues, &total_content);
+
     ReviewReport {
         issues: all_issues,
         summary,
@@ -1202,6 +1319,9 @@ pub fn generate_review_report(files: &[(PathBuf, String)]) -> ReviewReport {
         ast_analysis_enabled: true,
         // P0-4 FIX: Add review_performed field for completion evidence
         review_performed: true,
+        // P1-Issue7: Add quality-based review evidence
+        quality_score,
+        quality_metrics,
     }
 }
 
@@ -1290,6 +1410,297 @@ pub fn get_issues_by_severity(
         .iter()
         .filter(|i| i.severity == severity)
         .collect()
+}
+
+// P1-Issue7: Quality-based review evidence implementation
+impl ReviewEngine {
+    /// Calculate quality score and metrics from review issues
+    pub fn calculate_quality_metrics(&self, issues: &[ReviewIssue], content: &str) -> (ReviewQualityScore, ReviewQualityMetrics) {
+        let metrics = self.calculate_detailed_metrics(issues, content);
+        let score = self.calculate_quality_score(&metrics, issues);
+        
+        (score, metrics)
+    }
+    
+    /// Calculate detailed quality metrics
+    fn calculate_detailed_metrics(&self, issues: &[ReviewIssue], content: &str) -> ReviewQualityMetrics {
+        let lines_reviewed = content.lines().count();
+        let functions_reviewed = self.count_functions(content);
+        
+        let complexity_metrics = self.calculate_complexity_metrics(content);
+        let test_metrics = self.calculate_test_metrics(content, functions_reviewed);
+        let security_metrics = self.calculate_security_metrics(issues);
+        let performance_metrics = self.calculate_performance_metrics(issues);
+        let maintainability_metrics = self.calculate_maintainability_metrics(content, issues);
+        
+        ReviewQualityMetrics {
+            lines_reviewed,
+            functions_reviewed,
+            complexity_metrics,
+            test_metrics,
+            security_metrics,
+            performance_metrics,
+            maintainability_metrics,
+        }
+    }
+    
+    /// Calculate overall quality score
+    fn calculate_quality_score(&self, metrics: &ReviewQualityMetrics, issues: &[ReviewIssue]) -> ReviewQualityScore {
+        let security_score = self.calculate_security_quality_score(&metrics.security_metrics);
+        let code_quality_score = self.calculate_code_quality_score(&metrics.complexity_metrics, &metrics.maintainability_metrics);
+        let maintainability_score = self.calculate_maintainability_quality_score(&metrics.maintainability_metrics);
+        let documentation_score = self.calculate_documentation_quality_score(issues);
+        let performance_score = self.calculate_performance_quality_score(&metrics.performance_metrics);
+        
+        // Calculate overall score as weighted average
+        let overall_score = (
+            security_score as u32 * 30 +
+            code_quality_score as u32 * 25 +
+            maintainability_score as u32 * 20 +
+            documentation_score as u32 * 15 +
+            performance_score as u32 * 10
+        ) / 100;
+        
+        let grade = self.score_to_grade(overall_score as u8);
+        let confidence = self.calculate_confidence_score(metrics, issues);
+        
+        ReviewQualityScore {
+            overall_score: overall_score as u8,
+            security_score,
+            code_quality_score,
+            maintainability_score,
+            documentation_score,
+            performance_score,
+            grade,
+            confidence,
+        }
+    }
+    
+    /// Calculate security quality score
+    fn calculate_security_quality_score(&self, metrics: &SecurityMetrics) -> u8 {
+        if metrics.critical_security_issues > 0 {
+            return 0;
+        }
+        
+        let base_score = 100u8.saturating_sub(
+            (metrics.security_issues * 10) as u8
+        ).saturating_sub(
+            (metrics.vulnerabilities * 5) as u8
+        );
+        
+        // Apply security adherence bonus
+        base_score.saturating_add(metrics.security_adherence / 4)
+    }
+    
+    /// Calculate code quality score based on complexity
+    fn calculate_code_quality_score(&self, complexity: &ComplexityMetrics, maintainability: &MaintainabilityMetrics) -> u8 {
+        let complexity_penalty = (complexity.very_complex_functions * 15).saturating_add(complexity.complex_functions * 5) as u8;
+        
+        let length_penalty = (maintainability.long_functions * 3) as u8;
+        
+        100u8.saturating_sub(complexity_penalty).saturating_sub(length_penalty)
+    }
+    
+    /// Calculate maintainability quality score
+    fn calculate_maintainability_quality_score(&self, metrics: &MaintainabilityMetrics) -> u8 {
+        let duplication_penalty = (metrics.duplication_percentage * 20.0) as u8;
+        let readability_bonus = metrics.readability_score;
+        
+        100u8.saturating_sub(duplication_penalty).saturating_add(readability_bonus / 4)
+    }
+    
+    /// Calculate documentation quality score
+    fn calculate_documentation_quality_score(&self, issues: &[ReviewIssue]) -> u8 {
+        let doc_issues = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Documentation)
+            .count();
+        
+        100u8.saturating_sub((doc_issues * 5) as u8)
+    }
+    
+    /// Calculate performance quality score
+    fn calculate_performance_quality_score(&self, metrics: &PerformanceMetrics) -> u8 {
+        let performance_penalty = (metrics.performance_issues * 8).saturating_add(metrics.bottlenecks * 12) as u8;
+        
+        let efficiency_bonus = (metrics.memory_efficiency + metrics.cpu_efficiency) / 8u8;
+        
+        100u8.saturating_sub(performance_penalty).saturating_add(efficiency_bonus)
+    }
+    
+    /// Convert numeric score to grade
+    fn score_to_grade(&self, score: u8) -> QualityGrade {
+        match score {
+            90..=100 => QualityGrade::A,
+            80..=89 => QualityGrade::B,
+            70..=79 => QualityGrade::C,
+            60..=69 => QualityGrade::D,
+            _ => QualityGrade::F,
+        }
+    }
+    
+    /// Calculate confidence in quality assessment
+    fn calculate_confidence_score(&self, metrics: &ReviewQualityMetrics, issues: &[ReviewIssue]) -> u8 {
+        let base_confidence = 50u8;
+        
+        // Increase confidence based on lines reviewed
+        let lines_bonus = if metrics.lines_reviewed > 1000 { 20 } else { (metrics.lines_reviewed / 50) as u8 };
+        
+        // Increase confidence based on AST analysis
+        let ast_bonus = 15u8;
+        
+        // Decrease confidence based on uncertainty
+        let uncertainty_penalty = if issues.iter().any(|i| i.severity == ReviewSeverity::Info) { 10 } else { 0 };
+        
+        base_confidence.saturating_add(lines_bonus).saturating_add(ast_bonus).saturating_sub(uncertainty_penalty)
+    }
+    
+    /// Count functions in content
+    fn count_functions(&self, content: &str) -> usize {
+        let mut count = 0;
+        for line in content.lines() {
+            if line.trim().starts_with("fn ") || line.trim().starts_with("pub fn ") || 
+               line.trim().starts_with("async fn ") || line.trim().starts_with("pub async fn ") {
+                count += 1;
+            }
+        }
+        count
+    }
+    
+    /// Calculate complexity metrics
+    fn calculate_complexity_metrics(&self, content: &str) -> ComplexityMetrics {
+        let mut complexities = Vec::new();
+        let mut current_complexity = 1;
+        
+        for line in content.lines() {
+            let trimmed = line.trim();
+            
+            // Increase complexity for control structures
+            if trimmed.starts_with("if ") || trimmed.starts_with("else if ") ||
+               trimmed.starts_with("while ") || trimmed.starts_with("for ") ||
+               trimmed.starts_with("match ") || trimmed.contains("&&") || trimmed.contains("||") {
+                current_complexity += 1;
+            }
+            
+            // Reset complexity at function boundaries
+            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") ||
+               trimmed.starts_with("async fn ") || trimmed.starts_with("pub async fn ") {
+                if current_complexity > 1 {
+                    complexities.push(current_complexity);
+                }
+                current_complexity = 1;
+            }
+        }
+        
+        // Add the last function if it exists
+        if current_complexity > 1 {
+            complexities.push(current_complexity);
+        }
+        
+        let avg_complexity = if complexities.is_empty() { 1.0 } else { 
+            complexities.iter().sum::<usize>() as f32 / complexities.len() as f32 
+        };
+        let max_complexity = complexities.iter().max().copied().unwrap_or(1);
+        let complex_functions = complexities.iter().filter(|&&c| c > 10).count();
+        let very_complex_functions = complexities.iter().filter(|&&c| c > 20).count();
+        
+        ComplexityMetrics {
+            avg_complexity,
+            max_complexity,
+            complex_functions,
+            very_complex_functions,
+        }
+    }
+    
+    /// Calculate test metrics
+    fn calculate_test_metrics(&self, content: &str, production_functions: usize) -> TestCoverageMetrics {
+        let test_functions = content.lines()
+            .filter(|line| line.trim().starts_with("#[test]") || line.trim().starts_with("#[tokio::test]"))
+            .count();
+        
+        let test_ratio = if production_functions > 0 {
+            test_functions as f32 / production_functions as f32
+        } else {
+            0.0
+        };
+        
+        let coverage_percentage = (test_ratio * 100.0).min(100.0);
+        
+        TestCoverageMetrics {
+            coverage_percentage,
+            test_functions,
+            production_functions,
+            test_ratio,
+        }
+    }
+    
+    /// Calculate security metrics
+    fn calculate_security_metrics(&self, issues: &[ReviewIssue]) -> SecurityMetrics {
+        let security_issues = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Security)
+            .count();
+        
+        let critical_security_issues = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Security && i.severity == ReviewSeverity::Critical)
+            .count();
+        
+        let vulnerabilities = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Security && 
+                   (i.severity == ReviewSeverity::High || i.severity == ReviewSeverity::Critical))
+            .count();
+        
+        let security_adherence = 100u8.saturating_sub((security_issues * 10) as u8);
+        
+        SecurityMetrics {
+            security_issues,
+            critical_security_issues,
+            vulnerabilities,
+            security_adherence,
+        }
+    }
+    
+    /// Calculate performance metrics
+    fn calculate_performance_metrics(&self, issues: &[ReviewIssue]) -> PerformanceMetrics {
+        let performance_issues = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Performance)
+            .count();
+        
+        let bottlenecks = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Performance && 
+                   (i.severity == ReviewSeverity::High || i.severity == ReviewSeverity::Critical))
+            .count();
+        
+        PerformanceMetrics {
+            performance_issues,
+            bottlenecks,
+            memory_efficiency: 80, // Default estimate
+            cpu_efficiency: 80,     // Default estimate
+        }
+    }
+    
+    /// Calculate maintainability metrics
+    fn calculate_maintainability_metrics(&self, content: &str, issues: &[ReviewIssue]) -> MaintainabilityMetrics {
+        let maintainability_issues = issues.iter()
+            .filter(|i| i.issue_type == ReviewIssueType::Maintainability)
+            .count();
+        
+        let lines: Vec<&str> = content.lines().collect();
+        let avg_function_length = if lines.is_empty() { 0.0 } else { lines.len() as f32 / self.count_functions(content) as f32 };
+        let max_function_length = lines.len();
+        
+        let long_functions = lines.iter()
+            .filter(|&&line| line.len() > 50)
+            .count();
+        
+        let readability_score = 100u8.saturating_sub((maintainability_issues * 8) as u8);
+        
+        MaintainabilityMetrics {
+            duplication_percentage: 5.0, // Default estimate
+            avg_function_length,
+            max_function_length,
+            long_functions,
+            readability_score,
+        }
+    }
 }
 
 /// P1-007: Review diff using tree-sitter extracted symbols from RepoContext

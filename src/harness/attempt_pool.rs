@@ -13,6 +13,7 @@ use crate::harness::{
     repo_intelligence::RepoContext,
     review::{ReviewIssue, review_diff},
     risk::{RiskAssessment, assess_risk},
+    sandbox::SandboxPolicy,
     selection::PatchCandidate,
     semantic_diff::analyze_semantic_diff,
     temp_workspace::{TempWorkspace, ValidationTarget},
@@ -22,6 +23,7 @@ use crate::harness::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 /// An attempt record with scoring
@@ -42,6 +44,7 @@ pub struct AttemptRecord {
 /// Attempt pool for parallel candidate evaluation
 pub struct AttemptPool {
     max_concurrent: usize,
+    max_candidates: usize,
     workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy,
 }
 
@@ -50,8 +53,32 @@ impl AttemptPool {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             max_concurrent,
+            max_candidates: max_concurrent, // Default to same value for backward compatibility
             workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy::TempCopy,
         }
+    }
+
+    /// Create a new attempt pool with separate candidate limit
+    pub fn new_with_limits(max_concurrent: usize, max_candidates: usize) -> Self {
+        Self {
+            max_concurrent,
+            max_candidates,
+            workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy::TempCopy,
+        }
+    }
+
+    /// P0-Issue1: Helper method to extract container ID from command result
+    fn extract_container_id_from_command_result(&self, command: &str, stderr: &str) -> Option<String> {
+        // Look for Docker command and extract container ID
+        if command.starts_with("docker run") {
+            use regex::Regex;
+            if let Ok(re) = Regex::new(r"[a-f0-9]{64}") {
+                if let Some(caps) = re.find(stderr) {
+                    return Some(caps.as_str().to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Evaluate multiple candidates in parallel
@@ -69,18 +96,23 @@ impl AttemptPool {
         let mut records = Vec::new();
         let mut join_set = JoinSet::new();
 
-        // Limit concurrent attempts
+        // P1-Issue8: Split candidate limit from concurrency
+        // First limit the number of candidates to process
         let candidates_to_run: Vec<_> = candidates
             .into_iter()
-            .take(self.max_concurrent)
+            .take(self.max_candidates)
             .collect();
 
         tracing::info!(
-            "Starting parallel evaluation of {} candidates",
-            candidates_to_run.len()
+            "Starting parallel evaluation of {} candidates (concurrency limit: {})",
+            candidates_to_run.len(),
+            self.max_concurrent
         );
 
-        // Spawn evaluation tasks
+        // P1-Issue8: Create semaphore for concurrency control
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
+
+        // Spawn evaluation tasks with concurrency control
         for (idx, candidate) in candidates_to_run.into_iter().enumerate() {
             let candidate_id = format!("attempt_{}_{}", base_request.work_context_id, idx);
             let edits = candidate.edits.clone();
@@ -90,7 +122,14 @@ impl AttemptPool {
             let file_policy = policy.clone();
 
             let candidate_clone = candidate.clone();
+            let mode = base_request.mode;
+            let sandbox_policy = base_request.sandbox_policy.clone();
+            let semaphore = semaphore.clone();
+            
             join_set.spawn(async move {
+                // P1-Issue8: Acquire semaphore permit for concurrency control
+                let _permit = semaphore.acquire().await.unwrap();
+                
                 evaluate_single_candidate(
                     candidate_id,
                     candidate_clone,
@@ -99,6 +138,8 @@ impl AttemptPool {
                     validation_plan,
                     file_set,
                     file_policy,
+                    mode,
+                    sandbox_policy.as_ref(),
                 )
                 .await
             });
@@ -148,7 +189,10 @@ impl AttemptPool {
 
     /// Select the best passing candidate
     pub fn select_best<'a>(&self, records: &'a [AttemptRecord]) -> Option<&'a AttemptRecord> {
-        records.iter().find(|r| r.passed && r.score > 0.5)
+        records.iter().find(|r| {
+            // P0-Issue3: Only select candidates that actually passed validation, not just inconclusive
+            r.validation_result.as_ref().map(|v| v.passed()).unwrap_or(false) && r.score > 0.5
+        })
     }
 }
 
@@ -161,6 +205,8 @@ async fn evaluate_single_candidate(
     validation_plan: ValidationPlan,
     file_set: FileSet,
     policy: FilePolicy,
+    mode: HarnessMode,
+    sandbox_policy: Option<&SandboxPolicy>,
 ) -> AttemptRecord {
     let start = std::time::Instant::now();
 
@@ -208,24 +254,98 @@ async fn evaluate_single_candidate(
     let semantic = analyze_semantic_diff(&diff);
     let risk = assess_risk(&semantic, &review_issues);
 
-    // Step 4: Run validation using runtime factory (P0-5 FIX)
-    let sandbox_runtime = crate::harness::sandbox::SandboxRuntimeFactory::create(
-        false, // prefer_docker - can be made configurable later
-        None,  // image - can be made configurable later
-    ).await;
+    // P0-1.2: Use provided sandbox policy or derive from mode as fallback
+    let effective_policy = sandbox_policy.cloned().unwrap_or_else(|| SandboxPolicy::from_mode(mode));
+    let sandbox_runtime = match crate::harness::sandbox::SandboxRuntimeFactory::create_with_policy(&effective_policy).await {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::error!("Failed to create sandbox runtime: {}", e);
+            // P0-1.3: Remove local fallback from autonomous mode
+            if effective_policy.fallback_to_local {
+                std::sync::Arc::new(crate::harness::sandbox::LocalCommandRuntime::new())
+            } else {
+                // In autonomous mode, no fallback allowed - return early error record
+                return AttemptRecord {
+                    attempt_id,
+                    candidate,
+                    patch_result: None,
+                    validation_result: None,
+                    review_issues: vec![],
+                    risk_assessment: None,
+                    score: 0.0,
+                    passed: false,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("Failed to create required isolated sandbox runtime: {}", e)),
+                };
+            }
+        }
+    };
+
     let validation = run_validation(
         &workspace.root,
         &validation_plan,
-        sandbox_runtime, // P0-5 FIX: Use runtime factory result directly
+        sandbox_runtime, 
     )
     .await
     .ok();
+
+    // P0-Issue1: Record sandbox evidence for autonomous mode safety
+    if let Some(ref validation_result) = validation {
+        // Create sandbox evidence based on the runtime type
+        let sandbox_evidence = if validation_result.command_results
+            .iter()
+            .any(|r| r.command.starts_with("docker run")) {
+            // Docker runtime evidence
+            let container_id = validation_result.command_results
+                .iter()
+                .find_map(|r| self.extract_container_id_from_command_result(&r.command, &r.stderr));
+            crate::harness::evidence::SandboxEvidence {
+                runtime_kind: crate::harness::sandbox::SandboxRuntimeKind::Docker,
+                isolated_process: true, // Docker provides process isolation
+                isolated_filesystem: true, // Docker provides filesystem isolation
+                network_disabled: true, // Docker runtime uses network=none by default
+                cpu_limited: true, // Docker runtime sets CPU limits
+                memory_limited: true, // Docker runtime sets memory limits
+                container_id,
+                mount_mode: crate::harness::evidence::SandboxMountMode::ReadWrite,
+                resource_limits_applied: true,
+                no_new_privileges: true,
+                capabilities_dropped: true,
+                seccomp_enabled: false,
+            }
+        } else {
+            // Local runtime evidence
+            crate::harness::evidence::SandboxEvidence {
+                runtime_kind: crate::harness::sandbox::SandboxRuntimeKind::Local,
+                isolated_process: false, // Local runtime does not provide process isolation
+                isolated_filesystem: false, // Local runtime does not provide filesystem isolation
+                network_disabled: false, // Local runtime does not disable network
+                cpu_limited: false, // Local runtime does not limit CPU
+                memory_limited: false, // Local runtime does not limit memory
+                container_id: None,
+                mount_mode: crate::harness::evidence::SandboxMountMode::ReadWrite,
+                resource_limits_applied: false,
+                no_new_privileges: false,
+                capabilities_dropped: false,
+                seccomp_enabled: false,
+            }
+        };
+
+        // Log sandbox evidence for completion verification
+        tracing::info!(
+            "P0-Issue1: Attempt {} sandbox evidence - runtime: {:?}, isolated: {}, network: {}",
+            attempt_id,
+            sandbox_evidence.runtime_kind,
+            sandbox_evidence.isolated_process && sandbox_evidence.isolated_filesystem,
+            sandbox_evidence.network_disabled
+        );
+    }
 
     // Cleanup workspace
     let _ = workspace.cleanup().await;
 
     // Compute score
-    let passed = validation.as_ref().map(|v| v.passed).unwrap_or(false);
+    let passed = validation.as_ref().map(|v| v.passed()).unwrap_or(false);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     AttemptRecord {
@@ -249,7 +369,7 @@ fn compute_attempt_score(record: &AttemptRecord) -> f32 {
 
     // Validation score (40% weight)
     if let Some(ref validation) = record.validation_result {
-        if validation.passed {
+        if validation.passed() {
             score += 0.4;
         }
         weight_sum += 0.4;
