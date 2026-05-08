@@ -304,8 +304,8 @@ impl ReviewEngine {
                     "SEC011",
                 ),
                 (
-                    Regex::new(r"(?i)TODO.*security|FIXME.*security|XXX.*security").unwrap(),
-                    ReviewSeverity::Medium,
+                    Regex::new(r"(?i)TODO.*security|FIXME.*security|XXX.*security|HACK.*security|BACKDOOR|TROJAN.*security").unwrap(),
+                    ReviewSeverity::High,
                     "SEC012",
                 ),
             ],
@@ -326,27 +326,27 @@ impl ReviewEngine {
                     "BUG003",
                 ),
                 (
-                    Regex::new(r"(?i)unimplemented!").unwrap(),
+                    Regex::new(r"(?i)unimplemented!|todo!\(|todo!\s*\(|FIXME.*unimplemented|TODO.*unimplemented").unwrap(),
                     ReviewSeverity::High,
                     "BUG004",
                 ),
                 (
-                    Regex::new(r"(?i)todo!").unwrap(),
+                    Regex::new(r"(?i)todo!\s*\(|TODO.*implement|FIXME.*implement|todo.*later|todo.*future").unwrap(),
                     ReviewSeverity::Medium,
                     "BUG005",
                 ),
                 (
-                    Regex::new(r"(?i)fixme|xxx|hack").unwrap(),
+                    Regex::new(r"(?i)fixme|xxx|hack|workaround|temporary|temp|quick.*fix|band.*aid").unwrap(),
                     ReviewSeverity::Low,
                     "BUG006",
                 ),
                 (
-                    Regex::new(r"(?i)clone\(\)").unwrap(),
+                    Regex::new(r"(?i)clone\(\)|clone\(\)\s*\.unwrap\(\)|\.clone\(\)\s*\.expect\(").unwrap(),
                     ReviewSeverity::Low,
                     "BUG007",
                 ),
                 (
-                    Regex::new(r"(?i)as_ptr\(\)").unwrap(),
+                    Regex::new(r"(?i)as_ptr\(|raw_ptr\(|unsafe\s+block|unsafe\s+fn|transmute|ptr::").unwrap(),
                     ReviewSeverity::Medium,
                     "BUG008",
                 ),
