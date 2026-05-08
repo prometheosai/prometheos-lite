@@ -1,13 +1,16 @@
-use crate::{
-    harness::{
-        completion::CompletionDecision,
-        edit_protocol::EditOperation,
-        execution_loop::{
-            HarnessExecutionRequest, HarnessExecutionResult, ValidationFailurePolicy,
-            execute_harness_task,
-        },
-        mode_policy::HarnessMode,
+use crate::harness::{
+    acceptance::AcceptanceCriterion,
+    artifacts::HarnessArtifact,
+    completion::CompletionDecision,
+    edit_protocol::EditOperation,
+    evidence_persistence::{EvidencePersistenceManager, FileEvidenceSink},
+    execution_loop::{
+        HarnessExecutionRequest, HarnessExecutionResult, ValidationFailurePolicy,
+        execute_harness_task,
     },
+    mode_policy::HarnessMode,
+};
+use crate::{
     work::{
         artifact::{Artifact, ArtifactKind},
         service::WorkContextService,
@@ -108,7 +111,7 @@ impl HarnessWorkContextService {
             mentioned_symbols.len()
         );
 
-        // P0-FIX: Build request with config provider auto-resolution
+        // P0-FIX: Build request with config provider auto-resolution and mode-aware sandbox policy
         let mut req = HarnessExecutionRequest {
             work_context_id: ctx.id.clone(),
             repo_root: repo_root.clone(),
@@ -127,8 +130,9 @@ impl HarnessWorkContextService {
             patch_provider: None,
             provider_context: None, // Will be set after repo analysis in execution loop
             progress_callback: None,
-            validation_failure_policy: crate::harness::execution_loop::default_validation_failure_policy(),
-            sandbox_policy: None, // Use default policy
+            validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
+            // P0-HARNESS-007: Set sandbox policy based on mode for proper isolation
+            sandbox_policy: Some(crate::harness::sandbox::SandboxPolicy::from_mode(mode)),
         };
         
         // P0-B5: Make provider resolution errors explicit instead of swallowed
@@ -156,16 +160,17 @@ impl HarnessWorkContextService {
         let result = execute_harness_task(req).await?;
         ctx.metadata = serde_json::json!({"harness":serde_json::to_value(&result)?});
         
-        // P0-8 FIX: Persist EvidenceLog as first-class artifact
-        let evidence_log_artifact = Artifact::new(
-            uuid::Uuid::new_v4().to_string(),
-            ctx.id.clone(),
-            ArtifactKind::EvidenceLog,
-            "evidence-log".to_string(),
-            serde_json::to_value(&result.evidence_log)?,
-            "harness".into(),
+        // P0-HARNESS-009: Persist EvidenceLog with explicit persistence contract
+        let evidence_dir = std::env::current_dir()?.join("evidence");
+        let persistence_manager = EvidencePersistenceManager::new(
+            Box::new(FileEvidenceSink::new(evidence_dir))
         );
-        self.work_context_service.add_artifact(&mut ctx, evidence_log_artifact)?;
+        
+        // Persist evidence log with verification that side effects are recorded
+        persistence_manager.persist_evidence_log(&ctx.id, &result.evidence_log).await?;
+        
+        tracing::info!("P0-HARNESS-009: EvidenceLog persisted with {} entries for work context {}", 
+                   result.evidence_log.entries.len(), ctx.id);
         
         // Persist other harness artifacts
         for h in &result.artifacts {
