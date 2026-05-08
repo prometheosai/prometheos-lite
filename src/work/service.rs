@@ -267,6 +267,52 @@ impl WorkContextService {
         // Priority 3: Create new context (caller's responsibility)
         Ok(None)
     }
+
+    /// V1.6-FIX-016: Persist EvidenceLog into WorkContext/RunDb
+    pub fn persist_evidence_log(
+        &self,
+        work_context_id: &str,
+        evidence_log: &EvidenceLog,
+    ) -> Result<()> {
+        use crate::harness::evidence_persistence::EvidencePersistenceManager;
+        
+        // Create persistence manager
+        let persistence_manager = EvidencePersistenceManager::new();
+        
+        // Persist the evidence log to the work context
+        let evidence_data = serde_json::to_value(evidence_log)?;
+        
+        // Store as artifact in the work context
+        let artifact = super::Artifact {
+            id: format!("evidence_log_{}", work_context_id),
+            work_context_id: work_context_id.to_string(),
+            kind: super::ArtifactKind::EvidenceLog,
+            created_at: chrono::Utc::now(),
+            data: evidence_data,
+            metadata: serde_json::json!({
+                "evidence_log_id": evidence_log.execution_id,
+                "entries_count": evidence_log.entries.len(),
+                "has_failures": evidence_log.has_failures(),
+                "persistence_timestamp": chrono::Utc::now().to_rfc3339()
+            }),
+        };
+        
+        // Add artifact to work context
+        let mut context = self.get_context(work_context_id)?;
+        context.artifacts.push(artifact);
+        context.touch();
+        
+        // Update the work context
+        self.update_context(&context)?;
+        
+        tracing::info!(
+            work_context_id = %work_context_id,
+            entries_count = %entries_count,
+            "Persisted EvidenceLog to WorkContext"
+        );
+        
+        Ok(())
+    }
 }
 
 #[cfg(test)]
