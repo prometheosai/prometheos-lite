@@ -7,6 +7,7 @@ use crate::harness::{
     },
 };
 use anyhow::{Context, Result, bail};
+use chrono;
 use diffy::create_patch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -646,7 +647,19 @@ pub fn compute_patch_hash(diff: &str) -> String {
     compute_hash(diff)
 }
 
-/// P0-3.1: Verify patch integrity by comparing hashes at different stages
+/// P0-3.1: Comprehensive patch identity verification for audit-grade integrity
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PatchIdentity {
+    pub planned_patch_hash: String,
+    pub dry_run_patch_hash: String,
+    pub applied_patch_hash: String,
+    pub reviewed_diff_hash: String,
+    pub verification_timestamp: chrono::DateTime<chrono::Utc>,
+    pub verification_passed: bool,
+    pub mismatch_details: Option<String>,
+}
+
+/// P0-3.1: Legacy patch hash verification for backward compatibility
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PatchHashVerification {
     pub generated_patch_hash: Option<String>,
@@ -654,6 +667,99 @@ pub struct PatchHashVerification {
     pub applied_patch_hash: Option<String>,
     pub hash_verification_passed: bool,
     pub hash_mismatch_details: Option<String>,
+}
+
+impl PatchIdentity {
+    /// Create a new patch identity verification instance
+    pub fn new() -> Self {
+        Self {
+            planned_patch_hash: String::new(),
+            dry_run_patch_hash: String::new(),
+            applied_patch_hash: String::new(),
+            reviewed_diff_hash: String::new(),
+            verification_timestamp: chrono::Utc::now(),
+            verification_passed: false,
+            mismatch_details: None,
+        }
+    }
+
+    /// Record planned patch hash (from provider generation)
+    pub fn record_planned_hash(&mut self, diff: &str) {
+        self.planned_patch_hash = compute_patch_hash(diff);
+    }
+
+    /// Record dry-run patch hash
+    pub fn record_dry_run_hash(&mut self, diff: &str) {
+        self.dry_run_patch_hash = compute_patch_hash(diff);
+    }
+
+    /// Record applied patch hash
+    pub fn record_applied_hash(&mut self, diff: &str) {
+        self.applied_patch_hash = compute_patch_hash(diff);
+    }
+
+    /// Record reviewed diff hash
+    pub fn record_reviewed_hash(&mut self, diff: &str) {
+        self.reviewed_diff_hash = compute_patch_hash(diff);
+    }
+
+    /// P0-3.1: Verify complete patch identity - all hashes must match exactly
+    pub fn verify_complete_identity(&mut self) -> Result<()> {
+        let verification_result = self.planned_patch_hash == self.dry_run_patch_hash 
+            && self.dry_run_patch_hash == self.applied_patch_hash 
+            && self.applied_patch_hash == self.reviewed_diff_hash;
+
+        if verification_result {
+            self.verification_passed = true;
+            self.verification_timestamp = chrono::Utc::now();
+            tracing::info!("Patch identity verification passed - all hashes match");
+            Ok(())
+        } else {
+            self.verification_passed = false;
+            let details = format!(
+                "Patch identity mismatch - planned: {}, dry-run: {}, applied: {}, reviewed: {}",
+                self.planned_patch_hash, 
+                self.dry_run_patch_hash, 
+                self.applied_patch_hash, 
+                self.reviewed_diff_hash
+            );
+            self.mismatch_details = Some(details.clone());
+            tracing::error!("Patch identity verification failed: {}", details);
+            anyhow::bail!("Patch identity verification failed: {}", details)
+        }
+    }
+
+    /// P0-3.1: Verify partial patch identity (for review-only mode)
+    pub fn verify_partial_identity(&mut self) -> Result<()> {
+        if !self.planned_patch_hash.is_empty() && !self.reviewed_diff_hash.is_empty() {
+            if self.planned_patch_hash == self.reviewed_diff_hash {
+                tracing::info!("Partial patch identity verification passed (planned == reviewed)");
+                Ok(())
+            } else {
+                let details = format!(
+                    "Partial patch identity mismatch - planned: {}, reviewed: {}",
+                    self.planned_patch_hash, self.reviewed_diff_hash
+                );
+                self.mismatch_details = Some(details.clone());
+                anyhow::bail!("Partial patch identity verification failed: {}", details)
+            }
+        } else {
+            anyhow::bail!("Insufficient hash data for partial verification")
+        }
+    }
+
+    /// Check if all required hash stages are present
+    pub fn has_complete_hashes(&self) -> bool {
+        !self.planned_patch_hash.is_empty()
+            && !self.dry_run_patch_hash.is_empty()
+            && !self.applied_patch_hash.is_empty()
+            && !self.reviewed_diff_hash.is_empty()
+    }
+
+    /// Get verification status for completion decision
+    pub fn can_complete(&self) -> bool {
+        self.verification_passed && self.has_complete_hashes()
+    }
 }
 
 impl PatchHashVerification {
@@ -685,30 +791,30 @@ impl PatchHashVerification {
     /// P0-3.1: Verify all patch hashes match
     pub fn verify_hashes(&mut self) -> Result<()> {
         match (&self.generated_patch_hash, &self.dry_run_patch_hash, &self.applied_patch_hash) {
-            (Some(gen), Some(dry), Some(app)) => {
-                if gen == dry && dry == app {
+            (Some(generated), Some(dry), Some(app)) => {
+                if generated == dry && dry == app {
                     self.hash_verification_passed = true;
                     Ok(())
                 } else {
                     self.hash_verification_passed = false;
                     let details = format!(
                         "Hash mismatch - generated: {}, dry-run: {}, applied: {}",
-                        gen, dry, app
+                        generated, dry, app
                     );
                     self.hash_mismatch_details = Some(details.clone());
                     anyhow::bail!("Patch hash verification failed: {}", details)
                 }
             }
-            (Some(gen), Some(dry), None) => {
+            (Some(generated), Some(dry), None) => {
                 // Partial verification (dry-run only)
-                if gen == dry {
+                if generated == dry {
                     tracing::warn!("Partial hash verification passed (generated == dry-run), but applied hash missing");
                     Ok(())
                 } else {
                     self.hash_verification_passed = false;
                     let details = format!(
                         "Hash mismatch between generated and dry-run - generated: {}, dry-run: {}",
-                        gen, dry
+                        generated, dry
                     );
                     self.hash_mismatch_details = Some(details.clone());
                     anyhow::bail!("Partial hash verification failed: {}", details)
