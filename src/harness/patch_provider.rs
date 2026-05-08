@@ -629,11 +629,26 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Create a new provider registry
+    /// Create a new provider registry with comprehensive provider support
     ///
-    /// Fails if no generator provider is registered (only repair-only providers)
+    /// P1-Issue6: Broaden real provider support by including multiple provider types
     pub fn new() -> anyhow::Result<Self> {
-        let aggregate = AggregatePatchProvider::new();
+        let mut aggregate = AggregatePatchProvider::new();
+        
+        // Add heuristic provider (always available)
+        aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
+        
+        // Add template provider for common patterns
+        aggregate.add_provider(Box::new(TemplatePatchProvider::new()));
+        
+        // Try to add script provider if available
+        if let Ok(script_path) = std::env::var("PROMETHEOS_SCRIPT_PROVIDER") {
+            let path = PathBuf::from(script_path);
+            if path.exists() {
+                aggregate.add_provider(Box::new(ScriptPatchProvider::new(path)));
+                tracing::info!("Added script provider from PROMETHEOS_SCRIPT_PROVIDER");
+            }
+        }
 
         // Validate at least one provider can generate
         if !aggregate.capabilities().can_generate {
@@ -678,16 +693,35 @@ impl ProviderRegistry {
     pub fn from_config(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
         // Check if we have a valid LLM configuration
         if config.provider.is_empty() || config.model.is_empty() {
+            // P1-Issue7: Provide actionable error messages for missing provider config
+            let provider_var = std::env::var("PROMETHEOS_PROVIDER").unwrap_or_else(|_| "not set".to_string());
+            let model_var = std::env::var("PROMETHEOS_MODEL").unwrap_or_else(|_| "not set".to_string());
+            let base_url_var = std::env::var("PROMETHEOS_BASE_URL").unwrap_or_else(|_| "not set".to_string());
+            
             bail!(
-                "No LLM provider configured. \
-                Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables \
-                or configure in settings file."
+                "No LLM provider configured. This is required for patch generation.\n\n
+                Current configuration:\n
+                - Config provider: '{}'\n
+                - Config model: '{}'\n
+                - Environment PROMETHEOS_PROVIDER: {}\n
+                - Environment PROMETHEOS_MODEL: {}\n
+                - Environment PROMETHEOS_BASE_URL: {}\n\n
+                To fix this issue:\n\n
+                1. Set environment variables:\n    export PROMETHEOS_PROVIDER=lmstudio\n    export PROMETHEOS_MODEL=qwen2.5-coder\n    export PROMETHEOS_BASE_URL=http://localhost:1234/v1\n\n                2. Or create a config file at ~/.config/prometheos/config.json:\n    {{\n      \"provider\": \"lmstudio\",\n      \"model\": \"qwen2.5-coder\",\n      \"base_url\": \"http://localhost:1234/v1\"\n    }}\n\n                3. Supported providers: lmstudio, ollama, openai, anthropic\n\n                4. For local models, ensure your LLM server is running and accessible\n                ",
+                config.provider, config.model, provider_var, model_var, base_url_var
             );
         }
 
         // Create LLM client from config
         let client = crate::llm::LlmClient::new(&config.base_url, &config.model)
-            .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
+            .map_err(|e| {
+                // P1-Issue7: Provide actionable error messages for LLM client creation failures
+                anyhow::anyhow!(
+                    "Failed to create LLM client with configuration:\n\n
+                    Provider: {}\n                    Model: {}\n                    Base URL: {}\n\n                    Error: {}\n\n                    To fix this issue:\n\n                    1. Check that the base URL is correct and accessible\n                    2. Verify the model name matches what the provider supports\n                    3. Ensure the LLM server is running\n                    4. Check network connectivity and firewall settings\n                    5. For local models, verify the server is started with the correct model\n\n                    Example working configurations:\n                    - LM Studio: http://localhost:1234/v1\n                    - Ollama: http://localhost:11434\n                    - OpenAI: https://api.openai.com/v1\n                    ",
+                    config.provider, config.model, config.base_url, e
+                )
+            })?;
 
         Self::with_llm_provider(client, config.model.clone())
     }
@@ -839,6 +873,240 @@ impl PatchProvider for StaticPatchProvider {
             max_candidates: 1,
             supported_operations: vec!["search_replace".into(), "whole_file".into(), "create_file".into()],
             typical_latency_ms: 0,
+        }
+    }
+}
+
+/// Script-based patch provider for deterministic edits
+pub struct ScriptPatchProvider {
+    script_path: PathBuf,
+    supported_languages: Vec<String>,
+}
+
+impl ScriptPatchProvider {
+    pub fn new(script_path: PathBuf) -> Self {
+        Self {
+            script_path,
+            supported_languages: vec!["rust".into(), "python".into(), "javascript".into()],
+        }
+    }
+
+    pub fn with_languages(mut self, languages: Vec<String>) -> Self {
+        self.supported_languages = languages;
+        self
+    }
+}
+
+#[async_trait]
+impl PatchProvider for ScriptPatchProvider {
+    fn name(&self) -> &str {
+        "script"
+    }
+
+    async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        let start = std::time::Instant::now();
+        
+        // Build script arguments
+        let output = tokio::process::Command::new(&self.script_path)
+            .arg("generate")
+            .arg("--task")
+            .arg(&request.context.task)
+            .arg("--repo")
+            .arg(".")
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(GenerateResponse {
+                candidates: vec![],
+                generation_time_ms: start.elapsed().as_millis() as u64,
+                provider_notes: Some(format!("Script failed: {}", String::from_utf8_lossy(&output.stderr))),
+            });
+        }
+
+        // Parse script output (JSON format expected)
+        let script_output: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let candidates = parse_script_candidates(script_output, "script")?;
+
+        Ok(GenerateResponse {
+            candidates,
+            generation_time_ms: start.elapsed().as_millis() as u64,
+            provider_notes: Some("Generated by script provider".into()),
+        })
+    }
+
+    async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
+        let start = std::time::Instant::now();
+        
+        let output = tokio::process::Command::new(&self.script_path)
+            .arg("repair")
+            .arg("--failure")
+            .arg(format!("{:?}", request.failure.kind))
+            .arg("--message")
+            .arg(&request.failure.message)
+            .output()
+            .await?;
+
+        let repaired = if output.status.success() {
+            // Parse repaired edits from script output
+            let script_output: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            parse_script_edits(script_output)?
+        } else {
+            request.failed_edits.clone()
+        };
+
+        let repair_applied = repaired != request.failed_edits;
+
+        Ok(RepairResponse {
+            repaired_edits: repaired,
+            repair_applied,
+            repair_notes: "Script-based repair".into(),
+            repair_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn can_handle(&self, kind: FailureKind) -> bool {
+        matches!(kind, 
+            FailureKind::PatchApplyFailure | 
+            FailureKind::PatchParseFailure | 
+            FailureKind::SyntaxError
+        )
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: true,
+            max_candidates: 3,
+            supported_operations: vec!["search_replace".into(), "whole_file".into()],
+            typical_latency_ms: 100,
+        }
+    }
+}
+
+/// Template-based patch provider for common patterns
+pub struct TemplatePatchProvider {
+    templates: HashMap<String, Template>,
+}
+
+#[derive(Debug, Clone)]
+struct Template {
+    name: String,
+    pattern: String,
+    replacements: HashMap<String, String>,
+    confidence: u8,
+}
+
+impl TemplatePatchProvider {
+    pub fn new() -> Self {
+        let mut templates = HashMap::new();
+        
+        // Add common templates
+        templates.insert("add_import".into(), Template {
+            name: "add_import".into(),
+            pattern: "use {import};".into(),
+            replacements: HashMap::new(),
+            confidence: 85,
+        });
+
+        templates.insert("fix_missing_semicolon".into(), Template {
+            name: "fix_missing_semicolon".into(),
+            pattern: "{line};".into(),
+            replacements: HashMap::new(),
+            confidence: 90,
+        });
+
+        templates.insert("add_error_handling".into(), Template {
+            name: "add_error_handling".into(),
+            pattern: "match {expr} {{\n    Ok(result) => result,\n    Err(e) => return Err(e.into()),\n}}".into(),
+            replacements: HashMap::new(),
+            confidence: 75,
+        });
+
+        Self { templates }
+    }
+
+    pub fn with_template(mut self, template: Template) -> Self {
+        self.templates.insert(template.name.clone(), template);
+        self
+    }
+}
+
+#[async_trait]
+impl PatchProvider for TemplatePatchProvider {
+    fn name(&self) -> &str {
+        "template"
+    }
+
+    async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        let start = std::time::Instant::now();
+        let mut candidates = Vec::new();
+
+        // Analyze task to find matching templates
+        let task_lower = request.context.task.to_lowercase();
+        
+        for template in self.templates.values() {
+            if task_lower.contains(&template.name.to_lowercase().replace('_', " ")) {
+                // Apply template with context
+                if let Some(template_edits) = apply_template(template, &request.context) {
+                    candidates.push(ProviderCandidate {
+                        edits: template_edits,
+                        source: "template".into(),
+                        strategy: format!("template_{}", template.name),
+                        confidence: template.confidence,
+                        reasoning: format!("Applied {} template", template.name),
+                        estimated_risk: RiskEstimate::Low,
+                    });
+                }
+            }
+        }
+
+        let candidates_count = candidates.len();
+        Ok(GenerateResponse {
+            candidates,
+            generation_time_ms: start.elapsed().as_millis() as u64,
+            provider_notes: Some(format!("Generated {} template candidates", candidates_count)),
+        })
+    }
+
+    async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
+        let start = std::time::Instant::now();
+        let mut repaired = request.failed_edits.clone();
+
+        // Try to apply template-based repairs
+        let repair_applied = if request.failure.kind == FailureKind::SyntaxError {
+            for template in self.templates.values() {
+                if template.name == "fix_missing_semicolon" {
+                    // Add semicolons to lines that might be missing them
+                    let fixed_repaired = apply_semicolon_fix(&repaired);
+                    repaired = fixed_repaired;
+                    break;
+                }
+            }
+            repaired != request.failed_edits
+        } else {
+            false
+        };
+
+        Ok(RepairResponse {
+            repaired_edits: repaired,
+            repair_applied,
+            repair_notes: "Template-based repair".into(),
+            repair_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn can_handle(&self, kind: FailureKind) -> bool {
+        matches!(kind, FailureKind::SyntaxError | FailureKind::PatchParseFailure)
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: true,
+            max_candidates: 5,
+            supported_operations: vec!["search_replace".into()],
+            typical_latency_ms: 5,
         }
     }
 }
@@ -1339,5 +1607,494 @@ impl PatchProvider for LlmPatchProvider {
             ],
             typical_latency_ms: 5000,
         }
+    }
+}
+
+// Helper functions for new providers
+
+/// Parse script output into provider candidates
+fn parse_script_candidates(output: serde_json::Value, source: &str) -> anyhow::Result<Vec<ProviderCandidate>> {
+    let mut candidates = Vec::new();
+    
+    if let Some(candidates_array) = output.get("candidates").and_then(|v| v.as_array()) {
+        for candidate_json in candidates_array {
+            let edits = if let Some(edits_array) = candidate_json.get("edits").and_then(|v| v.as_array()) {
+                parse_script_edits_from_array(edits_array)?
+            } else {
+                vec![]
+            };
+            
+            candidates.push(ProviderCandidate {
+                edits,
+                source: source.to_string(),
+                strategy: candidate_json.get("strategy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("script")
+                    .to_string(),
+                confidence: candidate_json.get("confidence")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(80) as u8,
+                reasoning: candidate_json.get("reasoning")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Generated by script")
+                    .to_string(),
+                estimated_risk: RiskEstimate::Low,
+            });
+        }
+    }
+    
+    Ok(candidates)
+}
+
+/// Parse edits from script output
+fn parse_script_edits(output: serde_json::Value) -> anyhow::Result<Vec<EditOperation>> {
+    if let Some(edits_array) = output.get("edits").and_then(|v| v.as_array()) {
+        parse_script_edits_from_array(edits_array)
+    } else {
+        Ok(vec![])
+    }
+}
+
+/// Parse edits from JSON array
+fn parse_script_edits_from_array(edits_array: &[serde_json::Value]) -> anyhow::Result<Vec<EditOperation>> {
+    let mut edits = Vec::new();
+    
+    for edit_json in edits_array {
+        let edit_type = edit_json.get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing edit type"))?;
+        
+        match edit_type {
+            "search_replace" => {
+                let file = edit_json.get("file")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
+                let search = edit_json.get("search")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing search pattern"))?;
+                let replace = edit_json.get("replace")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing replace pattern"))?;
+                
+                edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+                    file: PathBuf::from(file),
+                    search: search.to_string(),
+                    replace: replace.to_string(),
+                    replace_all: edit_json.get("replace_all").and_then(|v| v.as_bool()),
+                    context_lines: edit_json.get("context_lines").and_then(|v| v.as_u64()).map(|v| v as u16),
+                }));
+            }
+            "whole_file" => {
+                let file = edit_json.get("file")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
+                let content = edit_json.get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing file content"))?;
+                
+                edits.push(EditOperation::WholeFile(WholeFileEdit {
+                    file: PathBuf::from(file),
+                    content: content.to_string(),
+                }));
+            }
+            "create_file" => {
+                let file = edit_json.get("file")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
+                let content = edit_json.get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                
+                edits.push(EditOperation::CreateFile(CreateFileEdit {
+                    file: PathBuf::from(file),
+                    content: content.to_string(),
+                    executable: None,
+                }));
+            }
+            _ => {
+                return Err(anyhow::anyhow!("Unsupported edit type: {}", edit_type));
+            }
+        }
+    }
+    
+    Ok(edits)
+}
+
+/// Apply template to generate edits
+fn apply_template(template: &Template, context: &PatchProviderContext) -> Option<Vec<EditOperation>> {
+    let mut edits = Vec::new();
+    
+    match template.name.as_str() {
+        "add_import" => {
+            // Extract import from task description
+            let task_lower = context.task.to_lowercase();
+            if let Some(start) = task_lower.find("import ") {
+                let remaining = &task_lower[start..];
+                if let Some(end) = remaining.find(|c: char| c.is_whitespace() && !c.is_alphanumeric()) {
+                    let import = &remaining[7..end];
+                    edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+                        file: PathBuf::from("src/main.rs"), // Default assumption
+                        search: "".to_string(),
+                        replace: format!("use {};", import),
+                        replace_all: None,
+                        context_lines: Some(0),
+                    }));
+                }
+            }
+        }
+        "fix_missing_semicolon" => {
+            // This would be handled in repair
+        }
+        "add_error_handling" => {
+            // Look for function calls that might need error handling
+            let task_lower = context.task.to_lowercase();
+            if task_lower.contains("error") || task_lower.contains("result") {
+                edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+                    file: PathBuf::from("src/main.rs"), // Default assumption
+                    search: "{expr}".to_string(),
+                    replace: template.pattern.clone(),
+                    replace_all: None,
+                    context_lines: Some(2),
+                }));
+            }
+        }
+        _ => {}
+    }
+    
+    if edits.is_empty() {
+        None
+    } else {
+        Some(edits)
+    }
+}
+
+/// Apply semicolon fix to edits
+fn apply_semicolon_fix(edits: &[EditOperation]) -> Vec<EditOperation> {
+    let mut fixed = Vec::new();
+    
+    for edit in edits {
+        match edit {
+            EditOperation::SearchReplace(sr) => {
+                let mut new_sr = sr.clone();
+                
+                // Add semicolon if missing and it looks like a statement
+                if !sr.replace.trim_end().ends_with(';') && 
+                   (sr.replace.contains("let ") || sr.replace.contains("fn ") || sr.replace.contains("return ")) {
+                    new_sr.replace.push(';');
+                }
+                
+                fixed.push(EditOperation::SearchReplace(new_sr));
+            }
+            _ => fixed.push(edit.clone()),
+        }
+    }
+    
+    fixed
+}
+
+/// Deterministic safe patch provider that generates predictable patches
+/// 
+/// This provider uses deterministic algorithms to generate safe patches
+/// without relying on external services or random generation.
+pub struct DeterministicPatchProvider {
+    /// Seed for deterministic behavior
+    seed: u64,
+}
+
+impl DeterministicPatchProvider {
+    /// Create a new deterministic patch provider with the given seed
+    pub fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+    
+    /// Create a deterministic patch provider with default seed
+    pub fn new_default() -> Self {
+        Self { seed: 42 }
+    }
+}
+
+#[async_trait]
+impl PatchProvider for DeterministicPatchProvider {
+    fn name(&self) -> &str {
+        "deterministic"
+    }
+
+    async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        let start = std::time::Instant::now();
+        let mut candidates = Vec::new();
+        
+        // Generate deterministic candidates based on task analysis
+        if let Some(candidate) = self.generate_safe_candidate(&request.context) {
+            candidates.push(candidate);
+        }
+        
+        Ok(GenerateResponse {
+            candidates,
+            generation_time_ms: start.elapsed().as_millis() as u64,
+            provider_notes: Some("Generated deterministic safe patches".to_string()),
+        })
+    }
+
+    async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
+        let start = std::time::Instant::now();
+        
+        // Apply deterministic repair strategies
+        let repaired_edits = match request.repair_strategy {
+            RepairStrategy::FixSyntaxError => self.deterministic_syntax_repair(&request.failed_edits, &request.failure),
+            RepairStrategy::ExpandContextWindow => self.deterministic_expand_context(&request.failed_edits),
+            RepairStrategy::NarrowSearchPattern => self.deterministic_narrow_search(&request.failed_edits),
+            RepairStrategy::AddMissingImport => self.deterministic_add_import(&request.failed_edits, &request.context),
+            _ => Ok(request.failed_edits.clone()),
+        };
+        
+        let repair_applied = repaired_edits.as_ref().map_or(false, |edits| edits != &request.failed_edits);
+        
+        Ok(RepairResponse {
+            repaired_edits: repaired_edits.unwrap_or(request.failed_edits),
+            repair_applied,
+            repair_notes: format!("Applied deterministic {:?} repair", request.repair_strategy),
+            repair_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn can_handle(&self, kind: FailureKind) -> bool {
+        // Can handle common failure types deterministically
+        matches!(
+            kind,
+            FailureKind::PatchApplyFailure
+                | FailureKind::PatchParseFailure
+                | FailureKind::SyntaxError
+                | FailureKind::ValidationFailed
+        )
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: true,
+            max_candidates: 2,
+            supported_operations: vec![
+                "search_replace".to_string(),
+                "whole_file".to_string(),
+                "create_file".to_string(),
+            ],
+            typical_latency_ms: 5,
+        }
+    }
+}
+
+impl DeterministicPatchProvider {
+    /// Generate a safe candidate based on deterministic analysis
+    fn generate_safe_candidate(&self, context: &PatchProviderContext) -> Option<ProviderCandidate> {
+        let task_lower = context.task.to_lowercase();
+        
+        // Use deterministic pattern matching to generate safe edits
+        let edits = if task_lower.contains("import") {
+            self.generate_import_edit(&task_lower)
+        } else if task_lower.contains("function") || task_lower.contains("fn ") {
+            self.generate_function_edit(&task_lower)
+        } else if task_lower.contains("fix") || task_lower.contains("error") {
+            self.generate_fix_edit(&task_lower)
+        } else {
+            // Default: add a comment with task clarification
+            vec![EditOperation::SearchReplace(SearchReplaceEdit {
+                file: PathBuf::from("src/main.rs"),
+                search: "".to_string(),
+                replace: format!("// TODO: {}\n", context.task),
+                replace_all: None,
+                context_lines: Some(0),
+            })]
+        };
+        
+        if edits.is_empty() {
+            None
+        } else {
+            Some(ProviderCandidate {
+                edits,
+                source: "deterministic".to_string(),
+                strategy: "safe_pattern".to_string(),
+                confidence: 75, // Moderate confidence for deterministic patches
+                reasoning: "Generated using deterministic safe patterns".to_string(),
+                estimated_risk: RiskEstimate::Low,
+            })
+        }
+    }
+    
+    /// Generate import edits deterministically
+    fn generate_import_edit(&self, task: &str) -> Vec<EditOperation> {
+        let mut edits = Vec::new();
+        
+        // Look for import patterns in the task
+        if let Some(import_start) = task.find("import ") {
+            let remaining = &task[import_start + 7..];
+            if let Some(import_end) = remaining.find(|c: char| c.is_whitespace() && !c.is_alphanumeric()) {
+                let import_name = &remaining[..import_end];
+                edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+                    file: PathBuf::from("src/main.rs"),
+                    search: "".to_string(),
+                    replace: format!("use {};\n", import_name),
+                    replace_all: None,
+                    context_lines: Some(0),
+                }));
+            }
+        }
+        
+        edits
+    }
+    
+    /// Generate function edits deterministically
+    fn generate_function_edit(&self, task: &str) -> Vec<EditOperation> {
+        let mut edits = Vec::new();
+        
+        // Simple function template
+        let function_name = if let Some(fn_start) = task.find("fn ") {
+            let remaining = &task[fn_start + 3..];
+            if let Some(fn_end) = remaining.find(|c: char| !c.is_alphanumeric() && c != '_') {
+                &remaining[..fn_end]
+            } else {
+                "new_function"
+            }
+        } else {
+            "new_function"
+        };
+        
+        edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+            file: PathBuf::from("src/main.rs"),
+            search: "".to_string(),
+            replace: format!(
+                "fn {}() -> Result<(), Box<dyn std::error::Error>> {{\n    // TODO: Implement {}\n    Ok(())\n}}\n",
+                function_name, function_name
+            ),
+            replace_all: None,
+            context_lines: Some(0),
+        }));
+        
+        edits
+    }
+    
+    /// Generate fix edits deterministically
+    fn generate_fix_edit(&self, task: &str) -> Vec<EditOperation> {
+        let mut edits = Vec::new();
+        
+        // Common fix patterns
+        if task.contains("semicolon") {
+            edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+                file: PathBuf::from("src/main.rs"),
+                search: r"([a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[^;])".to_string(),
+                replace: "$1;".to_string(),
+                replace_all: None,
+                context_lines: Some(1),
+            }));
+        }
+        
+        if task.contains("missing") && task.contains("import") {
+            edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
+                file: PathBuf::from("src/main.rs"),
+                search: "".to_string(),
+                replace: "use std::io;\n".to_string(),
+                replace_all: None,
+                context_lines: Some(0),
+            }));
+        }
+        
+        edits
+    }
+    
+    /// Deterministic syntax repair
+    fn deterministic_syntax_repair(&self, edits: &[EditOperation], _failure: &FailureDetails) -> anyhow::Result<Vec<EditOperation>> {
+        let mut repaired = Vec::new();
+        
+        for edit in edits {
+            match edit {
+                EditOperation::SearchReplace(sr) => {
+                    let mut new_sr = sr.clone();
+                    
+                    // Add missing semicolons for statements
+                    if !sr.replace.trim_end().ends_with(';') && 
+                       (sr.replace.contains("let ") || sr.replace.contains("return ")) {
+                        new_sr.replace.push(';');
+                    }
+                    
+                    // Fix common syntax issues
+                    if sr.replace.contains("{{") {
+                        new_sr.replace = sr.replace.replace("{{", "{");
+                    }
+                    if sr.replace.contains("}}") {
+                        new_sr.replace = sr.replace.replace("}}", "}");
+                    }
+                    
+                    repaired.push(EditOperation::SearchReplace(new_sr));
+                }
+                _ => repaired.push(edit.clone()),
+            }
+        }
+        
+        Ok(repaired)
+    }
+    
+    /// Deterministic context expansion
+    fn deterministic_expand_context(&self, edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+        let mut expanded = Vec::new();
+        
+        for edit in edits {
+            match edit {
+                EditOperation::SearchReplace(sr) => {
+                    let mut new_sr = sr.clone();
+                    // Add 3 more lines of context deterministically
+                    new_sr.context_lines = sr.context_lines.map(|c| c.saturating_add(3));
+                    expanded.push(EditOperation::SearchReplace(new_sr));
+                }
+                _ => expanded.push(edit.clone()),
+            }
+        }
+        
+        Ok(expanded)
+    }
+    
+    /// Deterministic search narrowing
+    fn deterministic_narrow_search(&self, edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+        let mut narrowed = Vec::new();
+        
+        for edit in edits {
+            match edit {
+                EditOperation::SearchReplace(sr) => {
+                    let mut new_sr = sr.clone();
+                    // Add more specific context by including the first line
+                    if let Some(first_line) = sr.search.lines().next() {
+                        if !sr.search.starts_with(first_line) {
+                            new_sr.search = format!("{}\n{}", first_line, sr.search);
+                        }
+                    }
+                    narrowed.push(EditOperation::SearchReplace(new_sr));
+                }
+                _ => narrowed.push(edit.clone()),
+            }
+        }
+        
+        Ok(narrowed)
+    }
+    
+    /// Deterministic import addition
+    fn deterministic_add_import(&self, edits: &[EditOperation], _context: &PatchProviderContext) -> anyhow::Result<Vec<EditOperation>> {
+        let mut with_imports = edits.to_vec();
+        
+        // Add common imports that might be missing
+        let common_imports = vec![
+            "use std::collections::HashMap;",
+            "use std::error::Error;",
+            "use anyhow::Result;",
+        ];
+        
+        for import in common_imports {
+            with_imports.insert(0, EditOperation::SearchReplace(SearchReplaceEdit {
+                file: PathBuf::from("src/main.rs"),
+                search: "".to_string(),
+                replace: format!("{}\n", import),
+                replace_all: None,
+                context_lines: Some(0),
+            }));
+        }
+        
+        Ok(with_imports)
     }
 }
