@@ -533,7 +533,7 @@ impl ContextBudget {
         
         // Adjust budgets based on average usage
         for (section, avg_tokens) in avg_usage {
-            if let Some(budget) = self.sections.get_mut(section) {
+            if let Some(budget) = self.sections.get_mut(&section) {
                 // Increase budget if consistently over limit
                 if avg_tokens > budget.max_tokens {
                     budget.max_tokens = ((avg_tokens as f32 * 1.2) as usize).min(budget.max_tokens * 2);
