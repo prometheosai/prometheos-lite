@@ -24,28 +24,46 @@ use tokio::{
 pub enum SandboxRuntimeKind {
     Docker,
     Local,
-    Mock,
 }
 
-/// P0-Issue2: Sandbox policy for mode-aware runtime selection
+/// P0-Issue2: Enhanced sandbox policy for mode-aware runtime selection
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxPolicy {
     pub prefer_docker: bool,
+    pub require_docker: bool,
     pub fallback_to_local: bool,
-    pub require_isolated: bool,
-    pub require_network_disabled: bool,
-    pub require_resource_limits: bool,
+    pub network: NetworkPolicy,
+    pub mount_mode: MountMode,
+    pub cpu_limit: Option<String>,
+    pub memory_limit: Option<String>,
     pub docker_image: Option<String>,
+}
+
+/// P0-Issue2: Network policy for sandbox isolation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    Disabled,
+    Enabled,
+    OutboundOnly,
+}
+
+/// P0-Issue2: Mount mode for Docker containers
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MountMode {
+    ReadOnly,
+    ReadWrite,
 }
 
 impl Default for SandboxPolicy {
     fn default() -> Self {
         Self {
             prefer_docker: false,
+            require_docker: false,
             fallback_to_local: true,
-            require_isolated: false,
-            require_network_disabled: false,
-            require_resource_limits: false,
+            network: NetworkPolicy::Enabled,
+            mount_mode: MountMode::ReadWrite,
+            cpu_limit: None,
+            memory_limit: None,
             docker_image: None,
         }
     }
@@ -56,10 +74,12 @@ impl SandboxPolicy {
     pub fn autonomous() -> Self {
         Self {
             prefer_docker: true,
+            require_docker: true, // Docker required for autonomous mode
             fallback_to_local: false, // No fallback for autonomous mode
-            require_isolated: true,
-            require_network_disabled: true,
-            require_resource_limits: true,
+            network: NetworkPolicy::Disabled, // Network disabled for safety
+            mount_mode: MountMode::ReadWrite, // Read-write for temp workspace validation
+            cpu_limit: Some("1".to_string()),
+            memory_limit: Some("512m".to_string()),
             docker_image: Some("rust:latest".to_string()),
         }
     }
@@ -68,10 +88,12 @@ impl SandboxPolicy {
     pub fn assisted() -> Self {
         Self {
             prefer_docker: true,
+            require_docker: false, // Docker preferred but not required
             fallback_to_local: true, // Allow fallback in assisted mode
-            require_isolated: true,
-            require_network_disabled: false,
-            require_resource_limits: true,
+            network: NetworkPolicy::OutboundOnly, // Limited network access
+            mount_mode: MountMode::ReadWrite, // Read-write for temp workspace validation
+            cpu_limit: Some("2".to_string()),
+            memory_limit: Some("1g".to_string()),
             docker_image: Some("rust:latest".to_string()),
         }
     }
@@ -80,11 +102,27 @@ impl SandboxPolicy {
     pub fn review_only() -> Self {
         Self {
             prefer_docker: false, // Local commands OK for review-only
+            require_docker: false,
             fallback_to_local: true,
-            require_isolated: false,
-            require_network_disabled: false,
-            require_resource_limits: false,
+            network: NetworkPolicy::Enabled, // Network allowed for review-only
+            mount_mode: MountMode::ReadOnly, // Read-only for review-only analysis
+            cpu_limit: None,
+            memory_limit: None,
             docker_image: None,
+        }
+    }
+
+    /// Create sandbox policy for benchmark mode
+    pub fn benchmark() -> Self {
+        Self {
+            prefer_docker: true,
+            require_docker: false,
+            fallback_to_local: true,
+            network: NetworkPolicy::Enabled, // Network allowed for benchmarking
+            mount_mode: MountMode::ReadWrite,
+            cpu_limit: Some("2".to_string()),
+            memory_limit: Some("1g".to_string()),
+            docker_image: Some("rust:latest".to_string()),
         }
     }
 
@@ -95,7 +133,7 @@ impl SandboxPolicy {
             HarnessMode::Autonomous => Self::autonomous(),
             HarnessMode::Assisted => Self::assisted(),
             HarnessMode::Review | HarnessMode::ReviewOnly => Self::review_only(),
-            HarnessMode::Benchmark => Self::assisted(), // Use assisted for benchmarking
+            HarnessMode::Benchmark => Self::benchmark(),
         }
     }
 }
@@ -548,6 +586,8 @@ pub struct DockerSandboxRuntime {
     /// Timeout for container operations
     timeout_ms: u64,
     policy: CommandSecurityPolicy,
+    /// P0-Issue2: Mount mode for volume mounts
+    mount_mode: MountMode,
 }
 
 impl DockerSandboxRuntime {
@@ -570,6 +610,7 @@ impl DockerSandboxRuntime {
             cpus: Some("1.0".to_string()),
             memory: Some("512m".to_string()),
             timeout_ms: 300000, // 5 minutes
+            mount_mode: MountMode::ReadWrite, // Default to read-write for compatibility
         }
     }
 
@@ -627,6 +668,30 @@ impl DockerSandboxRuntime {
         }
     }
 
+    /// P0-Issue2: Set network policy for Docker runtime
+    pub fn set_network_policy(&mut self, policy: NetworkPolicy) {
+        self.network_mode = match policy {
+            NetworkPolicy::Disabled => "none".to_string(),
+            NetworkPolicy::Enabled => "bridge".to_string(),
+            NetworkPolicy::OutboundOnly => "bridge".to_string(), // Would need additional firewall rules
+        };
+    }
+
+    /// P0-Issue2: Set mount mode for Docker runtime
+    pub fn set_mount_mode(&mut self, mode: MountMode) {
+        self.mount_mode = mode;
+    }
+
+    /// P0-Issue2: Set CPU limit for Docker runtime
+    pub fn set_cpu_limit(&mut self, limit: String) {
+        self.cpus = Some(limit);
+    }
+
+    /// P0-Issue2: Set memory limit for Docker runtime
+    pub fn set_memory_limit(&mut self, limit: String) {
+        self.memory = Some(limit);
+    }
+
     /// P0-Issue1: Create sandbox evidence for autonomous mode safety verification
     pub fn create_sandbox_evidence(&self, container_id: Option<String>) -> crate::harness::evidence::SandboxEvidence {
         crate::harness::evidence::SandboxEvidence {
@@ -669,11 +734,10 @@ impl DockerSandboxRuntime {
 
         // Add volume mounts
         // Mount the repo root to the working directory
-        // P0-C2: Support read-only mounts for validation scenarios
-        let mount_mode = if cmd.program == "cargo" && (cmd.args.contains(&"test".to_string()) || cmd.args.contains(&"check".to_string()) || cmd.args.contains(&"clippy".to_string())) {
-            ":ro" // Read-only for validation commands
-        } else {
-            ":rw" // Read-write for patch application
+        // P0-Issue2: Use policy-defined mount mode for proper isolation
+        let mount_mode = match self.mount_mode {
+            crate::harness::sandbox::MountMode::ReadOnly => ":ro",
+            crate::harness::sandbox::MountMode::ReadWrite => ":rw",
         };
         args.push("--volume".to_string());
         args.push(format!("{}:{}{}", repo_root.display(), self.workdir, mount_mode));
@@ -804,40 +868,41 @@ impl CommandRuntime for DockerSandboxRuntime {
             timed_out: false,
         })
     }
-
-    /// P0-Issue1: Extract container ID from Docker output for evidence tracking
-    fn extract_container_id(&self, stderr: &str) -> Option<String> {
-        // Docker container IDs are typically 64-character hex strings
-        // Look for patterns like "Container ID: <hash>" or just the hash itself
-        use regex::Regex;
-        if let Ok(re) = Regex::new(r"[a-f0-9]{64}") {
-            if let Some(caps) = re.find(stderr) {
-                return Some(caps.as_str().to_string());
-            }
-        }
-        None
-    }
 }
 
 /// P1-FIX: Sandbox runtime factory for selecting appropriate backend
 pub struct SandboxRuntimeFactory;
 
 impl SandboxRuntimeFactory {
-    /// P0-Issue2: Create sandbox runtime based on policy
+    /// P0-Issue2: Create sandbox runtime based on enhanced policy
     pub async fn create_with_policy(policy: &SandboxPolicy) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
         // Check if Docker is available and preferred
         let docker_available = DockerSandboxRuntime::is_docker_available().await;
         
-        if policy.prefer_docker && docker_available {
+        if policy.require_docker && !docker_available {
+            tracing::error!("Docker required by policy but not available");
+            anyhow::bail!("Docker runtime required by policy but not available on this system");
+        }
+        
+        if (policy.prefer_docker || policy.require_docker) && docker_available {
             let image = policy.docker_image.clone().unwrap_or_else(|| "rust:latest".to_string());
             tracing::info!("P0-Issue2: Using Docker sandbox with image: {}", image);
+            tracing::info!("P0-Issue2: Network policy: {:?}, Mount mode: {:?}", policy.network, policy.mount_mode);
             
-            // Verify Docker meets policy requirements
-            if policy.require_isolated || policy.require_network_disabled || policy.require_resource_limits {
-                tracing::info!("P0-Issue2: Docker runtime meets policy requirements");
+            // Create Docker runtime with policy configuration
+            let mut docker_runtime = DockerSandboxRuntime::new(image);
+            
+            // Apply policy settings
+            docker_runtime.set_network_policy(policy.network.clone());
+            docker_runtime.set_mount_mode(policy.mount_mode.clone());
+            if let Some(ref cpu_limit) = policy.cpu_limit {
+                docker_runtime.set_cpu_limit(cpu_limit.clone());
+            }
+            if let Some(ref memory_limit) = policy.memory_limit {
+                docker_runtime.set_memory_limit(memory_limit.clone());
             }
             
-            Ok(std::sync::Arc::new(DockerSandboxRuntime::new(image)))
+            Ok(std::sync::Arc::new(docker_runtime))
         } else if policy.prefer_docker && !docker_available {
             if policy.fallback_to_local {
                 tracing::warn!("P0-Issue2: Docker not available, falling back to local runtime");
@@ -861,10 +926,12 @@ impl SandboxRuntimeFactory {
     pub async fn create(prefer_docker: bool, image: Option<String>) -> std::sync::Arc<dyn SandboxRuntime + Send + Sync> {
         let policy = SandboxPolicy {
             prefer_docker,
+            require_docker: false,
             fallback_to_local: true,
-            require_isolated: false,
-            require_network_disabled: false,
-            require_resource_limits: false,
+            network: NetworkPolicy::Enabled,
+            mount_mode: MountMode::ReadWrite,
+            cpu_limit: None,
+            memory_limit: None,
             docker_image: image,
         };
         
