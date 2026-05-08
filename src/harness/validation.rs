@@ -1,5 +1,6 @@
 use crate::harness::sandbox::SandboxRuntime;
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,7 +12,47 @@ use std::{
 };
 use tokio::fs;
 use tokio::sync::Mutex;
+use tracing;
 use walkdir::WalkDir;
+
+/// P1-Issue5: Validation cache configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidationCacheConfig {
+    /// Whether caching is enabled
+    pub enabled: bool,
+    /// Cache TTL in milliseconds
+    pub ttl_ms: u64,
+    /// Whether to disable cache for post-apply validation
+    pub disable_post_apply: bool,
+    /// Whether to disable cache for critical validation categories
+    pub disable_critical_categories: bool,
+    /// Categories that should never be cached
+    pub never_cache_categories: Vec<ValidationCategory>,
+}
+
+impl Default for ValidationCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_ms: 300_000, // 5 minutes
+            disable_post_apply: true, // P1-Issue5: Default to disabled for post-apply
+            disable_critical_categories: true,
+            never_cache_categories: vec![
+                ValidationCategory::Test, // Tests should always run fresh
+                ValidationCategory::Repro, // Reproducibility checks should be fresh
+            ],
+        }
+    }
+}
+
+/// P0-Issue3: Validation status to distinguish between passed, failed, and inconclusive
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ValidationStatus {
+    Passed,
+    Failed,
+    Inconclusive,
+    SkippedExplicitly,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ValidationPlan {
@@ -99,11 +140,45 @@ impl ValidationPlan {
 
         plan
     }
+
+    /// P1-Issue10: Create validation plan for final gates with no cache
+    pub fn for_final_gate(env: &crate::harness::environment::EnvironmentProfile) -> Self {
+        Self::default_for_repo(env).with_no_cache()
+    }
+
+    /// P1-Issue10: Create validation plan for final gates with no cache from registry
+    pub fn for_final_gate_with_registry(env: &crate::harness::environment::EnvironmentProfile, registry: &crate::harness::runtime_tools::RuntimeToolRegistry) -> Self {
+        Self::from_registry(env, registry).with_no_cache()
+    }
+
+    /// P1-Issue10: Check if this validation represents a final gate
+    pub fn is_final_gate(&self) -> bool {
+        // Final gates are characterized by:
+        // 1. Having test commands (production readiness checks)
+        // 2. Having multiple validation categories (comprehensive validation)
+        // 3. Longer timeout (indicating thorough validation)
+        let has_tests = !self.test_commands.is_empty();
+        let has_multiple_categories = (!self.format_commands.is_empty() && !self.lint_commands.is_empty()) ||
+                                   (!self.lint_commands.is_empty() && !self.test_commands.is_empty()) ||
+                                   (!self.format_commands.is_empty() && !self.test_commands.is_empty());
+        let has_long_timeout = self.timeout_ms.unwrap_or(0) > 60000; // More than 1 minute
+        
+        has_tests && (has_multiple_categories || has_long_timeout)
+    }
+
+    /// P1-Issue10: Ensure no-cache for final gates
+    pub fn ensure_no_cache_for_final_gate(mut self) -> Self {
+        if self.is_final_gate() {
+            self.disable_cache = true;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationResult {
-    pub passed: bool,
+    // P0-Issue3: Use ValidationStatus instead of boolean passed
+    pub status: ValidationStatus,
     pub command_results: Vec<CommandResult>,
     pub errors: Vec<String>,
     pub duration_ms: u64,
@@ -112,6 +187,31 @@ pub struct ValidationResult {
     pub category_results: HashMap<ValidationCategory, CategoryResult>,
     // P0-4 FIX: Add validation_performed field for completion evidence
     pub validation_performed: bool,
+    // P1-Issue10: Add final gate information
+    pub is_final_gate: bool,
+    pub cache_disabled: bool,
+    // P0-2.1: Add direct command execution counters
+    pub commands_planned: usize,
+    pub commands_executed: usize,
+    pub commands_skipped: usize,
+    pub categories_executed: Vec<ValidationCategory>,
+}
+
+impl ValidationResult {
+    /// P0-Issue3: Helper method to check if validation passed (backward compatibility)
+    pub fn passed(&self) -> bool {
+        matches!(self.status, ValidationStatus::Passed)
+    }
+
+    /// P0-Issue3: Helper method to check if validation failed
+    pub fn failed(&self) -> bool {
+        matches!(self.status, ValidationStatus::Failed)
+    }
+
+    /// P0-Issue3: Helper method to check if validation was inconclusive
+    pub fn inconclusive(&self) -> bool {
+        matches!(self.status, ValidationStatus::Inconclusive)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -417,28 +517,69 @@ fn compute_env_hash() -> String {
 struct ValidationCache {
     entries: Arc<Mutex<HashMap<String, CachedResult>>>,
     ttl_ms: u64,
+    config: ValidationCacheConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedResult {
     result: CommandResult,
     timestamp: Instant,
     file_hashes: HashMap<PathBuf, String>,
+    validation_category: ValidationCategory,
+    cache_hit_count: u32,
 }
 
 impl ValidationCache {
-    fn new(ttl_ms: u64) -> Self {
+    pub fn new(ttl_ms: u64) -> Self {
+        Self::new_with_config(ttl_ms, ValidationCacheConfig::default())
+    }
+
+    pub fn new_with_config(ttl_ms: u64, config: ValidationCacheConfig) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             ttl_ms,
+            config,
         }
+    }
+
+    /// P1-Issue5: Check if caching should be disabled for this category
+    fn should_disable_cache(&self, category: &ValidationCategory, is_post_apply: bool) -> bool {
+        if !self.config.enabled {
+            return true;
+        }
+        
+        if is_post_apply && self.config.disable_post_apply {
+            return true;
+        }
+        
+        if self.config.disable_critical_categories && self.is_critical_category(category) {
+            return true;
+        }
+        
+        if self.config.never_cache_categories.contains(category) {
+            return true;
+        }
+        
+        false
+    }
+
+    /// P1-Issue5: Determine if a validation category is critical
+    fn is_critical_category(&self, category: &ValidationCategory) -> bool {
+        matches!(category, ValidationCategory::Test | ValidationCategory::Repro)
     }
 
     async fn get(
         &self,
         key: &str,
         current_hashes: &HashMap<PathBuf, String>,
+        category: &ValidationCategory,
+        is_post_apply: bool,
     ) -> Option<CommandResult> {
+        // P1-Issue5: Check if caching should be disabled
+        if self.should_disable_cache(category, is_post_apply) {
+            return None;
+        }
+
         let entries = self.entries.lock().await;
         if let Some(cached) = entries.get(key) {
             // Check TTL
@@ -450,13 +591,33 @@ impl ValidationCache {
             if &cached.file_hashes == current_hashes {
                 let mut result = cached.result.clone();
                 result.cached = true;
+                tracing::debug!(
+                    "Cache hit for {} (category: {:?}, post_apply: {})",
+                    key, category, is_post_apply
+                );
                 return Some(result);
             }
         }
         None
     }
 
-    async fn set(&self, key: String, result: CommandResult, file_hashes: HashMap<PathBuf, String>) {
+    async fn set(
+        &self,
+        key: String,
+        result: CommandResult,
+        file_hashes: HashMap<PathBuf, String>,
+        category: ValidationCategory,
+        is_post_apply: bool,
+    ) {
+        // P1-Issue5: Don't cache if caching is disabled for this category
+        if self.should_disable_cache(&category, is_post_apply) {
+            tracing::debug!(
+                "Skipping cache for {} (category: {:?}, post_apply: {})",
+                key, category, is_post_apply
+            );
+            return;
+        }
+
         let mut entries = self.entries.lock().await;
         entries.insert(
             key,
@@ -464,14 +625,55 @@ impl ValidationCache {
                 result,
                 timestamp: Instant::now(),
                 file_hashes,
+                validation_category: category,
+                cache_hit_count: 0,
             },
+        );
+        
+        tracing::debug!(
+            "Cached result for {} (category: {:?}, post_apply: {})",
+            key, category, is_post_apply
         );
     }
 
     async fn clear(&self) {
         let mut entries = self.entries.lock().await;
         entries.clear();
+        tracing::debug!("Validation cache cleared");
     }
+
+    /// P1-Issue5: Get cache statistics
+    pub async fn get_stats(&self) -> ValidationCacheStats {
+        let entries = self.entries.lock().await;
+        let total_entries = entries.len();
+        let mut category_counts = HashMap::new();
+        let mut total_cache_hits = 0;
+        
+        for cached in entries.values() {
+            *category_counts.entry(cached.validation_category).or_insert(0) += 1;
+            total_cache_hits += cached.cache_hit_count;
+        }
+        
+        ValidationCacheStats {
+            total_entries,
+            category_counts,
+            total_cache_hits,
+            ttl_ms: self.ttl_ms,
+            enabled: self.config.enabled,
+            disable_post_apply: self.config.disable_post_apply,
+        }
+    }
+}
+
+/// P1-Issue5: Cache statistics
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ValidationCacheStats {
+    pub total_entries: usize,
+    pub category_counts: HashMap<ValidationCategory, usize>,
+    pub total_cache_hits: u32,
+    pub ttl_ms: u64,
+    pub enabled: bool,
+    pub disable_post_apply: bool,
 }
 
 static GLOBAL_CACHE: Lazy<ValidationCache> = Lazy::new(|| ValidationCache::new(300_000)); // 5 minute TTL
@@ -492,6 +694,14 @@ pub async fn run_validation_with_cache(
 ) -> Result<ValidationResult> {
     let start = Instant::now();
     let timeout = plan.timeout_ms.unwrap_or(120000);
+
+    // P1-Issue10: Force no-cache validation for final gates
+    let effective_cache = if plan.disable_cache {
+        // Create a temporary cache that won't be used
+        &ValidationCache::new(0)
+    } else {
+        cache
+    };
 
     let all_commands: Vec<(String, ValidationCategory)> = plan
         .format_commands
@@ -515,9 +725,9 @@ pub async fn run_validation_with_cache(
         .collect();
 
     let results = if plan.parallel {
-        run_parallel(root, &all_commands, sandbox.clone(), cache, timeout).await?
+        run_parallel(root, &all_commands, sandbox.clone(), effective_cache, timeout).await?
     } else {
-        run_sequential(root, &all_commands, &*sandbox, cache, timeout).await?
+        run_sequential(root, &all_commands, &*sandbox, effective_cache, timeout).await?
     };
 
     let mut category_results: HashMap<ValidationCategory, CategoryResult> = HashMap::new();
@@ -557,7 +767,22 @@ pub async fn run_validation_with_cache(
         .map(|(cmd, _)| cmd.clone())
         .collect();
 
-    let passed = errors.is_empty();
+    // P0-Issue3: Fix zero-command validation false positives
+    let all_commands: Vec<String> = plan.format_commands
+        .iter()
+        .chain(plan.lint_commands.iter())
+        .chain(plan.test_commands.iter())
+        .chain(plan.repro_commands.iter())
+        .cloned()
+        .collect();
+
+    let status = if all_commands.is_empty() {
+        ValidationStatus::Inconclusive
+    } else if errors.is_empty() {
+        ValidationStatus::Passed
+    } else {
+        ValidationStatus::Failed
+    };
     let cached = results.iter().all(|(_, r)| r.cached);
 
     let test_commands: Vec<_> = plan.test_commands.clone();
@@ -569,8 +794,31 @@ pub async fn run_validation_with_cache(
 
     let command_results: Vec<_> = results.into_iter().map(|(_, r)| r).collect();
 
+    // P0-2.1: Calculate command execution counters
+    let commands_planned = all_commands.len();
+    let commands_executed = results.len();
+    let commands_skipped = commands_planned.saturating_sub(commands_executed);
+    
+    // P0-2.1: Track which categories were actually executed
+    let mut categories_executed = Vec::new();
+    for (cmd, _) in &results {
+        // Find the category for this command by looking through all_commands
+        for (_, cat) in &all_commands {
+            if cat.0 == *cmd {
+                if !categories_executed.contains(&cat.1) {
+                    categories_executed.push(cat.1.clone());
+                }
+                break;
+            }
+        }
+    }
+
+    // P1-Issue10: Determine if this was a final gate validation
+    let is_final_gate = plan.is_final_gate();
+    let cache_disabled = plan.disable_cache;
+
     Ok(ValidationResult {
-        passed,
+        status,
         command_results,
         errors,
         duration_ms: start.elapsed().as_millis() as u64,
@@ -579,6 +827,14 @@ pub async fn run_validation_with_cache(
         category_results,
         // P0-4 FIX: Add validation_performed field for completion evidence
         validation_performed: true,
+        // P1-Issue10: Add final gate information
+        is_final_gate,
+        cache_disabled,
+        // P0-2.1: Add direct command execution counters
+        commands_planned,
+        commands_executed,
+        commands_skipped,
+        categories_executed,
     })
 }
 
@@ -780,7 +1036,7 @@ pub async fn validate_with_retry(
     for attempt in 0..=max_retries {
         let result = run_validation(root, plan, sandbox.clone()).await?;
 
-        if result.passed {
+        if result.passed() {
             return Ok(result);
         }
 
