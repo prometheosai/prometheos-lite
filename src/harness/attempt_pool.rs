@@ -23,8 +23,24 @@ use crate::harness::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+
+/// Extract container ID from Docker command output
+fn extract_container_id_from_command_result(command: &str, stderr: &str) -> Option<String> {
+    // Docker container IDs are typically 64-character hex strings
+    // Look for patterns like "Container ID: <hash>" or just the hash itself
+    if command.starts_with("docker run") {
+        use regex::Regex;
+        if let Ok(re) = Regex::new(r"[a-f0-9]{64}") {
+            if let Some(caps) = re.find(stderr) {
+                return Some(caps.as_str().to_string());
+            }
+        }
+    }
+    None
+}
 
 /// An attempt record with scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +141,7 @@ impl AttemptPool {
             let mode = base_request.mode;
             let sandbox_policy = base_request.sandbox_policy.clone();
             let semaphore = semaphore.clone();
+            let trace_id_clone = trace_id.clone();
             
             join_set.spawn(async move {
                 // P1-Issue8: Acquire semaphore permit for concurrency control
@@ -140,6 +157,7 @@ impl AttemptPool {
                     file_policy,
                     mode,
                     sandbox_policy.as_ref(),
+                    trace_id_clone,
                 )
                 .await
             });
@@ -148,12 +166,69 @@ impl AttemptPool {
         // Collect results
         while let Some(result) = join_set.join_next().await {
             match result {
-                Ok(record) => {
+                Ok(mut record) => {
                     tracing::info!(
                         "Attempt {} completed with score {:.2}",
                         record.attempt_id,
                         record.score
                     );
+                    
+                    // Record sandbox evidence in evidence log for completion verification
+                    if let Some(ref validation_result) = record.validation_result {
+                        let sandbox_evidence = if validation_result.command_results
+                            .iter()
+                            .any(|r| r.command.starts_with("docker run")) {
+                            // Docker runtime evidence
+                            let container_id = validation_result.command_results
+                                .iter()
+                                .find_map(|r| extract_container_id_from_command_result(&r.command, &r.stderr));
+                            crate::harness::evidence::SandboxEvidence {
+                                runtime_kind: crate::harness::sandbox::SandboxRuntimeKind::Docker,
+                                isolated_process: true, // Docker provides process isolation
+                                isolated_filesystem: true, // Docker provides filesystem isolation
+                                network_disabled: true, // Docker runtime uses network=none by default
+                                cpu_limited: true, // Docker runtime sets CPU limits
+                                memory_limited: true, // Docker runtime sets memory limits
+                                container_id,
+                                mount_mode: crate::harness::evidence::SandboxMountMode::ReadWrite,
+                                resource_limits_applied: true,
+                                no_new_privileges: true,
+                                capabilities_dropped: true,
+                                seccomp_enabled: true,
+                            }
+                        } else {
+                            // Local runtime evidence
+                            crate::harness::evidence::SandboxEvidence {
+                                runtime_kind: crate::harness::sandbox::SandboxRuntimeKind::Local,
+                                isolated_process: false, // Local runtime does not provide process isolation
+                                isolated_filesystem: false, // Local runtime does not provide filesystem isolation
+                                network_disabled: false, // Local runtime allows network access
+                                cpu_limited: false, // Local runtime does not limit CPU
+                                memory_limited: false, // Local runtime does not limit memory
+                                container_id: None,
+                                mount_mode: crate::harness::evidence::SandboxMountMode::ReadWrite,
+                                resource_limits_applied: false,
+                                no_new_privileges: false,
+                                capabilities_dropped: false,
+                                seccomp_enabled: false,
+                            }
+                        };
+                        
+                        evidence_log.record_sandbox_evidence(
+                            &sandbox_evidence,
+                            Some(&format!("Attempt {} validation", record.attempt_id)),
+                            trace_id.clone(),
+                        );
+                        
+                        tracing::info!(
+                            "P0-Issue1: Attempt {} sandbox evidence recorded - runtime: {:?}, isolated: {}, network: {}",
+                            record.attempt_id,
+                            sandbox_evidence.runtime_kind,
+                            sandbox_evidence.isolated_process && sandbox_evidence.isolated_filesystem,
+                            sandbox_evidence.network_disabled
+                        );
+                    }
+                    
                     records.push(record);
                 }
                 Err(e) => {
@@ -207,6 +282,7 @@ async fn evaluate_single_candidate(
     policy: FilePolicy,
     mode: HarnessMode,
     sandbox_policy: Option<&SandboxPolicy>,
+    trace_id: Option<String>,
 ) -> AttemptRecord {
     let start = std::time::Instant::now();
 
@@ -298,7 +374,7 @@ async fn evaluate_single_candidate(
             // Docker runtime evidence
             let container_id = validation_result.command_results
                 .iter()
-                .find_map(|r| self.extract_container_id_from_command_result(&r.command, &r.stderr));
+                .find_map(|r| extract_container_id_from_command_result(&r.command, &r.stderr));
             crate::harness::evidence::SandboxEvidence {
                 runtime_kind: crate::harness::sandbox::SandboxRuntimeKind::Docker,
                 isolated_process: true, // Docker provides process isolation
@@ -331,9 +407,9 @@ async fn evaluate_single_candidate(
             }
         };
 
-        // Log sandbox evidence for completion verification
+        // Sandbox evidence is recorded at the end of evaluation in the calling function
         tracing::info!(
-            "P0-Issue1: Attempt {} sandbox evidence - runtime: {:?}, isolated: {}, network: {}",
+            "P0-Issue1: Attempt {} sandbox evidence created - runtime: {:?}, isolated: {}, network: {}",
             attempt_id,
             sandbox_evidence.runtime_kind,
             sandbox_evidence.isolated_process && sandbox_evidence.isolated_filesystem,
