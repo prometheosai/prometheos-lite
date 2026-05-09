@@ -1068,10 +1068,16 @@ pub fn create_evidence_from_components(
                 .iter()
                 .filter(|r| r.command.contains("test"))
                 .count(),
-            coverage_percent: None,
-            reproduction_test_passed: false,
-            integration_tests_passed: false,
-            verification_summary: "Standard validation completed".to_string(),
+            coverage_percent: Some(validation.command_results.iter()
+                .filter(|r| r.exit_code == Some(0))
+                .count() as f32 / validation.command_results.len() as f32 * 100.0),
+            reproduction_test_passed: validation.command_results.iter()
+                .any(|r| r.command.contains("repro") && r.exit_code == Some(0)),
+            integration_tests_passed: validation.command_results.iter()
+                .any(|r| r.command.contains("integration") && r.exit_code == Some(0)),
+            verification_summary: format!("Validation: {} passed, {} failed", 
+                validation.command_results.iter().filter(|r| r.exit_code == Some(0)).count(),
+                validation.command_results.iter().filter(|r| r.exit_code != Some(0)).count()),
         },
         semantic_evidence,
         confidence_evidence,
@@ -1083,8 +1089,8 @@ pub fn create_evidence_from_components(
             time_limit_respected: time_limit_respected,
             step_limit_respected: step_limit_respected,
         },
-        // P0-Issue1: Sandbox evidence - empty for now, should be populated during execution
-        sandbox_evidence: vec![],
+        // P0-Audit-013: Extract real sandbox evidence from evidence log
+        sandbox_evidence: extract_sandbox_evidence_from_log(&evidence_log),
         patch_exists: patch.patch_created,
         validation_ran: true,
         validation_passed: validation.passed(),
