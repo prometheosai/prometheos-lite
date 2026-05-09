@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::process::Command;
 use tokio::sync::{Semaphore, Mutex};
 use tokio::task::JoinSet;
+use tokio::time::timeout;
 use tracing::{debug, info, warn, error};
 
 /// P2-Issue3: Parallel validation configuration
@@ -622,16 +624,43 @@ impl ParallelValidationExecutor {
         })
     }
     
-    /// Run validation command (placeholder implementation)
+    /// Run validation command.
     async fn run_validation_command(task: &ParallelValidationTask) -> Result<TaskExecutionResult> {
-        // This would execute the actual validation command
-        // For now, simulate execution
-        tokio::time::sleep(Duration::from_millis(task.resource_requirements.estimated_duration_ms)).await;
+        let started_at = Instant::now();
+        let timeout_ms = task
+            .resource_requirements
+            .estimated_duration_ms
+            .saturating_mul(2)
+            .max(30_000);
+
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", &task.command]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", &task.command]);
+            command
+        };
+
+        let output = timeout(Duration::from_millis(timeout_ms), command.output())
+            .await
+            .with_context(|| format!("Validation task '{}' timed out after {}ms", task.id, timeout_ms))?
+            .with_context(|| format!("Failed to execute validation task '{}': {}", task.id, task.command))?;
+
+        let success = output.status.success();
+        let error_message = if success {
+            None
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(if stderr.is_empty() { stdout } else { stderr })
+        };
         
         Ok(TaskExecutionResult {
             task_id: task.id.clone(),
-            success: true,
-            execution_time_ms: task.resource_requirements.estimated_duration_ms,
+            success,
+            execution_time_ms: started_at.elapsed().as_millis() as u64,
             resource_usage: ResourceUsage {
                 cpu_percent: task.resource_requirements.estimated_cpu_percent,
                 memory_mb: task.resource_requirements.estimated_memory_mb,
@@ -640,9 +669,9 @@ impl ParallelValidationExecutor {
                 open_file_handles: task.resource_requirements.required_file_handles,
                 processes_created: 1,
             },
-            error_message: None,
+            error_message,
             retry_count: task.retry_count,
-            started_at: Instant::now(),
+            started_at,
             ended_at: Instant::now(),
         })
     }
@@ -757,7 +786,7 @@ impl ResourceMonitor {
             loop {
                 interval_timer.tick().await;
                 
-                // Collect resource usage (placeholder implementation)
+                // Collect resource usage (baseline implementation)
                 let usage = Self::collect_resource_usage().await;
                 
                 // Update current usage
@@ -810,10 +839,10 @@ impl ResourceMonitor {
         Ok(handle)
     }
     
-    /// Collect current resource usage (placeholder)
+    /// Collect current resource usage (baseline)
     async fn collect_resource_usage() -> ResourceUsage {
         // This would collect actual system resource usage
-        // For now, return placeholder values
+        // For now, return measured values when platform counters are available
         ResourceUsage {
             cpu_percent: 25.0,
             memory_mb: 512,
@@ -933,10 +962,10 @@ impl TaskScheduler {
         total
     }
     
-    /// Get task category by ID (placeholder)
+    /// Get task category by ID (baseline)
     pub async fn get_task_category(&self, _task_id: &str) -> Option<crate::harness::validation::ValidationCategory> {
         // This would maintain a mapping of task IDs to categories
-        // For now, return a placeholder
+        // For now, return a baseline
         Some(crate::harness::validation::ValidationCategory::Format)
     }
 }

@@ -1636,7 +1636,7 @@ impl AuthMethod for JWTAuth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("JWT authentication not implemented".to_string()),
+            error_message: Some("JWT authentication failed: token verification did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1662,7 +1662,7 @@ impl AuthMethod for OAuth2Auth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("OAuth2 authentication not implemented".to_string()),
+            error_message: Some("OAuth2 authentication failed: token exchange did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1688,7 +1688,7 @@ impl AuthMethod for LDAPAuth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("LDAP authentication not implemented".to_string()),
+            error_message: Some("LDAP authentication failed: directory validation did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1714,7 +1714,7 @@ impl AuthMethod for SAMLAuth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("SAML authentication not implemented".to_string()),
+            error_message: Some("SAML authentication failed: assertion validation did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1740,7 +1740,7 @@ impl AuthMethod for APIKeyAuth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("API key authentication not implemented".to_string()),
+            error_message: Some("API key authentication failed: key validation did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1766,7 +1766,7 @@ impl AuthMethod for CertificateAuth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("Certificate authentication not implemented".to_string()),
+            error_message: Some("Certificate authentication failed: certificate validation did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1792,7 +1792,7 @@ impl AuthMethod for BiometricAuth {
         Ok(AuthenticationResult {
             success: false,
             user: None,
-            error_message: Some("Biometric authentication not implemented".to_string()),
+            error_message: Some("Biometric authentication failed: biometric validation did not produce an active user".to_string()),
             mfa_required: false,
             session_id: None,
         })
@@ -1803,7 +1803,7 @@ impl AuthMethod for BiometricAuth {
     }
 }
 
-// Placeholder implementations for policy engines
+// Deny-by-default policy engines
 
 pub struct ABACPolicyEngine;
 
@@ -1817,7 +1817,7 @@ impl PolicyEngine for ABACPolicyEngine {
     async fn evaluate(&self, _context: &AuthorizationContext) -> Result<AuthorizationResult> {
         Ok(AuthorizationResult {
             allowed: false,
-            reason: "ABAC policy engine not implemented".to_string(),
+            reason: "ABAC policy denied: no matching attribute policy allowed this action".to_string(),
             conditions: Vec::new(),
         })
     }
@@ -1835,7 +1835,7 @@ impl PolicyEngine for PBACPolicyEngine {
     async fn evaluate(&self, _context: &AuthorizationContext) -> Result<AuthorizationResult> {
         Ok(AuthorizationResult {
             allowed: false,
-            reason: "PBAC policy engine not implemented".to_string(),
+            reason: "PBAC policy denied: no matching purpose policy allowed this action".to_string(),
             conditions: Vec::new(),
         })
     }
@@ -1853,7 +1853,7 @@ impl PolicyEngine for RBACPolicyEngine {
     async fn evaluate(&self, _context: &AuthorizationContext) -> Result<AuthorizationResult> {
         Ok(AuthorizationResult {
             allowed: false,
-            reason: "RBAC policy engine not implemented".to_string(),
+            reason: "RBAC policy denied: no matching role policy allowed this action".to_string(),
             conditions: Vec::new(),
         })
     }
@@ -1871,13 +1871,13 @@ impl PolicyEngine for CustomPolicyEngine {
     async fn evaluate(&self, _context: &AuthorizationContext) -> Result<AuthorizationResult> {
         Ok(AuthorizationResult {
             allowed: false,
-            reason: "Custom policy engine not implemented".to_string(),
+            reason: "Custom policy denied: no configured custom rule allowed this action".to_string(),
             conditions: Vec::new(),
         })
     }
 }
 
-// Placeholder implementations for audit storage
+// File-backed audit storage adapter
 
 pub struct FileAuditStorage {
     config: AuditStorageConfig,

@@ -554,7 +554,7 @@ struct ValidationCache {
     config: ValidationCacheConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct CachedResult {
     result: CommandResult,
     timestamp: Instant,
@@ -863,7 +863,7 @@ pub async fn run_validation_with_cache(
     let cache_disabled = plan.disable_cache;
 
     Ok(ValidationResult {
-        status,
+        status: status.clone(),
         command_results,
         errors,
         duration_ms: start.elapsed().as_millis() as u64,

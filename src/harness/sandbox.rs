@@ -851,6 +851,11 @@ impl DockerSandboxRuntime {
             tmpfs_protected: true, // P0-Audit-005: /tmp protected with noexec
         }
     }
+
+    fn extract_container_id(&self, output: &str) -> Option<String> {
+        let re = regex::Regex::new(r"[a-f0-9]{64}").ok()?;
+        re.find(output).map(|m| m.as_str().to_string())
+    }
     fn build_docker_args(&self, repo_root: &Path, cmd: &StructuredCommand) -> Vec<String> {
         let mut args = vec![
             "run".to_string(),
