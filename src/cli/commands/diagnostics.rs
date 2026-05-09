@@ -769,13 +769,47 @@ impl DiagnosticsEngine {
     
     /// Ping provider for connectivity test
     async fn ping_provider(&self, config: &ProviderConfig) -> Result<()> {
-        // Implementation would depend on provider type
-        // This is a placeholder
-        Ok(())
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(self.config.connectivity_timeout_ms))
+            .build()
+            .context("failed to build diagnostics HTTP client")?;
+
+        let endpoint = provider_health_endpoint(config);
+        let mut request = client.get(&endpoint);
+
+        if let Some(api_key) = &config.api_key {
+            if !api_key.is_empty() {
+                request = match config.provider_type.as_str() {
+                    "openrouter" => request.header("Authorization", format!("Bearer {}", api_key)),
+                    _ => request.bearer_auth(api_key),
+                };
+            }
+        }
+
+        for (key, value) in &config.custom_headers {
+            request = request.header(key, value);
+        }
+
+        let response = request.send().await.with_context(|| {
+            format!(
+                "provider connectivity check failed for {} at {}",
+                config.name, endpoint
+            )
+        })?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "provider {} health endpoint returned status {}",
+                config.name,
+                response.status()
+            )
+        }
     }
     
     /// Measure provider performance
-    async fn measure_provider_performance(&self, config: &ProviderConfig) -> Result<ProviderPerformance> {
+    async fn measure_provider_performance(&self, _config: &ProviderConfig) -> Result<ProviderPerformance> {
         // Implementation would run actual performance tests
         Ok(ProviderPerformance::default())
     }
@@ -1023,6 +1057,15 @@ impl DiagnosticsEngine {
             available_disk_gb: 100, // Would get actual value
             network_status: NetworkStatus::Unknown, // Would check actual status
         })
+    }
+}
+
+fn provider_health_endpoint(config: &ProviderConfig) -> String {
+    let base = config.base_url.trim_end_matches('/').to_string();
+    match config.provider_type.as_str() {
+        "ollama" => format!("{}/api/tags", base),
+        "lmstudio" => format!("{}/models", base),
+        _ => format!("{}/models", base),
     }
 }
 

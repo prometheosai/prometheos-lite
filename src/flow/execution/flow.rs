@@ -737,13 +737,13 @@ mod tests {
     use async_trait::async_trait;
 
     // Test node implementation
-    struct MockNode {
+    struct TestNode {
         id: String,
         config: NodeConfig,
         output_value: String,
     }
 
-    impl MockNode {
+    impl TestNode {
         fn new(id: String, output_value: String) -> Self {
             Self {
                 id,
@@ -754,13 +754,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl Node for MockNode {
+    impl Node for TestNode {
         fn id(&self) -> NodeId {
             self.id.clone()
         }
 
         fn kind(&self) -> &str {
-            "mock"
+            "test"
         }
 
         fn prep(&self, _state: &SharedState) -> Result<Input> {
@@ -783,8 +783,8 @@ mod tests {
 
     #[test]
     fn test_flow_builder_validation() {
-        let node1 = MockNode::new("node1".to_string(), "output1".to_string());
-        let node2 = MockNode::new("node2".to_string(), "output2".to_string());
+        let node1 = TestNode::new("node1".to_string(), "output1".to_string());
+        let node2 = TestNode::new("node2".to_string(), "output2".to_string());
 
         let flow = Flow::builder()
             .start("node1".to_string())
@@ -802,7 +802,7 @@ mod tests {
 
     #[test]
     fn test_flow_builder_missing_start() {
-        let node = MockNode::new("node1".to_string(), "output1".to_string());
+        let node = TestNode::new("node1".to_string(), "output1".to_string());
 
         let flow = Flow::builder()
             .add_node("node1".to_string(), Arc::new(node))
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_flow_builder_missing_node() {
-        let node1 = MockNode::new("node1".to_string(), "output1".to_string());
+        let node1 = TestNode::new("node1".to_string(), "output1".to_string());
 
         let flow = Flow::builder()
             .start("node1".to_string())
@@ -830,8 +830,8 @@ mod tests {
 
     #[test]
     fn test_flow_builder_unreachable_node() {
-        let node1 = MockNode::new("node1".to_string(), "output1".to_string());
-        let node2 = MockNode::new("node2".to_string(), "output2".to_string());
+        let node1 = TestNode::new("node1".to_string(), "output1".to_string());
+        let node2 = TestNode::new("node2".to_string(), "output2".to_string());
 
         let flow = Flow::builder()
             .start("node1".to_string())
@@ -844,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_node() {
-        let node = Arc::new(MockNode::new("test".to_string(), "output".to_string()));
+        let node = Arc::new(TestNode::new("test".to_string(), "output".to_string()));
         let mut state = SharedState::new();
 
         let input = node.prep(&state).unwrap();
@@ -857,8 +857,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_execution() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
-        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(TestNode::new("node2".to_string(), "output2".to_string()));
 
         let mut flow = Flow::builder()
             .start("node1".to_string())
@@ -883,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_execution_terminal() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
 
         let mut flow = Flow::builder()
             .start("node1".to_string())
@@ -903,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn test_nested_flow_execution() {
         // Create inner flow
-        let inner_node = MockNode::new("inner_node".to_string(), "inner_output".to_string());
+        let inner_node = TestNode::new("inner_node".to_string(), "inner_output".to_string());
         let inner_flow = Flow::builder()
             .start("inner_node".to_string())
             .add_node("inner_node".to_string(), Arc::new(inner_node))
@@ -914,7 +914,7 @@ mod tests {
         let flow_node = FlowNode::new("nested".to_string(), inner_flow);
 
         // Create outer flow with FlowNode
-        let outer_node = MockNode::new("outer_node".to_string(), "outer_output".to_string());
+        let outer_node = TestNode::new("outer_node".to_string(), "outer_output".to_string());
         let mut outer_flow = Flow::builder()
             .start("outer_node".to_string())
             .add_node("outer_node".to_string(), Arc::new(outer_node))
@@ -938,8 +938,8 @@ mod tests {
 
     #[test]
     fn test_flow_builder_chain() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
-        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(TestNode::new("node2".to_string(), "output2".to_string()));
 
         let flow = FlowBuilder::new()
             .start("node1".to_string())
@@ -957,17 +957,17 @@ mod tests {
         let nodes = vec![
             (
                 "node1".to_string(),
-                Arc::new(MockNode::new("node1".to_string(), "output1".to_string()))
+                Arc::new(TestNode::new("node1".to_string(), "output1".to_string()))
                     as Arc<dyn Node>,
             ),
             (
                 "node2".to_string(),
-                Arc::new(MockNode::new("node2".to_string(), "output2".to_string()))
+                Arc::new(TestNode::new("node2".to_string(), "output2".to_string()))
                     as Arc<dyn Node>,
             ),
             (
                 "node3".to_string(),
-                Arc::new(MockNode::new("node3".to_string(), "output3".to_string()))
+                Arc::new(TestNode::new("node3".to_string(), "output3".to_string()))
                     as Arc<dyn Node>,
             ),
         ];
@@ -981,12 +981,12 @@ mod tests {
         let nodes = vec![
             (
                 "node1".to_string(),
-                Arc::new(MockNode::new("node1".to_string(), "output1".to_string()))
+                Arc::new(TestNode::new("node1".to_string(), "output1".to_string()))
                     as Arc<dyn Node>,
             ),
             (
                 "node2".to_string(),
-                Arc::new(MockNode::new("node2".to_string(), "output2".to_string()))
+                Arc::new(TestNode::new("node2".to_string(), "output2".to_string()))
                     as Arc<dyn Node>,
             ),
         ];
@@ -1003,9 +1003,9 @@ mod tests {
 
     #[test]
     fn test_flow_cycle_detection() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
-        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
-        let node3 = Arc::new(MockNode::new("node3".to_string(), "output3".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(TestNode::new("node2".to_string(), "output2".to_string()));
+        let node3 = Arc::new(TestNode::new("node3".to_string(), "output3".to_string()));
 
         let flow = Flow::builder()
             .start("node1".to_string())

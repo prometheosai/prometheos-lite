@@ -161,17 +161,11 @@ impl AntiPlaceholderCI {
 
     /// Initialize default placeholder patterns
     fn initialize_patterns(&mut self) -> Result<()> {
+        self.patterns.clear();
+
         // TODO comments
         self.patterns.push(PlaceholderPattern {
             name: "todo_comment".to_string(),
-            pattern: r"//\s*TODO\b".to_string(),
-            severity: Severity::Medium,
-            description: "TODO comment found".to_string(),
-            suggestion: "Replace TODO with actual implementation or create a proper issue".to_string(),
-        });
-
-        self.patterns.push(PlaceholderPattern {
-            name: "todo_comment_rust".to_string(),
             pattern: r"//\s*TODO\b|//\s*todo\b".to_string(),
             severity: Severity::Medium,
             description: "TODO comment found".to_string(),
@@ -188,31 +182,37 @@ impl AntiPlaceholderCI {
         });
 
         // Unimplemented functions
-        self.patterns.push(PlaceholderPattern {
-            name: "unimplemented".to_string(),
-            pattern: r"\bunimplemented!\(\)|\btodo!\(\)".to_string(),
-            severity: Severity::Critical,
-            description: "Unimplemented function or method".to_string(),
-            suggestion: "Implement the function or remove it if not needed".to_string(),
-        });
+        if self.config.check_unimplemented {
+            self.patterns.push(PlaceholderPattern {
+                name: "unimplemented".to_string(),
+                pattern: r"\bunimplemented!\(\)|\btodo!\(\)".to_string(),
+                severity: Severity::Critical,
+                description: "Unimplemented function or method".to_string(),
+                suggestion: "Implement the function or remove it if not needed".to_string(),
+            });
+        }
 
         // Panic calls in production code
-        self.patterns.push(PlaceholderPattern {
-            name: "panic_call".to_string(),
-            pattern: r"\bpanic!\(\)".to_string(),
-            severity: Severity::High,
-            description: "Panic call in production code".to_string(),
-            suggestion: "Replace with proper error handling using Result or Option".to_string(),
-        });
+        if self.config.check_panics {
+            self.patterns.push(PlaceholderPattern {
+                name: "panic_call".to_string(),
+                pattern: r"\bpanic!\(\)".to_string(),
+                severity: Severity::High,
+                description: "Panic call in production code".to_string(),
+                suggestion: "Replace with proper error handling using Result or Option".to_string(),
+            });
+        }
 
         // Debug print statements
-        self.patterns.push(PlaceholderPattern {
-            name: "debug_print".to_string(),
-            pattern: r"\b(debug_println|print!|println!)\s*\(".to_string(),
-            severity: Severity::Medium,
-            description: "Debug print statement found".to_string(),
-            suggestion: "Remove debug prints or use proper logging".to_string(),
-        });
+        if self.config.check_debug_prints {
+            self.patterns.push(PlaceholderPattern {
+                name: "debug_print".to_string(),
+                pattern: r"\b(debug_println|print!|println!)\s*\(".to_string(),
+                severity: Severity::Medium,
+                description: "Debug print statement found".to_string(),
+                suggestion: "Remove debug prints or use proper logging".to_string(),
+            });
+        }
 
         // Placeholder return values
         self.patterns.push(PlaceholderPattern {
@@ -445,8 +445,10 @@ impl AntiPlaceholderCI {
         
         report.push_str("# Anti-Placeholder CI Enforcement Report\n\n");
         
-        report.push_str(&format!("**Status**: {}\n\n", 
-            if result.passed { "✅ PASSED" } else { "❌ FAILED" }));
+        report.push_str(&format!(
+            "**Status**: {}\n\n",
+            if result.passed { "PASSED" } else { "FAILED" }
+        ));
         
         report.push_str(&format!("**Files Checked**: {}\n", result.files_checked));
         report.push_str(&format!("**Total Violations**: {}\n", result.total_violations));
@@ -460,13 +462,18 @@ impl AntiPlaceholderCI {
             
             for severity in severities {
                 let count = result.violations_by_severity[severity];
-                let emoji = match severity {
-                    Severity::Critical => "🚨",
-                    Severity::High => "⚠️",
-                    Severity::Medium => "📝",
-                    Severity::Low => "💡",
+                let marker = match severity {
+                    Severity::Critical => "[CRITICAL]",
+                    Severity::High => "[HIGH]",
+                    Severity::Medium => "[MEDIUM]",
+                    Severity::Low => "[LOW]",
                 };
-                report.push_str(&format!("{} **{}**: {}\n", emoji, self.severity_to_string(*severity), count));
+                report.push_str(&format!(
+                    "{} **{}**: {}\n",
+                    marker,
+                    self.severity_to_string(*severity),
+                    count
+                ));
             }
             report.push_str("\n");
         }
@@ -526,8 +533,9 @@ impl AntiPlaceholderCI {
     }
 
     /// Update configuration
-    pub fn update_config(&mut self, config: CIConfig) {
+    pub fn update_config(&mut self, config: CIConfig) -> Result<()> {
         self.config = config;
+        self.initialize_patterns()
     }
 }
 
@@ -620,4 +628,49 @@ fn main() {
 
         assert!(!result.passed); // Should fail due to exceeding max TODOs
     }
+
+    #[test]
+    fn test_disable_unimplemented_check() {
+        let mut config = CIConfig::default();
+        config.check_unimplemented = false;
+        config.check_panics = false;
+        config.check_debug_prints = false;
+        config.strict_mode = true;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.rs");
+        fs::write(&file_path, "fn f() { unimplemented!(); }").unwrap();
+
+        let ci = AntiPlaceholderCI::new(config).unwrap();
+        let result = ci.check_repository(dir.path()).unwrap();
+
+        assert!(result.passed);
+        assert!(result
+            .violations
+            .iter()
+            .all(|v| v.pattern_name != "unimplemented"));
+    }
+
+    #[test]
+    fn test_disable_debug_print_check() {
+        let mut config = CIConfig::default();
+        config.check_debug_prints = false;
+        config.check_panics = false;
+        config.check_unimplemented = false;
+        config.strict_mode = true;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.rs");
+        fs::write(&file_path, "fn f() { println!(\"debug\"); }").unwrap();
+
+        let ci = AntiPlaceholderCI::new(config).unwrap();
+        let result = ci.check_repository(dir.path()).unwrap();
+
+        assert!(result.passed);
+        assert!(result
+            .violations
+            .iter()
+            .all(|v| v.pattern_name != "debug_print"));
+    }
 }
+

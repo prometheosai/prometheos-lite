@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -416,7 +417,9 @@ impl TimeoutManager {
     /// Get escalation multiplier based on attempt number
     fn get_escalation_multiplier(&self, category_timeout: &CategoryTimeout, attempt_number: u32) -> f64 {
         for step in &category_timeout.escalation_steps {
-            if attempt_number == step.step && self.should_apply_escalation_step(step, attempt_number) {
+            if attempt_number == step.step
+                && self.should_apply_escalation_step(category_timeout, step, attempt_number)
+            {
                 return step.multiplier;
             }
         }
@@ -432,13 +435,18 @@ impl TimeoutManager {
     }
     
     /// Check if escalation step should be applied
-    fn should_apply_escalation_step(&self, step: &TimeoutStep, attempt_number: u32) -> bool {
+    fn should_apply_escalation_step(
+        &self,
+        category_timeout: &CategoryTimeout,
+        step: &TimeoutStep,
+        attempt_number: u32,
+    ) -> bool {
         if attempt_number > step.max_attempts {
             return false;
         }
         
         for condition in &step.conditions {
-            if !self.evaluate_timeout_condition(condition, attempt_number) {
+            if !self.evaluate_timeout_condition(category_timeout, condition, attempt_number) {
                 return false;
             }
         }
@@ -447,12 +455,17 @@ impl TimeoutManager {
     }
     
     /// Evaluate timeout condition
-    fn evaluate_timeout_condition(&self, condition: &TimeoutCondition, attempt_number: u32) -> bool {
+    fn evaluate_timeout_condition(
+        &self,
+        category_timeout: &CategoryTimeout,
+        condition: &TimeoutCondition,
+        attempt_number: u32,
+    ) -> bool {
         match condition {
             TimeoutCondition::Always => true,
             TimeoutCondition::PreviousTimeout => {
                 // Check if previous attempt timed out
-                if let Some(history) = self.history.get(&self.get_current_category()) {
+                if let Some(history) = self.history.get(&category_timeout_to_category(category_timeout, &self.config)) {
                     if let Some(last_result) = history.results.last() {
                         return last_result.timed_out;
                     }
@@ -461,41 +474,51 @@ impl TimeoutManager {
             }
             TimeoutCondition::ErrorRateExceeds(threshold) => {
                 // Check error rate in recent history
-                if let Some(history) = self.history.get(&self.get_current_category()) {
+                if let Some(history) = self.history.get(&category_timeout_to_category(category_timeout, &self.config)) {
                     return history.statistics.timeout_rate > *threshold;
                 }
                 false
             }
             TimeoutCondition::FileCountExceeds(threshold) => {
                 // Check if current file count exceeds threshold
-                let current_count = self.get_current_file_count().await.unwrap_or(0);
-                current_count > threshold
+                self.get_current_file_count().map_or(false, |count| count as u32 > *threshold)
             }
             TimeoutCondition::FileSizeExceeds(threshold) => {
-                // Check if current file size exceeds threshold
-                let current_size = self.get_current_file_size().await.unwrap_or(0);
-                current_size > threshold
+                // Threshold is MB, computed size is MB.
+                self.get_current_file_size_mb()
+                    .map_or(false, |size_mb| size_mb > *threshold)
             }
         }
     }
     
     /// Get current file count for timeout evaluation
-    async fn get_current_file_count(&self) -> Result<usize> {
-        // In a real implementation, this would scan the workspace
-        // For now, return a reasonable default
-        Ok(50)
+    fn get_current_file_count(&self) -> Result<usize> {
+        let mut count = 0usize;
+        for entry in walkdir::WalkDir::new(".")
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if entry.file_type().is_file() && !is_ignored_path(entry.path()) {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
     
     /// Get current file size for timeout evaluation
-    async fn get_current_file_size(&self) -> Result<usize> {
-        // In a real implementation, this would calculate total workspace size
-        // For now, return a reasonable default
-        Ok(1024 * 1024) // 1MB
-    }
-    
-    /// Get current category (placeholder)
-    fn get_current_category(&self) -> ValidationCategory {
-        ValidationCategory::Format // Placeholder
+    fn get_current_file_size_mb(&self) -> Result<f64> {
+        let mut total_bytes = 0u64;
+        for entry in walkdir::WalkDir::new(".")
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if entry.file_type().is_file() && !is_ignored_path(entry.path()) {
+                if let Ok(metadata) = entry.metadata() {
+                    total_bytes = total_bytes.saturating_add(metadata.len());
+                }
+            }
+        }
+        Ok(total_bytes as f64 / (1024.0 * 1024.0))
     }
     
     /// Apply adaptive adjustments
@@ -601,9 +624,28 @@ impl TimeoutManager {
     }
 }
 
+fn category_timeout_to_category(
+    category_timeout: &CategoryTimeout,
+    config: &ValidationTimeoutConfig,
+) -> ValidationCategory {
+    config
+        .category_timeouts
+        .iter()
+        .find_map(|(category, timeout)| (timeout == category_timeout).then_some(*category))
+        .unwrap_or(ValidationCategory::Format)
+}
+
+fn is_ignored_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let part = component.as_os_str().to_string_lossy();
+        matches!(part.as_ref(), ".git" | "target" | "node_modules" | ".cargo")
+    })
+}
+
 /// P2-Issue2: Adaptive timeout engine
 pub struct AdaptiveTimeoutEngine {
     config: AdaptiveTimeoutConfig,
+    learned_multiplier: f64,
 }
 
 impl AdaptiveTimeoutEngine {
@@ -611,6 +653,7 @@ impl AdaptiveTimeoutEngine {
     pub fn new(config: &AdaptiveTimeoutConfig) -> Self {
         Self {
             config: config.clone(),
+            learned_multiplier: 1.0,
         }
     }
     
@@ -679,20 +722,45 @@ impl AdaptiveTimeoutEngine {
     }
     
     /// Update adaptive engine with new result
-    pub fn update_with_result(&mut self, _history: &TimeoutHistory) {
-        // Adaptive engine would update internal models here
-        // For now, this is a placeholder
+    pub fn update_with_result(&mut self, history: &TimeoutHistory) {
+        if history.results.len() < self.config.min_samples {
+            return;
+        }
+
+        let stats = &history.statistics;
+        let targets = &self.config.performance_targets;
+        let mut adjustment = 0.0f64;
+
+        if stats.timeout_rate > targets.max_timeout_rate {
+            adjustment += (stats.timeout_rate - targets.max_timeout_rate) * self.config.adjustment_factor;
+        }
+
+        if stats.avg_applied_timeout_ms > 0.0 {
+            let utilization = stats.avg_execution_time_ms / stats.avg_applied_timeout_ms;
+            if utilization > targets.target_duration_percent {
+                adjustment += (utilization - targets.target_duration_percent) * self.config.adjustment_factor;
+            } else if stats.success_rate > targets.target_success_rate
+                && utilization < (targets.target_duration_percent - 0.2).max(0.0)
+            {
+                adjustment -=
+                    ((targets.target_duration_percent - 0.2) - utilization) * self.config.adjustment_factor;
+            }
+        }
+
+        let clamp = self.config.max_adjustment_percent.max(0.01);
+        let bounded_adjustment = adjustment.clamp(-clamp, clamp);
+        self.learned_multiplier = (self.learned_multiplier * (1.0 + bounded_adjustment)).clamp(0.5, 3.0);
     }
     
     /// Get adaptive multiplier for attempt number
     pub fn get_adaptive_multiplier(&self, attempt_number: u32) -> f64 {
-        // Simple adaptive multiplier - could be enhanced with machine learning
-        match attempt_number {
+        let base = match attempt_number {
             1 => 1.0,
             2 => 1.5,
             3 => 2.0,
             _ => 2.5,
-        }
+        };
+        (base * self.learned_multiplier).clamp(1.0, 5.0)
     }
 }
 
@@ -707,5 +775,90 @@ impl Default for TimeoutStatistics {
             timeout_rate: 0.0,
             success_rate: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_engine_increases_multiplier_when_timeout_rate_high() {
+        let config = ValidationTimeoutConfig::default().adaptive_config;
+        let mut engine = AdaptiveTimeoutEngine::new(&config);
+        let history = TimeoutHistory {
+            category: ValidationCategory::Format,
+            results: vec![
+                TimeoutResult {
+                    applied_timeout_ms: 1000,
+                    actual_duration_ms: 1500,
+                    timed_out: true,
+                    escalation_steps_used: 1,
+                    category_timeout: CategoryTimeout {
+                        base_timeout_ms: 1000,
+                        max_timeout_ms: 5000,
+                        file_count_factor: 0.0,
+                        file_size_factor: 0.0,
+                        adaptive: true,
+                        escalation_steps: vec![],
+                    },
+                    adaptive_adjustments: vec![],
+                };
+                config.min_samples
+            ],
+            statistics: TimeoutStatistics {
+                total_executions: config.min_samples as u64,
+                successful_executions: 1,
+                timed_out_executions: (config.min_samples as u64).saturating_sub(1),
+                avg_execution_time_ms: 950.0,
+                avg_applied_timeout_ms: 1000.0,
+                timeout_rate: 0.5,
+                success_rate: 0.5,
+            },
+            last_updated: chrono::Utc::now(),
+        };
+
+        engine.update_with_result(&history);
+        assert!(engine.get_adaptive_multiplier(2) > 1.5);
+    }
+
+    #[test]
+    fn adaptive_engine_decreases_multiplier_when_timeout_generous() {
+        let config = ValidationTimeoutConfig::default().adaptive_config;
+        let mut engine = AdaptiveTimeoutEngine::new(&config);
+        let history = TimeoutHistory {
+            category: ValidationCategory::Format,
+            results: vec![
+                TimeoutResult {
+                    applied_timeout_ms: 1000,
+                    actual_duration_ms: 100,
+                    timed_out: false,
+                    escalation_steps_used: 1,
+                    category_timeout: CategoryTimeout {
+                        base_timeout_ms: 1000,
+                        max_timeout_ms: 5000,
+                        file_count_factor: 0.0,
+                        file_size_factor: 0.0,
+                        adaptive: true,
+                        escalation_steps: vec![],
+                    },
+                    adaptive_adjustments: vec![],
+                };
+                config.min_samples
+            ],
+            statistics: TimeoutStatistics {
+                total_executions: config.min_samples as u64,
+                successful_executions: config.min_samples as u64,
+                timed_out_executions: 0,
+                avg_execution_time_ms: 100.0,
+                avg_applied_timeout_ms: 1000.0,
+                timeout_rate: 0.0,
+                success_rate: 1.0,
+            },
+            last_updated: chrono::Utc::now(),
+        };
+
+        engine.update_with_result(&history);
+        assert!(engine.get_adaptive_multiplier(2) < 1.5);
     }
 }

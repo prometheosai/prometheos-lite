@@ -654,7 +654,7 @@ impl IoCContainer {
         let instance = if let Some(factory) = &registration.factory {
             factory.create_instance(self).await?
         } else {
-            // Create instance using reflection (placeholder)
+            // Fallback to registered or built-in typed constructors.
             self.create_instance_by_type(&registration.descriptor.implementation_type).await?
         };
         
@@ -1215,7 +1215,12 @@ impl ServiceDiscoveryEngine {
                 DiscoveryMechanismType::FileSystem => Box::new(FileSystemDiscovery::new()),
                 DiscoveryMechanismType::Environment => Box::new(EnvironmentDiscovery::new()),
                 DiscoveryMechanismType::ConfigurationFile => Box::new(ConfigurationFileDiscovery::new()),
-                _ => Box::new(PlaceholderDiscovery::new()),
+                DiscoveryMechanismType::Network
+                | DiscoveryMechanismType::Database
+                | DiscoveryMechanismType::Custom => Box::new(UnsupportedDiscovery::new(
+                    mechanism_config.name.clone(),
+                    mechanism_config.mechanism_type,
+                )),
             };
             mechanisms.push(mechanism);
         }
@@ -1515,23 +1520,31 @@ struct ServiceConfigFile {
     services: Vec<ServiceDescriptor>,
 }
 
-pub struct PlaceholderDiscovery;
+pub struct UnsupportedDiscovery {
+    name: String,
+    mechanism_type: DiscoveryMechanismType,
+}
 
-impl PlaceholderDiscovery {
-    pub fn new() -> Self {
-        Self
+impl UnsupportedDiscovery {
+    pub fn new(name: String, mechanism_type: DiscoveryMechanismType) -> Self {
+        Self {
+            name,
+            mechanism_type,
+        }
     }
 }
 
-impl DiscoveryMechanism for PlaceholderDiscovery {
+impl DiscoveryMechanism for UnsupportedDiscovery {
     fn discover_services(&self) -> Result<Vec<ServiceDescriptor>> {
-        // This discovery mechanism returns no services
-        // It's used as a fallback when other mechanisms fail
-        Ok(Vec::new())
+        Err(anyhow::anyhow!(
+            "Discovery mechanism '{}' ({:?}) is configured but not implemented",
+            self.name,
+            self.mechanism_type
+        ))
     }
     
     fn get_name(&self) -> &str {
-        "placeholder"
+        &self.name
     }
 }
 
