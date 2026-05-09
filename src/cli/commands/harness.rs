@@ -7,7 +7,7 @@
 //! - harness apply: Apply patches (with --assist flag)
 //! - harness rollback: Rollback last harness execution
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -129,81 +129,45 @@ async fn execute_run(
     format: String,
 ) -> Result<()> {
     let repo_root = repo.unwrap_or_else(|| std::env::current_dir().unwrap());
-    
-    println!("🔧 PrometheOS Harness V1.6");
-    println!("═══════════════════════════════");
-    println!("Task: {}", task);
-    println!("Mode: {}", mode);
-    println!("Repository: {}", repo_root.display());
-    println!();
+    let mode = parse_harness_mode(&mode)?;
 
-    // P2-014: Show what would happen (implementation would go here)
-    println!("📋 Harness Pipeline:");
-    println!("  1. Detect repository structure and language");
-    println!("  2. Extract task hints (files/symbols)");
-    println!("  3. Build repo context with tree-sitter");
-    println!("  4. Generate patch candidates via provider");
-    println!("  5. Evaluate candidates in isolated workspace");
-    println!("  6. Run validation (format, lint, test)");
-    println!("  7. Perform code review");
-    println!("  8. Assess risk");
-    println!("  9. Create git checkpoint");
-    println!("  10. Apply patch (if approved by mode policy)");
-    println!();
-    
-    println!("⚠️  Note: Full harness integration requires WorkContext service");
-    println!("   Use 'prometheos flow' for complete task execution");
-    
+    let request = prometheos_lite::harness::HarnessExecutionRequest {
+        work_context_id: uuid::Uuid::new_v4().to_string(),
+        repo_root,
+        task,
+        requirements: Vec::new(),
+        acceptance_criteria: Vec::new(),
+        mode,
+        limits: prometheos_lite::harness::HarnessLimits::default(),
+        mentioned_files: Vec::new(),
+        mentioned_symbols: Vec::new(),
+        proposed_edits: Vec::new(),
+        patch_provider: None,
+        provider_context: None,
+        progress_callback: None,
+        validation_failure_policy: prometheos_lite::harness::ValidationFailurePolicy::RollbackAutomatically,
+        sandbox_policy: Some(prometheos_lite::harness::SandboxPolicy::from_mode(mode)),
+    }
+    .with_config_provider()?;
+
+    let result = prometheos_lite::harness::execute_harness_task(request).await?;
+    print_execution_result(&result, &format)?;
+
     Ok(())
 }
 
 /// P2-014: Execute harness inspect command
 async fn execute_inspect(execution_id: String, show_evidence: bool) -> Result<()> {
-    println!("🔍 Inspecting harness execution: {}", execution_id);
-    println!();
-    
-    // Placeholder - would load execution from database
-    println!("Repository: <not implemented>");
-    println!("Provider: <not implemented>");
-    println!("Files selected: <not implemented>");
-    println!("Patch candidates: <not implemented>");
-    println!("Validation result: <not implemented>");
-    println!("Risk assessment: <not implemented>");
-    println!("Review issues: <not implemented>");
-    println!("Completion decision: <not implemented>");
-    
-    if show_evidence {
-        println!();
-        println!("📜 Evidence Log:");
-        println!("  <not implemented>");
-    }
-    
-    Ok(())
+    let _ = show_evidence;
+    bail!(
+        "Harness execution inspection requires a persisted execution store; execution '{}' was not found in the standalone CLI context",
+        execution_id
+    )
 }
 
 /// P2-014: Execute harness dry-run command
 async fn execute_dry_run(task: String, repo: Option<PathBuf>) -> Result<()> {
-    let repo_root = repo.unwrap_or_else(|| std::env::current_dir().unwrap());
-    
-    println!("🔬 Harness Dry-Run");
-    println!("═══════════════════");
-    println!("Task: {}", task);
-    println!("Repository: {}", repo_root.display());
-    println!();
-    
-    println!("Running in ReviewOnly mode - no changes will be made.");
-    println!();
-    println!("This would:");
-    println!("  - Analyze the task and extract hints");
-    println!("  - Generate patch candidates");
-    println!("  - Validate in isolated workspace");
-    println!("  - Show diff of proposed changes");
-    println!("  - Generate review report");
-    println!();
-    
-    println!("⚠️  Full implementation requires WorkContext integration");
-    
-    Ok(())
+    execute_run(task, "review-only".to_string(), repo, "text".to_string()).await
 }
 
 /// P2-014: Execute harness apply command
@@ -212,50 +176,20 @@ async fn execute_apply(
     assist: bool,
     force: bool,
 ) -> Result<()> {
-    if assist {
-        println!("👤 Assisted Apply Mode");
-        println!("══════════════════════");
-        println!("Execution ID: {}", execution_id);
-        println!();
-        println!("This will show you the proposed changes and ask for approval.");
-        println!();
-        println!("Review the following before approving:");
-        println!("  - Patch diff");
-        println!("  - Validation results");
-        println!("  - Risk assessment");
-        println!("  - Review findings");
-    } else if force {
-        println!("⚠️  WARNING: Force applying patches without review!");
-        println!("Execution ID: {}", execution_id);
-    } else {
-        println!("🤖 Autonomous Apply Mode");
-        println!("════════════════════════");
-        println!("Execution ID: {}", execution_id);
-        println!();
-        println!("Applying patches if risk level is acceptable...");
-    }
-    
-    Ok(())
+    let _ = (assist, force);
+    bail!(
+        "Harness apply requires a persisted execution store and rollback metadata; execution '{}' is not available in the standalone CLI context",
+        execution_id
+    )
 }
 
 /// P2-014: Execute harness rollback command
 async fn execute_rollback(execution_id: String, force: bool) -> Result<()> {
-    println!("↩️  Rollback Harness Execution");
-    println!("══════════════════════════════");
-    println!("Execution ID: {}", execution_id);
-    println!();
-    
-    if !force {
-        println!("This will restore the repository to the state before the harness execution.");
-        println!("Any changes made after the harness execution will be preserved.");
-        println!();
-        println!("Run with --force to skip this confirmation.");
-    } else {
-        println!("Rolling back...");
-        println!("✓ Repository restored");
-    }
-    
-    Ok(())
+    let _ = force;
+    bail!(
+        "Harness rollback requires persisted checkpoint metadata; execution '{}' is not available in the standalone CLI context",
+        execution_id
+    )
 }
 
 /// P2-014: Execute harness status command
@@ -263,7 +197,7 @@ async fn execute_status() -> Result<()> {
     println!("📊 Harness Status");
     println!("═════════════════");
     println!();
-    println!("Recent executions: <not implemented>");
+    println!("Recent executions: unavailable in standalone CLI context");
     println!();
     println!("Available commands:");
     println!("  prometheos harness run \"<task>\"     - Run harness on a task");
@@ -274,3 +208,39 @@ async fn execute_status() -> Result<()> {
     
     Ok(())
 }
+
+fn parse_harness_mode(mode: &str) -> Result<prometheos_lite::harness::mode_policy::HarnessMode> {
+    match mode.to_lowercase().replace('_', "-").as_str() {
+        "review" | "review-only" | "dry-run" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::ReviewOnly),
+        "assisted" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::Assisted),
+        "auto" | "autonomous" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::Autonomous),
+        "benchmark" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::Benchmark),
+        other => bail!("Invalid harness mode '{}'. Expected review-only, assisted, autonomous, or benchmark", other),
+    }
+}
+
+fn print_execution_result(
+    result: &prometheos_lite::harness::HarnessExecutionResult,
+    format: &str,
+) -> Result<()> {
+    match format.to_lowercase().as_str() {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(result)?);
+        }
+        "text" => {
+            println!("Harness execution complete");
+            println!("Work context: {}", result.work_context_id);
+            println!("Summary: {}", result.summary);
+            println!("Completion: {:?}", result.completion_decision);
+            println!("Risk: {:?}", result.risk_assessment.level);
+            println!("Review issues: {}", result.review_issues.len());
+            println!("Failures: {}", result.failures.len());
+            println!("Evidence entries: {}", result.evidence_log.entries.len());
+        }
+        other => bail!("Unsupported output format '{}'. Expected text or json", other),
+    }
+
+    Ok(())
+}
+
+

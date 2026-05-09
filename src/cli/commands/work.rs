@@ -326,9 +326,9 @@ impl WorkCommand {
                         );
                         
                         let harness_mode = match mode.to_lowercase().as_str() {
-                            "auto" => prometheos_lite::harness::mode_policy::HarnessMode::Auto,
+                            "auto" => prometheos_lite::harness::mode_policy::HarnessMode::Autonomous,
                             "assisted" => prometheos_lite::harness::mode_policy::HarnessMode::Assisted,
-                            "dry_run" => prometheos_lite::harness::mode_policy::HarnessMode::DryRun,
+                            "dry_run" => prometheos_lite::harness::mode_policy::HarnessMode::ReviewOnly,
                             _ => return Err(anyhow::anyhow!("Invalid mode: {}", mode)),
                         };
                         
@@ -344,9 +344,15 @@ impl WorkCommand {
                         
                         println!("WorkContext found: {} - {}", context.title, context.goal);
                         
-                        // For now, just show the harness metadata
-                        let metadata = context.metadata.get("harness").cloned().unwrap_or(serde_json::Value::Null);
-                        println!("Harness metadata: {}", serde_json::to_string_pretty(&metadata)?);
+                        let result = harness_service
+                            .run_for_context(&id, repo_path.into(), harness_mode, Vec::new())
+                            .await?;
+
+                        println!("Harness summary: {}", result.summary);
+                        println!("Completion: {:?}", result.completion_decision);
+                        println!("Risk: {:?}", result.risk_assessment.level);
+                        println!("Review issues: {}", result.review_issues.len());
+                        println!("Evidence entries: {}", result.evidence_log.entries.len());
                     }
                     HarnessSubcommand::Replay { id, step } => {
                         println!("Replaying harness execution for WorkContext {}", id);

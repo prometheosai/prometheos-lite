@@ -220,7 +220,7 @@ pub struct ProviderIssue {
 }
 
 /// P1-Issue8: Issue severity
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IssueSeverity {
     Info,
     Warning,
@@ -229,7 +229,7 @@ pub enum IssueSeverity {
 }
 
 /// P1-Issue8: Issue category
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum IssueCategory {
     Configuration,
     Connectivity,
@@ -983,7 +983,7 @@ impl DiagnosticsEngine {
                 if issue.severity >= IssueSeverity::Error {
                     total_errors += 1;
                     *errors_by_severity.entry(issue.severity).or_insert(0) += 1;
-                    *errors_by_category.entry(issue.category.to_string()).or_insert(0) += 1;
+                    *errors_by_category.entry(format!("{:?}", issue.category)).or_insert(0) += 1;
                     *error_counts.entry(issue.message.clone()).or_insert(0) += 1;
                     
                     if issue.severity == IssueSeverity::Critical {
@@ -1291,7 +1291,7 @@ async fn handle_full_diagnostics(
             if !results.recommendations.is_empty() {
                 println!("\nRecommendations:");
                 for rec in &results.recommendations {
-                    println!("  [{}] {}", rec.priority, rec.title);
+                    println!("  [{:?}] {}", rec.priority, rec.title);
                 }
             }
             
