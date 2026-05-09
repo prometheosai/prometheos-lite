@@ -83,11 +83,16 @@ impl Transaction {
 
         // P0 SAFETY: Store repo-relative path in snapshot, not absolute path
         // This ensures rollback works correctly in temp workspaces
-        let rel_path = full_path.strip_prefix(repo_root)
+        let rel_path = full_path
+            .strip_prefix(repo_root)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| {
                 // If we can't strip prefix, use the original (shouldn't happen with proper validation)
-                tracing::warn!("Path {} is not under repo root {}", full_path.display(), repo_root.display());
+                tracing::warn!(
+                    "Path {} is not under repo root {}",
+                    full_path.display(),
+                    repo_root.display()
+                );
                 full_path.clone()
             });
 
@@ -305,7 +310,7 @@ async fn run_with_transaction(
         dry_run,
         transaction_id: Some(transaction.id),
         content_hashes,
-        snapshots: vec![], // Will be populated by apply_patch_with_rollback
+        snapshots: vec![],
     })
 }
 
@@ -393,7 +398,13 @@ async fn apply_edit_to_transaction(
             let existing = fs::read_to_string(&path).await.ok();
             let existed = path.exists();
 
-            transaction.record_snapshot(path.clone(), &policy.repo_root, existing, Some(x.content.clone()), existed);
+            transaction.record_snapshot(
+                path.clone(),
+                &policy.repo_root,
+                existing,
+                Some(x.content.clone()),
+                existed,
+            );
             transaction.record_change(path, Some(x.content.clone()));
         }
 
@@ -406,7 +417,13 @@ async fn apply_edit_to_transaction(
                 return Err(fail(&x.file, "create_file", "File already exists", None));
             }
 
-            transaction.record_snapshot(path.clone(), &policy.repo_root, None, Some(x.content.clone()), false);
+            transaction.record_snapshot(
+                path.clone(),
+                &policy.repo_root,
+                None,
+                Some(x.content.clone()),
+                false,
+            );
             transaction.record_change(path, Some(x.content.clone()));
         }
 
@@ -463,10 +480,22 @@ async fn apply_edit_to_transaction(
             })?;
 
             // For rename: source file goes from content -> None (deleted)
-            transaction.record_snapshot(from_path.clone(), &policy.repo_root, Some(content.clone()), None, true);
+            transaction.record_snapshot(
+                from_path.clone(),
+                &policy.repo_root,
+                Some(content.clone()),
+                None,
+                true,
+            );
             transaction.record_change(from_path.clone(), None);
             // Target file goes from None -> content (created)
-            transaction.record_snapshot(to_path.clone(), &policy.repo_root, None, Some(content.clone()), false);
+            transaction.record_snapshot(
+                to_path.clone(),
+                &policy.repo_root,
+                None,
+                Some(content.clone()),
+                false,
+            );
             transaction.record_change(to_path, Some(content));
         }
 
@@ -496,7 +525,7 @@ async fn apply_edit_to_transaction(
                     })?;
 
                 // P0 SAFETY: Resolve repo-relative path safely
-        let full_path = resolve_repo_path(&policy.repo_root, target_path)
+                let full_path = resolve_repo_path(&policy.repo_root, target_path)
                     .map_err(|e| fail(target_path, "unified_diff", e.to_string(), None))?;
 
                 if diff.is_new_file {
@@ -521,7 +550,13 @@ async fn apply_edit_to_transaction(
                         )
                     })?;
 
-                    transaction.record_snapshot(full_path.clone(), &policy.repo_root, Some(content), None, true);
+                    transaction.record_snapshot(
+                        full_path.clone(),
+                        &policy.repo_root,
+                        Some(content),
+                        None,
+                        true,
+                    );
                     transaction.record_change(full_path, None);
                 } else {
                     let original = fs::read_to_string(&full_path).await.map_err(|e| {
@@ -705,8 +740,8 @@ impl PatchIdentity {
 
     /// P0-3.1: Verify complete patch identity - all hashes must match exactly
     pub fn verify_complete_identity(&mut self) -> Result<()> {
-        let verification_result = self.planned_patch_hash == self.dry_run_patch_hash 
-            && self.dry_run_patch_hash == self.applied_patch_hash 
+        let verification_result = self.planned_patch_hash == self.dry_run_patch_hash
+            && self.dry_run_patch_hash == self.applied_patch_hash
             && self.applied_patch_hash == self.reviewed_diff_hash;
 
         if verification_result {
@@ -718,9 +753,9 @@ impl PatchIdentity {
             self.verification_passed = false;
             let details = format!(
                 "Patch identity mismatch - planned: {}, dry-run: {}, applied: {}, reviewed: {}",
-                self.planned_patch_hash, 
-                self.dry_run_patch_hash, 
-                self.applied_patch_hash, 
+                self.planned_patch_hash,
+                self.dry_run_patch_hash,
+                self.applied_patch_hash,
                 self.reviewed_diff_hash
             );
             self.mismatch_details = Some(details.clone());
@@ -790,7 +825,11 @@ impl PatchHashVerification {
 
     /// P0-3.1: Verify all patch hashes match
     pub fn verify_hashes(&mut self) -> Result<()> {
-        match (&self.generated_patch_hash, &self.dry_run_patch_hash, &self.applied_patch_hash) {
+        match (
+            &self.generated_patch_hash,
+            &self.dry_run_patch_hash,
+            &self.applied_patch_hash,
+        ) {
             (Some(generated), Some(dry), Some(app)) => {
                 if generated == dry && dry == app {
                     self.hash_verification_passed = true;
@@ -808,7 +847,9 @@ impl PatchHashVerification {
             (Some(generated), Some(dry), None) => {
                 // Partial verification (dry-run only)
                 if generated == dry {
-                    tracing::warn!("Partial hash verification passed (generated == dry-run), but applied hash missing");
+                    tracing::warn!(
+                        "Partial hash verification passed (generated == dry-run), but applied hash missing"
+                    );
                     Ok(())
                 } else {
                     self.hash_verification_passed = false;
@@ -823,10 +864,27 @@ impl PatchHashVerification {
             _ => {
                 self.hash_verification_passed = false;
                 let missing = vec![
-                    if self.generated_patch_hash.is_none() { "generated" } else { "" },
-                    if self.dry_run_patch_hash.is_none() { "dry-run" } else { "" },
-                    if self.applied_patch_hash.is_none() { "applied" } else { "" },
-                ].iter().copied().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
+                    if self.generated_patch_hash.is_none() {
+                        "generated"
+                    } else {
+                        ""
+                    },
+                    if self.dry_run_patch_hash.is_none() {
+                        "dry-run"
+                    } else {
+                        ""
+                    },
+                    if self.applied_patch_hash.is_none() {
+                        "applied"
+                    } else {
+                        ""
+                    },
+                ]
+                .iter()
+                .copied()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
                 self.hash_mismatch_details = Some(format!("Missing hash stages: {}", missing));
                 anyhow::bail!("Incomplete hash verification: missing {}", missing)
             }
@@ -835,9 +893,9 @@ impl PatchHashVerification {
 
     /// P0-3.1: Check if verification is complete
     pub fn is_complete(&self) -> bool {
-        self.generated_patch_hash.is_some() && 
-        self.dry_run_patch_hash.is_some() && 
-        self.applied_patch_hash.is_some()
+        self.generated_patch_hash.is_some()
+            && self.dry_run_patch_hash.is_some()
+            && self.applied_patch_hash.is_some()
     }
 }
 
@@ -932,8 +990,13 @@ impl RollbackHandle {
         let full_path = self.repo_root.join(rel_path);
 
         // P0 SAFETY: Verify the resolved path is still within repo_root
-        let canonical_repo = self.repo_root.canonicalize().unwrap_or_else(|_| self.repo_root.clone());
-        let canonical_target = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+        let canonical_repo = self
+            .repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.repo_root.clone());
+        let canonical_target = full_path
+            .canonicalize()
+            .unwrap_or_else(|_| full_path.clone());
 
         if !canonical_target.starts_with(&canonical_repo) {
             bail!(
