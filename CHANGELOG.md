@@ -13,14 +13,20 @@
 - Updated CI enforcement integration tests to align with real matcher behavior:
   - Exclusion matching via concrete filename substring.
   - TODO detection uses comment-form markers (`// TODO`), matching production patterns.
+- Fixed trace storage deadlock in `get_traces_by_flow_run`:
+  - Removed self-deadlock caused by nested mutex acquisition via `get_trace`.
+  - Collect trace IDs under lock, release lock, then hydrate traces.
+- Fixed failing doctest parsing in patch provider docs by replacing invalid pseudo-code fence content with non-rust text format.
+- Added repo-local Cargo build stability config in `.cargo/config.toml`:
+  - `jobs = 1` to reduce Windows linker/resource contention under full-suite test load.
+  - `incremental = true` to keep full test cycle practical.
 
 ### Validation Notes
 
 - `cargo check --quiet` passes.
 - `cargo test --test ci_enforcement_tests --quiet` passes (6/6).
-- Full `cargo test --quiet` still fails in this environment due to external/toolchain-level issues not introduced by this patch set:
-  - Rust compiler ICE while compiling `tests/rollback_integration_test.rs` (`rustc 1.95.0`).
-  - Missing `windows_sys` `rlib` format in another integration test build path.
+- `cargo test --test v15_observability_test --quiet` passes (10/10).
+- `cargo test --quiet` passes end-to-end in this environment.
 
 ## V1.6 Strict Audit Completion - Runtime De-Placeholdering
 

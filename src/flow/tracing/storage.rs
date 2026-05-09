@@ -491,19 +491,29 @@ impl TraceStorage {
 
     /// Get traces by flow run ID
     pub fn get_traces_by_flow_run(&self, flow_run_id: &str) -> Result<Vec<HierarchicalTrace>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+        // Collect trace IDs while holding the DB lock, then release the lock before
+        // calling `get_trace` (which acquires the same mutex) to avoid self-deadlock.
+        let trace_ids: Vec<String> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
 
-        let mut stmt =
-            conn.prepare("SELECT trace_id FROM execution_traces WHERE flow_run_id = ?1")?;
+            let mut stmt =
+                conn.prepare("SELECT trace_id FROM execution_traces WHERE flow_run_id = ?1")?;
+            let mut rows = stmt.query(params![flow_run_id])?;
+            let mut ids = Vec::new();
 
-        let mut rows = stmt.query(params![flow_run_id])?;
+            while let Some(row) = rows.next()? {
+                let trace_id: String = row.get(0)?;
+                ids.push(trace_id);
+            }
+
+            ids
+        };
+
         let mut traces = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            let trace_id: String = row.get(0)?;
+        for trace_id in trace_ids {
             if let Some(trace) = self.get_trace(&trace_id)? {
                 traces.push(trace);
             }

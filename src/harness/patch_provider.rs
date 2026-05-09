@@ -1642,16 +1642,14 @@ impl LlmPatchProvider {
     }
 
     /// Parse whole-file edits from LLM response
-    /// 
+    ///
     /// Supports formats:
-    /// - ```whole_file
-    ///   FILE: path/to/file.rs
-    ///   <content>
-    ///   ```
-    /// - ```
-    ///   FILE: path/to/file.rs
-    ///   <content>
-    ///   ```
+    /// - fenced block with `whole_file` marker and `FILE: <path>` header
+    /// - generic fenced block with `FILE: <path>` header
+    ///
+    /// Example payload (text format):
+    /// `FILE: path/to/file.rs`
+    /// `<content>`
     fn parse_whole_file_edits(response: &str) -> Vec<EditOperation> {
         let mut edits = Vec::new();
         let lines: Vec<&str> = response.lines().collect();
