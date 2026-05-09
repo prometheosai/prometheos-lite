@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-checks:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Lint (clippy - strict)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Doc tests
+        run: cargo test --doc --all-features
+
+      - name: Build verification (release)
+        run: cargo build --release --all-features
+
+      - name: Tests
+        run: cargo test --all-targets --all-features
+
+      - name: Guardrail Tests
+        run: cargo test --test guardrail_tests --test guardrail_integration_tests
+
+      - name: Anti-Placeholder Check
+        run: |
+          # P0-Audit-007: Block TODO/FIXME/mock leakage in production code
+          echo "Checking for placeholder patterns in production code..."
+          
+          # Check for forbidden patterns outside tests/docs
+          if grep -r -E "TODO|FIXME|mock|placeholder|stub|unimplemented!|todo!|panic!.*TODO" src/ --exclude-dir=target; then
+            echo "::error::Found placeholder patterns in production code"
+            echo "CI should fail on TODO/FIXME/mock outside tests/docs"
+            exit 1
+          fi
+          
+          # Check for placeholder patterns in tests (allowed but should be minimal)
+          TODO_COUNT=$(grep -r "TODO" tests/ | wc -l || true)
+          if [ "$TODO_COUNT" -gt 5 ]; then
+            echo "::warning::High number of TODOs in tests ($TODO_COUNT). Consider implementing."
+          fi
+          
+          echo "Anti-placeholder check passed"
+
+      - name: Anti-regression check (no direct LLM calls in API)
+        run: |
+          # Fail if API handlers contain direct LlmClient::generate() calls
+          # All execution must go through FlowExecutionService
+          if grep -rn "LlmClient::generate\|llm_client\.generate" src/api/; then
+            echo "ERROR: Direct LLM calls found in API handlers. Use FlowExecutionService instead."
+            exit 1
+          fi
+          echo "OK: No direct LLM calls in API handlers"
+
+      - name: Stub/placeholder detection
+        run: |
+          # Fail if production code contains TODO/FIXME/unimplemented!/todo! placeholders
+          # Excludes test files and comments about the patterns themselves
+          echo "Checking for stubs in production code..."
+
+          # Check for unimplemented!() and todo!() macros in src/ (excluding tests)
+          if grep -rn "unimplemented!\|todo!" src/ --include="*.rs" | grep -v "//.*unimplemented\|//.*todo\|review.rs.*todo!" | head -20; then
+            echo "ERROR: Found unimplemented!() or todo!() macros in production code."
+            echo "These must be resolved before merging to main."
+            exit 1
+          fi
+
+          # Check for TODO/FIXME comments in src/ (excluding legitimate detection patterns)
+          if grep -rn "TODO:\|FIXME:" src/ --include="*.rs" | grep -v "STYLE001\|BUG005\|BUG006\|reproduction.rs" | head -20; then
+            echo "WARNING: Found TODO/FIXME comments in production code."
+            echo "These should be resolved or converted to tracked issues."
+            # Allowing this as warning only - can be made strict after cleanup
+          fi
+
+          echo "OK: No critical stubs found in production code"
