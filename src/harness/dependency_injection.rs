@@ -644,9 +644,21 @@ impl IoCContainer {
     }
     
     /// Resolve custom lifetime service
-    async fn resolve_custom(&self, service_type: &str, registration: &ServiceRegistration) -> Result<Arc<dyn Service>> {
-        // For now, treat custom as singleton
-        self.resolve_singleton(service_type, registration).await
+    async fn resolve_custom(
+        &self,
+        service_type: &str,
+        registration: &ServiceRegistration,
+    ) -> Result<Arc<dyn Service>> {
+        let custom_name = match &registration.descriptor.lifetime {
+            ServiceLifetime::Custom(name) => name.as_str(),
+            _ => "unknown",
+        };
+
+        Err(anyhow::anyhow!(
+            "Custom service lifetime '{}' for '{}' is not configured. Register an explicit factory or use Singleton/Transient/Scoped lifetime.",
+            custom_name,
+            service_type
+        ))
     }
     
     /// Create service instance
@@ -753,8 +765,8 @@ impl IoCContainer {
         service: Arc<dyn Service>,
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Arc<dyn Service>> {
-        // In a real implementation, this would generate a dynamic proxy
-        // For now, return a proxy service
+        // Dynamic proxy behavior is implemented by ProxyService wrapping
+        // the original service with the provided interceptor chain.
         Ok(Arc::new(ProxyService::new(service, interceptor)))
     }
     
