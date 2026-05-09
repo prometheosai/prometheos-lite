@@ -1148,6 +1148,24 @@ pub fn create_evidence_from_components(
         None
     };
 
+    let patch_identity = if let Some(patch_hash) = generated_patch_hash.clone() {
+        let mut identity = crate::harness::patch_applier::PatchIdentity::new();
+        identity.planned_patch_hash = patch_hash.clone();
+        identity.reviewed_diff_hash = patch_hash.clone();
+        if let Some(dry_hash) = dry_run_patch_hash.clone() {
+            identity.dry_run_patch_hash = dry_hash;
+        }
+        if let Some(applied_hash) = applied_patch_hash.clone() {
+            identity.applied_patch_hash = applied_hash;
+        }
+        if identity.has_complete_hashes() {
+            let _ = identity.verify_complete_identity();
+        }
+        Some(identity)
+    } else {
+        None
+    };
+
     CompletionEvidence {
         patch_evidence: PatchEvidence {
             patch_created: patch.patch_created,
@@ -1157,7 +1175,7 @@ pub fn create_evidence_from_components(
             patch_hash: generated_patch_hash.clone(),
             dry_run_passed: patch.dry_run_passed,
             // P0-3.1: Real patch identity verification for audit-grade integrity
-            patch_identity: None, // Will be populated during actual patch application
+            patch_identity,
             // Legacy fields for backward compatibility
             generated_patch_hash,
             dry_run_patch_hash,

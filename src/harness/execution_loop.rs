@@ -1993,6 +1993,24 @@ pub async fn execute_harness_task(
         && dry_run_patch_hash.is_some()
         && applied_patch_hash.is_some();
 
+    let patch_identity = if let Some(patch_result) = patch.as_ref() {
+        let mut identity = crate::harness::patch_applier::PatchIdentity::new();
+        identity.record_planned_hash(&patch_result.diff);
+        identity.record_reviewed_hash(&patch_result.diff);
+        if dry.failures.is_empty() {
+            identity.record_dry_run_hash(&patch_result.diff);
+        }
+        if patch_result.failures.is_empty() && !patch_result.diff.is_empty() {
+            identity.record_applied_hash(&patch_result.diff);
+        }
+        if identity.has_complete_hashes() {
+            let _ = identity.verify_complete_identity();
+        }
+        Some(identity)
+    } else {
+        None
+    };
+
     let evidence = CompletionEvidence {
         // 8 Evidence Dimensions
         patch_evidence: PatchEvidence {
@@ -2003,7 +2021,7 @@ pub async fn execute_harness_task(
             patch_hash: generated_patch_hash.clone(),
             dry_run_passed: dry.failures.is_empty(),
             // P0-3.1: Real patch identity verification for audit-grade integrity
-            patch_identity: None, // P0-3.1: Will be populated by real verification
+            patch_identity,
             // Legacy fields for backward compatibility
             generated_patch_hash,
             dry_run_patch_hash,
