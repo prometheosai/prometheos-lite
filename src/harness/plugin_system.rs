@@ -966,8 +966,9 @@ impl PluginSecurityManager {
         
         // Check signature if enabled
         if self.config.signature_verification_enabled {
-            // In a real implementation, this would verify plugin signatures
-            debug!("Signature verification enabled but not implemented");
+            return Err(anyhow::anyhow!(
+                "Plugin signature verification is enabled, but this plugin has no verifiable signature metadata"
+            ));
         }
         
         // Check trusted sources

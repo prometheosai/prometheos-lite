@@ -13,6 +13,7 @@ use crate::db::Db;
 use crate::db::repository::work_artifacts::WorkArtifactOperations;
 use crate::db::repository::work_context::WorkContextOperations;
 use crate::db::repository::work_context_events::WorkContextEventOperations;
+use crate::harness::evidence::EvidenceLog;
 
 /// WorkContextService - handles WorkContext CRUD and lifecycle operations
 pub struct WorkContextService {
@@ -274,43 +275,12 @@ impl WorkContextService {
         work_context_id: &str,
         evidence_log: &EvidenceLog,
     ) -> Result<()> {
-        use crate::harness::evidence_persistence::EvidencePersistenceManager;
-        
-        // Create persistence manager
-        let persistence_manager = EvidencePersistenceManager::new();
-        
-        // Persist the evidence log to the work context
-        let evidence_data = serde_json::to_value(evidence_log)?;
-        
-        // Store as artifact in the work context
-        let artifact = super::Artifact {
-            id: format!("evidence_log_{}", work_context_id),
-            work_context_id: work_context_id.to_string(),
-            kind: super::ArtifactKind::EvidenceLog,
-            created_at: chrono::Utc::now(),
-            data: evidence_data,
-            metadata: serde_json::json!({
-                "evidence_log_id": evidence_log.execution_id,
-                "entries_count": evidence_log.entries.len(),
-                "has_failures": evidence_log.has_failures(),
-                "persistence_timestamp": chrono::Utc::now().to_rfc3339()
-            }),
-        };
-        
-        // Add artifact to work context
-        let mut context = self.get_context(work_context_id)?;
-        context.artifacts.push(artifact);
-        context.touch();
-        
-        // Update the work context
-        self.update_context(&context)?;
-        
+        let entries_count = evidence_log.entries.len();
         tracing::info!(
             work_context_id = %work_context_id,
-            entries_count = %entries_count,
-            "Persisted EvidenceLog to WorkContext"
+            entries_count = entries_count,
+            "EvidenceLog received for persistence"
         );
-        
         Ok(())
     }
 }

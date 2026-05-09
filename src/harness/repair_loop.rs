@@ -24,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepairRequest {
     pub failure: FailureDetails,
     pub original_edits: Vec<EditOperation>,
