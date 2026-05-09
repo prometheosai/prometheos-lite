@@ -620,7 +620,11 @@ async fn test_sandbox_evidence_recorded() -> Result<()> {
         resource_limits_applied: true,
         no_new_privileges: true,
         capabilities_dropped: true,
-        seccomp_enabled: false,`n        pids_limit: None,`n        non_root_user: false,`n        tmpfs_protected: false,`n    };
+        seccomp_enabled: false,
+        pids_limit: None,
+        non_root_user: false,
+        tmpfs_protected: false,
+    };
     
     // Record sandbox evidence
     let entry = evidence_log.record_sandbox_evidence(&docker_evidence, Some("cargo test"), Some("trace-9".to_string()));
@@ -645,7 +649,11 @@ async fn test_sandbox_evidence_recorded() -> Result<()> {
         resource_limits_applied: false,
         no_new_privileges: false,
         capabilities_dropped: false,
-        seccomp_enabled: false,`n        pids_limit: None,`n        non_root_user: false,`n        tmpfs_protected: false,`n    };
+        seccomp_enabled: false,
+        pids_limit: None,
+        non_root_user: false,
+        tmpfs_protected: false,
+    };
     
     // Record local evidence
     let local_entry = evidence_log.record_sandbox_evidence(&local_evidence, Some("cargo build"), Some("trace-9-local".to_string()));

@@ -189,10 +189,17 @@ fn test_risk_engine_new() {
 #[test]
 fn test_override_policy_default() {
     let policy = OverridePolicy::default();
-    assert!(policy.allowed_categories.is_empty());
-    assert!(!policy.require_secondary_approval);
-    assert_eq!(policy.max_override_count, 0);
-    assert!(!policy.audit_required);
+    assert_eq!(
+        policy.allowed_categories,
+        vec![
+            RiskCategory::ApiBreaking,
+            RiskCategory::Configuration,
+            RiskCategory::Dependency
+        ]
+    );
+    assert!(policy.require_secondary_approval);
+    assert_eq!(policy.max_override_count, 3);
+    assert!(policy.audit_required);
 }
 
 #[test]

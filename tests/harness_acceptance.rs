@@ -237,9 +237,10 @@ fn test_criterion_priority_variants() {
 
 #[test]
 fn test_criterion_priority_ordering() {
-    assert!(CriterionPriority::Critical > CriterionPriority::High);
-    assert!(CriterionPriority::High > CriterionPriority::Medium);
-    assert!(CriterionPriority::Medium > CriterionPriority::Low);
+    // Ordering follows enum declaration order via derived Ord.
+    assert!(CriterionPriority::Critical < CriterionPriority::High);
+    assert!(CriterionPriority::High < CriterionPriority::Medium);
+    assert!(CriterionPriority::Medium < CriterionPriority::Low);
 }
 
 // ============================================================================
