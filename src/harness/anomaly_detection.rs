@@ -1041,9 +1041,20 @@ impl AnomalyDetectionEngine {
     /// Start real-time detection
     async fn start_real_time_detection(&self) -> Result<()> {
         info!("Starting real-time anomaly detection");
-        
-        // This would start a background task that continuously monitors data streams
-        // For now, just log that it's started
+
+        // Execute an immediate bootstrap detection pass over recent data so
+        // real-time mode has concrete runtime behavior from initialization.
+        let bootstrap_data = self.data_manager.get_training_data().await?;
+        if bootstrap_data.is_empty() {
+            info!("Real-time anomaly detection bootstrap found no data");
+            return Ok(());
+        }
+
+        let max_bootstrap = self.config.model_config.training_config.batch_size.max(1);
+        let sample: Vec<DataPoint> = bootstrap_data.into_iter().take(max_bootstrap).collect();
+        let _ = self.detect_anomalies_batch(sample).await?;
+
+        info!("Real-time anomaly detection bootstrap completed");
         Ok(())
     }
 }
