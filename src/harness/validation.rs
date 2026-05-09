@@ -870,8 +870,11 @@ pub async fn run_validation_with_cache(
         cached,
         flaky_tests_detected: flaky_tests,
         category_results,
-        // P0-4 FIX: Add validation_performed field for completion evidence
-        validation_performed: true,
+        // P0-Audit-012: Fix validation_performed semantics for zero-command plans
+        validation_performed: !matches!(
+            status,
+            ValidationStatus::SkippedNoCommands | ValidationStatus::NotApplicable
+        ),
         // P1-Issue10: Add final gate information
         is_final_gate,
         cache_disabled,

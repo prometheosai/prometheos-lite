@@ -138,6 +138,15 @@ impl SandboxPolicy {
     }
 }
 
+/// V1.6-P0-003: Docker capabilities verification
+#[derive(Debug, Clone, Default)]
+pub struct DockerCapabilities {
+    pub can_create_containers: bool,
+    pub can_set_resource_limits: bool,
+    pub can_set_network_policies: bool,
+    pub can_set_security_options: bool,
+}
+
 /// Parsed command structure with program and arguments
 #[derive(Debug, Clone)]
 pub struct StructuredCommand {
@@ -692,6 +701,136 @@ impl DockerSandboxRuntime {
         self.memory = Some(limit);
     }
 
+    /// V1.6-P0-003: Verify Docker daemon is running and accessible
+    pub async fn verify_docker_daemon() -> Result<()> {
+        // Check Docker daemon status
+        let output = Command::new("docker")
+            .arg("info")
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to run docker info: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker daemon not accessible: {}", stderr);
+        }
+
+        // Parse Docker info to verify critical components
+        let info = String::from_utf8_lossy(&output.stdout);
+        
+        // Check for essential Docker components
+        if !info.contains("Server Version:") {
+            anyhow::bail!("Docker daemon info incomplete - missing server version");
+        }
+        
+        if !info.contains("Containers:") {
+            anyhow::bail!("Docker daemon info incomplete - missing container information");
+        }
+
+        // Verify Docker daemon is healthy
+        let health_output = Command::new("docker")
+            .args(&["system", "info", "--format", "{{.ServerState.Health}}"])
+            .output()
+            .await;
+
+        match health_output {
+            Ok(output) if output.status.success() => {
+                let health = String::from_utf8_lossy(&output.stdout);
+                if health.trim() != "healthy" {
+                    tracing::warn!("Docker daemon health status: {}", health.trim());
+                }
+            }
+            _ => {
+                tracing::warn!("Could not verify Docker daemon health status");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// V1.6-P0-003: Verify Docker capabilities required for autonomous mode
+    pub async fn verify_docker_capabilities() -> Result<DockerCapabilities> {
+        let mut capabilities = DockerCapabilities::default();
+
+        // Test container creation capability
+        let test_output = Command::new("docker")
+            .args(&["run", "--rm", "--name", "prometheos-test-cap", "hello-world"])
+            .output()
+            .await;
+
+        match test_output {
+            Ok(output) if output.status.success() => {
+                capabilities.can_create_containers = true;
+                tracing::info!("Container creation capability verified");
+            }
+            Ok(_) => {
+                tracing::error!("Container creation test failed");
+            }
+            Err(e) => {
+                tracing::error!("Container creation test error: {}", e);
+            }
+        }
+
+        // Test resource limits capability
+        let limits_output = Command::new("docker")
+            .args(&["run", "--rm", "--cpus", "0.5", "--memory", "128m", "hello-world"])
+            .output()
+            .await;
+
+        match limits_output {
+            Ok(output) if output.status.success() => {
+                capabilities.can_set_resource_limits = true;
+                tracing::info!("Resource limits capability verified");
+            }
+            Ok(_) => {
+                tracing::warn!("Resource limits test failed - Docker may not support limits");
+            }
+            Err(e) => {
+                tracing::warn!("Resource limits test error: {}", e);
+            }
+        }
+
+        // Test network policy capability
+        let network_output = Command::new("docker")
+            .args(&["run", "--rm", "--network", "none", "hello-world"])
+            .output()
+            .await;
+
+        match network_output {
+            Ok(output) if output.status.success() => {
+                capabilities.can_set_network_policies = true;
+                tracing::info!("Network policy capability verified");
+            }
+            Ok(_) => {
+                tracing::error!("Network policy test failed");
+            }
+            Err(e) => {
+                tracing::error!("Network policy test error: {}", e);
+            }
+        }
+
+        // Test security options capability
+        let security_output = Command::new("docker")
+            .args(&["run", "--rm", "--security-opt", "no-new-privileges:true", "hello-world"])
+            .output()
+            .await;
+
+        match security_output {
+            Ok(output) if output.status.success() => {
+                capabilities.can_set_security_options = true;
+                tracing::info!("Security options capability verified");
+            }
+            Ok(_) => {
+                tracing::error!("Security options test failed");
+            }
+            Err(e) => {
+                tracing::error!("Security options test error: {}", e);
+            }
+        }
+
+        Ok(capabilities)
+    }
+
     /// P0-Issue1: Create sandbox evidence for autonomous mode safety verification
     pub fn create_sandbox_evidence(&self, container_id: Option<String>) -> crate::harness::evidence::SandboxEvidence {
         crate::harness::evidence::SandboxEvidence {
@@ -706,7 +845,10 @@ impl DockerSandboxRuntime {
             resource_limits_applied: self.cpus.is_some() || self.memory.is_some(),
             no_new_privileges: true, // Always set in Docker runtime
             capabilities_dropped: true, // Always drop ALL capabilities
-            seccomp_enabled: false, // Not explicitly enabled in current implementation
+            seccomp_enabled: true, // P0-Audit-005: Seccomp now enabled
+            pids_limit: Some(64), // P0-Audit-005: PIDs limit applied
+            non_root_user: true, // P0-Audit-005: Non-root user enforced
+            tmpfs_protected: true, // P0-Audit-005: /tmp protected with noexec
         }
     }
     fn build_docker_args(&self, repo_root: &Path, cmd: &StructuredCommand) -> Vec<String> {
@@ -754,11 +896,27 @@ impl DockerSandboxRuntime {
             args.push(format!("{}={}", key, value));
         }
 
-        // Security options
+        // Security options - P0-Audit-005: Harden Docker sandbox
         args.push("--security-opt".to_string());
         args.push("no-new-privileges:true".to_string());
         args.push("--cap-drop".to_string());
         args.push("ALL".to_string());
+        
+        // Additional hardening measures
+        args.push("--pids-limit".to_string());
+        args.push("64".to_string()); // Limit process count
+        
+        // Add tmpfs for /tmp
+        args.push("--tmpfs".to_string());
+        args.push("/tmp:noexec,nosuid,size=100m".to_string());
+        
+        // Use non-root user
+        args.push("--user".to_string());
+        args.push("nobody".to_string());
+        
+        // Add seccomp profile if available
+        args.push("--security-opt".to_string());
+        args.push("seccomp=runtime/default".to_string());
 
         // Add the image
         args.push(self.image.clone());
@@ -881,7 +1039,49 @@ impl SandboxRuntimeFactory {
         
         if policy.require_docker && !docker_available {
             tracing::error!("Docker required by policy but not available");
-            anyhow::bail!("Docker runtime required by policy but not available on this system");
+            anyhow::bail!(
+                "Docker runtime required by policy but not available on this system. \
+                Autonomous mode requires Docker for security isolation. \
+                Please install Docker and ensure it's running, or use assisted mode instead."
+            );
+        }
+
+        // V1.6-P0-003: Additional autonomous mode Docker requirements
+        if policy.require_docker {
+            // Verify Docker daemon is running and accessible
+            match DockerSandboxRuntime::verify_docker_daemon().await {
+                Ok(_) => {
+                    tracing::info!("Docker daemon verified and accessible");
+                }
+                Err(e) => {
+                    tracing::error!("Docker daemon verification failed: {}", e);
+                    anyhow::bail!(
+                        "Docker daemon verification failed: {}. \
+                        Autonomous mode requires a fully functional Docker daemon. \
+                        Please check Docker installation and permissions.", e
+                    );
+                }
+            }
+
+            // Verify required Docker capabilities
+            match DockerSandboxRuntime::verify_docker_capabilities().await {
+                Ok(capabilities) => {
+                    if !capabilities.can_create_containers {
+                        anyhow::bail!("Docker lacks container creation capability required for autonomous mode");
+                    }
+                    if !capabilities.can_set_resource_limits {
+                        tracing::warn!("Docker cannot set resource limits - autonomous mode may be less secure");
+                    }
+                    if !capabilities.can_set_network_policies {
+                        anyhow::bail!("Docker cannot enforce network policies required for autonomous mode");
+                    }
+                    tracing::info!("Docker capabilities verified: {:?}", capabilities);
+                }
+                Err(e) => {
+                    tracing::error!("Docker capabilities verification failed: {}", e);
+                    anyhow::bail!("Docker capabilities verification failed: {}", e);
+                }
+            }
         }
         
         if (policy.prefer_docker || policy.require_docker) && docker_available {
