@@ -18,6 +18,1033 @@ use prometheos_harness::{
 };
 use serde_json::json;
 
+/// V1.6-P0-002: Test validation-gated selection - no fallback to highest confidence
+#[tokio::test]
+async fn test_validation_gated_selection_no_fallback() {
+    use prometheos_harness::{
+        attempt_pool::{AttemptPool, AttemptRecord},
+        selection::PatchCandidate,
+        validation::ValidationResult,
+        confidence::ConfidenceScore,
+        edit_protocol::EditOperation,
+    };
+    
+    let pool = AttemptPool::new(3);
+    
+    // Create candidates with different confidence levels
+    let high_confidence_candidate = PatchCandidate {
+        id: "high_conf".to_string(),
+        edits: vec![EditOperation::CreateFile {
+            path: "test.rs".into(),
+            content: "fn main() {}".to_string(),
+        }],
+        source: "test_provider".to_string(),
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        metadata: Default::default(),
+        risk: None,
+        validation: None,
+        review_issues: vec![],
+        semantic_diff: None,
+        lines_added: 1,
+        lines_removed: 0,
+    };
+    
+    let low_confidence_candidate = PatchCandidate {
+        id: "low_conf".to_string(),
+        edits: vec![EditOperation::CreateFile {
+            path: "test.rs".into(),
+            content: "fn main() {}".to_string(),
+        }],
+        source: "test_provider".to_string(),
+        confidence: ConfidenceScore {
+            score: 0.6,
+            factors: vec![],
+            explanation: "Low confidence".to_string(),
+            recommendation: None,
+        },
+        metadata: Default::default(),
+        risk: None,
+        validation: None,
+        review_issues: vec![],
+        semantic_diff: None,
+        lines_added: 1,
+        lines_removed: 0,
+    };
+    
+    // Create attempt records where high confidence fails validation, low confidence passes
+    let mut records = vec![
+        AttemptRecord {
+            attempt_id: "attempt_1".to_string(),
+            candidate: high_confidence_candidate,
+            patch_result: None,
+            validation_result: Some(ValidationResult {
+                passed: false, // High confidence fails validation
+                summary: "Validation failed".to_string(),
+                commands_executed: 2,
+                commands_passed: 0,
+                commands_failed: 2,
+                duration_ms: 100,
+                details: vec![],
+            }),
+            review_issues: vec![],
+            risk_assessment: None,
+            semantic_analysis: None,
+            score: 0.8, // High score due to confidence
+            passed: false,
+        },
+        AttemptRecord {
+            attempt_id: "attempt_2".to_string(),
+            candidate: low_confidence_candidate,
+            patch_result: None,
+            validation_result: Some(ValidationResult {
+                passed: true, // Low confidence passes validation
+                summary: "Validation passed".to_string(),
+                commands_executed: 2,
+                commands_passed: 2,
+                commands_failed: 0,
+                duration_ms: 100,
+                details: vec![],
+            }),
+            review_issues: vec![],
+            risk_assessment: None,
+            semantic_analysis: None,
+            score: 0.6, // Lower score but passes validation
+            passed: true,
+        },
+    ];
+    
+    // Test 1: Verify validation-gated selection works
+    let selected = pool.select_best(&records);
+    assert!(selected.is_some(), "Should select low confidence candidate that passed validation");
+    assert_eq!(selected.unwrap().attempt_id, "attempt_2", "Should select the passing candidate");
+    
+    // Test 2: Verify no fallback when all fail validation
+    records[1].validation_result = Some(ValidationResult {
+        passed: false, // Now both fail validation
+        summary: "Validation failed".to_string(),
+        commands_executed: 2,
+        commands_passed: 0,
+        commands_failed: 2,
+        duration_ms: 100,
+        details: vec![],
+    });
+    records[1].passed = false;
+    
+    let selected = pool.select_best(&records);
+    assert!(selected.is_none(), "Should not select any candidate when all fail validation");
+    
+    // Test 3: Prove validation-gated selection behavior
+    let proof = pool.prove_validation_gated_selection(&records);
+    assert!(proof, "Should prove validation-gated selection works correctly");
+    
+    println!("✅ V1.6-P0-002: Validation-gated selection test passed");
+}
+
+/// V1.6-P0-005: Test zero validation commands executed
+#[tokio::test]
+async fn test_complete_rejected_zero_validation_commands() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 0, // ZERO commands executed - should fail
+            commands_skipped: 4,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Zero validation commands test passed");
+}
+
+/// V1.6-P0-005: Test missing rollback evidence
+#[tokio::test]
+async fn test_complete_rejected_missing_rollback() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: false, // Missing rollback capability
+            rollback_available: false,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Missing rollback test passed");
+}
+
+/// V1.6-P0-005: Test missing patch hashes
+#[tokio::test]
+async fn test_complete_rejected_missing_patch_hashes() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: None, // Missing patch hash
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: None,
+            dry_run_patch_hash: None,
+            applied_patch_hash: None,
+            hash_verification_passed: false,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Missing patch hashes test passed");
+}
+
+/// V1.6-P0-005: Test mismatched patch hashes
+#[tokio::test]
+async fn test_complete_rejected_mismatched_patch_hashes() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("def456".to_string()), // Mismatched hash
+            applied_patch_hash: Some("ghi789".to_string()), // Mismatched hash
+            hash_verification_passed: false,
+            hash_mismatch_details: Some("Hashes do not match".to_string()),
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Mismatched patch hashes test passed");
+}
+
+/// V1.6-P0-005: Test missing review evidence
+#[tokio::test]
+async fn test_complete_rejected_missing_review() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: false, // Review not performed
+            files_reviewed: 0,
+            lines_analyzed: 0,
+            security_patterns_checked: 0,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 0,
+            test_coverage_analyzed: false,
+            performance_impact_assessed: false,
+            review_depth_score: 0.0,
+            quality_indicators: vec![],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: false, // Review not run
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Missing review test passed");
+}
+
+/// V1.6-P0-005: Test critical review issue
+#[tokio::test]
+async fn test_complete_rejected_critical_issue() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 1, // Critical issue
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 1, // Critical issue present
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Critical issue test passed");
+}
+
+/// V1.6-P0-005: Test risk approval required
+#[tokio::test]
+async fn test_complete_rejected_risk_approval_required() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "High".to_string(),
+            security_risk: "High".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: true, // Approval required
+            risk_reasons: vec!["Security-sensitive changes".to_string()],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: true, // Approval required
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Risk approval required test passed");
+}
+
+/// V1.6-P0-005: Test low confidence
+#[tokio::test]
+async fn test_complete_rejected_low_confidence() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.3, // Low confidence
+            confidence_classification: "Low".to_string(),
+            validation_contribution: 0.1,
+            risk_contribution: 0.1,
+            review_contribution: 0.1,
+            confidence_factors: vec!["Weak evidence".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![],
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.3, // Low confidence
+            factors: vec![],
+            explanation: "Low confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Low confidence test passed");
+}
+
+/// V1.6-P0-005: Test missing Docker evidence in autonomous mode
+#[tokio::test]
+async fn test_complete_rejected_missing_docker_evidence() {
+    let evidence = CompletionEvidence {
+        patch_evidence: PatchEvidence {
+            patch_created: true,
+            files_modified: 1,
+            lines_changed: 10,
+            patch_applied_cleanly: true,
+            patch_hash: Some("abc123".to_string()),
+            dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("abc123".to_string()),
+            dry_run_patch_hash: Some("abc123".to_string()),
+            applied_patch_hash: Some("abc123".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
+        },
+        validation_evidence: ValidationEvidence {
+            validation_performed: true,
+            all_validations_passed: true,
+            format_check_passed: true,
+            static_check_passed: true,
+            lint_check_passed: true,
+            test_passed: true,
+            validation_summary: "All validations passed".to_string(),
+            commands_planned: 4,
+            commands_executed: 4,
+            commands_skipped: 0,
+            categories_executed: vec![],
+        },
+        review_evidence: ReviewEvidence {
+            review_performed: true,
+            files_reviewed: 5,
+            lines_analyzed: 100,
+            security_patterns_checked: 10,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 2,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            review_depth_score: 0.8,
+            quality_indicators: vec!["Good structure".to_string()],
+        },
+        risk_evidence: RiskEvidence {
+            risk_assessed: true,
+            overall_risk_level: "Low".to_string(),
+            security_risk: "Low".to_string(),
+            api_risk: "Low".to_string(),
+            database_risk: "Low".to_string(),
+            dependency_risk: "Low".to_string(),
+            requires_approval: false,
+            risk_reasons: vec![],
+        },
+        semantic_evidence: SemanticEvidence {
+            api_changes_detected: false,
+            auth_changes_detected: false,
+            database_changes_detected: false,
+            dependency_changes_detected: false,
+            config_changes_detected: false,
+            breaking_changes_count: 0,
+            security_relevant_changes: false,
+        },
+        confidence_evidence: ConfidenceEvidence {
+            confidence_score: 0.9,
+            confidence_classification: "High".to_string(),
+            validation_contribution: 0.3,
+            risk_contribution: 0.2,
+            review_contribution: 0.4,
+            confidence_factors: vec!["Strong validation".to_string()],
+        },
+        process_evidence: ProcessEvidence {
+            git_checkpoint_created: true,
+            rollback_available: true,
+            all_phases_completed: true,
+            no_critical_errors: true,
+            time_limit_respected: true,
+            step_limit_respected: true,
+        },
+        sandbox_evidence: vec![], // No sandbox evidence - should fail in autonomous mode
+        patch_exists: true,
+        validation_ran: true,
+        validation_passed: true,
+        review_ran: true,
+        critical_issues: 0,
+        confidence: ConfidenceScore {
+            score: 0.9,
+            factors: vec![],
+            explanation: "High confidence".to_string(),
+            recommendation: None,
+        },
+        verification_strength: VerificationStrength::Full,
+        requires_approval: false,
+        decision_factors: vec![],
+    };
+
+    let decision = prometheos_harness::completion::make_completion_decision(&evidence);
+    assert!(!matches!(decision, prometheos_harness::completion::CompletionDecision::Complete(_)));
+    println!("✅ V1.6-P0-005: Missing Docker evidence test passed");
+}
+
 /// Test case 1: Complete rejected without patch hash
 #[tokio::test]
 async fn test_complete_rejected_without_patch_hash() {
