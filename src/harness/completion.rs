@@ -1089,8 +1089,8 @@ pub fn create_evidence_from_components(
             time_limit_respected: time_limit_respected,
             step_limit_respected: step_limit_respected,
         },
-        // P0-Audit-013: Extract real sandbox evidence from evidence log
-        sandbox_evidence: extract_sandbox_evidence_from_log(&evidence_log),
+        // Sandbox evidence is populated by execution loop when available.
+        sandbox_evidence: Vec::new(),
         patch_exists: patch.patch_created,
         validation_ran: true,
         validation_passed: validation.passed(),

@@ -195,6 +195,9 @@ impl AttemptPool {
                                 no_new_privileges: true,
                                 capabilities_dropped: true,
                                 seccomp_enabled: true,
+                                pids_limit: Some(64),
+                                non_root_user: true,
+                                tmpfs_protected: true,
                             }
                         } else {
                             // Local runtime evidence
@@ -211,6 +214,9 @@ impl AttemptPool {
                                 no_new_privileges: false,
                                 capabilities_dropped: false,
                                 seccomp_enabled: false,
+                                pids_limit: None,
+                                non_root_user: false,
+                                tmpfs_protected: false,
                             }
                         };
                         
@@ -281,7 +287,11 @@ impl AttemptPool {
     pub fn prove_validation_gated_selection(&self, records: &[AttemptRecord]) -> bool {
         // Find highest confidence candidate (regardless of validation)
         let highest_confidence = records.iter()
-            .max_by(|a, b| a.candidate.confidence.partial_cmp(&b.candidate.confidence).unwrap());
+            .max_by(|a, b| {
+                a.candidate.confidence.score
+                    .partial_cmp(&b.candidate.confidence.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         
         // Find best passing candidate
         let best_passing = self.select_best(records);
@@ -299,7 +309,8 @@ impl AttemptPool {
                 // The passing candidate should either be the highest confidence that passed
                 // or a lower confidence candidate that passed while higher ones failed
                 let highest_passed = highest.validation_result.as_ref().map(|v| v.passed()).unwrap_or(false);
-                return highest_passed || (passing.candidate.confidence <= highest.candidate.confidence);
+                return highest_passed
+                    || (passing.candidate.confidence.score <= highest.candidate.confidence.score);
             }
         }
         
@@ -424,6 +435,9 @@ async fn evaluate_single_candidate(
                 no_new_privileges: true,
                 capabilities_dropped: true,
                 seccomp_enabled: false,
+                pids_limit: Some(64),
+                non_root_user: true,
+                tmpfs_protected: true,
             }
         } else {
             // Local runtime evidence
@@ -440,6 +454,9 @@ async fn evaluate_single_candidate(
                 no_new_privileges: false,
                 capabilities_dropped: false,
                 seccomp_enabled: false,
+                pids_limit: None,
+                non_root_user: false,
+                tmpfs_protected: false,
             }
         };
 

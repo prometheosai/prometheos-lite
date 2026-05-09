@@ -135,6 +135,17 @@ fn extract_sandbox_evidence_from_log(evidence_log: &EvidenceLog) -> Vec<SandboxE
                     no_new_privileges,
                     capabilities_dropped,
                     seccomp_enabled,
+                    pids_limit: entry.input_summary
+                        .get("pids_limit")
+                        .and_then(|s| s.parse::<u32>().ok()),
+                    non_root_user: entry.input_summary
+                        .get("non_root_user")
+                        .and_then(|s| s.parse::<bool>().ok())
+                        .unwrap_or(false),
+                    tmpfs_protected: entry.input_summary
+                        .get("tmpfs_protected")
+                        .and_then(|s| s.parse::<bool>().ok())
+                        .unwrap_or(false),
                 });
             }
         }
@@ -218,6 +229,48 @@ impl Clone for HarnessExecutionRequest {
 }
 
 impl HarnessExecutionRequest {
+    /// Create a request with conservative defaults for tests and simple callers.
+    pub fn new() -> Self {
+        let mode = HarnessMode::ReviewOnly;
+        Self {
+            work_context_id: uuid::Uuid::new_v4().to_string(),
+            repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            task: String::new(),
+            requirements: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            mode,
+            limits: HarnessLimits::default(),
+            mentioned_files: Vec::new(),
+            mentioned_symbols: Vec::new(),
+            proposed_edits: Vec::new(),
+            patch_provider: None,
+            provider_context: None,
+            progress_callback: None,
+            validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
+            sandbox_policy: Some(crate::harness::sandbox::SandboxPolicy::from_mode(mode)),
+        }
+    }
+
+    pub fn with_mode(mut self, mode: HarnessMode) -> Self {
+        self.mode = mode;
+        self.sandbox_policy = Some(crate::harness::sandbox::SandboxPolicy::from_mode(mode));
+        self
+    }
+
+    pub fn with_task(mut self, task: impl Into<String>) -> Self {
+        self.task = task.into();
+        self
+    }
+
+    pub fn with_repo_path(mut self, repo_root: PathBuf) -> Self {
+        self.repo_root = repo_root;
+        self
+    }
+
+    pub async fn execute(self) -> anyhow::Result<HarnessExecutionResult> {
+        execute_harness_task(self.with_config_provider()?).await
+    }
+
     /// P0-FIX: Auto-create patch provider from config if not already set
     ///
     /// This is the production entry point for LLM-based patch generation.
@@ -1990,8 +2043,8 @@ pub async fn execute_harness_task(
             rollback_available: rollback_handle.is_some(),
             all_phases_completed: traj.completed_at.is_some(),
             no_critical_errors: failures.iter().all(|f| !f.is_critical()),
-            time_limit_respected: true, // TODO: Pass actual time limit status from metrics
-            step_limit_respected: true, // TODO: Pass actual step limit status from metrics
+            time_limit_respected: ctx.start_time.elapsed().as_millis() as u64 <= ctx.limits.max_time_ms,
+            step_limit_respected: ctx.step_count <= ctx.limits.max_steps,
         },
         // P0-Issue1: Extract sandbox evidence from evidence log for completion verification
         sandbox_evidence: extract_sandbox_evidence_from_log(&evidence_log),

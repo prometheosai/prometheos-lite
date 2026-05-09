@@ -471,7 +471,7 @@ impl ContextBudget {
                         recommendation_type: RecommendationType::SplitRequest,
                         section: ContextSection::Files,
                         description: "Consider splitting into multiple requests".to_string(),
-                        token_impact: -violation.over_amount as isize,
+                        token_impact: -(violation.over_amount as isize),
                     });
                 }
                 ViolationType::CriticalTruncated => {
