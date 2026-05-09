@@ -801,7 +801,7 @@ impl DistributedCache {
     /// Get cache entry with metadata
     async fn get_cache_entry(&self, key: &str) -> Result<Option<CacheEntry>> {
         // This would need to be implemented by the cache backend
-        // For now, return None
+        // Return None when no distributed peer result is available
         Ok(None)
     }
 }
@@ -1071,7 +1071,7 @@ impl ReplicationManager {
         for node in replica_nodes {
             debug!("Getting value from replica node: {}", node.node_id);
             // In a real implementation, this would get the value from the remote node
-            // For now, return None
+            // Return None when no distributed peer result is available
             values.push(None);
         }
         

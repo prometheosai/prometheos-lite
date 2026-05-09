@@ -140,8 +140,7 @@ impl EvidenceSink for FileEvidenceSink {
         let mut artifacts = Vec::new();
         let mut entries = fs::read_dir(&artifacts_dir).await?;
         
-        while let Some(entry) = entries.next_entry().await {
-            let entry = entry?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
@@ -215,8 +214,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_file_evidence_sink_persistence() -> Result<()> {
-        let temp_dir = std::env::temp_dir();
-        let sink = FileEvidenceSink::new(temp_dir.join("test_evidence"));
+        let temp_dir = tempfile::tempdir()?;
+        let sink = FileEvidenceSink::new(temp_dir.path().join("test_evidence"));
         let work_context_id = "test-context";
         
         let entry = EvidenceEntry {
