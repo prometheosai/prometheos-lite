@@ -139,6 +139,7 @@ async fn test_review_only_no_side_effects() {
         provider_context: None,
         progress_callback: None,
         validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
+        sandbox_policy: Some(prometheos_lite::harness::sandbox::SandboxPolicy::from_mode(HarnessMode::ReviewOnly)),
     };
 
     // Verify mode is ReviewOnly
