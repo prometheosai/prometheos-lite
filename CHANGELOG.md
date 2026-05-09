@@ -1,3 +1,23 @@
+## V1.6 Strict Audit Completion - Runtime De-Placeholdering
+
+- Rewired runtime embedding usage so `serve` and runtime builder paths consistently use OpenRouter embedding provider instead of legacy local embedding stubs.
+- Hardened CI enforcement configuration coherence: pattern initialization now reflects active config flags and reinitializes correctly on config updates.
+- Replaced diagnostics provider connectivity placeholder with real HTTP connectivity checks, including provider-specific endpoints and auth/header handling.
+- Removed silent dependency discovery fallback:
+  - Replaced `PlaceholderDiscovery` with explicit `UnsupportedDiscovery` failures for unimplemented discovery types (`Network`, `Database`, `Custom`).
+  - This prevents false-positive “successful” discovery when unsupported mechanisms are configured.
+- Implemented adaptive timeout engine state updates:
+  - Added learned adaptive multiplier updates from historical timeout/success/utilization statistics.
+  - Adaptive escalation now uses bounded learned multipliers instead of static no-op behavior.
+- Added regression tests for adaptive timeout learning behavior (increase/decrease paths).
+- Renamed flow unit-test node kind from `"mock"` to `"test"` and corresponding helper type names for clearer test semantics.
+
+### Validation Notes
+
+- `cargo check --quiet` passes.
+- `cargo test --test harness_risk --quiet` passes.
+- Full `cargo test` remains constrained by Windows linker resource limits in this environment (`LNK1102`/`LNK1104`) on large test binaries, not by runtime logic regressions in the changed modules.
+
 ## V1.6 Harness Engine
 
 - Added the src/harness subsystem for repo intelligence, environment fingerprinting, file policy, structured edit validation, atomic patch application, sandboxed validation, review/risk/confidence scoring, trajectory recording, artifacts, and evidence-based completion.
