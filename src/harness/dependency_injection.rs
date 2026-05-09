@@ -1800,20 +1800,20 @@ impl Service for RemoteProxyService {
     
     fn initialize(&mut self) -> Result<()> {
         debug!("Initializing remote proxy for {}", self.target.get_service_type());
-        
-        // In a real implementation, this would call the remote service
-        // For now, initialize the local target
-        let mut target = (*self.target).clone();
-        target.initialize()
+
+        Err(anyhow::anyhow!(
+            "Remote proxy initialization must be performed through async remote call path; sync local fallback is disabled for service '{}'",
+            self.target.get_service_type()
+        ))
     }
     
     fn cleanup(&mut self) -> Result<()> {
         debug!("Cleaning up remote proxy for {}", self.target.get_service_type());
-        
-        // In a real implementation, this would call the remote service
-        // For now, cleanup the local target
-        let mut target = (*self.target).clone();
-        target.cleanup()
+
+        Err(anyhow::anyhow!(
+            "Remote proxy cleanup must be performed through async remote call path; sync local fallback is disabled for service '{}'",
+            self.target.get_service_type()
+        ))
     }
 }
 
