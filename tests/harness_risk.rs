@@ -28,6 +28,7 @@ fn test_risk_assessment_none() {
         requires_approval: false,
         can_override: true,
         override_conditions: vec![],
+        assessed: true,
     };
 
     assert!(matches!(assessment.level, RiskLevel::None));
@@ -50,6 +51,7 @@ fn test_risk_assessment_critical() {
         requires_approval: true,
         can_override: false,
         override_conditions: vec![],
+        assessed: true,
     };
 
     assert!(matches!(assessment.level, RiskLevel::Critical));

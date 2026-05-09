@@ -31,8 +31,7 @@ fn test_repo_context_structure() {
         compressed_context: String::new(),
         token_estimate: 0,
         language_breakdown: HashMap::new(),
-        dependency_graph: DependencyGraph::default(),
-    };
+        dependency_graph: DependencyGraph::default(),`n        repo_map: RepoMap::empty(),`n    };
 
     assert_eq!(context.root, PathBuf::from("/test/repo"));
     assert!(context.ranked_files.is_empty());
@@ -280,7 +279,7 @@ fn test_edge_kind_variants() {
 #[test]
 fn test_repop_map_alias() {
     // RepoMap is an alias for RepoContext
-    let _context: RepoMap = RepoContext {
+    let _context: RepoContext = RepoContext {
         root: PathBuf::from("/test"),
         ranked_files: vec![],
         symbols: vec![],
@@ -288,7 +287,7 @@ fn test_repop_map_alias() {
         compressed_context: String::new(),
         token_estimate: 0,
         language_breakdown: HashMap::new(),
-        dependency_graph: DependencyGraph::default(),
-    };
+        dependency_graph: DependencyGraph::default(),`n        repo_map: RepoMap::empty(),`n    };
 }
+
 
