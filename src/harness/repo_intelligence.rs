@@ -9,8 +9,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
-use tree_sitter_typescript;
 use tree_sitter_rust;
+use tree_sitter_typescript;
 
 /// P1-Issue1: Analyzer-backed RepoMap enhancements for Rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -344,7 +344,7 @@ impl RustAnalyzerData {
     /// Extract cargo metadata using `cargo metadata` command
     async fn extract_cargo_metadata(repo_path: &Path) -> Result<CargoMetadata> {
         use std::process::Command;
-        
+
         let output = Command::new("cargo")
             .args(&["metadata", "--no-deps", "--format-version", "1"])
             .current_dir(repo_path)
@@ -352,47 +352,93 @@ impl RustAnalyzerData {
             .context("Failed to run cargo metadata")?;
 
         if !output.status.success() {
-            anyhow::bail!("cargo metadata failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "cargo metadata failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
             .context("Failed to parse cargo metadata output")?;
 
-        let package = metadata.get("packages")
+        let package = metadata
+            .get("packages")
             .and_then(|p| p.as_array())
             .and_then(|arr| arr.first())
             .ok_or_else(|| anyhow::anyhow!("No package found in cargo metadata"))?;
 
-        let name = package.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let version = package.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string();
-        let edition = package.get("edition").and_then(|v| v.as_str()).unwrap_or("2015").to_string();
+        let name = package
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let version = package
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.0.0")
+            .to_string();
+        let edition = package
+            .get("edition")
+            .and_then(|v| v.as_str())
+            .unwrap_or("2015")
+            .to_string();
 
-        let workspace_members = metadata.get("workspace_members")
+        let workspace_members = metadata
+            .get("workspace_members")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let dependencies = package.get("dependencies")
+        let dependencies = package
+            .get("dependencies")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|dep| Self::parse_cargo_dependency(dep)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|dep| Self::parse_cargo_dependency(dep))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let targets = package.get("targets")
+        let targets = package
+            .get("targets")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|target| Self::parse_cargo_target(target)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|target| Self::parse_cargo_target(target))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let features = package.get("features")
+        let features = package
+            .get("features")
             .and_then(|v| v.as_object())
-            .map(|obj| obj.iter().filter_map(|(k, v)| {
-                let feature_list = v.as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
-                Some((k.clone(), feature_list))
-            }).collect())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| {
+                        let feature_list = v
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some((k.clone(), feature_list))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let rust_version = package.get("rust_version").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let rust_version = package
+            .get("rust_version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         Ok(CargoMetadata {
             name,
@@ -409,20 +455,41 @@ impl RustAnalyzerData {
     /// Parse a cargo dependency from metadata
     fn parse_cargo_dependency(dep: &serde_json::Value) -> Option<CargoDependency> {
         let name = dep.get("name").and_then(|v| v.as_str())?;
-        let version_req = dep.get("req").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let source = dep.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let version_req = dep
+            .get("req")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let source = dep
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let kind = match dep.get("kind").and_then(|v| v.as_str()) {
             Some("dev") => DependencyKind::Dev,
             Some("build") => DependencyKind::Build,
             _ => DependencyKind::Normal,
         };
-        let target = dep.get("target").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let optional = dep.get("optional").and_then(|v| v.as_bool()).unwrap_or(false);
-        let features = dep.get("features")
+        let target = dep
+            .get("target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let optional = dep
+            .get("optional")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let features = dep
+            .get("features")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
             .unwrap_or_default();
-        let uses_default_features = dep.get("uses_default_features").and_then(|v| v.as_bool()).unwrap_or(true);
+        let uses_default_features = dep
+            .get("uses_default_features")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         Some(CargoDependency {
             name: name.to_string(),
@@ -439,7 +506,9 @@ impl RustAnalyzerData {
     /// Parse a cargo target from metadata
     fn parse_cargo_target(target: &serde_json::Value) -> Option<CargoTarget> {
         let name = target.get("name").and_then(|v| v.as_str())?;
-        let kind_str = target.get("kind").and_then(|v| v.as_array())
+        let kind_str = target
+            .get("kind")
+            .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())?;
         let kind = match kind_str {
@@ -451,16 +520,34 @@ impl RustAnalyzerData {
             "custom-build" => TargetKind::Custom,
             _ => return None,
         };
-        let crate_types = target.get("crate_types")
+        let crate_types = target
+            .get("crate_types")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
             .unwrap_or_default();
-        let src_path = target.get("src_path").and_then(|v| v.as_str()).map(|s| PathBuf::from(s));
-        let edition = target.get("edition").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let src_path = target
+            .get("src_path")
+            .and_then(|v| v.as_str())
+            .map(|s| PathBuf::from(s));
+        let edition = target
+            .get("edition")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let doc = target.get("doc").and_then(|v| v.as_bool()).unwrap_or(false);
         let test = target.get("test").and_then(|v| v.as_bool()).unwrap_or(true);
-        let doctest = target.get("doctest").and_then(|v| v.as_bool()).unwrap_or(true);
-        let bench = target.get("bench").and_then(|v| v.as_bool()).unwrap_or(true);
+        let doctest = target
+            .get("doctest")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let bench = target
+            .get("bench")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         Some(CargoTarget {
             name: name.to_string(),
@@ -476,7 +563,10 @@ impl RustAnalyzerData {
     }
 
     /// Build module graph by analyzing mod statements and file structure
-    async fn build_module_graph(repo_path: &Path, cargo_metadata: &CargoMetadata) -> Result<ModuleGraph> {
+    async fn build_module_graph(
+        repo_path: &Path,
+        cargo_metadata: &CargoMetadata,
+    ) -> Result<ModuleGraph> {
         let mut modules = HashMap::new();
         let mut imports = HashMap::new();
         let mut visibility = HashMap::new();
@@ -493,14 +583,14 @@ impl RustAnalyzerData {
             let module_info = Self::parse_module_info(&file_path, &content, repo_path)?;
             if let Some(info) = module_info {
                 modules.insert(file_path.clone(), info.clone());
-                
+
                 // Extract imports
                 let file_imports = Self::extract_imports(&content);
                 imports.insert(info.name.clone(), file_imports);
-                
+
                 // Set visibility
                 visibility.insert(info.name.clone(), info.visibility);
-                
+
                 // Extract re-exports
                 let file_reexports = Self::extract_reexports(&content);
                 reexports.insert(info.name.clone(), file_reexports);
@@ -518,20 +608,25 @@ impl RustAnalyzerData {
     /// Find all Rust source files in the repository
     fn find_rust_files(repo_path: &Path) -> Result<Vec<PathBuf>> {
         let mut rust_files = Vec::new();
-        
+
         for entry in walkdir::WalkDir::new(repo_path)
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
                 let path = e.path();
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
                 // Skip common non-source directories
-                !matches!(name, 
-                    "target" | "node_modules" | ".git" | "dist" | "build" | 
-                    ".cache" | "__pycache__" | ".next"
+                !matches!(
+                    name,
+                    "target"
+                        | "node_modules"
+                        | ".git"
+                        | "dist"
+                        | "build"
+                        | ".cache"
+                        | "__pycache__"
+                        | ".next"
                 ) && path.is_file()
             })
             .filter_map(|e| e.ok())
@@ -543,26 +638,33 @@ impl RustAnalyzerData {
                 }
             }
         }
-        
+
         Ok(rust_files)
     }
 
     /// Parse module information using AST-based analysis
-    fn parse_module_info(file_path: &Path, content: &str, repo_path: &Path) -> Result<Option<ModuleInfo>> {
+    fn parse_module_info(
+        file_path: &Path,
+        content: &str,
+        repo_path: &Path,
+    ) -> Result<Option<ModuleInfo>> {
         // Extract module name from file path
-        let relative_path = file_path.strip_prefix(repo_path)
+        let relative_path = file_path
+            .strip_prefix(repo_path)
             .map_err(|_| anyhow::anyhow!("File not under repo root"))?;
-        
+
         let module_name = if relative_path.file_stem() == Some(std::ffi::OsStr::new("mod")) {
             // This is a mod.rs file, use parent directory name
-            relative_path.parent()
+            relative_path
+                .parent()
                 .and_then(|p| p.file_stem())
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string()
         } else {
             // Use file stem
-            relative_path.file_stem()
+            relative_path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string()
@@ -578,12 +680,19 @@ impl RustAnalyzerData {
     }
 
     /// Parse Rust module using tree-sitter AST
-    fn parse_rust_module_ast(file_path: &Path, content: &str, module_name: &str, relative_path: &Path) -> Result<Option<ModuleInfo>> {
+    fn parse_rust_module_ast(
+        file_path: &Path,
+        content: &str,
+        module_name: &str,
+        relative_path: &Path,
+    ) -> Result<Option<ModuleInfo>> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into())
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
             .map_err(|_| anyhow::anyhow!("Failed to set Rust parser language"))?;
 
-        let tree = parser.parse(content, None)
+        let tree = parser
+            .parse(content, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse Rust file: {}", file_path.display()))?;
 
         let mut submodules = Vec::new();
@@ -593,14 +702,15 @@ impl RustAnalyzerData {
         // Walk the AST to extract module information
         let mut cursor = tree.walk();
         let root_node = tree.root_node();
-        
+
         // Find module declarations, visibility, and documentation
         for node in root_node.children(&mut cursor) {
             match node.kind() {
                 "mod_item" => {
                     // Extract module name
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let mod_name = name_node.utf8_text(content.as_bytes())
+                        let mod_name = name_node
+                            .utf8_text(content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         submodules.push(mod_name);
@@ -627,16 +737,31 @@ impl RustAnalyzerData {
     }
 
     /// Detect inline module declarations (mod name { ... })
-    fn detect_inline_modules(_root_node: &Node, _cursor: &mut tree_sitter::TreeCursor, _content: &str) -> bool { false }
+    fn detect_inline_modules(
+        _root_node: &Node,
+        _cursor: &mut tree_sitter::TreeCursor,
+        _content: &str,
+    ) -> bool {
+        false
+    }
 
     /// Fallback basic module parsing for non-Rust files
-    fn parse_basic_module(file_path: &Path, content: &str, module_name: &str, relative_path: &Path) -> Result<Option<ModuleInfo>> {
+    fn parse_basic_module(
+        file_path: &Path,
+        content: &str,
+        module_name: &str,
+        relative_path: &Path,
+    ) -> Result<Option<ModuleInfo>> {
         use regex::Regex;
-        
+
         // Basic visibility detection
-        let visibility = if content.contains("pub mod") || content.contains("pub struct") || 
-                         content.contains("pub fn") || content.contains("pub enum") ||
-                         content.contains("pub trait") || content.contains("pub type") {
+        let visibility = if content.contains("pub mod")
+            || content.contains("pub struct")
+            || content.contains("pub fn")
+            || content.contains("pub enum")
+            || content.contains("pub trait")
+            || content.contains("pub type")
+        {
             Visibility::Public
         } else {
             Visibility::Private
@@ -660,18 +785,19 @@ impl RustAnalyzerData {
     /// Extract module documentation from comments
     fn extract_module_documentation(content: &str) -> Option<String> {
         use regex::Regex;
-        
+
         // Look for module-level documentation comments
         let re = Regex::new(r"///\s*(.+)").ok()?;
-        let docs: Vec<String> = re.captures_iter(content)
-                .filter_map(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .collect();
-            
+        let docs: Vec<String> = re
+            .captures_iter(content)
+            .filter_map(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .collect();
+
         if !docs.is_empty() {
             return Some(docs.join(" "));
         }
-        
+
         None
     }
 
@@ -696,7 +822,10 @@ impl RustAnalyzerData {
     }
 
     fn extract_super_traits(content: &str, trait_name: &str) -> Vec<String> {
-        let pattern = format!(r"pub\s+trait\s+{}\s*:\s*([^\{{]+)\{{", regex::escape(trait_name));
+        let pattern = format!(
+            r"pub\s+trait\s+{}\s*:\s*([^\{{]+)\{{",
+            regex::escape(trait_name)
+        );
         regex::Regex::new(&pattern)
             .ok()
             .and_then(|re| re.captures(content))
@@ -723,9 +852,9 @@ impl RustAnalyzerData {
     /// Extract import statements from content
     fn extract_imports(content: &str) -> Vec<String> {
         use regex::Regex;
-        
+
         let mut imports = Vec::new();
-        
+
         // Extract use statements
         if let Ok(re) = Regex::new(r"use\s+([^;]+);") {
             for caps in re.captures_iter(content) {
@@ -734,16 +863,16 @@ impl RustAnalyzerData {
                 }
             }
         }
-        
+
         imports
     }
 
     /// Extract re-export statements from content
     fn extract_reexports(content: &str) -> Vec<String> {
         use regex::Regex;
-        
+
         let mut reexports = Vec::new();
-        
+
         // Extract pub use statements
         if let Ok(re) = Regex::new(r"pub\s+use\s+([^;]+);") {
             for caps in re.captures_iter(content) {
@@ -752,12 +881,15 @@ impl RustAnalyzerData {
                 }
             }
         }
-        
+
         reexports
     }
 
     /// Extract public API surface from module graph
-    async fn extract_public_api(repo_path: &Path, module_graph: &ModuleGraph) -> Result<PublicApiSurface> {
+    async fn extract_public_api(
+        repo_path: &Path,
+        module_graph: &ModuleGraph,
+    ) -> Result<PublicApiSurface> {
         let mut public_functions = Vec::new();
         let mut public_structs = Vec::new();
         let mut public_enums = Vec::new();
@@ -772,17 +904,18 @@ impl RustAnalyzerData {
                     .context(format!("Failed to read file: {}", file_path.display()))?;
 
                 // Extract public functions
-                public_functions.extend(Self::extract_public_functions(&content, &module_info.name));
-                
+                public_functions
+                    .extend(Self::extract_public_functions(&content, &module_info.name));
+
                 // Extract public structs
                 public_structs.extend(Self::extract_public_structs(&content, &module_info.name));
-                
+
                 // Extract public enums
                 public_enums.extend(Self::extract_public_enums(&content, &module_info.name));
-                
+
                 // Extract public traits
                 public_traits.extend(Self::extract_public_traits(&content, &module_info.name));
-                
+
                 // Extract public types
                 public_types.extend(Self::extract_public_types(&content, &module_info.name));
             }
@@ -814,10 +947,11 @@ impl RustAnalyzerData {
     fn extract_public_functions(content: &str, module: &str) -> Vec<PublicFunction> {
         use regex::Regex;
         let mut functions = Vec::new();
-        
+
         // Pattern for public function definitions
-        let pattern = r"pub\s+(async\s+)?(unsafe\s+)?fn\s+(\w+)\s*<([^>]*)>\s*\(([^)]*)\)\s*(->\s*([^\{]+))?";
-        
+        let pattern =
+            r"pub\s+(async\s+)?(unsafe\s+)?fn\s+(\w+)\s*<([^>]*)>\s*\(([^)]*)\)\s*(->\s*([^\{]+))?";
+
         if let Ok(re) = Regex::new(pattern) {
             for caps in re.captures_iter(content) {
                 let is_async = caps.get(1).is_some();
@@ -826,21 +960,27 @@ impl RustAnalyzerData {
                 let generics = caps.get(4).map(|m| m.as_str().to_string());
                 let params_str = caps.get(5).unwrap().as_str();
                 let return_type = caps.get(7).map(|m| m.as_str().trim().to_string());
-                
+
                 // Parse parameters
                 let parameters = Self::parse_parameters(params_str);
-                
+
                 // Build signature
                 let signature = format!(
                     "{}{}fn {}{}({}){}",
                     if is_async { "async " } else { "" },
                     if is_unsafe { "unsafe " } else { "" },
                     name,
-                    generics.as_ref().map(|g| format!("<{}>", g)).unwrap_or_default(),
+                    generics
+                        .as_ref()
+                        .map(|g| format!("<{}>", g))
+                        .unwrap_or_default(),
                     params_str,
-                    return_type.as_ref().map(|rt| format!(" -> {}", rt)).unwrap_or_default()
+                    return_type
+                        .as_ref()
+                        .map(|rt| format!(" -> {}", rt))
+                        .unwrap_or_default()
                 );
-                
+
                 functions.push(PublicFunction {
                     name: name.clone(),
                     module: module.to_string(),
@@ -855,32 +995,32 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         functions
     }
 
     /// Parse function parameters from parameter string
     fn parse_parameters(params_str: &str) -> Vec<Parameter> {
         let mut parameters = Vec::new();
-        
+
         if params_str.trim().is_empty() {
             return parameters;
         }
-        
+
         // Simple parameter parsing (doesn't handle complex cases like generics)
         for param in params_str.split(',') {
             let param = param.trim();
             if param.is_empty() {
                 continue;
             }
-            
+
             let parts: Vec<&str> = param.split(':').collect();
             if parts.len() >= 2 {
                 let name = parts[0].trim().to_string();
                 let type_name = parts[1].trim().to_string();
                 let is_mutable = name.starts_with("mut ");
                 let clean_name = if is_mutable { &name[4..] } else { &name };
-                
+
                 parameters.push(Parameter {
                     name: clean_name.to_string(),
                     type_name,
@@ -888,7 +1028,7 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         parameters
     }
 
@@ -896,20 +1036,26 @@ impl RustAnalyzerData {
     fn extract_public_structs(content: &str, module: &str) -> Vec<PublicStruct> {
         use regex::Regex;
         let mut structs = Vec::new();
-        
+
         // Pattern for public struct definitions
         let pattern = r"#\[derive\(([^)]+)\)\]\s*pub\s+struct\s+(\w+)\s*(<([^>]*)>)?\s*\{([^}]*)\}";
-        
+
         if let Ok(re) = Regex::new(pattern) {
             for caps in re.captures_iter(content) {
-                let derives = caps.get(1).unwrap().as_str().split(',').map(|s| s.trim().to_string()).collect();
+                let derives = caps
+                    .get(1)
+                    .unwrap()
+                    .as_str()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
                 let name = caps.get(2).unwrap().as_str().to_string();
                 let generics = caps.get(4).map(|m| m.as_str().to_string());
                 let fields_str = caps.get(5).unwrap().as_str();
-                
+
                 // Parse fields
                 let fields = Self::parse_struct_fields(fields_str);
-                
+
                 structs.push(PublicStruct {
                     name: name.clone(),
                     module: module.to_string(),
@@ -921,32 +1067,32 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         structs
     }
 
     /// Parse struct fields from fields string
     fn parse_struct_fields(fields_str: &str) -> Vec<StructField> {
         let mut fields = Vec::new();
-        
+
         for field in fields_str.split(',') {
             let field = field.trim();
             if field.is_empty() {
                 continue;
             }
-            
+
             let parts: Vec<&str> = field.split(':').collect();
             if parts.len() >= 2 {
                 let name_part = parts[0].trim();
                 let type_name = parts[1].trim().to_string();
-                
+
                 // Handle visibility
                 let (name, visibility) = if name_part.starts_with("pub ") {
                     (name_part[4..].trim().to_string(), Visibility::Public)
                 } else {
                     (name_part.to_string(), Visibility::Private)
                 };
-                
+
                 fields.push(StructField {
                     name: name.clone(),
                     type_name,
@@ -955,7 +1101,7 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         fields
     }
 
@@ -963,20 +1109,26 @@ impl RustAnalyzerData {
     fn extract_public_enums(content: &str, module: &str) -> Vec<PublicEnum> {
         use regex::Regex;
         let mut enums = Vec::new();
-        
+
         // Pattern for public enum definitions
         let pattern = r"#\[derive\(([^)]+)\)\]\s*pub\s+enum\s+(\w+)\s*(<([^>]*)>)?\s*\{([^}]*)\}";
-        
+
         if let Ok(re) = Regex::new(pattern) {
             for caps in re.captures_iter(content) {
-                let derives = caps.get(1).unwrap().as_str().split(',').map(|s| s.trim().to_string()).collect();
+                let derives = caps
+                    .get(1)
+                    .unwrap()
+                    .as_str()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
                 let name = caps.get(2).unwrap().as_str().to_string();
                 let generics = caps.get(4).map(|m| m.as_str().to_string());
                 let variants_str = caps.get(5).unwrap().as_str();
-                
+
                 // Parse variants
                 let variants = Self::parse_enum_variants(variants_str);
-                
+
                 enums.push(PublicEnum {
                     name: name.clone(),
                     module: module.to_string(),
@@ -988,25 +1140,25 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         enums
     }
 
     /// Parse enum variants from variants string
     fn parse_enum_variants(variants_str: &str) -> Vec<EnumVariant> {
         let mut variants = Vec::new();
-        
+
         for variant in variants_str.split(',') {
             let variant = variant.trim();
             if variant.is_empty() {
                 continue;
             }
-            
+
             let parts: Vec<&str> = variant.split('(').collect();
             let name = parts[0].trim().to_string();
-            
+
             let fields = if parts.len() > 1 && parts[1].ends_with(')') {
-                let fields_str = &parts[1][..parts[1].len()-1];
+                let fields_str = &parts[1][..parts[1].len() - 1];
                 Self::parse_struct_fields(fields_str)
                     .into_iter()
                     .map(|f| StructField {
@@ -1019,14 +1171,14 @@ impl RustAnalyzerData {
             } else {
                 Vec::new()
             };
-            
+
             variants.push(EnumVariant {
                 name,
                 fields,
                 documentation: None,
             });
         }
-        
+
         variants
     }
 
@@ -1034,18 +1186,18 @@ impl RustAnalyzerData {
     fn extract_public_traits(content: &str, module: &str) -> Vec<PublicTrait> {
         use regex::Regex;
         let mut traits = Vec::new();
-        
+
         // Pattern for public trait definitions
         let pattern = r"pub\s+trait\s+(\w+)\s*(<([^>]*)>)?\s*(where\s+([^\{]+))?\s*\{";
-        
+
         if let Ok(re) = Regex::new(pattern) {
             for caps in re.captures_iter(content) {
                 let name = caps.get(1).unwrap().as_str().to_string();
                 let generics = caps.get(3).map(|m| m.as_str().to_string());
-                
+
                 // Extract methods from trait body
                 let methods = Self::extract_trait_methods(content, &name);
-                
+
                 traits.push(PublicTrait {
                     name: name.clone(),
                     module: module.to_string(),
@@ -1057,7 +1209,7 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         traits
     }
 
@@ -1072,15 +1224,15 @@ impl RustAnalyzerData {
     fn extract_public_types(content: &str, module: &str) -> Vec<PublicType> {
         use regex::Regex;
         let mut types = Vec::new();
-        
+
         // Pattern for public type aliases
         let pattern = r"pub\s+type\s+(\w+)\s*=\s*([^;]+);";
-        
+
         if let Ok(re) = Regex::new(pattern) {
             for caps in re.captures_iter(content) {
                 let name = caps.get(1).unwrap().as_str().to_string();
                 let type_definition = caps.get(2).unwrap().as_str().to_string();
-                
+
                 types.push(PublicType {
                     name: name.clone(),
                     module: module.to_string(),
@@ -1091,12 +1243,15 @@ impl RustAnalyzerData {
                 });
             }
         }
-        
+
         types
     }
 
     /// Analyze crate structure
-    async fn analyze_crate_structure(repo_path: &Path, cargo_metadata: &CargoMetadata) -> Result<CrateStructure> {
+    async fn analyze_crate_structure(
+        repo_path: &Path,
+        cargo_metadata: &CargoMetadata,
+    ) -> Result<CrateStructure> {
         let mut source_files = HashMap::new();
         let mut test_files = Vec::new();
         let mut bench_files = Vec::new();
@@ -1108,7 +1263,7 @@ impl RustAnalyzerData {
         for target in &cargo_metadata.targets {
             if let Some(src_path) = &target.src_path {
                 let absolute_path = repo_path.join(src_path);
-                
+
                 match target.kind {
                     TargetKind::Lib => {
                         source_files.insert(absolute_path, SourceFileType::Library);
@@ -1123,11 +1278,12 @@ impl RustAnalyzerData {
                         let content = fs::read_to_string(&absolute_path_clone).unwrap_or_default();
                         let test_functions = Self::extract_test_functions(&content);
                         let test_path_clone = absolute_path_clone.clone();
-                        
+
                         test_files.push(TestFile {
                             path: test_path_clone,
                             test_functions,
-                            integration_tests: absolute_path_clone.starts_with(repo_path.join("tests")),
+                            integration_tests: absolute_path_clone
+                                .starts_with(repo_path.join("tests")),
                             doc_tests: Self::has_doc_tests(&content),
                             coverage_estimate: Self::estimate_test_coverage(&content),
                         });
@@ -1155,12 +1311,12 @@ impl RustAnalyzerData {
                 if entry.path().extension() == Some(std::ffi::OsStr::new("rs")) {
                     let test_path = entry.path().to_path_buf();
                     source_files.insert(test_path.clone(), SourceFileType::Test);
-                    
+
                     // Create TestFile for additional test files
                     let content = fs::read_to_string(&test_path).unwrap_or_default();
                     let test_functions = Self::extract_test_functions(&content);
                     let test_path_clone = test_path.clone();
-                    
+
                     test_files.push(TestFile {
                         path: test_path_clone,
                         test_functions,
@@ -1187,19 +1343,21 @@ impl RustAnalyzerData {
     fn extract_test_functions(content: &str) -> Vec<String> {
         use regex::Regex;
         let mut functions = Vec::new();
-        
+
         // Pattern for test functions
         if let Ok(re) = Regex::new(r"#\[test\]\s*fn\s+(\w+)") {
             for caps in re.captures_iter(content) {
                 functions.push(caps.get(1).unwrap().as_str().to_string());
             }
         }
-        
+
         functions
     }
 
     fn has_doc_tests(content: &str) -> bool {
-        content.contains("```rust") || content.contains("```no_run") || content.contains("```ignore")
+        content.contains("```rust")
+            || content.contains("```no_run")
+            || content.contains("```ignore")
     }
 
     fn estimate_test_coverage(content: &str) -> f32 {
@@ -1211,10 +1369,16 @@ impl RustAnalyzerData {
         }
     }
 
-    async fn analyze_feature_modules(repo_path: &Path, feature_list: &[String]) -> Result<Vec<String>> {
+    async fn analyze_feature_modules(
+        repo_path: &Path,
+        feature_list: &[String],
+    ) -> Result<Vec<String>> {
         let mut modules = Vec::new();
         for feature in feature_list {
-            for entry in walkdir::WalkDir::new(repo_path).into_iter().filter_map(|e| e.ok()) {
+            for entry in walkdir::WalkDir::new(repo_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                     let content = fs::read_to_string(path).unwrap_or_default();
@@ -1237,16 +1401,23 @@ impl RustAnalyzerData {
     }
 
     /// Analyze dependency impact
-    async fn analyze_dependency_impact(repo_path: &Path, cargo_metadata: &CargoMetadata) -> Result<DependencyImpact> {
+    async fn analyze_dependency_impact(
+        repo_path: &Path,
+        cargo_metadata: &CargoMetadata,
+    ) -> Result<DependencyImpact> {
         let mut critical_dependencies = Vec::new();
         let mut transitive_deps = HashMap::new();
         let mut feature_impact = HashMap::new();
-        
+
         // Analyze each dependency
         for dep in &cargo_metadata.dependencies {
-            let usage_count = Self::count_dependency_usage(repo_path, &dep.name).await.unwrap_or(0);
-            let critical_paths = Self::find_critical_paths(repo_path, &dep.name).await.unwrap_or_default();
-            
+            let usage_count = Self::count_dependency_usage(repo_path, &dep.name)
+                .await
+                .unwrap_or(0);
+            let critical_paths = Self::find_critical_paths(repo_path, &dep.name)
+                .await
+                .unwrap_or_default();
+
             let breakage_risk = if usage_count > 10 {
                 BreakageRisk::Critical
             } else if usage_count > 5 {
@@ -1256,7 +1427,7 @@ impl RustAnalyzerData {
             } else {
                 BreakageRisk::Low
             };
-            
+
             critical_dependencies.push(CriticalDependency {
                 name: dep.name.clone(),
                 version: dep.version_req.clone().unwrap_or_default(),
@@ -1265,17 +1436,22 @@ impl RustAnalyzerData {
                 breakage_risk,
             });
         }
-        
+
         // Analyze feature impacts
         for (feature_name, feature_list) in &cargo_metadata.features {
-            feature_impact.insert(feature_name.clone(), FeatureImpact {
-                feature_name: feature_name.clone(),
-                affected_modules: Self::analyze_feature_modules(repo_path, feature_list).await.unwrap_or_default(),
-                dependency_changes: feature_list.clone(),
-                api_surface_changes: Self::feature_touches_api(feature_list),
-            });
+            feature_impact.insert(
+                feature_name.clone(),
+                FeatureImpact {
+                    feature_name: feature_name.clone(),
+                    affected_modules: Self::analyze_feature_modules(repo_path, feature_list)
+                        .await
+                        .unwrap_or_default(),
+                    dependency_changes: feature_list.clone(),
+                    api_surface_changes: Self::feature_touches_api(feature_list),
+                },
+            );
         }
-        
+
         Ok(DependencyImpact {
             critical_dependencies,
             transitive_deps,
@@ -1292,51 +1468,49 @@ impl RustAnalyzerData {
     /// Count how many times a dependency is used
     async fn count_dependency_usage(repo_path: &Path, dep_name: &str) -> Result<usize> {
         let mut count = 0;
-        
+
         for entry in walkdir::WalkDir::new(repo_path) {
             if let Ok(entry) = entry {
                 if entry.path().extension() == Some(std::ffi::OsStr::new("rs")) {
                     let content = fs::read_to_string(entry.path()).unwrap_or_default();
-                    
+
                     // Count use statements and direct references
                     use regex::Regex;
                     if let Ok(re) = Regex::new(&format!(r"use\s+{}\b", regex::escape(dep_name))) {
                         count += re.captures_iter(&content).count();
                     }
-                    
+
                     if let Ok(re) = Regex::new(&format!(r"{}::", regex::escape(dep_name))) {
                         count += re.captures_iter(&content).count();
                     }
                 }
             }
         }
-        
+
         Ok(count)
     }
 
     /// Find critical paths that use a dependency
     async fn find_critical_paths(repo_path: &Path, dep_name: &str) -> Result<Vec<String>> {
         let mut paths = Vec::new();
-        
+
         // Real implementation: analyze AST to find functions that use the dependency
-        use std::fs;
         use regex::Regex;
-        
+        use std::fs;
+
         // Read all Rust source files
         let rust_files = fs::read_dir(repo_path)
             .map_err(|e| anyhow::anyhow!("Failed to read directory: {}", e))?
             .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry.path().extension().map_or(false, |ext| ext == "rs")
-            })
+            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "rs"))
             .collect::<Vec<_>>();
-        
+
         // Analyze each file for dependency usage
         for entry in rust_files {
             let file_path = entry.path();
             let content = fs::read_to_string(&file_path)
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
-            
+
             // Look for usage patterns of the dependency
             let usage_pattern = format!(r"use\s+{}|::\s*{}|{}::", dep_name, dep_name, dep_name);
             if let Ok(re) = Regex::new(&usage_pattern) {
@@ -1345,7 +1519,7 @@ impl RustAnalyzerData {
                 }
             }
         }
-        
+
         Ok(paths)
     }
 }
@@ -2418,30 +2592,33 @@ fn parse_cargo_toml(path: &Path) -> DependencyGraph {
         // Parse [dependencies]
         if let Some(deps) = toml_value.get("dependencies").and_then(|d| d.as_table()) {
             for (name, spec) in deps {
-                graph.dependencies.insert(
-                    name.clone(),
-                    parse_cargo_dependency(name, spec),
-                );
+                graph
+                    .dependencies
+                    .insert(name.clone(), parse_cargo_dependency(name, spec));
             }
         }
 
         // Parse [dev-dependencies]
-        if let Some(deps) = toml_value.get("dev-dependencies").and_then(|d| d.as_table()) {
+        if let Some(deps) = toml_value
+            .get("dev-dependencies")
+            .and_then(|d| d.as_table())
+        {
             for (name, spec) in deps {
-                graph.dev_dependencies.insert(
-                    name.clone(),
-                    parse_cargo_dependency(name, spec),
-                );
+                graph
+                    .dev_dependencies
+                    .insert(name.clone(), parse_cargo_dependency(name, spec));
             }
         }
 
         // Parse [build-dependencies]
-        if let Some(deps) = toml_value.get("build-dependencies").and_then(|d| d.as_table()) {
+        if let Some(deps) = toml_value
+            .get("build-dependencies")
+            .and_then(|d| d.as_table())
+        {
             for (name, spec) in deps {
-                graph.build_dependencies.insert(
-                    name.clone(),
-                    parse_cargo_dependency(name, spec),
-                );
+                graph
+                    .build_dependencies
+                    .insert(name.clone(), parse_cargo_dependency(name, spec));
             }
         }
 
@@ -2483,10 +2660,19 @@ fn parse_cargo_dependency(name: &str, spec: &toml::Value) -> DependencySpec {
             dep.version = Some(version.clone());
         }
         toml::Value::Table(table) => {
-            dep.version = table.get("version").and_then(|v| v.as_str()).map(String::from);
-            dep.path = table.get("path").and_then(|p| p.as_str()).map(PathBuf::from);
+            dep.version = table
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            dep.path = table
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(PathBuf::from);
             dep.git = table.get("git").and_then(|g| g.as_str()).map(String::from);
-            dep.optional = table.get("optional").and_then(|o| o.as_bool()).unwrap_or(false);
+            dep.optional = table
+                .get("optional")
+                .and_then(|o| o.as_bool())
+                .unwrap_or(false);
 
             // Parse features
             if let Some(features) = table.get("features").and_then(|f| f.as_array()) {
@@ -2621,7 +2807,12 @@ fn parse_npm_lock(content: &str, manager: PackageManagerType) -> HashMap<String,
         _ => {
             // package-lock.json format
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
-                if let Some(deps) = json.get("packages").and_then(|p| p.get("")).and_then(|d| d.get("dependencies")).and_then(|d| d.as_object()) {
+                if let Some(deps) = json
+                    .get("packages")
+                    .and_then(|p| p.get(""))
+                    .and_then(|d| d.get("dependencies"))
+                    .and_then(|d| d.as_object())
+                {
                     for (name, version) in deps {
                         if let Some(v) = version.as_str() {
                             locked.insert(name.clone(), v.to_string());
@@ -2658,20 +2849,18 @@ fn parse_pyproject_toml(path: &Path) -> DependencyGraph {
                     if name == "python" {
                         continue; // Skip python version spec
                     }
-                    graph.dependencies.insert(
-                        name.clone(),
-                        parse_python_dependency(spec),
-                    );
+                    graph
+                        .dependencies
+                        .insert(name.clone(), parse_python_dependency(spec));
                 }
             }
 
             // Parse dev dependencies
             if let Some(deps) = poetry.get("dev-dependencies").and_then(|d| d.as_table()) {
                 for (name, spec) in deps {
-                    graph.dev_dependencies.insert(
-                        name.clone(),
-                        parse_python_dependency(spec),
-                    );
+                    graph
+                        .dev_dependencies
+                        .insert(name.clone(), parse_python_dependency(spec));
                 }
             }
 
@@ -2680,10 +2869,9 @@ fn parse_pyproject_toml(path: &Path) -> DependencyGraph {
                 for (_, group) in groups {
                     if let Some(deps) = group.get("dependencies").and_then(|d| d.as_table()) {
                         for (name, spec) in deps {
-                            graph.dev_dependencies.insert(
-                                name.clone(),
-                                parse_python_dependency(spec),
-                            );
+                            graph
+                                .dev_dependencies
+                                .insert(name.clone(), parse_python_dependency(spec));
                         }
                     }
                 }
@@ -2711,7 +2899,10 @@ fn parse_pyproject_toml(path: &Path) -> DependencyGraph {
             }
 
             // Parse optional-dependencies
-            if let Some(opt_deps) = project.get("optional-dependencies").and_then(|o| o.as_table()) {
+            if let Some(opt_deps) = project
+                .get("optional-dependencies")
+                .and_then(|o| o.as_table())
+            {
                 for (_, dep_array) in opt_deps {
                     if let Some(deps) = dep_array.as_array() {
                         for dep_str in deps {
@@ -2765,9 +2956,15 @@ fn parse_python_dependency(spec: &toml::Value) -> DependencySpec {
             dep.version = Some(version.clone());
         }
         toml::Value::Table(table) => {
-            dep.version = table.get("version").and_then(|v| v.as_str()).map(String::from);
+            dep.version = table
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             dep.git = table.get("git").and_then(|g| g.as_str()).map(String::from);
-            dep.optional = table.get("optional").and_then(|o| o.as_bool()).unwrap_or(false);
+            dep.optional = table
+                .get("optional")
+                .and_then(|o| o.as_bool())
+                .unwrap_or(false);
 
             if let Some(features) = table.get("extras").and_then(|e| e.as_array()) {
                 dep.features = features
@@ -2824,13 +3021,12 @@ impl DependencyGraph {
         let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
 
         // Collect all dependency relationships
-        let all_deps: Vec<_> = self.dependencies.iter()
-            .map(|(k, _)| k.clone())
-            .collect();
+        let all_deps: Vec<_> = self.dependencies.iter().map(|(k, _)| k.clone()).collect();
 
         for (dependent, spec) in &self.dependencies {
             // Add to reverse map
-            reverse.entry(dependent.clone())
+            reverse
+                .entry(dependent.clone())
                 .or_default()
                 .extend(all_deps.iter().filter(|d| *d != dependent).cloned());
         }
@@ -2990,7 +3186,12 @@ impl RepoCache {
     }
 
     /// Update cache entry for a file
-    pub fn update_file(&mut self, path: &Path, symbols: Vec<CodeSymbol>, relationships: Vec<SymbolEdge>) {
+    pub fn update_file(
+        &mut self,
+        path: &Path,
+        symbols: Vec<CodeSymbol>,
+        relationships: Vec<SymbolEdge>,
+    ) {
         let relative_path = match path.strip_prefix(&self.root) {
             Ok(p) => p.to_path_buf(),
             Err(_) => return,
@@ -3009,7 +3210,8 @@ impl RepoCache {
             Err(_) => return,
         };
 
-        let language = path.extension()
+        let language = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|e| detect_language_from_ext(e).to_string())
             .unwrap_or_default();
@@ -3049,7 +3251,9 @@ impl RepoCache {
     /// Invalidate entries older than a certain duration
     pub fn invalidate_stale(&mut self, max_age: Duration) {
         let now = SystemTime::now();
-        let to_remove: Vec<_> = self.files.iter()
+        let to_remove: Vec<_> = self
+            .files
+            .iter()
             .filter(|(_, entry)| {
                 now.duration_since(entry.mtime).unwrap_or(Duration::ZERO) > max_age
             })
@@ -3161,7 +3365,8 @@ pub async fn build_repo_context_with_cache(
     };
 
     // Load dependency graph (cached or fresh)
-    let dependency_graph = cache.as_ref()
+    let dependency_graph = cache
+        .as_ref()
         .and_then(|c| c.get_dependency_graph().cloned())
         .unwrap_or_else(|| parse_dependency_graph(root));
 
@@ -3217,7 +3422,8 @@ pub async fn build_repo_context_with_cache(
 
         // Add to ranked files
         let score = calculate_file_relevance(&symbols, &relationships);
-        let lang = path.extension()
+        let lang = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|e| detect_language_from_ext(e).to_string())
             .unwrap_or_default();
@@ -3310,40 +3516,58 @@ pub async fn build_repo_context_with_cache(
 fn calculate_file_relevance(symbols: &[CodeSymbol], relationships: &[SymbolEdge]) -> f32 {
     let symbol_weight = 1.0;
     let relationship_weight = 0.5;
-    
+
     let symbol_score = symbols.len() as f32 * symbol_weight;
     let relationship_score = relationships.len() as f32 * relationship_weight;
-    
+
     // Bonus for files with public exports
-    let public_bonus = symbols.iter()
+    let public_bonus = symbols
+        .iter()
         .filter(|s| s.visibility == Visibility::Public)
-        .count() as f32 * 2.0;
-    
+        .count() as f32
+        * 2.0;
+
     symbol_score + relationship_score + public_bonus
 }
 
 /// Generate reason string for file ranking
 fn generate_file_reason(symbols: &[CodeSymbol]) -> String {
-    let pub_count = symbols.iter()
+    let pub_count = symbols
+        .iter()
         .filter(|s| s.visibility == Visibility::Public)
         .count();
-    
-    let fn_count = symbols.iter()
+
+    let fn_count = symbols
+        .iter()
         .filter(|s| s.kind == SymbolKind::Function)
         .count();
-    
-    let struct_count = symbols.iter()
+
+    let struct_count = symbols
+        .iter()
         .filter(|s| s.kind == SymbolKind::Struct)
         .count();
-    
+
     let parts: Vec<String> = [
-        if pub_count > 0 { format!("{} public", pub_count) } else { String::new() },
-        if fn_count > 0 { format!("{} func", fn_count) } else { String::new() },
-        if struct_count > 0 { format!("{} types", struct_count) } else { String::new() },
-    ].into_iter()
+        if pub_count > 0 {
+            format!("{} public", pub_count)
+        } else {
+            String::new()
+        },
+        if fn_count > 0 {
+            format!("{} func", fn_count)
+        } else {
+            String::new()
+        },
+        if struct_count > 0 {
+            format!("{} types", struct_count)
+        } else {
+            String::new()
+        },
+    ]
+    .into_iter()
     .filter(|s| !s.is_empty())
     .collect();
-    
+
     if parts.is_empty() {
         format!("{} symbols", symbols.len())
     } else {
@@ -3355,18 +3579,18 @@ fn generate_file_reason(symbols: &[CodeSymbol]) -> String {
 async fn extract_symbols_from_file(path: &Path) -> Result<(Vec<CodeSymbol>, Vec<SymbolEdge>)> {
     // This calls into the existing symbol extraction logic
     let content = tokio::fs::read_to_string(path).await?;
-    
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language = detect_language_from_ext(ext);
-    
+
     let mut symbols = Vec::new();
     let mut relationships = Vec::new();
-    
+
     if let Some((s, r)) = extract_symbols_with_tree_sitter(path, &content, language) {
         symbols = s;
         relationships = r;
     }
-    
+
     Ok((symbols, relationships))
 }
 
@@ -3394,17 +3618,17 @@ git = { git = "https://github.com/example/repo" }
 tempfile = "3.0"
 "#;
         fs::write(dir.path().join("Cargo.toml"), content).unwrap();
-        
+
         let graph = parse_dependency_graph(dir.path());
-        
+
         assert_eq!(graph.package_manager, PackageManagerType::Cargo);
         assert_eq!(graph.dependencies.len(), 4);
         assert!(graph.dependencies.contains_key("serde"));
         assert!(graph.dev_dependencies.contains_key("tempfile"));
-        
+
         let tokio = graph.dependencies.get("tokio").unwrap();
         assert_eq!(tokio.features, vec!["full"]);
-        
+
         let local = graph.dependencies.get("local").unwrap();
         assert_eq!(local.path, Some(PathBuf::from("../local")));
     }
@@ -3418,10 +3642,14 @@ tempfile = "3.0"
   "devDependencies": { "jest": "^29.0.0" }
 }"#;
         fs::write(dir.path().join("package.json"), content).unwrap();
-        fs::write(dir.path().join("yarn.lock"), "\"react@^18.0.0\": version \"18.2.0\"").unwrap();
-        
+        fs::write(
+            dir.path().join("yarn.lock"),
+            "\"react@^18.0.0\": version \"18.2.0\"",
+        )
+        .unwrap();
+
         let graph = parse_dependency_graph(dir.path());
-        
+
         assert_eq!(graph.package_manager, PackageManagerType::Yarn);
         assert!(graph.dependencies.contains_key("react"));
         assert!(graph.dev_dependencies.contains_key("jest"));
@@ -3431,16 +3659,18 @@ tempfile = "3.0"
     fn test_repo_cache() {
         let dir = TempDir::new().unwrap();
         let mut cache = RepoCache::new(dir.path().to_path_buf());
-        
+
         let graph = DependencyGraph {
             source_file: dir.path().join("Cargo.toml"),
             package_manager: PackageManagerType::Cargo,
-            dependencies: [("serde".to_string(), DependencySpec::default())].into_iter().collect(),
+            dependencies: [("serde".to_string(), DependencySpec::default())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         cache.update_dependency_graph(graph);
         cache.save().unwrap();
-        
+
         let loaded = RepoCache::load(dir.path()).unwrap();
         assert!(loaded.dependency_graph.dependencies.contains_key("serde"));
     }
@@ -3516,13 +3746,19 @@ impl RepoMapQualityBenchmarkSuite {
 
         // Generate RepoMap for the benchmark repository
         let repo_map = self.generate_repo_map(&benchmark.repository_path).await?;
-        
+
         // Calculate quality metrics
-        let actual_metrics = self.calculate_quality_metrics(&repo_map, &benchmark.repository_path).await?;
-        
+        let actual_metrics = self
+            .calculate_quality_metrics(&repo_map, &benchmark.repository_path)
+            .await?;
+
         // Compare with expected metrics
-        let deviations = self.compare_metrics(&benchmark.expected_metrics, &actual_metrics, benchmark.tolerance);
-        
+        let deviations = self.compare_metrics(
+            &benchmark.expected_metrics,
+            &actual_metrics,
+            benchmark.tolerance,
+        );
+
         let passed = deviations.iter().all(|d| d.is_acceptable);
         let execution_time = start_time.elapsed();
 
@@ -3542,20 +3778,27 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Calculate comprehensive quality metrics
-    async fn calculate_quality_metrics(&self, repo_map: &RepoMap, repo_path: &Path) -> Result<RepoMapQualityMetrics> {
+    async fn calculate_quality_metrics(
+        &self,
+        repo_map: &RepoMap,
+        repo_path: &Path,
+    ) -> Result<RepoMapQualityMetrics> {
         let coverage = self.calculate_coverage_metrics(repo_map, repo_path).await?;
-        let performance = self.calculate_performance_metrics(repo_map, repo_path).await?;
+        let performance = self
+            .calculate_performance_metrics(repo_map, repo_path)
+            .await?;
         let accuracy = self.calculate_accuracy_metrics(repo_map, repo_path).await?;
-        let consistency = self.calculate_consistency_metrics(repo_map, repo_path).await?;
+        let consistency = self
+            .calculate_consistency_metrics(repo_map, repo_path)
+            .await?;
 
         // Calculate overall score as weighted average
-        let overall_score = (
-            coverage.file_coverage * 0.25 +
-            coverage.symbol_coverage * 0.20 +
-            performance.processing_rate * 0.15 +
-            accuracy.symbol_name_accuracy * 0.20 +
-            consistency.score_consistency * 0.20
-        ).min(100.0);
+        let overall_score = (coverage.file_coverage * 0.25
+            + coverage.symbol_coverage * 0.20
+            + performance.processing_rate * 0.15
+            + accuracy.symbol_name_accuracy * 0.20
+            + consistency.score_consistency * 0.20)
+            .min(100.0);
 
         Ok(RepoMapQualityMetrics {
             coverage,
@@ -3566,7 +3809,11 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Calculate coverage metrics
-    async fn calculate_coverage_metrics(&self, repo_map: &RepoMap, repo_path: &Path) -> Result<CoverageMetrics> {
+    async fn calculate_coverage_metrics(
+        &self,
+        repo_map: &RepoMap,
+        repo_path: &Path,
+    ) -> Result<CoverageMetrics> {
         let total_files = self.count_source_files(repo_path)?;
         let analyzed_files = repo_map.files.len();
         let file_coverage = (analyzed_files as f64 / total_files as f64) * 100.0;
@@ -3592,16 +3839,21 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Calculate performance metrics
-    async fn calculate_performance_metrics(&self, repo_map: &RepoMap, _repo_path: &Path) -> Result<PerformanceMetrics> {
+    async fn calculate_performance_metrics(
+        &self,
+        repo_map: &RepoMap,
+        _repo_path: &Path,
+    ) -> Result<PerformanceMetrics> {
         let start_time = std::time::Instant::now();
-        
+
         // Simulate generation time (in real implementation, this would be measured)
         let generation_time_ms = 150; // Typical generation time
-        
+
         // Calculate processing rates
         let processing_rate = repo_map.files.len() as f64 / (generation_time_ms as f64 / 1000.0);
-        let symbol_extraction_rate = repo_map.symbols.len() as f64 / (generation_time_ms as f64 / 1000.0);
-        
+        let symbol_extraction_rate =
+            repo_map.symbols.len() as f64 / (generation_time_ms as f64 / 1000.0);
+
         // Estimate memory usage (rough approximation)
         let memory_usage_mb = (repo_map.compressed_context.len() as f64 / 1024.0 / 1024.0) * 2.0;
 
@@ -3614,14 +3866,30 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Calculate accuracy metrics
-    async fn calculate_accuracy_metrics(&self, repo_map: &RepoMap, _repo_path: &Path) -> Result<AccuracyMetrics> {
+    async fn calculate_accuracy_metrics(
+        &self,
+        repo_map: &RepoMap,
+        _repo_path: &Path,
+    ) -> Result<AccuracyMetrics> {
         // In a real implementation, these would be validated against ground truth
         // For now, we'll estimate based on heuristics
-        
-        let symbol_name_accuracy = if repo_map.symbols.is_empty() { 0.0 } else { 95.0 };
-        let symbol_type_accuracy = if repo_map.symbols.is_empty() { 0.0 } else { 90.0 };
-        let dependency_accuracy = if repo_map.dependency_graph.dependencies.is_empty() { 0.0 } else { 85.0 };
-        
+
+        let symbol_name_accuracy = if repo_map.symbols.is_empty() {
+            0.0
+        } else {
+            95.0
+        };
+        let symbol_type_accuracy = if repo_map.symbols.is_empty() {
+            0.0
+        } else {
+            90.0
+        };
+        let dependency_accuracy = if repo_map.dependency_graph.dependencies.is_empty() {
+            0.0
+        } else {
+            85.0
+        };
+
         // Calculate relevance accuracy based on score distribution
         let relevance_accuracy = self.calculate_relevance_accuracy(repo_map)?;
 
@@ -3634,10 +3902,14 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Calculate consistency metrics
-    async fn calculate_consistency_metrics(&self, repo_map: &RepoMap, _repo_path: &Path) -> Result<ConsistencyMetrics> {
+    async fn calculate_consistency_metrics(
+        &self,
+        repo_map: &RepoMap,
+        _repo_path: &Path,
+    ) -> Result<ConsistencyMetrics> {
         // In a real implementation, run multiple times and compare results
         // For now, provide estimated values
-        
+
         let score_consistency = 98.0; // High consistency for deterministic scoring
         let ranking_consistency = 95.0; // High consistency for file ranking
         let symbol_consistency = 99.0; // Very high consistency for symbol extraction
@@ -3652,7 +3924,12 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Compare actual metrics with expected metrics
-    fn compare_metrics(&self, expected: &RepoMapQualityMetrics, actual: &RepoMapQualityMetrics, tolerance: f64) -> Vec<MetricDeviation> {
+    fn compare_metrics(
+        &self,
+        expected: &RepoMapQualityMetrics,
+        actual: &RepoMapQualityMetrics,
+        tolerance: f64,
+    ) -> Vec<MetricDeviation> {
         let mut deviations = Vec::new();
 
         // Compare coverage metrics
@@ -3701,7 +3978,13 @@ impl RepoMapQualityBenchmarkSuite {
     }
 
     /// Compare a single metric
-    fn compare_single_metric(&self, path: &str, expected: f64, actual: f64, tolerance: f64) -> MetricDeviation {
+    fn compare_single_metric(
+        &self,
+        path: &str,
+        expected: f64,
+        actual: f64,
+        tolerance: f64,
+    ) -> MetricDeviation {
         let percent_deviation = if expected == 0.0 {
             0.0
         } else {
@@ -3726,7 +4009,10 @@ impl RepoMapQualityBenchmarkSuite {
             let entry = entry?;
             if entry.file_type().is_file() {
                 if let Some(ext) = entry.path().extension() {
-                    if matches!(ext.to_str(), Some("rs") | Some("js") | Some("ts") | Some("py") | Some("go")) {
+                    if matches!(
+                        ext.to_str(),
+                        Some("rs") | Some("js") | Some("ts") | Some("py") | Some("go")
+                    ) {
                         count += 1;
                     }
                 }
@@ -3735,10 +4021,34 @@ impl RepoMapQualityBenchmarkSuite {
         Ok(count)
     }
 
-    fn count_all_symbols(&self, _repo_path: &Path) -> Result<usize> {
-        // In a real implementation, this would parse all files and count symbols
-        // For now, return an estimate
-        Ok(500)
+    fn count_all_symbols(&self, repo_path: &Path) -> Result<usize> {
+        let mut total = 0usize;
+
+        for entry in walkdir::WalkDir::new(repo_path) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let ext = entry.path().extension().and_then(|e| e.to_str());
+            let Some(ext) = ext else {
+                continue;
+            };
+
+            let is_supported = matches!(ext, "rs" | "js" | "ts" | "py" | "go");
+            if !is_supported {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(entry.path()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            total += count_symbol_markers(&content, ext);
+        }
+
+        Ok(total)
     }
 
     fn calculate_language_accuracy(&self, repo_map: &RepoMap) -> Result<f64> {
@@ -3749,7 +4059,11 @@ impl RepoMapQualityBenchmarkSuite {
         }
 
         // High accuracy if we have consistent language detection
-        let accuracy = if language_counts.len() <= 3 { 95.0 } else { 85.0 };
+        let accuracy = if language_counts.len() <= 3 {
+            95.0
+        } else {
+            85.0
+        };
         Ok(accuracy)
     }
 
@@ -3764,7 +4078,11 @@ impl RepoMapQualityBenchmarkSuite {
         let min_score = *scores.iter().min().unwrap();
 
         // Good relevance scoring if there's a reasonable score range
-        let accuracy = if max_score > min_score * 2 { 90.0 } else { 75.0 };
+        let accuracy = if max_score > min_score * 2 {
+            90.0
+        } else {
+            75.0
+        };
         Ok(accuracy)
     }
 
@@ -3787,19 +4105,26 @@ impl RepoMapQualityBenchmarkSuite {
         let total = self.results.len();
         let passed = self.results.iter().filter(|r| r.passed).count();
         // Calculate average quality score from component metrics
-        let avg_score = self.results.iter()
+        let avg_score = self
+            .results
+            .iter()
             .map(|r| {
                 let metrics = &r.actual_metrics;
-                (metrics.coverage.file_coverage + 
-                 metrics.performance.processing_rate +
-                 metrics.accuracy.symbol_name_accuracy +
-                 metrics.consistency.score_consistency) / 4.0
+                (metrics.coverage.file_coverage
+                    + metrics.performance.processing_rate
+                    + metrics.accuracy.symbol_name_accuracy
+                    + metrics.consistency.score_consistency)
+                    / 4.0
             })
-            .sum::<f64>() / total as f64;
+            .sum::<f64>()
+            / total as f64;
 
         format!(
             "RepoMap Quality Benchmark Summary:\n  Total: {}\n  Passed: {}\n  Failed: {}\n  Average Quality Score: {:.1}",
-            total, passed, total - passed, avg_score
+            total,
+            passed,
+            total - passed,
+            avg_score
         )
     }
 }
@@ -3892,16 +4217,60 @@ pub fn create_standard_quality_benchmarks() -> RepoMapQualityBenchmarkSuite {
     suite
 }
 
+fn count_symbol_markers(content: &str, ext: &str) -> usize {
+    let mut count = 0usize;
+
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with("//") || t.starts_with('#') {
+            continue;
+        }
+
+        count += match ext {
+            "rs" => {
+                (t.starts_with("fn ")
+                    || t.starts_with("pub fn ")
+                    || t.starts_with("struct ")
+                    || t.starts_with("pub struct ")
+                    || t.starts_with("enum ")
+                    || t.starts_with("pub enum ")
+                    || t.starts_with("trait ")
+                    || t.starts_with("impl ")) as usize
+            }
+            "js" | "ts" => {
+                (t.starts_with("function ")
+                    || t.starts_with("export function ")
+                    || t.starts_with("class ")
+                    || t.starts_with("export class ")
+                    || t.starts_with("interface ")
+                    || t.starts_with("type ")
+                    || (t.contains("=>") && (t.contains("const ") || t.contains("let "))))
+                    as usize
+            }
+            "py" => (t.starts_with("def ") || t.starts_with("class ")) as usize,
+            "go" => {
+                (t.starts_with("func ")
+                    || t.starts_with("type ")
+                    || t.starts_with("var ")
+                    || t.starts_with("const ")) as usize
+            }
+            _ => 0,
+        };
+    }
+
+    count
+}
+
 #[cfg(test)]
 mod quality_benchmark_tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_quality_metrics_calculation() {
         let suite = RepoMapQualityBenchmarkSuite::new();
-        
+
         // Create a simple test repository
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
@@ -3909,7 +4278,7 @@ mod quality_benchmark_tests {
 
         // This would require async runtime in real tests
         // let metrics = suite.calculate_quality_metrics(&repo_map, dir.path()).await.unwrap();
-        
+
         // For now, just test the structure
         assert_eq!(suite.benchmarks.len(), 0);
     }
@@ -3917,7 +4286,7 @@ mod quality_benchmark_tests {
     #[test]
     fn test_metric_comparison() {
         let suite = RepoMapQualityBenchmarkSuite::new();
-        
+
         let deviation = suite.compare_single_metric("test.metric", 100.0, 95.0, 10.0);
         assert_eq!(deviation.metric_path, "test.metric");
         assert_eq!(deviation.expected, 100.0);
@@ -3930,10 +4299,27 @@ mod quality_benchmark_tests {
     fn test_standard_benchmarks() {
         let suite = create_standard_quality_benchmarks();
         assert_eq!(suite.benchmarks.len(), 2);
-        
+
         let rust_benchmark = &suite.benchmarks[0];
         assert_eq!(rust_benchmark.name, "Rust Repository Quality");
         // Test that the benchmark has the expected component metrics
         assert_eq!(rust_benchmark.expected_metrics.coverage.file_coverage, 95.0);
+    }
+
+    #[test]
+    fn test_count_symbol_markers() {
+        let rust = r#"
+pub struct User {}
+impl User { pub fn new() -> Self { Self {} } }
+fn run() {}
+"#;
+        assert!(count_symbol_markers(rust, "rs") >= 3);
+
+        let ts = r#"
+export class Service {}
+export function build() {}
+const x = () => 1;
+"#;
+        assert!(count_symbol_markers(ts, "ts") >= 3);
     }
 }
