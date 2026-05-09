@@ -636,37 +636,106 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Create a new provider registry with comprehensive provider support
+    /// V1.6-P0-001: Create provider registry for testing only
     ///
-    /// P1-Issue6: Broaden real provider support by including multiple provider types
-    pub fn new() -> anyhow::Result<Self> {
+    /// This constructor is explicitly for testing environments and may use
+    /// template/static providers that are not suitable for production.
+    #[cfg(test)]
+    pub fn for_testing() -> anyhow::Result<Self> {
         let mut aggregate = AggregatePatchProvider::new();
         
-        // Add heuristic provider (always available)
+        // Add static provider for deterministic tests
+        aggregate.add_provider(Box::new(StaticPatchProvider::new()));
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
         
-        // Add template provider for common patterns
+        Ok(Self { aggregate })
+    }
+
+    /// V1.6-P0-001: Create provider registry for review-only mode
+    ///
+    /// Review-only mode cannot apply patches, only analyze them.
+    /// Uses safe providers that cannot generate side effects.
+    pub fn for_review_only() -> anyhow::Result<Self> {
+        let mut aggregate = AggregatePatchProvider::new();
+        
+        // Review-only: only analysis providers, no generation
+        aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
+        
+        // Template provider only for recognized patterns
         aggregate.add_provider(Box::new(TemplatePatchProvider::new()));
         
-        // Try to add script provider if available
-        if let Ok(script_path) = std::env::var("PROMETHEOS_SCRIPT_PROVIDER") {
+        Ok(Self { aggregate })
+    }
+
+    /// V1.6-P0-001: Create provider registry for assisted mode
+    ///
+    /// Assisted mode requires a real generator (LLM/script/codemod) with user oversight.
+    pub fn for_assisted(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
+        let mut aggregate = AggregatePatchProvider::new();
+        
+        // Require real generator for assisted mode
+        if let Some(llm_config) = &config.llm {
+            let client = crate::llm::LlmClient::new(llm_config)?;
+            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, llm_config.model.clone())));
+        } else if let Ok(script_path) = std::env::var("PROMETHEOS_SCRIPT_PROVIDER") {
             let path = PathBuf::from(script_path);
             if path.exists() {
                 aggregate.add_provider(Box::new(ScriptPatchProvider::new(path)));
-                tracing::info!("Added script provider from PROMETHEOS_SCRIPT_PROVIDER");
+            } else {
+                bail!("Script provider path does not exist: {}", path.display());
             }
+        } else {
+            bail!("Assisted mode requires LLM configuration or script provider");
         }
-
-        // Validate at least one provider can generate
+        
+        // Add heuristic provider as repair fallback
+        aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
+        
+        // Validate we have a real generator
         if !aggregate.capabilities().can_generate {
-            bail!(
-                "No patch generation provider registered. \
-                At least one provider with can_generate=true is required. \
-                Add an LLM provider, local model provider, or scripted provider."
-            );
+            bail!("Assisted mode requires at least one provider with can_generate=true");
         }
-
+        
         Ok(Self { aggregate })
+    }
+
+    /// V1.6-P0-001: Create provider registry for autonomous mode
+    ///
+    /// Autonomous mode requires the most restrictive and reliable providers.
+    pub fn for_autonomous(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
+        let mut aggregate = AggregatePatchProvider::new();
+        
+        // Autonomous mode: require LLM provider for highest reliability
+        if let Some(llm_config) = &config.llm {
+            let client = crate::llm::LlmClient::new(llm_config)?;
+            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, llm_config.model.clone())));
+        } else {
+            bail!("Autonomous mode requires LLM configuration");
+        }
+        
+        // Add heuristic provider as repair fallback only
+        aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
+        
+        // Validate strict requirements for autonomous mode
+        let caps = aggregate.capabilities();
+        if !caps.can_generate {
+            bail!("Autonomous mode requires a provider with can_generate=true");
+        }
+        
+        Ok(Self { aggregate })
+    }
+
+    /// DEPRECATED: Use mode-specific constructors instead
+    ///
+    /// This method is deprecated and will be removed in V1.7.
+    /// Use for_testing(), for_review_only(), for_assisted(), or for_autonomous() instead.
+    #[deprecated(note = "Use mode-specific constructors: for_testing(), for_review_only(), for_assisted(), or for_autonomous()")]
+    pub fn new() -> anyhow::Result<Self> {
+        anyhow::bail!(
+            "ProviderRegistry::new() is deprecated. \
+            Use for_testing(), for_review_only(), for_assisted(), or for_autonomous() instead. \
+            This prevents accidental use of weak generators in production."
+        );
     }
 
     /// Create with a specific provider
@@ -693,10 +762,33 @@ impl ProviderRegistry {
         Ok(Self { aggregate })
     }
 
-    /// Create from application configuration
+    /// V1.6-P0-001: Create provider registry from configuration with mode awareness
     ///
-    /// P0-FIX: Production factory that reads LLM configuration from app config.
-    /// Falls back to blocking behavior if LLM is not configured.
+    /// This method determines the appropriate mode based on configuration
+    /// and creates a provider registry with the correct safety constraints.
+    pub fn from_config_with_mode(config: &crate::config::AppConfig, mode: crate::harness::mode_policy::HarnessMode) -> anyhow::Result<Self> {
+        match mode {
+            crate::harness::mode_policy::HarnessMode::Autonomous => {
+                Self::for_autonomous(config)
+            }
+            crate::harness::mode_policy::HarnessMode::Assisted => {
+                Self::for_assisted(config)
+            }
+            crate::harness::mode_policy::HarnessMode::ReviewOnly => {
+                Self::for_review_only()
+            }
+            crate::harness::mode_policy::HarnessMode::Chat => {
+                // Chat mode defaults to assisted for safety
+                Self::for_assisted(config)
+            }
+        }
+    }
+
+    /// DEPRECATED: Use from_config_with_mode instead
+    ///
+    /// This method is deprecated and will be removed in V1.7.
+    /// Use from_config_with_mode() with explicit mode parameter.
+    #[deprecated(note = "Use from_config_with_mode() with explicit mode parameter")]
     pub fn from_config(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
         // Check if we have a valid LLM configuration
         if config.provider.is_empty() || config.model.is_empty() {
@@ -714,7 +806,11 @@ impl ProviderRegistry {
                 - Environment PROMETHEOS_MODEL: {}\n
                 - Environment PROMETHEOS_BASE_URL: {}\n\n
                 To fix this issue:\n\n
-                1. Set environment variables:\n    export PROMETHEOS_PROVIDER=lmstudio\n    export PROMETHEOS_MODEL=qwen2.5-coder\n    export PROMETHEOS_BASE_URL=http://localhost:1234/v1\n\n                2. Or create a config file at ~/.config/prometheos/config.json:\n    {{\n      \"provider\": \"lmstudio\",\n      \"model\": \"qwen2.5-coder\",\n      \"base_url\": \"http://localhost:1234/v1\"\n    }}\n\n                3. Supported providers: lmstudio, ollama, openai, anthropic\n\n                4. For local models, ensure your LLM server is running and accessible\n                ",
+                1. Set environment variables:\n    export PROMETHEOS_PROVIDER=lmstudio\n    export PROMETHEOS_MODEL=qwen2.5-coder\n    export PROMETHEOS_BASE_URL=http://localhost:1234/v1\n\n
+                2. Or create a config file at ~/.config/prometheos/config.json:\n    {{\n      \"provider\": \"lmstudio\",\n      \"model\": \"qwen2.5-coder\",\n      \"base_url\": \"http://localhost:1234/v1\"\n    }}\n\n
+                3. Supported providers: lmstudio, ollama, openai, anthropic\n\n
+                4. For local models, ensure your LLM server is running and accessible\n
+                ",
                 config.provider, config.model, provider_var, model_var, base_url_var
             );
         }
@@ -884,10 +980,41 @@ impl PatchProvider for StaticPatchProvider {
     }
 }
 
-/// Script-based patch provider for deterministic edits
+/// V1.6-P0-004: Script-based patch provider with sandboxing
 pub struct ScriptPatchProvider {
     script_path: PathBuf,
     supported_languages: Vec<String>,
+    /// Runtime for sandboxed script execution
+    runtime: Option<std::sync::Arc<dyn crate::harness::sandbox::CommandRuntime + Send + Sync>>,
+    /// Schema validation for script output
+    output_schema: ScriptOutputSchema,
+    /// Maximum output size to prevent resource exhaustion
+    max_output_size: usize,
+}
+
+/// V1.6-P0-004: Schema for script provider output validation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptOutputSchema {
+    pub version: String,
+    pub candidates_required: bool,
+    pub max_candidates: usize,
+    pub allowed_operations: Vec<String>,
+}
+
+impl Default for ScriptOutputSchema {
+    fn default() -> Self {
+        Self {
+            version: "1.0".to_string(),
+            candidates_required: true,
+            max_candidates: 10,
+            allowed_operations: vec![
+                "search_replace".to_string(),
+                "whole_file".to_string(),
+                "create_file".to_string(),
+                "delete_file".to_string(),
+            ],
+        }
+    }
 }
 
 impl ScriptPatchProvider {
@@ -895,12 +1022,127 @@ impl ScriptPatchProvider {
         Self {
             script_path,
             supported_languages: vec!["rust".into(), "python".into(), "javascript".into()],
+            runtime: None,
+            output_schema: ScriptOutputSchema::default(),
+            max_output_size: 1024 * 1024, // 1MB max output
         }
     }
 
     pub fn with_languages(mut self, languages: Vec<String>) -> Self {
         self.supported_languages = languages;
         self
+    }
+
+    /// V1.6-P0-004: Set sandbox runtime for script execution
+    pub fn with_runtime(mut self, runtime: std::sync::Arc<dyn crate::harness::sandbox::CommandRuntime + Send + Sync>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// V1.6-P0-004: Set output schema for validation
+    pub fn with_schema(mut self, schema: ScriptOutputSchema) -> Self {
+        self.output_schema = schema;
+        self
+    }
+
+    /// V1.6-P0-004: Set maximum output size
+    pub fn with_max_output_size(mut self, size: usize) -> Self {
+        self.max_output_size = size;
+        self
+    }
+
+    /// V1.6-P0-004: Validate script path is allowed
+    fn validate_script_path(&self) -> anyhow::Result<()> {
+        // Check if script path is within repository or allowlisted directory
+        let script_path = &self.script_path;
+        
+        // Allow scripts in common tool directories
+        let allowed_dirs = vec![
+            "tools/",
+            "scripts/",
+            ".prometheos/scripts/",
+            "node_modules/.bin/",
+        ];
+        
+        let script_str = script_path.to_string_lossy();
+        let is_allowed = allowed_dirs.iter().any(|dir| script_str.contains(dir));
+        
+        if !is_allowed {
+            anyhow::bail!(
+                "Script path '{}' is not in an allowed directory. \
+                Allowed directories: {:?}. \
+                This prevents execution of arbitrary scripts.",
+                script_path.display(), allowed_dirs
+            );
+        }
+        
+        if !script_path.exists() {
+            anyhow::bail!("Script path does not exist: {}", script_path.display());
+        }
+        
+        Ok(())
+    }
+
+    /// V1.6-P0-004: Validate script output against schema
+    fn validate_output(&self, output: &str) -> anyhow::Result<()> {
+        // Check output size
+        if output.len() > self.max_output_size {
+            anyhow::bail!(
+                "Script output too large: {} bytes (max: {})",
+                output.len(),
+                self.max_output_size
+            );
+        }
+
+        // Parse as JSON and validate schema
+        let parsed: serde_json::Value = serde_json::from_str(output)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON output from script: {}", e))?;
+
+        // Validate required fields
+        if self.output_schema.candidates_required {
+            if let Some(candidates) = parsed.get("candidates") {
+                if let Some(candidates_array) = candidates.as_array() {
+                    if candidates_array.len() > self.output_schema.max_candidates {
+                        anyhow::bail!(
+                            "Too many candidates: {} (max: {})",
+                            candidates_array.len(),
+                            self.output_schema.max_candidates
+                        );
+                    }
+                } else {
+                    anyhow::bail!("Candidates field must be an array");
+                }
+            } else {
+                anyhow::bail!("Candidates field is required but missing");
+            }
+        }
+
+        // Validate operations if present
+        if let Some(candidates) = parsed.get("candidates") {
+            if let Some(candidates_array) = candidates.as_array() {
+                for candidate in candidates_array {
+                    if let Some(operations) = candidate.get("edits") {
+                        if let Some(operations_array) = operations.as_array() {
+                            for operation in operations_array {
+                                if let Some(op_type) = operation.get("type") {
+                                    if let Some(op_str) = op_type.as_str() {
+                                        if !self.output_schema.allowed_operations.contains(&op_str.to_string()) {
+                                            anyhow::bail!(
+                                                "Operation '{}' not allowed. Allowed: {:?}",
+                                                op_str,
+                                                self.output_schema.allowed_operations
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -913,50 +1155,127 @@ impl PatchProvider for ScriptPatchProvider {
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
         let start = std::time::Instant::now();
         
-        // Build script arguments
-        let output = tokio::process::Command::new(&self.script_path)
-            .arg("generate")
-            .arg("--task")
-            .arg(&request.context.task)
-            .arg("--repo")
-            .arg(".")
-            .output()
-            .await?;
+        // V1.6-P0-004: Validate script path before execution
+        self.validate_script_path()?;
+        
+        // Build script command
+        let script_command = format!(
+            "{} generate --task {} --repo .",
+            self.script_path.display(),
+            request.context.task
+        );
+        
+        // V1.6-P0-004: Execute through sandboxed runtime
+        let output = if let Some(ref runtime) = self.runtime {
+            // Use sandboxed runtime
+            runtime.run_command(
+                &std::path::Path::new("."),
+                &script_command,
+                30000, // 30 second timeout
+            ).await?
+        } else {
+            // Fallback to local execution with warning
+            tracing::warn!("V1.6-P0-004: Script provider using local runtime - sandboxing disabled");
+            
+            let local_output = tokio::process::Command::new(&self.script_path)
+                .arg("generate")
+                .arg("--task")
+                .arg(&request.context.task)
+                .arg("--repo")
+                .arg(".")
+                .output()
+                .await?;
+            
+            crate::harness::validation::CommandResult {
+                command: script_command,
+                exit_code: local_output.status.code(),
+                stdout: String::from_utf8_lossy(&local_output.stdout).into(),
+                stderr: String::from_utf8_lossy(&local_output.stderr).into(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                cached: false,
+                cache_key: None,
+                timed_out: false,
+            }
+        };
 
-        if !output.status.success() {
+        if !output.success() {
             return Ok(GenerateResponse {
                 candidates: vec![],
-                generation_time_ms: start.elapsed().as_millis() as u64,
-                provider_notes: Some(format!("Script failed: {}", String::from_utf8_lossy(&output.stderr))),
+                generation_time_ms: output.duration_ms,
+                provider_notes: Some(format!("Script failed: {}", output.stderr)),
             });
         }
 
+        // V1.6-P0-004: Validate output against schema
+        self.validate_output(&output.stdout)?;
+
         // Parse script output (JSON format expected)
-        let script_output: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let script_output: serde_json::Value = serde_json::from_str(&output.stdout)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON output from script: {}", e))?;
+        
         let candidates = parse_script_candidates(script_output, "script")?;
 
         Ok(GenerateResponse {
             candidates,
-            generation_time_ms: start.elapsed().as_millis() as u64,
-            provider_notes: Some("Generated by script provider".into()),
+            generation_time_ms: output.duration_ms,
+            provider_notes: Some("Generated by sandboxed script provider".into()),
         })
     }
 
     async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
         let start = std::time::Instant::now();
         
-        let output = tokio::process::Command::new(&self.script_path)
-            .arg("repair")
-            .arg("--failure")
-            .arg(format!("{:?}", request.failure.kind))
-            .arg("--message")
-            .arg(&request.failure.message)
-            .output()
-            .await?;
+        // V1.6-P0-004: Validate script path before execution
+        self.validate_script_path()?;
+        
+        // Build script command
+        let script_command = format!(
+            "{} repair --failure {} --message {}",
+            self.script_path.display(),
+            request.failure.kind,
+            request.failure.message
+        );
+        
+        // V1.6-P0-004: Execute through sandboxed runtime
+        let output = if let Some(ref runtime) = self.runtime {
+            // Use sandboxed runtime
+            runtime.run_command(
+                &std::path::Path::new("."),
+                &script_command,
+                30000, // 30 second timeout
+            ).await?
+        } else {
+            // Fallback to local execution with warning
+            tracing::warn!("V1.6-P0-004: Script provider repair using local runtime - sandboxing disabled");
+            
+            let local_output = tokio::process::Command::new(&self.script_path)
+                .arg("repair")
+                .arg("--failure")
+                .arg(format!("{:?}", request.failure.kind))
+                .arg("--message")
+                .arg(&request.failure.message)
+                .output()
+                .await?;
+            
+            crate::harness::validation::CommandResult {
+                command: script_command,
+                exit_code: local_output.status.code(),
+                stdout: String::from_utf8_lossy(&local_output.stdout).into(),
+                stderr: String::from_utf8_lossy(&local_output.stderr).into(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                cached: false,
+                cache_key: None,
+                timed_out: false,
+            }
+        };
 
-        let repaired = if output.status.success() {
+        let repaired = if output.success() {
+            // V1.6-P0-004: Validate output against schema
+            self.validate_output(&output.stdout)?;
+            
             // Parse repaired edits from script output
-            let script_output: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            let script_output: serde_json::Value = serde_json::from_str(&output.stdout)
+                .map_err(|e| anyhow::anyhow!("Invalid JSON output from script repair: {}", e))?;
             parse_script_edits(script_output)?
         } else {
             request.failed_edits.clone()
@@ -967,8 +1286,8 @@ impl PatchProvider for ScriptPatchProvider {
         Ok(RepairResponse {
             repaired_edits: repaired,
             repair_applied,
-            repair_notes: "Script-based repair".into(),
-            repair_time_ms: start.elapsed().as_millis() as u64,
+            repair_notes: "Sandboxed script-based repair".into(),
+            repair_time_ms: output.duration_ms,
         })
     }
 

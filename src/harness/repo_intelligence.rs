@@ -10,6 +10,7 @@ use std::{
 };
 use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
 use tree_sitter_typescript;
+use tree_sitter_rust;
 
 /// P1-Issue1: Analyzer-backed RepoMap enhancements for Rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -546,10 +547,8 @@ impl RustAnalyzerData {
         Ok(rust_files)
     }
 
-    /// Parse module information from a Rust file
+    /// Parse module information using AST-based analysis
     fn parse_module_info(file_path: &Path, content: &str, repo_path: &Path) -> Result<Option<ModuleInfo>> {
-        use regex::Regex;
-        
         // Extract module name from file path
         let relative_path = file_path.strip_prefix(repo_path)
             .map_err(|_| anyhow::anyhow!("File not under repo root"))?;
@@ -569,18 +568,133 @@ impl RustAnalyzerData {
                 .to_string()
         };
 
-        // Check for mod statements to find submodules
-        let mod_regex = Regex::new(r"mod\s+(\w+);")?;
+        // Use AST-based parsing if content is Rust
+        if file_path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            Self::parse_rust_module_ast(file_path, content, &module_name, &relative_path)
+        } else {
+            // Fallback to basic parsing for non-Rust files
+            Self::parse_basic_module(file_path, content, &module_name, &relative_path)
+        }
+    }
+
+    /// Parse Rust module using tree-sitter AST
+    fn parse_rust_module_ast(file_path: &Path, content: &str, module_name: &str, relative_path: &Path) -> Result<Option<ModuleInfo>> {
+        let mut parser = Parser::new();
+        parser.set_language(tree_sitter_rust::language())
+            .map_err(|_| anyhow::anyhow!("Failed to set Rust parser language"))?;
+
+        let tree = parser.parse(content, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse Rust file: {}", file_path.display()))?;
+
         let mut submodules = Vec::new();
-        if let Ok(re) = mod_regex {
-            for caps in re.captures_iter(content) {
-                if let Some(name) = caps.get(1) {
-                    submodules.push(name.as_str().to_string());
+        let mut visibility = Visibility::Private;
+        let mut documentation = None;
+
+        // Walk the AST to extract module information
+        let mut cursor = tree.walk();
+        let root_node = tree.root_node();
+        
+        // Find module declarations, visibility, and documentation
+        for node in root_node.children(&mut cursor) {
+            match node.kind() {
+                "mod_item" => {
+                    // Extract module name
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let mod_name = name_node.utf8_text(content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        submodules.push(mod_name);
+                    }
                 }
+                "source_file" => {
+                    // Process top-level items in the source file
+                    for child in node.children(&mut cursor) {
+                        match child.kind() {
+                            "mod_item" => {
+                                // Handle mod declarations
+                                if let Some(name_node) = child.child_by_field_name("name") {
+                                    let mod_name = name_node.utf8_text(content.as_bytes())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    submodules.push(mod_name);
+                                }
+                            }
+                            "function_item" | "struct_item" | "enum_item" | "trait_item" | "type_alias_item" => {
+                                // Check for visibility
+                                if let Some(vis_node) = child.child_by_field_name("visibility") {
+                                    if vis_node.kind() == "visibility_modifier" && 
+                                       vis_node.utf8_text(content.as_bytes()).unwrap_or("") == "pub" {
+                                        visibility = Visibility::Public;
+                                    }
+                                } else if child.child_by_field_name("name").is_some() {
+                                    // Check if it's implicitly public (e.g., in a pub mod block)
+                                    visibility = Visibility::Public;
+                                }
+                            }
+                            "line_comment" | "block_comment" => {
+                                // Extract documentation comments
+                                let comment_text = child.utf8_text(content.as_bytes()).unwrap_or("");
+                                if comment_text.starts_with("///") || comment_text.starts_with("//!") {
+                                    let doc_line = comment_text.trim_start_matches("///").trim_start_matches("//!").trim();
+                                    if documentation.is_none() {
+                                        documentation = Some(doc_line.to_string());
+                                    } else {
+                                        // Append to existing documentation
+                                        let mut docs = documentation.take().unwrap();
+                                        docs.push(' ');
+                                        docs.push_str(doc_line);
+                                        documentation = Some(docs);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
-        // Determine visibility
+        // Detect inline modules (mod blocks within the file)
+        let is_inline = Self::detect_inline_modules(&root_node, &mut cursor, content);
+
+        Ok(Some(ModuleInfo {
+            name: module_name.to_string(),
+            path: relative_path.to_path_buf(),
+            file_path: Some(file_path.to_path_buf()),
+            is_mod_rs: file_path.file_stem() == Some(std::ffi::OsStr::new("mod")),
+            is_inline,
+            visibility,
+            documentation,
+            submodules,
+        }))
+    }
+
+    /// Detect inline module declarations (mod name { ... })
+    fn detect_inline_modules(root_node: &Node, cursor: &mut tree_sitter::TreeCursor, content: &str) -> bool {
+        let mut has_inline_modules = false;
+        
+        for node in root_node.children(cursor) {
+            if node.kind() == "source_file" {
+                for child in node.children(cursor) {
+                    if child.kind() == "mod_item" {
+                        // Check if this is an inline module (has a body)
+                        if child.child_by_field_name("body").is_some() {
+                            has_inline_modules = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        has_inline_modules
+    }
+
+    /// Fallback basic module parsing for non-Rust files
+    fn parse_basic_module(file_path: &Path, content: &str, module_name: &str, relative_path: &Path) -> Result<Option<ModuleInfo>> {
+        use regex::Regex;
+        
+        // Basic visibility detection
         let visibility = if content.contains("pub mod") || content.contains("pub struct") || 
                          content.contains("pub fn") || content.contains("pub enum") ||
                          content.contains("pub trait") || content.contains("pub type") {
@@ -593,14 +707,14 @@ impl RustAnalyzerData {
         let documentation = Self::extract_module_documentation(content);
 
         Ok(Some(ModuleInfo {
-            name: module_name,
+            name: module_name.to_string(),
             path: relative_path.to_path_buf(),
             file_path: Some(file_path.to_path_buf()),
             is_mod_rs: file_path.file_stem() == Some(std::ffi::OsStr::new("mod")),
-            is_inline: false, // TODO: detect inline modules
+            is_inline: false,
             visibility,
             documentation,
-            submodules,
+            submodules: Vec::new(), // Cannot reliably extract without AST
         }))
     }
 
@@ -615,9 +729,8 @@ impl RustAnalyzerData {
                 .map(|m| m.as_str().to_string())
                 .collect();
             
-            if !docs.is_empty() {
-                return Some(docs.join(" "));
-            }
+        if !docs.is_empty() {
+            return Some(docs.join(" "));
         }
         
         None
