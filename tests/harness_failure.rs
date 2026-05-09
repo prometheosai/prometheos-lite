@@ -119,13 +119,20 @@ fn test_classify_patch_failure() {
 #[test]
 fn test_classify_validation_failure() {
     let validation_result = ValidationResult {
-        passed: false,
+        status: prometheos_lite::harness::validation::ValidationStatus::Failed,
         duration_ms: 100,
         cached: false,
         category_results: std::collections::HashMap::new(),
         flaky_tests_detected: vec![],
         command_results: vec![],
         errors: vec![],
+        validation_performed: true,
+        is_final_gate: false,
+        cache_disabled: false,
+        commands_planned: 1,
+        commands_executed: 1,
+        commands_skipped: 0,
+        categories_executed: vec![],
     };
     let details = classify_validation_failure(&validation_result);
 

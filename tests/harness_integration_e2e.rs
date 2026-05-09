@@ -601,7 +601,7 @@ mod tests {{
         let result = performance_{}::test_function_{}();
         assert_eq!(result, 4950); // Sum of 0..99
     }}
-}}"#, i, i, i, i, i, i, i),
+}}"#, i, i, i, i, i, i),
         executable: Some(false),
     })).collect();
     
@@ -623,3 +623,4 @@ mod tests {{
     
     Ok(())
 }
+
