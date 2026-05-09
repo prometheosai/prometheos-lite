@@ -345,7 +345,7 @@ impl DiagnosticParser for GenericDiagnosticParser {
 }
 
 /// P0-HARNESS-010: Extract severity and message from generic diagnostic line
-fn extract_severity_and_message(line: &str) -> Option<(&str, &str)> {
+fn extract_severity_and_message(line: &str) -> Option<(DiagnosticSeverity, &str)> {
     let patterns = [
         ("error:", DiagnosticSeverity::Error),
         ("warning:", DiagnosticSeverity::Warning),
@@ -357,7 +357,7 @@ fn extract_severity_and_message(line: &str) -> Option<(&str, &str)> {
         if let Some(pos) = line.find(pattern) {
             let msg_start = pos + pattern.len();
             let message = line[msg_start..].trim();
-            return Some((severity.into(), message));
+            return Some((severity.clone(), message));
         }
     }
     
@@ -428,7 +428,7 @@ pub fn generate_repair_strategy(diagnostic: &CompilerDiagnostic) -> RepairStrate
         (DiagnosticCategory::Unused, msg) if msg.contains("unused") => {
             (RepairStrategyType::RemoveUnused, 0.8)
         },
-        (DiagnosticCategory::Type, msg) if msg.contains("mismatch") => {
+        (DiagnosticCategory::Type, msg) if msg.contains("mismatch") || msg.contains("cannot find type") => {
             (RepairStrategyType::FixType, 0.7)
         },
         (DiagnosticCategory::Format, _) => {

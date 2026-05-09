@@ -826,7 +826,7 @@ impl PatchHashVerification {
                     if self.generated_patch_hash.is_none() { "generated" } else { "" },
                     if self.dry_run_patch_hash.is_none() { "dry-run" } else { "" },
                     if self.applied_patch_hash.is_none() { "applied" } else { "" },
-                ].iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
+                ].iter().copied().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
                 self.hash_mismatch_details = Some(format!("Missing hash stages: {}", missing));
                 anyhow::bail!("Incomplete hash verification: missing {}", missing)
             }

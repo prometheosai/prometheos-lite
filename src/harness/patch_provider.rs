@@ -19,7 +19,7 @@ use crate::harness::{
 };
 
 /// Context available to patch providers for generating or repairing edits
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PatchProviderContext {
     /// The original task description
     pub task: String,
@@ -171,13 +171,24 @@ pub trait PatchProvider: Send + Sync {
     ///
     /// # Returns
     /// * `RepairResponse` - Repaired edits or empty if repair not possible
-    async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse>;
+    async fn repair(&self, _request: RepairRequest) -> anyhow::Result<RepairResponse> {
+        Ok(RepairResponse {
+            repaired_edits: Vec::new(),
+            repair_applied: false,
+            repair_notes: "Provider does not implement repair".to_string(),
+            repair_time_ms: 0,
+        })
+    }
 
     /// Check if this provider can handle the given failure kind
-    fn can_handle(&self, kind: FailureKind) -> bool;
+    fn can_handle(&self, _kind: FailureKind) -> bool {
+        false
+    }
 
     /// Get provider capabilities
-    fn capabilities(&self) -> ProviderCapabilities;
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 }
 
 /// Provider capabilities
@@ -645,7 +656,7 @@ impl ProviderRegistry {
         let mut aggregate = AggregatePatchProvider::new();
         
         // Add static provider for deterministic tests
-        aggregate.add_provider(Box::new(StaticPatchProvider::new()));
+        aggregate.add_provider(Box::new(StaticPatchProvider::new("testing-static")));
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
         
         Ok(Self { aggregate })
@@ -674,9 +685,9 @@ impl ProviderRegistry {
         let mut aggregate = AggregatePatchProvider::new();
         
         // Require real generator for assisted mode
-        if let Some(llm_config) = &config.llm {
-            let client = crate::llm::LlmClient::new(llm_config)?;
-            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, llm_config.model.clone())));
+        if !config.base_url.is_empty() && !config.model.is_empty() {
+            let client = crate::llm::LlmClient::new(&config.base_url, &config.model)?;
+            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, config.model.clone())));
         } else if let Ok(script_path) = std::env::var("PROMETHEOS_SCRIPT_PROVIDER") {
             let path = PathBuf::from(script_path);
             if path.exists() {
@@ -706,9 +717,9 @@ impl ProviderRegistry {
         let mut aggregate = AggregatePatchProvider::new();
         
         // Autonomous mode: require LLM provider for highest reliability
-        if let Some(llm_config) = &config.llm {
-            let client = crate::llm::LlmClient::new(llm_config)?;
-            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, llm_config.model.clone())));
+        if !config.base_url.is_empty() && !config.model.is_empty() {
+            let client = crate::llm::LlmClient::new(&config.base_url, &config.model)?;
+            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, config.model.clone())));
         } else {
             bail!("Autonomous mode requires LLM configuration");
         }
@@ -777,9 +788,11 @@ impl ProviderRegistry {
             crate::harness::mode_policy::HarnessMode::ReviewOnly => {
                 Self::for_review_only()
             }
-            crate::harness::mode_policy::HarnessMode::Chat => {
-                // Chat mode defaults to assisted for safety
-                Self::for_assisted(config)
+            crate::harness::mode_policy::HarnessMode::Review => {
+                Self::for_review_only()
+            }
+            crate::harness::mode_policy::HarnessMode::Benchmark => {
+                Self::for_review_only()
             }
         }
     }
@@ -1198,7 +1211,7 @@ impl PatchProvider for ScriptPatchProvider {
             }
         };
 
-        if !output.success() {
+        if output.exit_code != Some(0) {
             return Ok(GenerateResponse {
                 candidates: vec![],
                 generation_time_ms: output.duration_ms,
@@ -1230,7 +1243,7 @@ impl PatchProvider for ScriptPatchProvider {
         
         // Build script command
         let script_command = format!(
-            "{} repair --failure {} --message {}",
+            "{} repair --failure {:?} --message {}",
             self.script_path.display(),
             request.failure.kind,
             request.failure.message
@@ -1269,7 +1282,7 @@ impl PatchProvider for ScriptPatchProvider {
             }
         };
 
-        let repaired = if output.success() {
+        let repaired = if output.exit_code == Some(0) {
             // V1.6-P0-004: Validate output against schema
             self.validate_output(&output.stdout)?;
             
@@ -2222,14 +2235,7 @@ impl DeterministicPatchProvider {
         } else if task_lower.contains("fix") || task_lower.contains("error") {
             self.generate_fix_edit(&task_lower)
         } else {
-            // Default: add a comment with task clarification
-            vec![EditOperation::SearchReplace(SearchReplaceEdit {
-                file: PathBuf::from("src/main.rs"),
-                search: "".to_string(),
-                replace: format!("// TODO: {}\n", context.task),
-                replace_all: None,
-                context_lines: Some(0),
-            })]
+            Vec::new()
         };
         
         if edits.is_empty() {
@@ -2288,8 +2294,8 @@ impl DeterministicPatchProvider {
             file: PathBuf::from("src/main.rs"),
             search: "".to_string(),
             replace: format!(
-                "fn {}() -> Result<(), Box<dyn std::error::Error>> {{\n    // TODO: Implement {}\n    Ok(())\n}}\n",
-                function_name, function_name
+                "fn {}() -> Result<(), Box<dyn std::error::Error>> {{\n    Ok(())\n}}\n",
+                function_name
             ),
             replace_all: None,
             context_lines: Some(0),

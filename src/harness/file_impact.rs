@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// P1-Issue2: File impact scoring for surgical edits
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FileImpactScore {
     pub file_path: PathBuf,
     pub overall_score: f32, // 0.0 - 1.0
@@ -20,7 +20,7 @@ pub struct FileImpactScore {
     pub change_risk: ChangeRisk,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SymbolRelevanceScore {
     pub score: f32,
     pub symbols_mentioned: Vec<String>,
@@ -30,7 +30,7 @@ pub struct SymbolRelevanceScore {
     pub critical_symbols: Vec<String>, // pub, unsafe, async, etc.
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImportGraphImpact {
     pub score: f32,
     pub imports_count: usize,
@@ -41,7 +41,7 @@ pub struct ImportGraphImpact {
     pub dependency_depth: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TestFileImpact {
     pub score: f32,
     pub is_test_file: bool,
@@ -53,7 +53,7 @@ pub struct TestFileImpact {
     pub production_code_dep: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiSurfaceImpact {
     pub score: f32,
     pub public_api_changes: usize,
@@ -540,7 +540,7 @@ impl FileImpactScore {
         let module_name = rust_analyzer.module_graph.modules
             .iter()
             .find(|(_, module)| {
-                module.file_path.as_ref() == Some(file_path)
+                module.file_path.as_deref() == Some(file_path)
             })
             .map(|(path, _)| {
                 path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
@@ -549,7 +549,7 @@ impl FileImpactScore {
         
         // Get imports for this module
         let imports = rust_analyzer.module_graph.imports
-            .get(&module_name)
+            .get(module_name)
             .map(|imports| imports.len())
             .unwrap_or(0);
         
