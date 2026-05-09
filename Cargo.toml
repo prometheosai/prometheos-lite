@@ -54,6 +54,7 @@ ignore = "0.4"
 tracing-opentelemetry = "0.24"
 tiktoken-rs = "0.5"
 walkdir = "2.5"
+dotenv = "0.15"
 
 [dev-dependencies]
 tempfile = "3"
