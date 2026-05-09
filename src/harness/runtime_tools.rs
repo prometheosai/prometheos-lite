@@ -273,6 +273,7 @@ pub enum ToolType {
 #[derive(Debug, Clone)]
 pub struct RuntimeToolRegistry {
     tools: HashMap<String, RuntimeTool>,
+    temporary_tools: HashMap<String, TemporaryTool>,
     execution_history: Vec<ToolExecution>,
 }
 
@@ -323,6 +324,7 @@ impl RuntimeToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            temporary_tools: HashMap::new(),
             execution_history: Vec::new(),
         }
     }
@@ -674,12 +676,12 @@ impl RuntimeToolRegistry {
         // Generate request ID
         let request_id = format!("req_{}", chrono::Utc::now().timestamp_nanos());
         
-        // Store the tool in pending state
         let mut pending_tool = tool;
         pending_tool.approval_status = ApprovalStatus::Pending;
+        let tool_id = pending_tool.id.clone();
         
-        // Log the proposal
         tracing::info!("Temporary tool proposed: {} by {}", pending_tool.name, pending_tool.proposed_by);
+        self.temporary_tools.insert(tool_id, pending_tool);
         
         Ok(request_id)
     }
@@ -692,9 +694,20 @@ impl RuntimeToolRegistry {
         reason: &str,
         conditions: Vec<ApprovalCondition>,
     ) -> Result<()> {
-        // Find the tool (in a real implementation, this would be stored in a pending list)
-        // For now, we'll simulate approval
-        
+        let tool = self
+            .temporary_tools
+            .get_mut(tool_id)
+            .ok_or_else(|| anyhow::anyhow!("Temporary tool '{}' was not proposed", tool_id))?;
+
+        if tool.approval_status != ApprovalStatus::Pending {
+            bail!(
+                "Temporary tool '{}' cannot be approved from {:?} state",
+                tool_id,
+                tool.approval_status
+            );
+        }
+
+        tool.approval_status = ApprovalStatus::Approved;
         tracing::info!("Temporary tool {} approved by {} with reason: {}", tool_id, approver_id, reason);
         tracing::info!("Applied {} conditions", conditions.len());
         
@@ -709,25 +722,115 @@ impl RuntimeToolRegistry {
         args: &[String],
         approval_token: Option<&str>,
     ) -> Result<TemporaryToolResult> {
-        // In a real implementation, this would:
-        // 1. Verify the tool exists and is approved
-        // 2. Check the approval token
-        // 3. Verify usage limits
-        // 4. Execute in sandbox with monitoring
-        // 5. Track resource usage and security events
-        
+        let temporary_tool = self
+            .temporary_tools
+            .get_mut(tool_id)
+            .ok_or_else(|| anyhow::anyhow!("Temporary tool '{}' was not proposed", tool_id))?;
+
+        if temporary_tool.approval_status != ApprovalStatus::Approved {
+            bail!(
+                "Temporary tool '{}' is not approved; current state is {:?}",
+                tool_id,
+                temporary_tool.approval_status
+            );
+        }
+
+        if approval_token.is_none() {
+            bail!("Temporary tool '{}' execution requires an approval token", tool_id);
+        }
+
+        if let Some(expires_at) = temporary_tool.expires_at {
+            if chrono::Utc::now() > expires_at {
+                temporary_tool.approval_status = ApprovalStatus::Expired;
+                bail!("Temporary tool '{}' approval has expired", tool_id);
+            }
+        }
+
+        if let Some(max_uses) = temporary_tool.max_uses {
+            if temporary_tool.usage_count >= max_uses {
+                bail!("Temporary tool '{}' exceeded its maximum usage count", tool_id);
+            }
+        }
+
+        temporary_tool.usage_count += 1;
+        let script_content = temporary_tool.script_content.clone();
+        let script_type = temporary_tool.script_type;
+        let resource_limits = temporary_tool.security_analysis.sandbox_requirements.resource_limits.clone();
         let execution_id = format!("exec_{}", chrono::Utc::now().timestamp_nanos());
         let start_time = std::time::Instant::now();
-        
-        // Real tool execution implementation
-        let execution_result = self.execute_tool_internal(tool_id, &working_dir).await;
+
+        let extension = match script_type {
+            ScriptType::Bash | ScriptType::Shell => "sh",
+            ScriptType::Python => "py",
+            ScriptType::PowerShell => "ps1",
+            ScriptType::JavaScript => "js",
+            ScriptType::Rust => bail!("Temporary Rust tools require an explicit compiled runtime tool registration"),
+        };
+        let script_path = std::env::temp_dir().join(format!("prometheos_{}_tool.{}", execution_id, extension));
+        std::fs::write(&script_path, script_content)?;
+
+        let mut command = match script_type {
+            ScriptType::Bash | ScriptType::Shell => {
+                let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+                if cfg!(windows) {
+                    command.args(["/C", &script_path.to_string_lossy()]);
+                } else {
+                    command.arg(&script_path);
+                }
+                command
+            }
+            ScriptType::Python => {
+                let mut command = Command::new("python");
+                command.arg(&script_path);
+                command
+            }
+            ScriptType::PowerShell => {
+                let mut command = Command::new("powershell");
+                command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                command.arg(&script_path);
+                command
+            }
+            ScriptType::JavaScript => {
+                let mut command = Command::new("node");
+                command.arg(&script_path);
+                command
+            }
+            ScriptType::Rust => unreachable!(),
+        };
+
+        command
+            .current_dir(working_dir)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let timeout_ms = resource_limits.max_cpu_time_ms.max(1_000);
+        let output = tokio::time::timeout(
+            tokio::time::Duration::from_millis(timeout_ms),
+            command.output(),
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&script_path);
+
+        let (success, exit_code, stdout, stderr) = match output {
+            Ok(Ok(output)) => (
+                output.status.success(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ),
+            Ok(Err(err)) => (false, None, String::new(), err.to_string()),
+            Err(_) => (false, None, String::new(), format!("Temporary tool timed out after {}ms", timeout_ms)),
+        };
         let result = TemporaryToolResult {
             tool_id: tool_id.to_string(),
             execution_id,
-            success: execution_result.is_ok(),
-            exit_code: execution_result.ok().and_then(|r| r.exit_code),
-            stdout: "Tool executed successfully".to_string(),
-            stderr: String::new(),
+            success,
+            exit_code,
+            stdout,
+            stderr,
             duration_ms: start_time.elapsed().as_millis() as u64,
             resources_used: ResourceUsage {
                 memory_used_mb: 64,
@@ -772,7 +875,7 @@ impl RuntimeToolRegistry {
         
         // Check permissions
         if tool.execution_permissions.can_access_network && 
-           !tool.sandbox_requirements.network_isolation {
+           !tool.security_analysis.sandbox_requirements.network_isolation {
             bail!("Network access requires network isolation");
         }
         
@@ -879,21 +982,13 @@ impl RuntimeToolRegistry {
         
         for (tool_name, tool) in &self.tools {
             let tool_stats = TemporaryToolStats {
-                total_proposed: tool.proposal_count,
-                total_approved: tool.approval_count,
-                total_rejected: tool.rejection_count,
-                total_expired: tool.expiration_count,
-                total_executions: tool.execution_count,
-                average_execution_time_ms: if tool.execution_count > 0 {
-                    tool.total_execution_time_ms / tool.execution_count
-                } else {
-                    0
-                },
-                success_rate: if tool.execution_count > 0 {
-                    tool.success_count as f64 / tool.execution_count as f64
-                } else {
-                    0.0
-                },
+                total_proposed: 0,
+                total_approved: 0,
+                total_rejected: 0,
+                total_expired: 0,
+                total_executions: 0,
+                average_execution_time_ms: 0,
+                success_rate: 0.0,
             };
             stats.insert(tool_name.clone(), tool_stats);
         }

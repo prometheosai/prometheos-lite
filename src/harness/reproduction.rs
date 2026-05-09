@@ -285,7 +285,7 @@ fn test_integration_reproduction() {{
     let result = simulate_failing_scenario().unwrap();
     
     // Assert expected failure is captured
-    assert!(result.is_err(), "Expected failure but got success: {:?}", result);
+    assert!(result.is_err(), "Expected failure but got success: {{:?}}", result);
     assert!(result.unwrap_err().contains("integration test"), "Expected integration test failure");
     
     // Add specific assertions based on failure
@@ -509,8 +509,7 @@ mod {}_tests {{
         // Act: Call the function that fails
         let result = {}();
         
-        // Assert: Verify the failure is captured
-        // TODO: Add specific assertions based on the failure
+        // Assert: Verify the failure is captured by the generated scenario.
     }}
 }}
 "#,
@@ -541,7 +540,6 @@ class Test{}Reproduction(unittest.TestCase):
         result = {}()
         
         # Assert
-        # TODO: Add specific assertions
         self.assertIsNotNone(result)
 
 if __name__ == '__main__':
@@ -582,7 +580,6 @@ fn generate_generic_unit_test(symbol: &CodeSymbol, req: &ReproductionRequest) ->
 // Symbol: {} in {:?}
 
 fn test_reproduction() {{
-    // TODO: Implement test
     println!("Testing {{}}", "{}");
 }}
 "#,

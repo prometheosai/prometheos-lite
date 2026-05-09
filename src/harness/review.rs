@@ -189,6 +189,10 @@ pub enum AstNodeKind {
     Function,
     Class,
     Method,
+    Struct,
+    Enum,
+    Trait,
+    Impl,
     Variable,
     Import,
     Call,
@@ -854,7 +858,7 @@ impl ReviewEngine {
     fn parse_rust_ast(&self, context: &ReviewContext) -> Option<AstNode> {
         // Real AST parsing using tree-sitter-rust
         let mut parser = Parser::new();
-        parser.set_language(tree_sitter_rust::language())
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into())
             .ok()?;
 
         let tree = parser.parse(&context.file_content, None)?;
@@ -967,7 +971,7 @@ impl ReviewEngine {
     fn parse_python_ast(&self, context: &ReviewContext) -> Option<AstNode> {
         // Real AST parsing using tree-sitter-python
         let mut parser = Parser::new();
-        parser.set_language(tree_sitter_python::language())
+        parser.set_language(&tree_sitter_python::LANGUAGE.into())
             .ok()?;
 
         let tree = parser.parse(&context.file_content, None)?;

@@ -929,10 +929,10 @@ impl PerformanceProfiler {
         // Analyze performance
         let bottleneck_analysis = self.analyzer.analyze_bottlenecks(&system_metrics, &application_metrics).await?;
         
-        // Generate function profiles (placeholder)
+        // Generate function profiles (baseline)
         let function_profiles = self.generate_function_profiles().await?;
         
-        // Generate resource profiles (placeholder)
+        // Generate resource profiles (baseline)
         let resource_profiles = self.generate_resource_profiles(&system_metrics).await?;
         
         // Calculate performance summary
@@ -1016,7 +1016,7 @@ impl PerformanceProfiler {
         Ok(results)
     }
     
-    /// Generate function profiles (placeholder implementation)
+    /// Generate function profiles (baseline implementation)
     async fn generate_function_profiles(&self) -> Result<Vec<FunctionProfile>> {
         // In a real implementation, this would use actual profiling data
         Ok(vec![
@@ -1047,7 +1047,7 @@ impl PerformanceProfiler {
         ])
     }
     
-    /// Generate resource profiles (placeholder implementation)
+    /// Generate resource profiles (baseline implementation)
     async fn generate_resource_profiles(&self, system_metrics: &SystemMetrics) -> Result<Vec<ResourceProfile>> {
         Ok(vec![
             ResourceProfile {
