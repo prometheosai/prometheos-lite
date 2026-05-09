@@ -875,6 +875,33 @@ impl RuntimeToolRegistry {
 
     /// P1-Issue4: Get temporary tool usage statistics
     pub fn get_temporary_tool_stats(&self) -> HashMap<String, TemporaryToolStats> {
+        let mut stats = HashMap::new();
+        
+        for (tool_name, tool) in &self.tools {
+            let tool_stats = TemporaryToolStats {
+                total_proposed: tool.proposal_count,
+                total_approved: tool.approval_count,
+                total_rejected: tool.rejection_count,
+                total_expired: tool.expiration_count,
+                total_executions: tool.execution_count,
+                average_execution_time_ms: if tool.execution_count > 0 {
+                    tool.total_execution_time_ms / tool.execution_count
+                } else {
+                    0
+                },
+                success_rate: if tool.execution_count > 0 {
+                    tool.success_count as f64 / tool.execution_count as f64
+                } else {
+                    0.0
+                },
+            };
+            stats.insert(tool_name.clone(), tool_stats);
+        }
+        
+        stats
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TemporaryToolStats {
     pub total_proposed: u32,
