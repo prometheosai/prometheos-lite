@@ -1455,9 +1455,113 @@ impl ComparisonStrategy for IssueComparisonStrategy {
 
 impl IssueComparisonStrategy {
     fn extract_issues(&self, result: &crate::harness::validation::ValidationResult) -> Vec<crate::harness::validation_artifacts::ValidationIssue> {
-        // In a real implementation, this would extract issues from validation artifacts
-        // For now, return empty list
-        Vec::new()
+        let mut issues = Vec::new();
+        let mut sequence: u64 = 0;
+
+        for category_result in result.category_results.values() {
+            if !category_result.passed {
+                sequence += 1;
+                issues.push(crate::harness::validation_artifacts::ValidationIssue {
+                    id: format!(
+                        "category-{:?}-{}-{}",
+                        category_result.category, result.duration_ms, sequence
+                    ),
+                    severity: crate::harness::validation_artifacts::ValidationIssueSeverity::Error,
+                    category: format!("{:?}", category_result.category).to_lowercase(),
+                    file: None,
+                    line: None,
+                    column: None,
+                    message: format!(
+                        "Validation category {:?} failed",
+                        category_result.category
+                    ),
+                    code: Some("VALIDATION_CATEGORY_FAILED".to_string()),
+                    fix_suggestion: Some(
+                        "Inspect failed commands in this category and address reported errors."
+                            .to_string(),
+                    ),
+                    context: Some(format!(
+                        "category={:?} commands={}",
+                        category_result.category,
+                        category_result.commands.len()
+                    )),
+                    detected_by: "validation_diffing".to_string(),
+                    detected_at: chrono::Utc::now(),
+                });
+            }
+        }
+
+        for command_result in &result.command_results {
+            if command_result.exit_code.unwrap_or(1) != 0 || command_result.timed_out {
+                sequence += 1;
+                let severity = if command_result.timed_out {
+                    crate::harness::validation_artifacts::ValidationIssueSeverity::Error
+                } else {
+                    crate::harness::validation_artifacts::ValidationIssueSeverity::Warning
+                };
+                let code = if command_result.timed_out {
+                    "VALIDATION_COMMAND_TIMEOUT"
+                } else {
+                    "VALIDATION_COMMAND_FAILED"
+                };
+
+                let message = if command_result.timed_out {
+                    format!("Command timed out: {}", command_result.command)
+                } else {
+                    format!(
+                        "Command failed (exit {:?}): {}",
+                        command_result.exit_code, command_result.command
+                    )
+                };
+
+                let context = if command_result.stderr.trim().is_empty() {
+                    None
+                } else {
+                    Some(command_result.stderr.clone())
+                };
+
+                issues.push(crate::harness::validation_artifacts::ValidationIssue {
+                    id: format!("cmd-{}-{}", command_result.command, sequence),
+                    severity,
+                    category: "command".to_string(),
+                    file: None,
+                    line: None,
+                    column: None,
+                    message,
+                    code: Some(code.to_string()),
+                    fix_suggestion: Some(
+                        "Review command stderr/stdout and fix the underlying validation failure."
+                            .to_string(),
+                    ),
+                    context,
+                    detected_by: "validation_diffing".to_string(),
+                    detected_at: chrono::Utc::now(),
+                });
+            }
+        }
+
+        for error in &result.errors {
+            sequence += 1;
+            issues.push(crate::harness::validation_artifacts::ValidationIssue {
+                id: format!("validation-error-{}", sequence),
+                severity: crate::harness::validation_artifacts::ValidationIssueSeverity::Error,
+                category: "validation".to_string(),
+                file: None,
+                line: None,
+                column: None,
+                message: error.clone(),
+                code: Some("VALIDATION_ERROR".to_string()),
+                fix_suggestion: Some(
+                    "Investigate validation runtime/configuration error and retry validation."
+                        .to_string(),
+                ),
+                context: None,
+                detected_by: "validation_diffing".to_string(),
+                detected_at: chrono::Utc::now(),
+            });
+        }
+
+        issues
     }
     
     fn compare_issue_lists(
