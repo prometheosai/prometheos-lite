@@ -1658,11 +1658,13 @@ struct AccessPolicy {
 
 impl ProtectionProxyService {
     pub fn new(target: Arc<dyn Service>) -> Self {
+        let mut allowed_callers = HashSet::new();
+        allowed_callers.insert("system".to_string());
         Self {
             target,
             access_policy: AccessPolicy {
                 allow_admin_methods: false,
-                allowed_callers: HashSet::new(),
+                allowed_callers,
             },
         }
     }
@@ -1676,9 +1678,16 @@ impl ProtectionProxyService {
         if method_name.contains("admin") && !self.access_policy.allow_admin_methods {
             return Err(anyhow::anyhow!("Access denied: admin methods not allowed"));
         }
-        
-        // In a real implementation, this would check caller identity
-        // For now, allow all non-admin methods
+
+        // Enforce caller allowlist for all operations.
+        let caller_id = std::env::var("PROMETHEOS_CALLER_ID").unwrap_or_else(|_| "system".to_string());
+        if !self.access_policy.allowed_callers.contains(&caller_id) {
+            return Err(anyhow::anyhow!(
+                "Access denied: caller '{}' is not in allowed_callers policy",
+                caller_id
+            ));
+        }
+
         Ok(())
     }
 }
