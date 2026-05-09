@@ -63,7 +63,6 @@ fn extract_sandbox_evidence_from_log(evidence_log: &EvidenceLog) -> Vec<SandboxE
                 let runtime_kind = match runtime_kind_str.as_str() {
                     "Docker" => crate::harness::sandbox::SandboxRuntimeKind::Docker,
                     "Local" => crate::harness::sandbox::SandboxRuntimeKind::Local,
-                    "Mock" => crate::harness::sandbox::SandboxRuntimeKind::Mock,
                     _ => crate::harness::sandbox::SandboxRuntimeKind::Local,
                 };
                 
@@ -231,9 +230,9 @@ impl HarnessExecutionRequest {
                 anyhow::anyhow!("Failed to load provider config: {}", e)
             })?;
             
-            let registry = crate::harness::patch_provider::ProviderRegistry::from_config(&config)
+            let registry = crate::harness::patch_provider::ProviderRegistry::from_config_with_mode(&config, self.mode)
                 .map_err(|e| {
-                    anyhow::anyhow!("Failed to create provider registry from config: {}", e)
+                    anyhow::anyhow!("Failed to create provider registry for mode {:?}: {}", self.mode, e)
                 })?;
             
             // Store the registry's aggregate provider

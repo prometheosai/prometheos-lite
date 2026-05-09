@@ -31,6 +31,10 @@ pub struct SandboxEvidence {
     pub no_new_privileges: bool,
     pub capabilities_dropped: bool,
     pub seccomp_enabled: bool,
+    // P0-Audit-005: Additional hardening evidence fields
+    pub pids_limit: Option<u32>,
+    pub non_root_user: bool,
+    pub tmpfs_protected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
