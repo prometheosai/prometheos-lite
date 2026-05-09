@@ -2,15 +2,14 @@
 
 use anyhow::Context;
 use std::sync::Arc;
-use tracing;
 
 use prometheos_lite::{
     config::AppConfig,
     flow::intelligence::OpenAiProvider,
     flow::{
         memory::embedding::OpenRouterEmbeddingProvider,
-        EmbeddingProvider, LocalEmbeddingProvider, MemoryDb, MemoryService, ModelRouter,
-        RuntimeContext, ToolRuntime, ToolSandboxProfile,
+        EmbeddingProvider, MemoryDb, MemoryService, ModelRouter, RuntimeContext, ToolRuntime,
+        ToolSandboxProfile,
     },
     llm::LlmClient,
 };
@@ -21,6 +20,7 @@ pub struct RuntimeBuilder {
 }
 
 impl RuntimeBuilder {
+
     /// Create a new RuntimeBuilder from loaded config
     pub fn new(config: AppConfig) -> Self {
         Self { config }
@@ -55,7 +55,7 @@ impl RuntimeBuilder {
             openrouter_api_key,
             self.config.embedding_dimension,
         ));
-        
+
         let persistent_db =
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
                 .context("Failed to create memory database")?;
@@ -106,24 +106,20 @@ impl RuntimeBuilder {
         Arc::new(ToolRuntime::new(ToolSandboxProfile::new()))
     }
 
-    /// Build the memory service
+    /// Build memory service with OpenRouter embedding provider
     pub fn build_memory_service(&self) -> anyhow::Result<Arc<MemoryService>> {
-        let embedding: Box<dyn EmbeddingProvider> = Box::new(LocalEmbeddingProvider::new(
-            self.config.embedding_url.clone(),
+        let openrouter_api_key = std::env::var("OPENROUTER_API_KEY")
+            .context("OPENROUTER_API_KEY environment variable not set")?;
+        
+        let embedding: Box<dyn EmbeddingProvider> = Box::new(OpenRouterEmbeddingProvider::new(
+            openrouter_api_key,
             self.config.embedding_dimension,
         ));
+        
         let persistent_db =
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
                 .context("Failed to create memory database")?;
         Ok(Arc::new(MemoryService::new(persistent_db, embedding)))
-    }
-
-    /// Build the embedding provider
-    pub fn build_embedding_provider(&self) -> Arc<dyn EmbeddingProvider> {
-        Arc::new(LocalEmbeddingProvider::new(
-            self.config.embedding_url.clone(),
-            self.config.embedding_dimension,
-        ))
     }
 
     /// Get the config
