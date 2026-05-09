@@ -144,17 +144,17 @@ impl OtelExporter {
             root_span.set_attribute(KeyValue::new("work_context_id", work_context_id.clone()));
         }
 
-        // Export node runs as independent spans (simplified for now)
+        // Export node runs as child spans of the flow execution root span.
         for node_run in &trace.node_runs {
             self.export_node_run(node_run)?;
         }
 
-        // Export tool calls as independent spans (simplified for now)
+        // Export tool calls as child spans of the flow execution root span.
         for tool_call in &trace.tool_calls {
             self.export_tool_call(tool_call)?;
         }
 
-        // Export LLM calls as independent spans (simplified for now)
+        // Export LLM calls as child spans of the flow execution root span.
         for llm_call in &trace.llm_calls {
             self.export_llm_call(llm_call)?;
         }

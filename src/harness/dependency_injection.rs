@@ -605,7 +605,7 @@ impl IoCContainer {
     
     /// Resolve scoped service
     async fn resolve_scoped(&self, service_type: &str, registration: &ServiceRegistration) -> Result<Arc<dyn Service>> {
-        // Get current scope (for now, use global scope)
+        // Use the global scope by default until request-scoped context is provided.
         let scope_id = "global".to_string();
         
         // Check if instance exists in scope

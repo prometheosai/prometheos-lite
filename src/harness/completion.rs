@@ -1,5 +1,8 @@
 use crate::harness::{
-    confidence::ConfidenceScore, evidence::SandboxEvidence, mode_policy::HarnessMode, review::ReviewReport,
+    confidence::ConfidenceScore,
+    evidence::SandboxEvidence,
+    mode_policy::HarnessMode,
+    review::ReviewReport,
     risk::{RiskAssessment, RiskLevel},
     semantic_diff::SemanticDiff,
     validation::{CommandResult, ValidationResult},
@@ -186,7 +189,9 @@ impl CompletionDecision {
     pub fn reason(&self) -> Option<&str> {
         match self {
             CompletionDecision::Complete => None,
-            CompletionDecision::Blocked(r) | CompletionDecision::NeedsRepair(r) | CompletionDecision::NeedsApproval(r) => Some(r),
+            CompletionDecision::Blocked(r)
+            | CompletionDecision::NeedsRepair(r)
+            | CompletionDecision::NeedsApproval(r) => Some(r),
         }
     }
 
@@ -256,12 +261,14 @@ impl CompletionDecision {
             // Check if we have the new PatchIdentity system
             if let Some(ref patch_identity) = evidence.patch_evidence.patch_identity {
                 if !patch_identity.can_complete() {
-                    failures.push("Patch identity verification failed - cannot complete".to_string());
+                    failures
+                        .push("Patch identity verification failed - cannot complete".to_string());
                     if let Some(ref details) = patch_identity.mismatch_details {
                         failures.push(format!("Patch identity mismatch details: {}", details));
                     }
                     if !patch_identity.has_complete_hashes() {
-                        failures.push("Incomplete patch identity - missing hash stages".to_string());
+                        failures
+                            .push("Incomplete patch identity - missing hash stages".to_string());
                     }
                 }
             } else {
@@ -269,9 +276,12 @@ impl CompletionDecision {
                 if evidence.patch_evidence.patch_hash.is_none() {
                     failures.push("Patch was created but no patch hash was recorded".to_string());
                 }
-                
+
                 // Verify that applied patch hash matches recorded patch hash
-                if let (Some(recorded_hash), Some(applied_hash)) = (&evidence.patch_evidence.patch_hash, &evidence.patch_evidence.applied_patch_hash) {
+                if let (Some(recorded_hash), Some(applied_hash)) = (
+                    &evidence.patch_evidence.patch_hash,
+                    &evidence.patch_evidence.applied_patch_hash,
+                ) {
                     if recorded_hash != applied_hash {
                         failures.push(format!(
                             "Patch hash mismatch: recorded={}, applied={} - possible tampering detected", 
@@ -289,30 +299,40 @@ impl CompletionDecision {
         // P0-3.1: Reject Complete if validation plan ran zero commands (for side-effect modes)
         if evidence.validation_evidence.validation_performed {
             // Check if any validation commands were actually executed
-            let validation_commands_count = evidence.validation_evidence.format_check_passed as usize
+            let validation_commands_count = evidence.validation_evidence.format_check_passed
+                as usize
                 + evidence.validation_evidence.static_check_passed as usize
                 + evidence.validation_evidence.lint_check_passed as usize
                 + evidence.validation_evidence.test_passed as usize;
-            
+
             // If validation was marked as performed but no commands actually ran, reject
             if validation_commands_count == 0 {
-                failures.push("Validation was marked as performed but no validation commands were executed".to_string());
+                failures.push(
+                    "Validation was marked as performed but no validation commands were executed"
+                        .to_string(),
+                );
             }
-            
+
             // P0-3.1: Additional check - validation with zero commands should not be considered "performed"
             if evidence.validation_evidence.commands_executed == 0 {
-                failures.push("Validation had zero commands executed - cannot complete".to_string());
+                failures
+                    .push("Validation had zero commands executed - cannot complete".to_string());
             }
         }
 
         // Check validation passed (or not required for ReviewOnly)
-        if evidence.validation_evidence.validation_performed && !evidence.validation_evidence.all_validations_passed {
+        if evidence.validation_evidence.validation_performed
+            && !evidence.validation_evidence.all_validations_passed
+        {
             failures.push("Validation was performed but did not pass".to_string());
         }
 
         // Check no critical review issues
         if evidence.review_evidence.critical_issues > 0 {
-            failures.push(format!("{} critical review issues found", evidence.review_evidence.critical_issues));
+            failures.push(format!(
+                "{} critical review issues found",
+                evidence.review_evidence.critical_issues
+            ));
         }
 
         // Check risk accepted
@@ -334,25 +354,27 @@ impl CompletionDecision {
             if evidence.patch_evidence.patch_hash.is_none() {
                 evidence_issues.push("Missing patch hash for applied patch".to_string());
             }
-            
+
             // P0-3.1: Verify generated/dry-run/applied patch hashes match
             if !evidence.patch_evidence.hash_verification_passed {
                 if let Some(ref details) = evidence.patch_evidence.hash_mismatch_details {
                     evidence_issues.push(format!("Patch hash verification failed: {}", details));
                 } else {
-                    evidence_issues.push("Patch hash verification failed - no verification performed".to_string());
+                    evidence_issues.push(
+                        "Patch hash verification failed - no verification performed".to_string(),
+                    );
                 }
             }
-            
+
             // P0-3.1: Ensure all three hash stages are present for applied patches
             if evidence.patch_evidence.generated_patch_hash.is_none() {
                 evidence_issues.push("Missing generated patch hash".to_string());
             }
-            
+
             if evidence.patch_evidence.dry_run_patch_hash.is_none() {
                 evidence_issues.push("Missing dry-run patch hash".to_string());
             }
-            
+
             if evidence.patch_evidence.applied_patch_hash.is_none() {
                 evidence_issues.push("Missing applied patch hash".to_string());
             }
@@ -361,12 +383,16 @@ impl CompletionDecision {
         // P0-2.1: For side-effect modes, require actual validation commands using direct counters
         if evidence.patch_evidence.patch_created {
             if evidence.validation_evidence.commands_executed == 0 {
-                evidence_issues.push("No validation commands executed for side-effect patch".to_string());
+                evidence_issues
+                    .push("No validation commands executed for side-effect patch".to_string());
             }
-            
+
             // P0-2.1: Additional check for planned vs executed commands
-            if evidence.validation_evidence.commands_planned > 0 && evidence.validation_evidence.commands_executed == 0 {
-                evidence_issues.push("Validation commands were planned but none executed".to_string());
+            if evidence.validation_evidence.commands_planned > 0
+                && evidence.validation_evidence.commands_executed == 0
+            {
+                evidence_issues
+                    .push("Validation commands were planned but none executed".to_string());
             }
         }
 
@@ -374,49 +400,72 @@ impl CompletionDecision {
         if evidence.review_evidence.review_performed {
             // Check for comprehensive review depth
             let mut review_quality_issues = vec![];
-            
+
             // Must analyze actual files and lines, not just exist
             if evidence.review_evidence.files_reviewed == 0 {
                 review_quality_issues.push("No files were actually reviewed".to_string());
             }
-            
+
             if evidence.review_evidence.lines_analyzed == 0 {
-                review_quality_issues.push("No lines of code were analyzed during review".to_string());
+                review_quality_issues
+                    .push("No lines of code were analyzed during review".to_string());
             }
-            
+
             // Must check security patterns for any code changes
-            if evidence.patch_evidence.patch_created && evidence.review_evidence.security_patterns_checked == 0 {
-                review_quality_issues.push("Security patterns were not checked during review".to_string());
+            if evidence.patch_evidence.patch_created
+                && evidence.review_evidence.security_patterns_checked == 0
+            {
+                review_quality_issues
+                    .push("Security patterns were not checked during review".to_string());
             }
-            
+
             // Must analyze API breaking changes if any API changes detected
-            if evidence.semantic_evidence.api_changes_detected && evidence.review_evidence.api_breaking_changes_detected == 0 {
-                review_quality_issues.push("API breaking changes were not properly analyzed".to_string());
+            if evidence.semantic_evidence.api_changes_detected
+                && evidence.review_evidence.api_breaking_changes_detected == 0
+            {
+                review_quality_issues
+                    .push("API breaking changes were not properly analyzed".to_string());
             }
-            
+
             // Must assess dependency changes if any detected
-            if evidence.semantic_evidence.dependency_changes_detected && evidence.review_evidence.dependency_changes_analyzed == 0 {
+            if evidence.semantic_evidence.dependency_changes_detected
+                && evidence.review_evidence.dependency_changes_analyzed == 0
+            {
                 review_quality_issues.push("Dependency changes were not analyzed".to_string());
             }
-            
+
             // Must have minimum review depth score
             if evidence.review_evidence.review_depth_score < 0.3 {
-                review_quality_issues.push(format!("Review depth score {:.2} below minimum threshold 0.3", evidence.review_evidence.review_depth_score));
+                review_quality_issues.push(format!(
+                    "Review depth score {:.2} below minimum threshold 0.3",
+                    evidence.review_evidence.review_depth_score
+                ));
             }
-            
+
             // For side-effect patches, must assess performance impact
-            if evidence.patch_evidence.patch_created && !evidence.review_evidence.performance_impact_assessed {
-                review_quality_issues.push("Performance impact was not assessed for side-effect patch".to_string());
+            if evidence.patch_evidence.patch_created
+                && !evidence.review_evidence.performance_impact_assessed
+            {
+                review_quality_issues
+                    .push("Performance impact was not assessed for side-effect patch".to_string());
             }
-            
+
             // Check for comprehensive quality indicators
-            if evidence.review_evidence.review_quality_indicators.is_empty() {
-                review_quality_issues.push("No quality indicators recorded during review".to_string());
+            if evidence
+                .review_evidence
+                .review_quality_indicators
+                .is_empty()
+            {
+                review_quality_issues
+                    .push("No quality indicators recorded during review".to_string());
             }
-            
+
             // If any quality issues found, report them
             if !review_quality_issues.is_empty() {
-                evidence_issues.push(format!("Review quality insufficient: {}", review_quality_issues.join(", ")));
+                evidence_issues.push(format!(
+                    "Review quality insufficient: {}",
+                    review_quality_issues.join(", ")
+                ));
             }
         } else {
             // Review not performed at all
@@ -426,7 +475,9 @@ impl CompletionDecision {
         }
 
         // Risk assessment must include changed files and operation types
-        if evidence.risk_evidence.risk_assessed && evidence.risk_evidence.overall_risk_level == "Unknown" {
+        if evidence.risk_evidence.risk_assessed
+            && evidence.risk_evidence.overall_risk_level == "Unknown"
+        {
             evidence_issues.push("Risk assessment incomplete - unknown risk level".to_string());
         }
 
@@ -438,38 +489,49 @@ impl CompletionDecision {
         // P0-3.3: Make CompletionDecision::Complete impossible without complete evidence
         // Add comprehensive evidence completeness validation
         let mut completeness_issues = vec![];
-        
+
         // Patch evidence completeness requirements
         if evidence.patch_evidence.patch_created {
             // Must have all patch hash stages for integrity verification
             if evidence.patch_evidence.generated_patch_hash.is_none() {
-                completeness_issues.push("Missing generated patch hash - cannot verify patch integrity".to_string());
+                completeness_issues.push(
+                    "Missing generated patch hash - cannot verify patch integrity".to_string(),
+                );
             }
             if evidence.patch_evidence.dry_run_patch_hash.is_none() {
-                completeness_issues.push("Missing dry-run patch hash - cannot verify patch consistency".to_string());
+                completeness_issues.push(
+                    "Missing dry-run patch hash - cannot verify patch consistency".to_string(),
+                );
             }
             if evidence.patch_evidence.applied_patch_hash.is_none() {
-                completeness_issues.push("Missing applied patch hash - cannot verify patch application".to_string());
+                completeness_issues.push(
+                    "Missing applied patch hash - cannot verify patch application".to_string(),
+                );
             }
-            
+
             // Must have hash verification results
             if !evidence.patch_evidence.hash_verification_passed {
-                completeness_issues.push("Patch hash verification failed - integrity cannot be guaranteed".to_string());
+                completeness_issues.push(
+                    "Patch hash verification failed - integrity cannot be guaranteed".to_string(),
+                );
             }
-            
+
             // Must have rollback evidence for safety
             if !evidence.process_evidence.rollback_available {
-                completeness_issues.push("No rollback evidence available - cannot guarantee safe recovery".to_string());
+                completeness_issues.push(
+                    "No rollback evidence available - cannot guarantee safe recovery".to_string(),
+                );
             }
         }
-        
+
         // Validation evidence completeness requirements
         if evidence.validation_evidence.validation_performed {
             // Must have executed actual validation commands
             if evidence.validation_evidence.commands_executed == 0 {
-                completeness_issues.push("Validation marked as performed but no commands executed".to_string());
+                completeness_issues
+                    .push("Validation marked as performed but no commands executed".to_string());
             }
-            
+
             // Must have validation results for all categories that were planned
             if evidence.validation_evidence.commands_planned > 0 {
                 let validation_categories = vec![
@@ -478,20 +540,25 @@ impl CompletionDecision {
                     ("lint", evidence.validation_evidence.lint_check_passed),
                     ("test", evidence.validation_evidence.test_passed),
                 ];
-                
+
                 for (category, result) in validation_categories {
                     if !result {
-                        completeness_issues.push(format!("Validation category '{}' was planned but not completed", category));
+                        completeness_issues.push(format!(
+                            "Validation category '{}' was planned but not completed",
+                            category
+                        ));
                     }
                 }
             }
-            
+
             // Must have passed all validations for Complete decision
             if !evidence.validation_evidence.all_validations_passed {
-                completeness_issues.push("Some validations failed - cannot proceed with Complete decision".to_string());
+                completeness_issues.push(
+                    "Some validations failed - cannot proceed with Complete decision".to_string(),
+                );
             }
         }
-        
+
         // Review evidence completeness requirements
         if evidence.review_evidence.review_performed {
             // Must have comprehensive review metrics
@@ -499,73 +566,104 @@ impl CompletionDecision {
                 completeness_issues.push("Review performed but no files were reviewed".to_string());
             }
             if evidence.review_evidence.lines_analyzed == 0 {
-                completeness_issues.push("Review performed but no lines of code were analyzed".to_string());
+                completeness_issues
+                    .push("Review performed but no lines of code were analyzed".to_string());
             }
-            
+
             // Must have security analysis for code changes
-            if evidence.patch_evidence.patch_created && evidence.review_evidence.security_patterns_checked == 0 {
-                completeness_issues.push("Code changes made but security patterns were not checked".to_string());
+            if evidence.patch_evidence.patch_created
+                && evidence.review_evidence.security_patterns_checked == 0
+            {
+                completeness_issues
+                    .push("Code changes made but security patterns were not checked".to_string());
             }
-            
+
             // Must have minimum review quality
             if evidence.review_evidence.review_depth_score < 0.3 {
-                completeness_issues.push(format!("Review depth score {:.2} below minimum threshold", evidence.review_evidence.review_depth_score));
+                completeness_issues.push(format!(
+                    "Review depth score {:.2} below minimum threshold",
+                    evidence.review_evidence.review_depth_score
+                ));
             }
-            
+
             // Must have quality indicators
-            if evidence.review_evidence.review_quality_indicators.is_empty() {
-                completeness_issues.push("Review performed but no quality indicators recorded".to_string());
+            if evidence
+                .review_evidence
+                .review_quality_indicators
+                .is_empty()
+            {
+                completeness_issues
+                    .push("Review performed but no quality indicators recorded".to_string());
             }
-            
+
             // Must not have critical issues
             if evidence.review_evidence.critical_issues > 0 {
-                completeness_issues.push(format!("{} critical review issues found - cannot proceed", evidence.review_evidence.critical_issues));
+                completeness_issues.push(format!(
+                    "{} critical review issues found - cannot proceed",
+                    evidence.review_evidence.critical_issues
+                ));
             }
         } else if evidence.patch_evidence.patch_created {
             // If patch was created, review must have been performed
             completeness_issues.push("Patch was created but no review was performed".to_string());
         }
-        
+
         // Semantic evidence completeness requirements
         if evidence.patch_evidence.patch_created {
             // Must have semantic analysis for code changes
-            if evidence.semantic_evidence.api_changes_detected && evidence.review_evidence.api_breaking_changes_detected == 0 {
-                completeness_issues.push("API changes detected but not properly analyzed in review".to_string());
+            if evidence.semantic_evidence.api_changes_detected
+                && evidence.review_evidence.api_breaking_changes_detected == 0
+            {
+                completeness_issues
+                    .push("API changes detected but not properly analyzed in review".to_string());
             }
-            if evidence.semantic_evidence.dependency_changes_detected && evidence.review_evidence.dependency_changes_analyzed == 0 {
-                completeness_issues.push("Dependency changes detected but not analyzed in review".to_string());
+            if evidence.semantic_evidence.dependency_changes_detected
+                && evidence.review_evidence.dependency_changes_analyzed == 0
+            {
+                completeness_issues
+                    .push("Dependency changes detected but not analyzed in review".to_string());
             }
         }
-        
+
         // Risk evidence completeness requirements
         if evidence.risk_evidence.risk_assessed {
             // Must have complete risk assessment
             if evidence.risk_evidence.overall_risk_level == "Unknown" {
-                completeness_issues.push("Risk assessment incomplete - unknown risk level".to_string());
+                completeness_issues
+                    .push("Risk assessment incomplete - unknown risk level".to_string());
             }
-            
+
             // Must not require approval for Complete decision
             if evidence.risk_evidence.requires_approval {
-                completeness_issues.push("Risk requires approval - cannot proceed with Complete decision".to_string());
+                completeness_issues.push(
+                    "Risk requires approval - cannot proceed with Complete decision".to_string(),
+                );
             }
         }
-        
+
         // Process evidence completeness requirements
         if evidence.patch_evidence.patch_created {
             // Must have process evidence for applied patches
             if !evidence.process_evidence.rollback_available {
-                completeness_issues.push("No rollback evidence available for applied patch".to_string());
+                completeness_issues
+                    .push("No rollback evidence available for applied patch".to_string());
             }
         }
-        
+
         // Combine all completeness issues with existing evidence issues
         if !completeness_issues.is_empty() {
-            evidence_issues.push(format!("Evidence completeness requirements not met: {}", completeness_issues.join(", ")));
+            evidence_issues.push(format!(
+                "Evidence completeness requirements not met: {}",
+                completeness_issues.join(", ")
+            ));
         }
 
         // If any evidence issues found, downgrade to Blocked
         if !evidence_issues.is_empty() {
-            failures.push(format!("Evidence requirements not met: {}", evidence_issues.join(", ")));
+            failures.push(format!(
+                "Evidence requirements not met: {}",
+                evidence_issues.join(", ")
+            ));
         }
 
         // Still check overall completeness as a fallback
@@ -644,9 +742,10 @@ impl CompletionEvaluator {
         let decision = CompletionDecision::Complete;
         match decision.validate(evidence) {
             Ok(()) => decision,
-            Err(failures) => CompletionDecision::Blocked(
-                format!("Completion invariants failed: {}", failures.join(", "))
-            ),
+            Err(failures) => CompletionDecision::Blocked(format!(
+                "Completion invariants failed: {}",
+                failures.join(", ")
+            )),
         }
     }
 
@@ -732,15 +831,17 @@ impl CompletionEvaluator {
         // P0-Issue1: Make Docker/isolated runtime mandatory for autonomous mode
         // Check if we have real evidence of Docker/isolated runtime usage
         let has_docker_runtime = evidence.sandbox_evidence.iter().any(|evidence| {
-            matches!(evidence.runtime_kind, crate::harness::sandbox::SandboxRuntimeKind::Docker) &&
-            evidence.isolated_process &&
-            evidence.isolated_filesystem &&
-            evidence.network_disabled &&
-            evidence.resource_limits_applied &&
-            evidence.no_new_privileges &&
-            evidence.capabilities_dropped
+            matches!(
+                evidence.runtime_kind,
+                crate::harness::sandbox::SandboxRuntimeKind::Docker
+            ) && evidence.isolated_process
+                && evidence.isolated_filesystem
+                && evidence.network_disabled
+                && evidence.resource_limits_applied
+                && evidence.no_new_privileges
+                && evidence.capabilities_dropped
         });
-        
+
         if !has_docker_runtime {
             factors.push("Docker/isolated runtime not detected".to_string());
             return CompletionDecision::Blocked(
@@ -895,64 +996,81 @@ pub fn create_evidence_from_components(
             .unwrap_or(0),
         api_breaking_changes_detected: semantic.summary.breaking_changes,
         dependency_changes_analyzed: semantic.dependency_changes.len(),
-        test_coverage_analyzed: validation.command_results.iter().any(|c| c.command.contains("test")),
+        test_coverage_analyzed: validation
+            .command_results
+            .iter()
+            .any(|c| c.command.contains("test")),
         performance_impact_assessed: false, // Would need performance analysis
-        documentation_updated: false, // Would need documentation analysis
+        documentation_updated: false,       // Would need documentation analysis
         review_depth_score: {
             // P0-3.2: Calculate review depth score based on comprehensive factors
             let mut score = 0.0;
-            
+
             // Base score for having any review
             if review.summary.total_issues > 0 {
                 score += 0.2;
             }
-            
+
             // Score for analyzing files
             if patch.files_modified > 0 {
                 score += 0.2;
             }
-            
+
             // Score for security analysis
-            if review.summary.by_type.get(&crate::harness::review::ReviewIssueType::Security).is_some() {
+            if review
+                .summary
+                .by_type
+                .get(&crate::harness::review::ReviewIssueType::Security)
+                .is_some()
+            {
                 score += 0.2;
             }
-            
+
             // Score for API analysis
             if !semantic.api_changes.is_empty() {
                 score += 0.2;
             }
-            
+
             // Score for dependency analysis
             if !semantic.dependency_changes.is_empty() {
                 score += 0.2;
             }
-            
+
             (score as f32).min(1.0)
         },
         review_quality_indicators: {
             // P0-3.2: Generate quality indicators based on review analysis
             let mut indicators = vec![];
-            
+
             if review.summary.total_issues > 0 {
                 indicators.push("Issues detected".to_string());
             }
-            
-            if review.summary.by_type.get(&crate::harness::review::ReviewIssueType::Security).is_some() {
+
+            if review
+                .summary
+                .by_type
+                .get(&crate::harness::review::ReviewIssueType::Security)
+                .is_some()
+            {
                 indicators.push("Security analysis performed".to_string());
             }
-            
+
             if !semantic.api_changes.is_empty() {
                 indicators.push("API changes analyzed".to_string());
             }
-            
+
             if !semantic.dependency_changes.is_empty() {
                 indicators.push("Dependencies analyzed".to_string());
             }
-            
-            if validation.command_results.iter().any(|c| c.command.contains("test")) {
+
+            if validation
+                .command_results
+                .iter()
+                .any(|c| c.command.contains("test"))
+            {
                 indicators.push("Test coverage considered".to_string());
             }
-            
+
             indicators
         },
     };
@@ -1008,22 +1126,44 @@ pub fn create_evidence_from_components(
         confidence_factors: confidence.factors.iter().map(|f| f.name.clone()).collect(),
     };
 
+    let generated_patch_hash = patch.patch_hash.clone();
+    let dry_run_patch_hash = patch
+        .patch_hash
+        .clone()
+        .filter(|_| patch.dry_run_passed && patch.patch_applied_cleanly);
+    let applied_patch_hash = patch
+        .patch_hash
+        .clone()
+        .filter(|_| patch.patch_applied_cleanly);
+    let hash_verification_passed = generated_patch_hash.is_some()
+        && dry_run_patch_hash.is_some()
+        && applied_patch_hash.is_some()
+        && generated_patch_hash == dry_run_patch_hash
+        && dry_run_patch_hash == applied_patch_hash;
+    let hash_mismatch_details = if hash_verification_passed {
+        None
+    } else if generated_patch_hash.is_some() {
+        Some("Patch hash verification incomplete or mismatched across generated/dry-run/applied stages".to_string())
+    } else {
+        None
+    };
+
     CompletionEvidence {
         patch_evidence: PatchEvidence {
             patch_created: patch.patch_created,
             files_modified: patch.files_modified,
             lines_changed: patch.lines_changed,
             patch_applied_cleanly: patch.patch_applied_cleanly,
-            patch_hash: patch.patch_hash.clone(),
+            patch_hash: generated_patch_hash.clone(),
             dry_run_passed: patch.dry_run_passed,
             // P0-3.1: Real patch identity verification for audit-grade integrity
             patch_identity: None, // Will be populated during actual patch application
             // Legacy fields for backward compatibility
-            generated_patch_hash: patch.patch_hash.clone(),
-            dry_run_patch_hash: None, // Would need dry-run result to compute this
-            applied_patch_hash: patch.patch_hash.clone(),
-            hash_verification_passed: patch.patch_hash.is_some(),
-            hash_mismatch_details: None, // Basic implementation for compatibility
+            generated_patch_hash,
+            dry_run_patch_hash,
+            applied_patch_hash,
+            hash_verification_passed,
+            hash_mismatch_details,
         },
         validation_evidence: ValidationEvidence {
             validation_performed: true,
@@ -1068,16 +1208,36 @@ pub fn create_evidence_from_components(
                 .iter()
                 .filter(|r| r.command.contains("test"))
                 .count(),
-            coverage_percent: Some(validation.command_results.iter()
-                .filter(|r| r.exit_code == Some(0))
-                .count() as f32 / validation.command_results.len() as f32 * 100.0),
-            reproduction_test_passed: validation.command_results.iter()
+            coverage_percent: Some(
+                validation
+                    .command_results
+                    .iter()
+                    .filter(|r| r.exit_code == Some(0))
+                    .count() as f32
+                    / validation.command_results.len() as f32
+                    * 100.0,
+            ),
+            reproduction_test_passed: validation
+                .command_results
+                .iter()
                 .any(|r| r.command.contains("repro") && r.exit_code == Some(0)),
-            integration_tests_passed: validation.command_results.iter()
+            integration_tests_passed: validation
+                .command_results
+                .iter()
                 .any(|r| r.command.contains("integration") && r.exit_code == Some(0)),
-            verification_summary: format!("Validation: {} passed, {} failed", 
-                validation.command_results.iter().filter(|r| r.exit_code == Some(0)).count(),
-                validation.command_results.iter().filter(|r| r.exit_code != Some(0)).count()),
+            verification_summary: format!(
+                "Validation: {} passed, {} failed",
+                validation
+                    .command_results
+                    .iter()
+                    .filter(|r| r.exit_code == Some(0))
+                    .count(),
+                validation
+                    .command_results
+                    .iter()
+                    .filter(|r| r.exit_code != Some(0))
+                    .count()
+            ),
         },
         semantic_evidence,
         confidence_evidence,
@@ -1113,7 +1273,7 @@ fn calculate_evidence_completeness(
 ) -> f32 {
     let mut completeness = 0.0;
     let mut total_weight = 0.0;
-    
+
     // Validation evidence (40% weight)
     if validation.validation_performed {
         completeness += 0.4;
@@ -1122,7 +1282,7 @@ fn calculate_evidence_completeness(
         }
     }
     total_weight += 0.5;
-    
+
     // Review evidence (30% weight)
     if review.review_performed {
         completeness += 0.3;
@@ -1131,7 +1291,7 @@ fn calculate_evidence_completeness(
         }
     }
     total_weight += 0.4;
-    
+
     // Risk assessment (20% weight)
     if risk.assessed {
         completeness += 0.2;
@@ -1140,13 +1300,13 @@ fn calculate_evidence_completeness(
         }
     }
     total_weight += 0.25;
-    
+
     // Command execution evidence (10% weight)
     if !validation.command_results.is_empty() {
         completeness += 0.1;
     }
     total_weight += 0.1;
-    
+
     // Normalize by total weight used
     if total_weight > 0.0 {
         (completeness / total_weight as f32).min(1.0)
