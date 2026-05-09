@@ -2,6 +2,11 @@ use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
+use tree_sitter_rust;
+use tree_sitter_python;
+use tree_sitter_javascript;
+use tree_sitter_typescript;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewIssue {
@@ -837,8 +842,7 @@ impl ReviewEngine {
     }
 
     fn parse_ast(&self, context: &ReviewContext) -> Option<AstNode> {
-        // Simplified AST parsing based on language
-        // In a full implementation, this would use tree-sitter or similar
+        // Real AST parsing using tree-sitter
         match context.language {
             Language::Rust => self.parse_rust_ast(context),
             Language::Python => self.parse_python_ast(context),
@@ -848,7 +852,12 @@ impl ReviewEngine {
     }
 
     fn parse_rust_ast(&self, context: &ReviewContext) -> Option<AstNode> {
-        // Simplified: extract function signatures and structures
+        // Real AST parsing using tree-sitter-rust
+        let mut parser = Parser::new();
+        parser.set_language(tree_sitter_rust::language())
+            .ok()?;
+
+        let tree = parser.parse(&context.file_content, None)?;
         let mut root = AstNode {
             kind: AstNodeKind::Unknown,
             name: None,
@@ -857,20 +866,98 @@ impl ReviewEngine {
             children: vec![],
         };
 
-        let fn_pattern = Regex::new(r"(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)").ok()?;
-        for cap in fn_pattern.captures_iter(&context.file_content) {
-            if let Some(name) = cap.get(1) {
-                let line = context.file_content[..cap.get(0).unwrap().start()]
-                    .lines()
-                    .count()
-                    + 1;
-                root.children.push(AstNode {
-                    kind: AstNodeKind::Function,
-                    name: Some(name.as_str().to_string()),
-                    line_start: line,
-                    line_end: line,
-                    children: vec![],
-                });
+        let mut cursor = tree.walk();
+        let root_node = tree.root_node();
+
+        // Extract functions, structs, enums, traits, impls
+        for node in root_node.children(&mut cursor) {
+            match node.kind() {
+                "function_item" => {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Function,
+                            name: Some(name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                "struct_item" => {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Struct,
+                            name: Some(name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                "enum_item" => {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Enum,
+                            name: Some(name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                "trait_item" => {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Trait,
+                            name: Some(name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                "impl_item" => {
+                    if let Some(type_node) = node.child_by_field_name("type") {
+                        let type_name = type_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Impl,
+                            name: Some(type_name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -878,6 +965,12 @@ impl ReviewEngine {
     }
 
     fn parse_python_ast(&self, context: &ReviewContext) -> Option<AstNode> {
+        // Real AST parsing using tree-sitter-python
+        let mut parser = Parser::new();
+        parser.set_language(tree_sitter_python::language())
+            .ok()?;
+
+        let tree = parser.parse(&context.file_content, None)?;
         let mut root = AstNode {
             kind: AstNodeKind::Unknown,
             name: None,
@@ -886,20 +979,47 @@ impl ReviewEngine {
             children: vec![],
         };
 
-        let def_pattern = Regex::new(r"(?m)^\s*def\s+(\w+)").ok()?;
-        for cap in def_pattern.captures_iter(&context.file_content) {
-            if let Some(name) = cap.get(1) {
-                let line = context.file_content[..cap.get(0).unwrap().start()]
-                    .lines()
-                    .count()
-                    + 1;
-                root.children.push(AstNode {
-                    kind: AstNodeKind::Function,
-                    name: Some(name.as_str().to_string()),
-                    line_start: line,
-                    line_end: line,
-                    children: vec![],
-                });
+        let mut cursor = tree.walk();
+        let root_node = tree.root_node();
+
+        // Extract functions, classes, imports
+        for node in root_node.children(&mut cursor) {
+            match node.kind() {
+                "function_definition" => {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Function,
+                            name: Some(name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                "class_definition" => {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let line_start = node.start_position().row + 1;
+                        let line_end = node.end_position().row + 1;
+                        
+                        root.children.push(AstNode {
+                            kind: AstNodeKind::Class,
+                            name: Some(name),
+                            line_start,
+                            line_end,
+                            children: vec![],
+                        });
+                    }
+                }
+                _ => {}
             }
         }
 

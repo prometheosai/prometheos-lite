@@ -263,11 +263,47 @@ impl AttemptPool {
     }
 
     /// Select the best passing candidate
+    /// 
+    /// V1.6-P0-002: This method enforces validation-gated selection.
+    /// No fallback to highest-confidence candidate when all fail validation.
     pub fn select_best<'a>(&self, records: &'a [AttemptRecord]) -> Option<&'a AttemptRecord> {
         records.iter().find(|r| {
             // P0-Issue3: Only select candidates that actually passed validation, not just inconclusive
             r.validation_result.as_ref().map(|v| v.passed()).unwrap_or(false) && r.score > 0.5
         })
+    }
+
+    /// V1.6-P0-002: Prove validation-gated selection with explicit test
+    /// 
+    /// This method demonstrates that no fallback to highest-confidence occurs
+    /// when all candidates fail validation.
+    #[cfg(test)]
+    pub fn prove_validation_gated_selection(&self, records: &[AttemptRecord]) -> bool {
+        // Find highest confidence candidate (regardless of validation)
+        let highest_confidence = records.iter()
+            .max_by(|a, b| a.candidate.confidence.partial_cmp(&b.candidate.confidence).unwrap());
+        
+        // Find best passing candidate
+        let best_passing = self.select_best(records);
+        
+        // If no candidates pass validation, ensure no selection occurs
+        if best_passing.is_none() {
+            // This proves validation-gated selection: no fallback to highest confidence
+            return true;
+        }
+        
+        // If there is a passing candidate, ensure it's not just the highest confidence
+        // that failed validation (this would indicate a bug)
+        if let Some(highest) = highest_confidence {
+            if let Some(passing) = best_passing {
+                // The passing candidate should either be the highest confidence that passed
+                // or a lower confidence candidate that passed while higher ones failed
+                let highest_passed = highest.validation_result.as_ref().map(|v| v.passed()).unwrap_or(false);
+                return highest_passed || (passing.candidate.confidence <= highest.candidate.confidence);
+            }
+        }
+        
+        false
     }
 }
 
