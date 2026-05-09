@@ -48,6 +48,26 @@ jobs:
       - name: Guardrail Tests
         run: cargo test --test guardrail_tests --test guardrail_integration_tests
 
+      - name: Anti-Placeholder Check
+        run: |
+          # P0-Audit-007: Block TODO/FIXME/mock leakage in production code
+          echo "Checking for placeholder patterns in production code..."
+          
+          # Check for forbidden patterns outside tests/docs
+          if grep -r -E "TODO|FIXME|mock|placeholder|stub|unimplemented!|todo!|panic!.*TODO" src/ --exclude-dir=target; then
+            echo "::error::Found placeholder patterns in production code"
+            echo "CI should fail on TODO/FIXME/mock outside tests/docs"
+            exit 1
+          fi
+          
+          # Check for placeholder patterns in tests (allowed but should be minimal)
+          TODO_COUNT=$(grep -r "TODO" tests/ | wc -l || true)
+          if [ "$TODO_COUNT" -gt 5 ]; then
+            echo "::warning::High number of TODOs in tests ($TODO_COUNT). Consider implementing."
+          fi
+          
+          echo "Anti-placeholder check passed"
+
       - name: Anti-regression check (no direct LLM calls in API)
         run: |
           # Fail if API handlers contain direct LlmClient::generate() calls
