@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod attempt_pool;
 pub mod benchmark;
 pub mod completion;
+pub mod ci_enforcement;
 pub mod compiler_diagnostics;
 pub mod confidence;
 pub mod context_budget;
@@ -69,6 +70,10 @@ pub use completion::{
     ProcessEvidence, ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence,
     VerificationEvidence, create_evidence_from_components, evaluate_completion,
     format_completion_decision,
+};
+pub use ci_enforcement::{
+    AntiPlaceholderCI, CIConfig, CIEnforcementResult, CustomPattern, PlaceholderPattern,
+    PlaceholderViolation, Severity,
 };
 pub use confidence::{
     ConfidenceCalibrator, ConfidenceClassification, ConfidenceFactor, ConfidenceScore,

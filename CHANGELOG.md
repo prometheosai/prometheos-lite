@@ -1,3 +1,27 @@
+## V1.6 Strict Audit Completion - CI Enforcement Integration and De-Placeholdering Pass 2
+
+- Wired diagnostics command into top-level CLI command routing:
+  - Added `Diagnostics` variant to CLI command enum.
+  - Added dispatch path to `handle_diagnostics_command`.
+- Completed anti-placeholder CI module cleanup:
+  - Removed embedded test fixture payloads from `src/harness/ci_enforcement.rs`.
+  - Moved CI enforcement tests into standalone integration test `tests/ci_enforcement_tests.rs`.
+- Fixed CI enforcement type coherence:
+  - Added `Hash` derivation for `Severity` so `HashMap<Severity, usize>` compiles, serializes, and compares correctly.
+- Exposed CI enforcement APIs through harness module exports for stable external imports.
+- Corrected malformed regex literals in CI enforcement patterns.
+- Updated CI enforcement integration tests to align with real matcher behavior:
+  - Exclusion matching via concrete filename substring.
+  - TODO detection uses comment-form markers (`// TODO`), matching production patterns.
+
+### Validation Notes
+
+- `cargo check --quiet` passes.
+- `cargo test --test ci_enforcement_tests --quiet` passes (6/6).
+- Full `cargo test --quiet` still fails in this environment due to external/toolchain-level issues not introduced by this patch set:
+  - Rust compiler ICE while compiling `tests/rollback_integration_test.rs` (`rustc 1.95.0`).
+  - Missing `windows_sys` `rlib` format in another integration test build path.
+
 ## V1.6 Strict Audit Completion - Runtime De-Placeholdering
 
 - Rewired runtime embedding usage so `serve` and runtime builder paths consistently use OpenRouter embedding provider instead of legacy local embedding stubs.

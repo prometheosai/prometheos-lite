@@ -35,6 +35,8 @@ enum Commands {
     Work(commands::work::WorkCommand),
     /// Manage domain templates
     Templates(commands::templates::TemplatesCommand),
+    /// Run provider/system/validation diagnostics
+    Diagnostics(commands::diagnostics::DiagnosticsArgs),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -48,5 +50,6 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Bench(cmd) => cmd.execute().await,
         Commands::Work(cmd) => cmd.execute().await,
         Commands::Templates(cmd) => cmd.execute().await,
+        Commands::Diagnostics(args) => commands::diagnostics::handle_diagnostics_command(args).await,
     }
 }
