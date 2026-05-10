@@ -602,7 +602,7 @@ pub enum EffortLevel {
 }
 
 /// P1-Issue8: Error summary
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ErrorSummary {
     /// Total errors
     pub total_errors: usize,
@@ -663,6 +663,11 @@ impl DiagnosticsEngine {
         detailed: bool,
         benchmark: bool,
     ) -> Result<DiagnosticResults> {
+        let _ = (
+            self.config.benchmark_iterations,
+            self.config.include_sensitive,
+            self.config.detailed_logging,
+        );
         let mut results = DiagnosticResults {
             overall_status: HealthStatus::Unknown,
             timestamp: chrono::Utc::now(),
@@ -795,13 +800,13 @@ impl DiagnosticsEngine {
         let endpoint = provider_health_endpoint(config);
         let mut request = client.get(&endpoint);
 
-        if let Some(api_key) = &config.api_key {
-            if !api_key.is_empty() {
-                request = match config.provider_type.as_str() {
-                    "openrouter" => request.header("Authorization", format!("Bearer {}", api_key)),
-                    _ => request.bearer_auth(api_key),
-                };
-            }
+        if let Some(api_key) = &config.api_key
+            && !api_key.is_empty()
+        {
+            request = match config.provider_type.as_str() {
+                "openrouter" => request.header("Authorization", format!("Bearer {}", api_key)),
+                _ => request.bearer_auth(api_key),
+            };
         }
 
         for (key, value) in &config.custom_headers {
@@ -1023,9 +1028,7 @@ impl DiagnosticsEngine {
         // Determine overall status
         if critical_count > 0 {
             HealthStatus::Critical
-        } else if error_count > 0 {
-            HealthStatus::Warning
-        } else if warning_count > 3 {
+        } else if error_count > 0 || warning_count > 3 {
             HealthStatus::Warning
         } else {
             HealthStatus::Healthy
@@ -1058,7 +1061,7 @@ impl DiagnosticsEngine {
         }
 
         let mut most_common_errors: Vec<(String, usize)> = error_counts.into_iter().collect();
-        most_common_errors.sort_by(|a, b| b.1.cmp(&a.1));
+        most_common_errors.sort_by_key(|b| std::cmp::Reverse(b.1));
         most_common_errors.truncate(5);
 
         ErrorSummary {
@@ -1202,18 +1205,6 @@ impl Default for BenchmarkResults {
                 repomap_generation_time_ms: 0,
                 validation_execution_time_ms: 0,
             },
-        }
-    }
-}
-
-impl Default for ErrorSummary {
-    fn default() -> Self {
-        Self {
-            total_errors: 0,
-            errors_by_severity: HashMap::new(),
-            errors_by_category: HashMap::new(),
-            most_common_errors: Vec::new(),
-            critical_errors: Vec::new(),
         }
     }
 }

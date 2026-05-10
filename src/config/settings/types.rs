@@ -23,7 +23,7 @@ pub struct AppConfig {
     pub repo_path: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct StrictMode {
     /// Enforce error on missing inputs instead of silent fallback
     #[serde(default = "super::defaults::default_strict_mode_enforce_missing_inputs")]
@@ -43,19 +43,6 @@ pub struct StrictMode {
     /// Enforce tool idempotency checks
     #[serde(default = "super::defaults::default_strict_mode_enforce_idempotency")]
     pub enforce_idempotency: bool,
-}
-
-impl Default for StrictMode {
-    fn default() -> Self {
-        Self {
-            enforce_missing_inputs: false,
-            enforce_missing_services: false,
-            enforce_empty_outputs: false,
-            enforce_no_unwrap: false,
-            enforce_no_silent_none: false,
-            enforce_idempotency: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

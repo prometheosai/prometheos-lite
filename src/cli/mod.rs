@@ -17,9 +17,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run PrometheOS on a task prompt (deprecated)
-    #[deprecated(since = "0.2.0", note = "Use 'flow' command instead")]
-    Run(commands::run::RunCommand),
     /// Run a flow from a JSON or YAML file
     Flow(commands::flow::FlowCommand),
     /// P2-014: Harness V1.6 commands for autonomous/assisted coding
@@ -43,7 +40,6 @@ pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run(cmd) => cmd.execute().await,
         Commands::Flow(cmd) => cmd.execute().await,
         Commands::Harness(cmd) => cmd.execute().await,
         Commands::Serve(cmd) => cmd.execute().await,

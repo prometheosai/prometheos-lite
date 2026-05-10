@@ -1,8 +1,8 @@
 //! Tests for CLI runner
 
 #[cfg(test)]
-mod tests {
-    use crate::cli::runner::runner::FlowRunner;
+mod runner_tests {
+    use crate::cli::runner::flow_runner::FlowRunner;
     use prometheos_lite::flow::loader::{FlowFile, NodeDefinition};
     use prometheos_lite::flow::{DefaultNodeFactory, IdWrapper, NodeFactory, PassthroughNode};
 
@@ -111,9 +111,8 @@ mod tests {
 
     #[test]
     fn test_node_factory_with_model_router() {
-        let factory = DefaultNodeFactory::new();
+        let _factory = DefaultNodeFactory::new();
         // Cannot access private field, just verify factory creates successfully
-        assert!(true);
     }
 
     #[test]

@@ -178,9 +178,14 @@ async fn execute_inspect(execution_id: String, show_evidence: bool) -> Result<()
 
     if show_evidence {
         let evidence_dir = std::env::current_dir()?.join("evidence");
-        let manager = prometheos_lite::harness::evidence_persistence::EvidencePersistenceManager::new(
-            Box::new(prometheos_lite::harness::evidence_persistence::FileEvidenceSink::new(evidence_dir)),
-        );
+        let manager =
+            prometheos_lite::harness::evidence_persistence::EvidencePersistenceManager::new(
+                Box::new(
+                    prometheos_lite::harness::evidence_persistence::FileEvidenceSink::new(
+                        evidence_dir,
+                    ),
+                ),
+            );
         let evidence = manager
             .retrieve_evidence_log(&execution_id)
             .await
@@ -288,7 +293,24 @@ async fn execute_status() -> Result<()> {
     println!("📊 Harness Status");
     println!("═════════════════");
     println!();
-    println!("Recent executions: unavailable in standalone CLI context");
+    let db = Arc::new(prometheos_lite::db::Db::new("prometheos.db")?);
+    let service = prometheos_lite::work::service::WorkContextService::new(db);
+    let contexts = service.list_contexts("cli-user")?;
+    if contexts.is_empty() {
+        println!("Recent executions: none");
+    } else {
+        println!("Recent executions:");
+        for ctx in contexts.iter().take(10) {
+            let run_id = ctx.harness_metadata().and_then(|m| m.latest_run_id);
+            println!(
+                "  {} status={:?} phase={:?} latest_run_id={}",
+                ctx.id,
+                ctx.status,
+                ctx.current_phase,
+                run_id.unwrap_or_else(|| "-".to_string())
+            );
+        }
+    }
     println!();
     println!("Available commands:");
     println!("  prometheos harness run \"<task>\"     - Run harness on a task");
@@ -342,7 +364,9 @@ fn print_execution_result(
     Ok(())
 }
 
-fn load_context_for_execution(execution_id: &str) -> Result<prometheos_lite::work::types::WorkContext> {
+fn load_context_for_execution(
+    execution_id: &str,
+) -> Result<prometheos_lite::work::types::WorkContext> {
     let db = Arc::new(prometheos_lite::db::Db::new("prometheos.db")?);
     let service = prometheos_lite::work::service::WorkContextService::new(db);
     service

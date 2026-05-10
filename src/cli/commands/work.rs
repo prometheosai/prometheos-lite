@@ -335,68 +335,49 @@ impl WorkCommand {
                 println!("Updated WorkContext status to {:?}", new_status);
             }
             WorkSubcommand::Cost { id } => {
-                let context = work_context_service
-                    .get_context(&id)?
-                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-                let usage = context.harness_metadata().and_then(|m| m.token_usage);
+                let runs = work_context_service.list_harness_run_metrics(&id)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "work_context_id": id,
-                        "token_usage": usage.unwrap_or_default()
+                        "latest_run_id": runs.first().map(|r| r.run_id.clone()),
+                        "token_usage": runs.first().map(|r| r.token_usage.clone()).unwrap_or_default(),
+                        "runs": runs
                     }))?
                 );
             }
             WorkSubcommand::Quality { id } => {
-                let context = work_context_service
-                    .get_context(&id)?
-                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-                let hm = context.harness_metadata();
-                let quality_metrics = hm
-                    .as_ref()
-                    .and_then(|m| m.quality_metrics.clone())
-                    .unwrap_or_default();
-                let harness = context
-                    .metadata
-                    .get("harness")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                let runs = work_context_service.list_harness_run_metrics(&id)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "work_context_id": id,
-                        "quality_metrics": quality_metrics,
-                        "review": harness.get("review_issues").cloned().unwrap_or(serde_json::Value::Null),
-                        "risk": harness.get("risk_assessment").cloned().unwrap_or(serde_json::Value::Null),
-                        "completion": harness.get("completion_decision").cloned().unwrap_or(serde_json::Value::Null),
+                        "latest_run_id": runs.first().map(|r| r.run_id.clone()),
+                        "quality_metrics": runs.first().map(|r| r.quality_metrics.clone()).unwrap_or_default(),
+                        "runs": runs
                     }))?
                 );
             }
             WorkSubcommand::Traces { id, run_id } => {
-                let context = work_context_service
-                    .get_context(&id)?
-                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-                let latest = context.harness_metadata().and_then(|m| m.latest_run_id);
-                if let Some(filter_run_id) = run_id
-                    && latest.as_deref() != Some(filter_run_id.as_str()) {
-                        anyhow::bail!(
-                            "Run '{}' not found for work context '{}'",
-                            filter_run_id,
-                            id
-                        );
+                let runs = work_context_service.list_harness_run_metrics(&id)?;
+                if let Some(filter_run_id) = run_id {
+                    let run = runs.iter().find(|r| r.run_id == filter_run_id).cloned();
+                    if let Some(run) = run {
+                        println!("{}", serde_json::to_string_pretty(&run)?);
+                        return Ok(());
                     }
-                let harness = context
-                    .metadata
-                    .get("harness")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                    anyhow::bail!(
+                        "Run '{}' not found for work context '{}'",
+                        filter_run_id,
+                        id
+                    );
+                }
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "work_context_id": id,
-                        "latest_run_id": latest,
-                        "trace_summary": context.harness_metadata().and_then(|m| m.trace_summary).unwrap_or_default(),
-                        "trajectory": harness.get("trajectory").cloned().unwrap_or(serde_json::Value::Null),
+                        "latest_run_id": runs.first().map(|r| r.run_id.clone()),
+                        "runs": runs,
                     }))?
                 );
             }
@@ -453,25 +434,35 @@ impl WorkCommand {
                     }
                     HarnessSubcommand::Replay { id, step } => {
                         println!("Replaying harness execution for WorkContext {}", id);
+                        let runs = work_context_service.list_harness_run_metrics(&id)?;
+                        let run = runs
+                            .first()
+                            .ok_or_else(|| anyhow::anyhow!("No persisted harness runs found"))?;
                         if let Some(step_num) = step {
-                            println!("From step: {}", step_num);
-                        }
-
-                        let context = work_context_service
-                            .get_context(&id)?
-                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-
-                        if let Some(harness_data) = context.metadata.get("harness") {
-                            if let Some(trajectory) = harness_data.get("trajectory") {
-                                println!(
-                                    "Trajectory data: {}",
-                                    serde_json::to_string_pretty(trajectory)?
+                            let steps = run
+                                .trajectory
+                                .get("steps")
+                                .and_then(|v| v.as_array())
+                                .ok_or_else(|| anyhow::anyhow!("Persisted trajectory has no steps array"))?;
+                            if step_num >= steps.len() {
+                                anyhow::bail!(
+                                    "Step {} out of bounds for run '{}' ({} steps)",
+                                    step_num,
+                                    run.run_id,
+                                    steps.len()
                                 );
-                            } else {
-                                println!("No trajectory data found");
                             }
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "work_context_id": id,
+                                    "run_id": run.run_id,
+                                    "step": step_num,
+                                    "event": steps[step_num].clone()
+                                }))?
+                            );
                         } else {
-                            println!("No harness metadata found");
+                            println!("{}", serde_json::to_string_pretty(&run.trajectory)?);
                         }
                     }
                     HarnessSubcommand::Benchmark { id, benchmark_type } => {
@@ -483,7 +474,36 @@ impl WorkCommand {
                             .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
 
                         println!("WorkContext: {} - {}", context.title, context.goal);
-                        println!("Benchmark would run here with type: {}", benchmark_type);
+                        let benchmark_test = prometheos_lite::harness::benchmark::BenchmarkTest {
+                            id: format!("{}-{}", context.id, benchmark_type),
+                            name: format!("work-{}", benchmark_type),
+                            test_type: prometheos_lite::harness::benchmark::TestType::PerformanceTest,
+                            command: "cargo".to_string(),
+                            args: vec!["check".to_string(), "--all-targets".to_string()],
+                            working_dir: std::path::PathBuf::from("."),
+                            iterations: 1,
+                            timeout_ms: 120_000,
+                            metrics: vec![prometheos_lite::harness::benchmark::MetricType::Duration],
+                        };
+                        let suite = prometheos_lite::harness::benchmark::BenchmarkSuite {
+                            id: format!("suite-{}", context.id),
+                            name: format!("work-context-{}", context.id),
+                            description: "CLI benchmark execution for WorkContext".to_string(),
+                            tests: vec![benchmark_test],
+                            config: prometheos_lite::harness::benchmark::BenchmarkConfig::default(),
+                        };
+                        let mut runner =
+                            prometheos_lite::harness::benchmark::create_benchmark_runner();
+                        runner.register_suite(suite.clone());
+                        let result = runner.run_suite(&suite.id).await?;
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "work_context_id": context.id,
+                                "benchmark_type": benchmark_type,
+                                "results": result
+                            }))?
+                        );
                     }
                     HarnessSubcommand::Artifact { id, artifact_type } => {
                         println!("Showing artifacts for WorkContext {}", id);
@@ -492,61 +512,62 @@ impl WorkCommand {
                         let context = work_context_service
                             .get_context(&id)?
                             .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-
-                        if let Some(harness_data) = context.metadata.get("harness") {
-                            if let Some(artifacts) = harness_data.get("artifacts") {
-                                println!("Artifacts: {}", serde_json::to_string_pretty(artifacts)?);
-                            } else {
-                                println!("No artifacts found");
-                            }
-                        } else {
-                            println!("No harness metadata found");
-                        }
+                        let selected: Vec<_> = context
+                            .artifacts
+                            .into_iter()
+                            .filter(|a| {
+                                if artifact_type == "all" {
+                                    return true;
+                                }
+                                a.name.contains(&artifact_type)
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&selected)?);
                     }
                     HarnessSubcommand::Risk { id, threshold } => {
                         println!("Showing risk assessment for WorkContext {}", id);
                         println!("Risk threshold: {}", threshold);
 
-                        let context = work_context_service
-                            .get_context(&id)?
-                            .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-
-                        if let Some(harness_data) = context.metadata.get("harness") {
-                            if let Some(risk) = harness_data.get("risk_assessment") {
-                                println!(
-                                    "Risk assessment: {}",
-                                    serde_json::to_string_pretty(risk)?
-                                );
-                            } else {
-                                println!("No risk assessment found");
-                            }
-                        } else {
-                            println!("No harness metadata found");
-                        }
+                        let evidence_dir = std::env::current_dir()?.join("evidence");
+                        let manager = prometheos_lite::harness::evidence_persistence::EvidencePersistenceManager::new(
+                            Box::new(prometheos_lite::harness::evidence_persistence::FileEvidenceSink::new(
+                                evidence_dir,
+                            )),
+                        );
+                        let evidence = manager.retrieve_evidence_log(&id).await?;
+                        let risk_entries: Vec<_> = evidence
+                            .entries
+                            .iter()
+                            .filter(|e| e.description.starts_with("Risk assessment:"))
+                            .cloned()
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&risk_entries)?);
                     }
                     HarnessSubcommand::Completion { id, detailed } => {
                         println!("Showing completion status for WorkContext {}", id);
+                        let evidence_dir = std::env::current_dir()?.join("evidence");
+                        let manager = prometheos_lite::harness::evidence_persistence::EvidencePersistenceManager::new(
+                            Box::new(prometheos_lite::harness::evidence_persistence::FileEvidenceSink::new(
+                                evidence_dir,
+                            )),
+                        );
+                        let evidence = manager.retrieve_evidence_log(&id).await?;
+                        let completion_entries: Vec<_> = evidence
+                            .entries
+                            .iter()
+                            .filter(|e| e.description.starts_with("Completion evaluation:"))
+                            .cloned()
+                            .collect();
                         if detailed {
-                            println!("Showing detailed completion evidence");
+                            println!("{}", serde_json::to_string_pretty(&completion_entries)?);
+                        } else if let Some(last) = completion_entries.last() {
+                            println!("{}", serde_json::to_string_pretty(last)?);
+                        } else {
+                            anyhow::bail!("No persisted completion evidence found");
                         }
-
                         let context = work_context_service
                             .get_context(&id)?
                             .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
-
-                        if let Some(harness_data) = context.metadata.get("harness") {
-                            if let Some(completion) = harness_data.get("completion_decision") {
-                                println!(
-                                    "Completion decision: {}",
-                                    serde_json::to_string_pretty(completion)?
-                                );
-                            } else {
-                                println!("No completion decision found");
-                            }
-                        } else {
-                            println!("No harness metadata found");
-                        }
-
                         println!("WorkContext status: {:?}", context.status);
                         println!("Current phase: {:?}", context.current_phase);
                     }
