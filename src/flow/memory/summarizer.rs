@@ -108,7 +108,7 @@ impl MemorySummarizer {
 
         // Split into sentences (basic heuristic: periods followed by space or end)
         let sentences: Vec<&str> = content
-            .split(|c: char| c == '.' || c == '!' || c == '?')
+            .split(['.', '!', '?'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();

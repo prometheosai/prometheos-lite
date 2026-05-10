@@ -23,7 +23,7 @@ pub struct StrictModeEnforcer {
 #[derive(Debug, Clone)]
 struct ToolCallResult {
     result_hash: String,
-    timestamp: chrono::DateTime<chrono::Utc>,
+    _timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 impl StrictModeEnforcer {
@@ -58,31 +58,31 @@ impl StrictModeEnforcer {
             );
         }
 
-        if let Some(obj) = input.as_object() {
-            if obj.is_empty() {
-                bail!(
-                    "Strict mode violation: Input '{}' is empty object. Missing inputs are not allowed.",
-                    field_name
-                );
-            }
+        if let Some(obj) = input.as_object()
+            && obj.is_empty()
+        {
+            bail!(
+                "Strict mode violation: Input '{}' is empty object. Missing inputs are not allowed.",
+                field_name
+            );
         }
 
-        if let Some(arr) = input.as_array() {
-            if arr.is_empty() {
-                bail!(
-                    "Strict mode violation: Input '{}' is empty array. Missing inputs are not allowed.",
-                    field_name
-                );
-            }
+        if let Some(arr) = input.as_array()
+            && arr.is_empty()
+        {
+            bail!(
+                "Strict mode violation: Input '{}' is empty array. Missing inputs are not allowed.",
+                field_name
+            );
         }
 
-        if let Some(s) = input.as_str() {
-            if s.trim().is_empty() {
-                bail!(
-                    "Strict mode violation: Input '{}' is empty string. Missing inputs are not allowed.",
-                    field_name
-                );
-            }
+        if let Some(s) = input.as_str()
+            && s.trim().is_empty()
+        {
+            bail!(
+                "Strict mode violation: Input '{}' is empty string. Missing inputs are not allowed.",
+                field_name
+            );
         }
 
         Ok(())
@@ -117,31 +117,31 @@ impl StrictModeEnforcer {
             );
         }
 
-        if let Some(obj) = output.as_object() {
-            if obj.is_empty() {
-                bail!(
-                    "Strict mode violation: Output '{}' is empty object. Empty outputs are not allowed.",
-                    output_name
-                );
-            }
+        if let Some(obj) = output.as_object()
+            && obj.is_empty()
+        {
+            bail!(
+                "Strict mode violation: Output '{}' is empty object. Empty outputs are not allowed.",
+                output_name
+            );
         }
 
-        if let Some(arr) = output.as_array() {
-            if arr.is_empty() {
-                bail!(
-                    "Strict mode violation: Output '{}' is empty array. Empty outputs are not allowed.",
-                    output_name
-                );
-            }
+        if let Some(arr) = output.as_array()
+            && arr.is_empty()
+        {
+            bail!(
+                "Strict mode violation: Output '{}' is empty array. Empty outputs are not allowed.",
+                output_name
+            );
         }
 
-        if let Some(s) = output.as_str() {
-            if s.trim().is_empty() {
-                bail!(
-                    "Strict mode violation: Output '{}' is empty string. Empty outputs are not allowed.",
-                    output_name
-                );
-            }
+        if let Some(s) = output.as_str()
+            && s.trim().is_empty()
+        {
+            bail!(
+                "Strict mode violation: Output '{}' is empty string. Empty outputs are not allowed.",
+                output_name
+            );
         }
 
         Ok(())
@@ -194,7 +194,7 @@ impl StrictModeEnforcer {
                 cache_key,
                 ToolCallResult {
                     result_hash,
-                    timestamp: chrono::Utc::now(),
+                    _timestamp: chrono::Utc::now(),
                 },
             );
         }

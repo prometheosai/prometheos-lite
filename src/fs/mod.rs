@@ -100,12 +100,12 @@ impl FileWriter {
     pub fn write_file(&self, parsed_file: &ParsedFile) -> Result<PathBuf> {
         let file_path = self.output_dir.join(&parsed_file.path);
 
-        if let Some(parent) = file_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create parent directory: {}", parent.display())
-                })?;
-            }
+        if let Some(parent) = file_path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create parent directory: {}", parent.display())
+            })?;
         }
 
         if file_path.exists() {

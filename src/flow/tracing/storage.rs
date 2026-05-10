@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_trace_storage_init() {
-        let storage = TraceStorage::in_memory().unwrap();
+        let _storage = TraceStorage::in_memory().unwrap();
         // Schema should be created without errors
     }
 
@@ -573,7 +573,7 @@ mod tests {
         let trace = HierarchicalTrace {
             trace_id: trace_id.clone(),
             work_context_id: Some("test-context".to_string()),
-            flow_run_id: flow_run_id,
+            flow_run_id,
             node_runs: Vec::new(),
             tool_calls: Vec::new(),
             llm_calls: Vec::new(),
@@ -598,7 +598,7 @@ mod tests {
         let trace = HierarchicalTrace {
             trace_id: trace_id.clone(),
             work_context_id: Some("test-context".to_string()),
-            flow_run_id: flow_run_id,
+            flow_run_id,
             node_runs: Vec::new(),
             tool_calls: Vec::new(),
             llm_calls: Vec::new(),

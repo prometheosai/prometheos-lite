@@ -140,7 +140,7 @@ impl Node for PlannerNode {
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+            if let Some(mode) = PersonalityMode::parse(mode_str) {
                 let prompt_context = PromptContext::new(mode);
                 prompt_context.inject_into_prompt(&base_prompt)
             } else {
@@ -274,7 +274,7 @@ impl Node for CoderNode {
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+            if let Some(mode) = PersonalityMode::parse(mode_str) {
                 let prompt_context = PromptContext::new(mode);
                 prompt_context.inject_into_prompt(&base_prompt)
             } else {
@@ -295,7 +295,7 @@ impl Node for CoderNode {
         if let Some(code) = output["generated_code"].as_str() {
             // Apply constitutional filter based on personality mode
             let filtered_code = if let Some(mode_str) = state.get_personality_mode() {
-                if let Some(mode) = PersonalityMode::from_str(&mode_str) {
+                if let Some(mode) = PersonalityMode::parse(&mode_str) {
                     let filter = ConstitutionalFilter::new(mode);
                     filter.filter(code)
                 } else {
@@ -417,7 +417,7 @@ impl Node for ReviewerNode {
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+            if let Some(mode) = PersonalityMode::parse(mode_str) {
                 let prompt_context = PromptContext::new(mode);
                 prompt_context.inject_into_prompt(&base_prompt)
             } else {
@@ -438,7 +438,7 @@ impl Node for ReviewerNode {
         if let Some(review) = output["review"].as_str() {
             // Apply constitutional filter based on personality mode
             let filtered_review = if let Some(mode_str) = state.get_personality_mode() {
-                if let Some(mode) = PersonalityMode::from_str(&mode_str) {
+                if let Some(mode) = PersonalityMode::parse(&mode_str) {
                     let filter = ConstitutionalFilter::new(mode);
                     filter.filter(review)
                 } else {
@@ -573,7 +573,7 @@ impl Node for LlmNode {
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
-            if let Some(mode) = PersonalityMode::from_str(mode_str) {
+            if let Some(mode) = PersonalityMode::parse(mode_str) {
                 let prompt_context = PromptContext::new(mode);
                 prompt_context.inject_into_prompt(&final_prompt)
             } else {
@@ -594,7 +594,7 @@ impl Node for LlmNode {
         if let Some(response) = output["response"].as_str() {
             // Apply constitutional filter based on personality mode
             let filtered_response = if let Some(mode_str) = state.get_personality_mode() {
-                if let Some(mode) = PersonalityMode::from_str(&mode_str) {
+                if let Some(mode) = PersonalityMode::parse(&mode_str) {
                     let filter = ConstitutionalFilter::new(mode);
                     filter.filter(response)
                 } else {
@@ -679,8 +679,22 @@ impl Node for ToolNode {
             })
             .unwrap_or_else(crate::tools::ToolPolicy::conservative);
 
-        let context =
-            crate::tools::ToolContext::new(run_id, trace_id, node_id, tool_name.clone(), policy);
+        let work_domain = state
+            .get_input("work_domain")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let work_phase = state
+            .get_input("work_phase")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let context = crate::tools::ToolContext::new(
+            run_id,
+            trace_id,
+            node_id,
+            tool_name.clone(),
+            policy,
+        )
+        .with_work_context(work_domain, work_phase);
 
         Ok(serde_json::json!({
             "tool_name": tool_name,
@@ -736,6 +750,313 @@ pub struct FileWriterNode {
     config: NodeConfig,
 }
 
+pub struct HarnessRepoMapNode {
+    config: NodeConfig,
+    repo_path: std::path::PathBuf,
+}
+
+impl HarnessRepoMapNode {
+    pub fn new(config: NodeConfig, repo_path: std::path::PathBuf) -> Self {
+        Self { config, repo_path }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessRepoMapNode {
+    fn id(&self) -> String {
+        "harness.repo_map".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.repo_map"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        super::coding_nodes::CodeAnalysisNode::new(self.config.clone(), self.repo_path.clone())
+            .prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        super::coding_nodes::CodeAnalysisNode::new(self.config.clone(), self.repo_path.clone())
+            .exec(input)
+            .await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        super::coding_nodes::CodeAnalysisNode::new(self.config.clone(), self.repo_path.clone())
+            .post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
+pub struct HarnessPatchApplyNode {
+    config: NodeConfig,
+    tool_runtime: Option<std::sync::Arc<ToolRuntime>>,
+}
+
+impl HarnessPatchApplyNode {
+    pub fn new(config: NodeConfig, tool_runtime: Option<std::sync::Arc<ToolRuntime>>) -> Self {
+        Self {
+            config,
+            tool_runtime,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessPatchApplyNode {
+    fn id(&self) -> String {
+        "harness.patch_apply".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.patch_apply"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        ToolNode::new(self.config.clone(), self.tool_runtime.clone()).prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        ToolNode::new(self.config.clone(), self.tool_runtime.clone())
+            .exec(input)
+            .await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        ToolNode::new(self.config.clone(), self.tool_runtime.clone()).post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
+pub struct HarnessValidateNode {
+    config: NodeConfig,
+    tool_runtime: Option<std::sync::Arc<ToolRuntime>>,
+}
+
+impl HarnessValidateNode {
+    pub fn new(config: NodeConfig, tool_runtime: Option<std::sync::Arc<ToolRuntime>>) -> Self {
+        Self {
+            config,
+            tool_runtime,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessValidateNode {
+    fn id(&self) -> String {
+        "harness.validate".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.validate"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        ToolNode::new(self.config.clone(), self.tool_runtime.clone()).prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        ToolNode::new(self.config.clone(), self.tool_runtime.clone())
+            .exec(input)
+            .await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        ToolNode::new(self.config.clone(), self.tool_runtime.clone()).post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
+pub struct HarnessReviewNode {
+    config: NodeConfig,
+    model_router: Option<std::sync::Arc<ModelRouter>>,
+    context_builder: ContextBuilder,
+}
+
+impl HarnessReviewNode {
+    pub fn new(
+        config: NodeConfig,
+        model_router: Option<std::sync::Arc<ModelRouter>>,
+        context_builder: ContextBuilder,
+    ) -> Self {
+        Self {
+            config,
+            model_router,
+            context_builder,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessReviewNode {
+    fn id(&self) -> String {
+        "harness.review".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.review"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        ReviewerNode::new(
+            self.config.clone(),
+            self.model_router.clone(),
+            self.context_builder.clone(),
+        )
+        .prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        ReviewerNode::new(
+            self.config.clone(),
+            self.model_router.clone(),
+            self.context_builder.clone(),
+        )
+        .exec(input)
+        .await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        ReviewerNode::new(
+            self.config.clone(),
+            self.model_router.clone(),
+            self.context_builder.clone(),
+        )
+        .post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
+pub struct HarnessRiskNode(HarnessReviewNode);
+
+impl HarnessRiskNode {
+    pub fn new(
+        config: NodeConfig,
+        model_router: Option<std::sync::Arc<ModelRouter>>,
+        context_builder: ContextBuilder,
+    ) -> Self {
+        Self(HarnessReviewNode::new(config, model_router, context_builder))
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessRiskNode {
+    fn id(&self) -> String {
+        "harness.risk".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.risk"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        self.0.prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        self.0.exec(input).await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        self.0.post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.0.config()
+    }
+}
+
+pub struct HarnessCompletionNode {
+    config: NodeConfig,
+}
+
+impl HarnessCompletionNode {
+    pub fn new(config: NodeConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessCompletionNode {
+    fn id(&self) -> String {
+        "harness.completion".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.completion"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        TerminalNode::new(self.config.clone()).prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        TerminalNode::new(self.config.clone()).exec(input).await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        TerminalNode::new(self.config.clone()).post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
+pub struct HarnessAttemptPoolNode {
+    config: NodeConfig,
+}
+
+impl HarnessAttemptPoolNode {
+    pub fn new(config: NodeConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessAttemptPoolNode {
+    fn id(&self) -> String {
+        "harness.attempt_pool".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.attempt_pool"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        ConditionalNode::new(self.config.clone()).prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        ConditionalNode::new(self.config.clone()).exec(input).await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        ConditionalNode::new(self.config.clone()).post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
+pub struct HarnessContextDistillNode {
+    config: NodeConfig,
+    memory_service: Option<std::sync::Arc<MemoryService>>,
+}
+
+impl HarnessContextDistillNode {
+    pub fn new(config: NodeConfig, memory_service: Option<std::sync::Arc<MemoryService>>) -> Self {
+        Self {
+            config,
+            memory_service,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Node for HarnessContextDistillNode {
+    fn id(&self) -> String {
+        "harness.context_distill".to_string()
+    }
+    fn kind(&self) -> &str {
+        "harness.context_distill"
+    }
+    fn prep(&self, state: &SharedState) -> Result<serde_json::Value> {
+        ContextLoaderNode::new(self.config.clone(), self.memory_service.clone()).prep(state)
+    }
+    async fn exec(&self, input: serde_json::Value) -> Result<serde_json::Value> {
+        ContextLoaderNode::new(self.config.clone(), self.memory_service.clone())
+            .exec(input)
+            .await
+    }
+    fn post(&self, state: &mut SharedState, output: serde_json::Value) -> String {
+        ContextLoaderNode::new(self.config.clone(), self.memory_service.clone()).post(state, output)
+    }
+    fn config(&self) -> NodeConfig {
+        self.config.clone()
+    }
+}
+
 impl FileWriterNode {
     pub fn new(config: NodeConfig) -> Self {
         Self { config }
@@ -783,13 +1104,22 @@ impl Node for FileWriterNode {
             })
             .unwrap_or_else(crate::tools::ToolPolicy::conservative);
 
+        let work_domain = state
+            .get_input("work_domain")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let work_phase = state
+            .get_input("work_phase")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let context = crate::tools::ToolContext::new(
             run_id,
             trace_id,
             node_id,
             "file_writer".to_string(),
             policy,
-        );
+        )
+        .with_work_context(work_domain, work_phase);
 
         // Use PathGuard to validate the path
         let path_guard = crate::tools::PathGuard::default();
@@ -828,39 +1158,37 @@ impl Node for FileWriterNode {
 
         // Check outbox for duplicate operation
         let db_path = ".prometheos/runs.db";
-        if std::path::Path::new(db_path).exists() {
-            if let Ok(db) = crate::db::repository::Db::new(db_path) {
-                if let Ok(existing) = OutboxOperations::get_outbox_entry_by_hash(
-                    &db,
-                    &context.run_id,
-                    &context.node_id,
-                    &idempotency_key.key,
-                ) {
-                    if let Some(entry) = existing {
-                        if entry.status == "completed" {
-                            // Return cached result instead of re-executing
-                            return Ok(serde_json::json!({
-                                "success": true,
-                                "file_path": file_path,
-                                "bytes_written": content.len(),
-                                "idempotency_key": idempotency_key.key,
-                                "from_cache": true,
-                                "cached_output": entry.output
-                            }));
-                        }
-                    }
-                }
-
-                // Create outbox entry for this operation
-                let _ = OutboxOperations::create_outbox_entry(
-                    &db,
-                    &context.run_id,
-                    &context.trace_id,
-                    &context.node_id,
-                    "file_writer",
-                    &idempotency_key.key,
-                );
+        if std::path::Path::new(db_path).exists()
+            && let Ok(db) = crate::db::repository::Db::new(db_path)
+        {
+            if let Ok(existing) = OutboxOperations::get_outbox_entry_by_hash(
+                &db,
+                &context.run_id,
+                &context.node_id,
+                &idempotency_key.key,
+            ) && let Some(entry) = existing
+                && entry.status == "completed"
+            {
+                // Return cached result instead of re-executing
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "file_path": file_path,
+                    "bytes_written": content.len(),
+                    "idempotency_key": idempotency_key.key,
+                    "from_cache": true,
+                    "cached_output": entry.output
+                }));
             }
+
+            // Create outbox entry for this operation
+            let _ = OutboxOperations::create_outbox_entry(
+                &db,
+                &context.run_id,
+                &context.trace_id,
+                &context.node_id,
+                "file_writer",
+                &idempotency_key.key,
+            );
         }
 
         // Proceed with write
@@ -868,28 +1196,26 @@ impl Node for FileWriterNode {
             .with_context(|| format!("Failed to write file: {}", file_path))?;
 
         // Mark outbox entry as completed
-        if std::path::Path::new(db_path).exists() {
-            if let Ok(db) = crate::db::repository::Db::new(db_path) {
-                if let Ok(entry) = OutboxOperations::get_outbox_entry_by_hash(
-                    &db,
-                    &context.run_id,
-                    &context.node_id,
-                    &idempotency_key.key,
-                ) {
-                    if let Some(ref entry) = entry {
-                        let _ = OutboxOperations::mark_outbox_completed(
-                            &db,
-                            &entry.id,
-                            &serde_json::json!({
-                                "success": true,
-                                "file_path": file_path,
-                                "bytes_written": content.len()
-                            })
-                            .to_string(),
-                        );
-                    }
-                }
-            }
+        if std::path::Path::new(db_path).exists()
+            && let Ok(db) = crate::db::repository::Db::new(db_path)
+            && let Ok(entry) = OutboxOperations::get_outbox_entry_by_hash(
+                &db,
+                &context.run_id,
+                &context.node_id,
+                &idempotency_key.key,
+            )
+            && let Some(ref entry) = entry
+        {
+            let _ = OutboxOperations::mark_outbox_completed(
+                &db,
+                &entry.id,
+                &serde_json::json!({
+                    "success": true,
+                    "file_path": file_path,
+                    "bytes_written": content.len()
+                })
+                .to_string(),
+            );
         }
 
         Ok(serde_json::json!({

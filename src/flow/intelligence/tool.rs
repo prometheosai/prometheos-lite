@@ -483,13 +483,13 @@ impl ToolRuntime {
         context: &ToolContext,
     ) -> Result<ToolOutput> {
         if tool.name() == "write_file"
-            && context.node_id.starts_with("harness.")
+            && context.is_software_patch_only_context()
             && !crate::runtime_policy::is_raw_write_allowed(
                 crate::runtime_policy::RuntimeDomain::SoftwareHarness,
             )
         {
             anyhow::bail!(
-                "write_file is denied for harness software path. Use patch_file protocol instead."
+                "write_file is denied for software execution path. Use patch_file protocol instead."
             );
         }
 

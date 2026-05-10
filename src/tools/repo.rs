@@ -126,10 +126,10 @@ impl ListTreeTool {
             let entry_path = entry.path();
 
             // Skip common ignored directories
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if name == "target" || name == "node_modules" || name == ".git" || name == ".next" {
-                    continue;
-                }
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
+                && (name == "target" || name == "node_modules" || name == ".git" || name == ".next")
+            {
+                continue;
             }
 
             if entry_path.is_dir() {
@@ -228,16 +228,11 @@ impl Tool for RepoReadFileTool {
 /// Search files tool - searches for patterns across files
 pub struct SearchFilesTool {
     repo_path: PathBuf,
-    path_guard: PathGuard,
 }
 
 impl SearchFilesTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        let base_dir = repo_path.to_string_lossy().to_string();
-        Self {
-            repo_path,
-            path_guard: PathGuard::new(base_dir),
-        }
+        Self { repo_path }
     }
 }
 
@@ -303,29 +298,29 @@ impl SearchFilesTool {
             let path = entry.path();
 
             if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name == "target" || name == "node_modules" || name == ".git" {
-                        continue;
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && (name == "target" || name == "node_modules" || name == ".git")
+                {
+                    continue;
                 }
 
                 let mut sub_entries = tokio::fs::read_dir(&path).await?;
                 while let Some(sub_entry) = sub_entries.next_entry().await? {
                     let sub_path = sub_entry.path();
                     if sub_path.is_file() {
-                        if let Some(glob_pattern) = glob {
-                            if !self.matches_glob(&sub_path, glob_pattern) {
-                                continue;
-                            }
+                        if let Some(glob_pattern) = glob
+                            && !self.matches_glob(&sub_path, glob_pattern)
+                        {
+                            continue;
                         }
                         self.search_file(&sub_path, query, results).await?;
                     }
                 }
             } else if path.is_file() {
-                if let Some(glob_pattern) = glob {
-                    if !self.matches_glob(&path, glob_pattern) {
-                        continue;
-                    }
+                if let Some(glob_pattern) = glob
+                    && !self.matches_glob(&path, glob_pattern)
+                {
+                    continue;
                 }
                 self.search_file(&path, query, results).await?;
             }
@@ -714,9 +709,9 @@ impl PatchFileTool {
                         } else if diff_line.starts_with('-') {
                             // Remove line
                             old_idx += 1;
-                        } else if diff_line.starts_with('+') {
+                        } else if let Some(stripped) = diff_line.strip_prefix('+') {
                             // Add line
-                            new_lines.push(&diff_line[1..]);
+                            new_lines.push(stripped);
                         }
 
                         i += 1;
@@ -840,7 +835,7 @@ mod tests {
         let result = tool.call(serde_json::json!({})).await.unwrap();
 
         assert!(result["success"].as_bool().unwrap());
-        assert!(result["files"].as_array().unwrap().len() > 0);
+        assert!(!result["files"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

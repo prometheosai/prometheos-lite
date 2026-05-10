@@ -6,19 +6,8 @@
 
 use crate::flow::Tool;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
-
-/// Command output structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-    pub duration_ms: u64,
-    pub success: bool,
-}
 
 /// Command tool - executes commands with safety guards
 pub struct CommandTool {
@@ -434,16 +423,16 @@ impl RunTestsTool {
             // Check for .csproj file (dotnet)
             if let Ok(entries) = std::fs::read_dir(path) {
                 for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.ends_with(".csproj") {
-                            return Ok((
-                                "dotnet".to_string(),
-                                vec!["test".to_string()]
-                                    .into_iter()
-                                    .chain(additional_args)
-                                    .collect(),
-                            ));
-                        }
+                    if let Some(name) = entry.file_name().to_str()
+                        && name.ends_with(".csproj")
+                    {
+                        return Ok((
+                            "dotnet".to_string(),
+                            vec!["test".to_string()]
+                                .into_iter()
+                                .chain(additional_args)
+                                .collect(),
+                        ));
                     }
                 }
             }
@@ -486,10 +475,9 @@ impl RunTestsTool {
         if let Some(captures) = regex::Regex::new(r"test result: ok\. (\d+) passed")
             .unwrap()
             .captures(&combined)
+            && let Some(count) = captures.get(1)
         {
-            if let Some(count) = captures.get(1) {
-                return count.as_str().parse().unwrap_or(0);
-            }
+            return count.as_str().parse().unwrap_or(0);
         }
 
         // Cargo test output: "test result: FAILED. X passed; Y failed"
@@ -513,21 +501,20 @@ impl RunTestsTool {
         if let Some(captures) = regex::Regex::new(r"(\d+) passed")
             .unwrap()
             .captures(&combined)
+            && let Some(count) = captures.get(1)
         {
-            if let Some(count) = captures.get(1) {
-                let passed = count.as_str().parse().unwrap_or(0);
-                if let Some(failed_captures) = regex::Regex::new(r"(\d+) failed")
-                    .unwrap()
-                    .captures(&combined)
-                {
-                    let failed = failed_captures
-                        .get(1)
-                        .and_then(|m| m.as_str().parse().ok())
-                        .unwrap_or(0);
-                    return passed + failed;
-                }
-                return passed;
+            let passed = count.as_str().parse().unwrap_or(0);
+            if let Some(failed_captures) = regex::Regex::new(r"(\d+) failed")
+                .unwrap()
+                .captures(&combined)
+            {
+                let failed = failed_captures
+                    .get(1)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                return passed + failed;
             }
+            return passed;
         }
 
         0
@@ -540,10 +527,9 @@ impl RunTestsTool {
         if let Some(captures) = regex::Regex::new(r"(\d+) passed")
             .unwrap()
             .captures(&combined)
+            && let Some(count) = captures.get(1)
         {
-            if let Some(count) = captures.get(1) {
-                return count.as_str().parse().unwrap_or(0);
-            }
+            return count.as_str().parse().unwrap_or(0);
         }
 
         0
@@ -556,10 +542,9 @@ impl RunTestsTool {
         if let Some(captures) = regex::Regex::new(r"(\d+) failed")
             .unwrap()
             .captures(&combined)
+            && let Some(count) = captures.get(1)
         {
-            if let Some(count) = captures.get(1) {
-                return count.as_str().parse().unwrap_or(0);
-            }
+            return count.as_str().parse().unwrap_or(0);
         }
 
         0

@@ -5,7 +5,6 @@ use super::router::ModelRouter;
 use super::tool::{Tool, ToolInput, ToolOutput, ToolRuntime, ToolSandboxProfile};
 use super::*;
 
-
 // Mock LLM provider for testing
 struct MockLlmProvider {
     name: String,
@@ -285,15 +284,24 @@ async fn test_tool_runtime_denies_harness_write_file_without_override() {
         "harness.patch_apply".to_string(),
         "write_file".to_string(),
         ToolPolicy::new().with_permission(ToolPermission::FileWrite),
-    );
+    )
+    .with_work_context(Some("software".to_string()), Some("execution".to_string()));
     let tool = MockTool::new("write_file".to_string(), "raw writer".to_string());
-    let result = runtime.execute_tool(&tool, serde_json::json!({"path":"x","content":"y"}), &context).await;
+    let result = runtime
+        .execute_tool(
+            &tool,
+            serde_json::json!({"path":"x","content":"y"}),
+            &context,
+        )
+        .await;
     assert!(result.is_err());
-    assert!(result
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("patch_file protocol"));
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("patch_file protocol")
+    );
 }
 
 #[tokio::test]
@@ -344,4 +352,3 @@ async fn test_llm_utilities_call_stream() {
 
     assert!(result.contains("gpt-4"));
 }
-

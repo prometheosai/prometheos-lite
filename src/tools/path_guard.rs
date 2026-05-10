@@ -15,11 +15,6 @@ impl PathGuard {
         Self { base_dir }
     }
 
-    /// Create a PathGuard with the default prometheos-output directory
-    pub fn default() -> Self {
-        Self::new("prometheos-output".to_string())
-    }
-
     /// Validate a file path is safe
     ///
     /// Rules:
@@ -96,6 +91,12 @@ impl PathGuard {
         }
 
         true
+    }
+}
+
+impl Default for PathGuard {
+    fn default() -> Self {
+        Self::new("prometheos-output".to_string())
     }
 }
 

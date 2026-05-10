@@ -4,8 +4,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::context::ContextBuilder;
-use crate::flow::{MemoryService, ModelRouter, Node, NodeConfig, ToolRuntime};
 use crate::flow::factory::{NodeRegistry, register_builtin_nodes, register_harness_nodes};
+use crate::flow::{MemoryService, ModelRouter, Node, NodeConfig, ToolRuntime};
 
 /// NodeFactory trait - creates concrete nodes based on node_type
 pub trait NodeFactory: Send + Sync {
@@ -220,79 +220,51 @@ impl DefaultNodeFactory {
                     .repo_path
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
-                let inner = Arc::new(super::coding_nodes::CodeAnalysisNode::new(
+                Ok(Arc::new(super::builtin_nodes::HarnessRepoMapNode::new(
                     node_config,
                     repo_path,
-                ));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.repo_map".to_string(),
-                    inner,
                 )))
             }
             "harness.patch_apply" => {
-                let inner = Arc::new(super::builtin_nodes::ToolNode::new(
+                Ok(Arc::new(super::builtin_nodes::HarnessPatchApplyNode::new(
                     node_config,
                     self.tool_runtime.clone(),
-                ));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.patch_apply".to_string(),
-                    inner,
                 )))
             }
             "harness.validate" => {
-                let inner = Arc::new(super::builtin_nodes::ToolNode::new(
+                Ok(Arc::new(super::builtin_nodes::HarnessValidateNode::new(
                     node_config,
                     self.tool_runtime.clone(),
-                ));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.validate".to_string(),
-                    inner,
                 )))
             }
             "harness.review" => {
-                let inner = Arc::new(super::builtin_nodes::ReviewerNode::new(
+                Ok(Arc::new(super::builtin_nodes::HarnessReviewNode::new(
                     node_config,
                     self.model_router.clone(),
                     context_builder,
-                ));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.review".to_string(),
-                    inner,
                 )))
             }
             "harness.risk" => {
-                let inner = Arc::new(super::builtin_nodes::ReviewerNode::new(
+                Ok(Arc::new(super::builtin_nodes::HarnessRiskNode::new(
                     node_config,
                     self.model_router.clone(),
                     context_builder,
-                ));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.risk".to_string(),
-                    inner,
                 )))
             }
             "harness.completion" => {
-                let inner = Arc::new(super::builtin_nodes::TerminalNode::new(node_config));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.completion".to_string(),
-                    inner,
+                Ok(Arc::new(super::builtin_nodes::HarnessCompletionNode::new(
+                    node_config,
                 )))
             }
             "harness.attempt_pool" => {
-                let inner = Arc::new(super::builtin_nodes::ConditionalNode::new(node_config));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.attempt_pool".to_string(),
-                    inner,
+                Ok(Arc::new(super::builtin_nodes::HarnessAttemptPoolNode::new(
+                    node_config,
                 )))
             }
             "harness.context_distill" => {
-                let inner = Arc::new(super::builtin_nodes::ContextLoaderNode::new(
+                Ok(Arc::new(super::builtin_nodes::HarnessContextDistillNode::new(
                     node_config,
                     self.memory_service.clone(),
-                ));
-                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
-                    "harness.context_distill".to_string(),
-                    inner,
                 )))
             }
             _ => anyhow::bail!("Unknown canonical node type '{}'", node_type),
@@ -303,10 +275,7 @@ impl DefaultNodeFactory {
 impl NodeFactory for DefaultNodeFactory {
     fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
         let node_config = Self::parse_config(&config)?;
-        let context_builder = self
-            .context_builder
-            .clone()
-            .unwrap_or_default();
+        let context_builder = self.context_builder.clone().unwrap_or_default();
         let resolved = self.registry.resolve(node_type).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown node type '{}'. NodeRegistry has no registration for this type.",

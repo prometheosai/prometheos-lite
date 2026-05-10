@@ -142,29 +142,29 @@ impl SearchCodeTool {
             let path = entry.path();
 
             if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name == "target" || name == "node_modules" || name == ".git" {
-                        continue;
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && (name == "target" || name == "node_modules" || name == ".git")
+                {
+                    continue;
                 }
 
                 let mut sub_entries = tokio::fs::read_dir(&path).await?;
                 while let Some(sub_entry) = sub_entries.next_entry().await? {
                     let sub_path = sub_entry.path();
                     if sub_path.is_file() {
-                        if let Some(file_pattern) = file_pattern {
-                            if !self.matches_pattern(&sub_path, file_pattern) {
-                                continue;
-                            }
+                        if let Some(file_pattern) = file_pattern
+                            && !self.matches_pattern(&sub_path, file_pattern)
+                        {
+                            continue;
                         }
                         self.search_file(&sub_path, pattern, results).await?;
                     }
                 }
             } else if path.is_file() {
-                if let Some(file_pattern) = file_pattern {
-                    if !self.matches_pattern(&path, file_pattern) {
-                        continue;
-                    }
+                if let Some(file_pattern) = file_pattern
+                    && !self.matches_pattern(&path, file_pattern)
+                {
+                    continue;
                 }
                 self.search_file(&path, pattern, results).await?;
             }
@@ -313,12 +313,13 @@ impl ListFilesTool {
                 "is_directory": is_dir
             }));
 
-            if is_dir {
-                if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                    if name != "target" && name != "node_modules" && name != ".git" {
-                        Box::pin(self.list_recursive(&entry_path, files)).await?;
-                    }
-                }
+            if is_dir
+                && let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
+                && name != "target"
+                && name != "node_modules"
+                && name != ".git"
+            {
+                Box::pin(self.list_recursive(&entry_path, files)).await?;
             }
         }
 

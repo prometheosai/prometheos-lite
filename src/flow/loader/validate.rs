@@ -27,17 +27,17 @@ pub fn validate_flow_file(flow: &FlowFile) -> Result<()> {
     }
 
     // Validate inputs if defined
-    if let Some(ref inputs) = flow.inputs {
-        if inputs.required.is_empty() {
-            bail!("Flow inputs.required cannot be empty if inputs is defined");
-        }
+    if let Some(ref inputs) = flow.inputs
+        && inputs.required.is_empty()
+    {
+        bail!("Flow inputs.required cannot be empty if inputs is defined");
     }
 
     // Validate outputs if defined
-    if let Some(ref outputs) = flow.outputs {
-        if outputs.primary.is_empty() {
-            bail!("Flow outputs.primary cannot be empty if outputs is defined");
-        }
+    if let Some(ref outputs) = flow.outputs
+        && outputs.primary.is_empty()
+    {
+        bail!("Flow outputs.primary cannot be empty if outputs is defined");
     }
 
     // Validate each node definition
@@ -105,10 +105,10 @@ fn validate_node_definition(node: &NodeDefinition) -> Result<()> {
     }
 
     // Validate config if present
-    if let Some(config) = &node.config {
-        if !config.is_object() {
-            bail!("Node config must be a JSON object");
-        }
+    if let Some(config) = &node.config
+        && !config.is_object()
+    {
+        bail!("Node config must be a JSON object");
     }
 
     Ok(())

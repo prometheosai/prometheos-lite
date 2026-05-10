@@ -140,6 +140,12 @@ impl LoopDetector {
     }
 }
 
+impl Default for LoopDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

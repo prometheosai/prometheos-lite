@@ -947,7 +947,7 @@ mod tests {
         let run_id = Tracer::generate_run_id();
         let work_context_id = Some("ctx-123".to_string());
 
-        let mut tracer =
+        let tracer =
             Tracer::with_hierarchical_trace(trace_id.clone(), run_id.clone(), work_context_id);
 
         let hierarchical = tracer.get_hierarchical_trace();
