@@ -364,18 +364,12 @@ pub async fn run_harness(
 }
 
 pub async fn get_harness_metadata(
-    State(state): State<Arc<AppState>>,
-    Path((id, view)): Path<(String, String)>,
+    State(_state): State<Arc<AppState>>,
+    Path((_id, _view)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
-    let h = harness_payload(&ctx);
-    let v = extract_harness_view(&h, view.as_str()).ok_or_else(|| {
-        ApiError::BadRequest(format!(
-            "Unknown harness view: {}. Deprecated compatibility route; use explicit endpoints.",
-            view
-        ))
-    })?;
-    Ok(Json(v))
+    Err(ApiError::BadRequest(
+        "Deprecated endpoint removed. Use explicit /harness/{evidence|patches|validation|review|risk|completion} endpoints.".to_string(),
+    ))
 }
 
 fn harness_payload(ctx: &crate::work::types::WorkContext) -> serde_json::Value {
@@ -483,18 +477,18 @@ pub async fn get_work_quality(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
-    let hm = ctx.harness_metadata();
-    let quality_metrics = hm
-        .as_ref()
-        .and_then(|m| m.quality_metrics.clone())
-        .unwrap_or_default();
-    let harness = harness_payload(&ctx);
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let runs = svc
+        .list_harness_run_metrics(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let latest = runs.first().cloned();
     Ok(Json(serde_json::json!({
         "work_context_id": id,
-        "quality_metrics": quality_metrics,
-        "risk": extract_harness_view(&harness, "risk").unwrap_or(serde_json::Value::Null),
-        "completion": extract_harness_view(&harness, "completion").unwrap_or(serde_json::Value::Null),
+        "quality_metrics": latest.as_ref().map(|r| r.quality_metrics.clone()).unwrap_or_default(),
+        "latest_run_id": latest.as_ref().map(|r| r.run_id.clone()),
+        "runs": runs,
     })))
 }
 
@@ -502,11 +496,18 @@ pub async fn get_work_cost(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
-    let hm = ctx.harness_metadata();
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let runs = svc
+        .list_harness_run_metrics(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let latest = runs.first().cloned();
     Ok(Json(serde_json::json!({
         "work_context_id": id,
-        "token_usage": hm.and_then(|m| m.token_usage).unwrap_or_default(),
+        "token_usage": latest.as_ref().map(|r| r.token_usage.clone()).unwrap_or_default(),
+        "latest_run_id": latest.as_ref().map(|r| r.run_id.clone()),
+        "runs": runs,
     })))
 }
 
@@ -514,18 +515,16 @@ pub async fn list_work_traces(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
-    let harness = harness_payload(&ctx);
-    let trajectory = extract_harness_view(&harness, "trajectory").unwrap_or(serde_json::Value::Null);
-    let trace_summary = ctx
-        .harness_metadata()
-        .and_then(|m| m.trace_summary)
-        .unwrap_or_default();
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let runs = svc
+        .list_harness_run_metrics(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(serde_json::json!({
         "work_context_id": id,
-        "latest_run_id": ctx.harness_metadata().and_then(|m| m.latest_run_id),
-        "trace_summary": trace_summary,
-        "trajectory": trajectory
+        "latest_run_id": runs.first().map(|r| r.run_id.clone()),
+        "runs": runs
     })))
 }
 
@@ -533,25 +532,26 @@ pub async fn get_trace_by_run(
     State(state): State<Arc<AppState>>,
     Path((id, run_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
-    let latest_run_id = ctx.harness_metadata().and_then(|m| m.latest_run_id);
-    if latest_run_id.as_deref() != Some(run_id.as_str()) {
-        return Err(ApiError::NotFound(format!(
-            "Run '{}' not found for work context '{}'",
-            run_id, id
-        )));
-    }
-    let harness = harness_payload(&ctx);
-    let trajectory = extract_harness_view(&harness, "trajectory").unwrap_or(serde_json::Value::Null);
-    let trace_summary = ctx
-        .harness_metadata()
-        .and_then(|m| m.trace_summary)
-        .unwrap_or_default();
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let run = svc
+        .get_harness_run_metrics(&id, &run_id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "Run '{}' not found for work context '{}'",
+                run_id, id
+            ))
+        })?;
     Ok(Json(serde_json::json!({
         "work_context_id": id,
         "run_id": run_id,
-        "trace_summary": trace_summary,
-        "trajectory": trajectory
+        "trace_summary": run.trace_summary,
+        "token_usage": run.token_usage,
+        "quality_metrics": run.quality_metrics,
+        "trajectory": run.trajectory,
+        "created_at": run.created_at,
     })))
 }
 

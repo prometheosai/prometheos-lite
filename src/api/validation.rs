@@ -195,8 +195,7 @@ pub fn validate_edit_file_path(path: &str) -> Result<String, ValidationError> {
 /// Sanitize user input to prevent injection attacks
 pub fn sanitize_input(input: &str) -> String {
     input
-        .replace('\0', "") // Remove null bytes
-        .replace('\x1b', "") // Remove escape sequences
+        .replace(['\0', '\x1b'], "") // Remove escape sequences
         .trim()
         .to_string()
 }

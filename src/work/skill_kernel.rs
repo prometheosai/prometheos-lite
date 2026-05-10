@@ -218,11 +218,11 @@ impl SkillKernel {
     fn extract_required_tools(&self, metadata: &HashMap<String, serde_json::Value>) -> Vec<String> {
         let mut tools = Vec::new();
 
-        for (_node_id, metadata_value) in metadata {
-            if let Some(tool_name) = metadata_value.get("tool_name").and_then(|v| v.as_str()) {
-                if !tools.contains(&tool_name.to_string()) {
-                    tools.push(tool_name.to_string());
-                }
+        for metadata_value in metadata.values() {
+            if let Some(tool_name) = metadata_value.get("tool_name").and_then(|v| v.as_str())
+                && !tools.contains(&tool_name.to_string())
+            {
+                tools.push(tool_name.to_string());
             }
         }
 

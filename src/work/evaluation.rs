@@ -163,17 +163,16 @@ impl EvaluationEngine {
         }
 
         // Test failures
-        if let Some(test_results) = execution_metadata.get("test_results") {
-            if let Some(failed) = test_results["failed"].as_u64() {
-                if failed > 0 {
-                    penalties.push(Penalty {
-                        penalty_type: PenaltyType::FailedTests,
-                        severity: (failed as f32 / 5.0).min(1.0),
-                        description: format!("Failed tests: {}", failed),
-                    });
-                    dimensions.correctness *= 0.5;
-                }
-            }
+        if let Some(test_results) = execution_metadata.get("test_results")
+            && let Some(failed) = test_results["failed"].as_u64()
+            && failed > 0
+        {
+            penalties.push(Penalty {
+                penalty_type: PenaltyType::FailedTests,
+                severity: (failed as f32 / 5.0).min(1.0),
+                description: format!("Failed tests: {}", failed),
+            });
+            dimensions.correctness *= 0.5;
         }
 
         // Calculate weighted combination of structural and semantic scores
@@ -230,17 +229,17 @@ impl EvaluationEngine {
         }
 
         // Validate patch structure if present
-        if let Some(patch) = execution_metadata.get("patch") {
-            if !patch.is_object() {
-                errors.push("Patch is not a valid object".to_string());
-            }
+        if let Some(patch) = execution_metadata.get("patch")
+            && !patch.is_object()
+        {
+            errors.push("Patch is not a valid object".to_string());
         }
 
         // Validate test results structure if present
-        if let Some(test_results) = execution_metadata.get("test_results") {
-            if !test_results.is_object() {
-                errors.push("Test results is not a valid object".to_string());
-            }
+        if let Some(test_results) = execution_metadata.get("test_results")
+            && !test_results.is_object()
+        {
+            errors.push("Test results is not a valid object".to_string());
         }
 
         Ok(StructuralValidation {
@@ -324,7 +323,6 @@ impl Default for EvaluationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     #[test]
     fn test_evaluation_dimensions_overall_score() {
@@ -364,7 +362,7 @@ mod tests {
     fn test_structural_validation_invalid() {
         let engine = EvaluationEngine::default();
 
-        let mut context = crate::work::types::WorkContext::new(
+        let context = crate::work::types::WorkContext::new(
             uuid::Uuid::new_v4().to_string(),
             "test-user".to_string(),
             "Test task".to_string(),

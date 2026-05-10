@@ -13,7 +13,9 @@ use crate::db::Db;
 use crate::db::repository::work_artifacts::WorkArtifactOperations;
 use crate::db::repository::work_context::WorkContextOperations;
 use crate::db::repository::work_context_events::WorkContextEventOperations;
+use crate::db::repository::work_run_metrics::WorkRunMetricsOperations;
 use crate::harness::evidence::EvidenceLog;
+use crate::work::types::HarnessRunMetricsRecord;
 
 /// WorkContextService - handles WorkContext CRUD and lifecycle operations
 pub struct WorkContextService {
@@ -295,6 +297,25 @@ impl WorkContextService {
         WorkContextOperations::list_work_contexts(&*self.db, user_id)
     }
 
+    pub fn upsert_harness_run_metrics(&self, record: &HarnessRunMetricsRecord) -> Result<()> {
+        WorkRunMetricsOperations::upsert_harness_run_metrics(&*self.db, record)
+    }
+
+    pub fn list_harness_run_metrics(
+        &self,
+        work_context_id: &str,
+    ) -> Result<Vec<HarnessRunMetricsRecord>> {
+        WorkRunMetricsOperations::list_harness_run_metrics(&*self.db, work_context_id)
+    }
+
+    pub fn get_harness_run_metrics(
+        &self,
+        work_context_id: &str,
+        run_id: &str,
+    ) -> Result<Option<HarnessRunMetricsRecord>> {
+        WorkRunMetricsOperations::get_harness_run_metrics(&*self.db, work_context_id, run_id)
+    }
+
     /// Get the active context for a conversation
     pub fn get_active_context_for_conversation(
         &self,
@@ -330,9 +351,10 @@ impl WorkContextService {
 
         // Priority 2: Active context for conversation
         if let Some(conv_id) = conversation_id
-            && let Some(context) = self.get_active_context_for_conversation(conv_id)? {
-                return Ok(Some(context));
-            }
+            && let Some(context) = self.get_active_context_for_conversation(conv_id)?
+        {
+            return Ok(Some(context));
+        }
 
         // Priority 3: Create new context (caller's responsibility)
         Ok(None)

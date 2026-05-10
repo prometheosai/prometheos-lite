@@ -179,6 +179,17 @@ pub struct HarnessMetadata {
     pub quality_metrics: Option<HarnessQualityMetrics>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HarnessRunMetricsRecord {
+    pub work_context_id: String,
+    pub run_id: String,
+    pub trace_summary: HarnessTraceSummary,
+    pub token_usage: TokenUsageSummary,
+    pub quality_metrics: HarnessQualityMetrics,
+    pub trajectory: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
 impl WorkContext {
     /// Create a new WorkContext with minimal required fields
     pub fn new(
@@ -279,8 +290,7 @@ impl WorkContext {
 }
 
 /// WorkDomain - the domain of work
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum WorkDomain {
     Software,
     Business,
@@ -294,10 +304,8 @@ pub enum WorkDomain {
     Custom(String),
 }
 
-
 /// WorkStatus - the status of a WorkContext
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum WorkStatus {
     #[default]
     Draft,
@@ -310,10 +318,8 @@ pub enum WorkStatus {
     Archived,
 }
 
-
 /// WorkPhase - the current phase of work
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum WorkPhase {
     #[default]
     Intake,
@@ -324,10 +330,8 @@ pub enum WorkPhase {
     Finalization,
 }
 
-
 /// AutonomyLevel - the autonomy level for execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AutonomyLevel {
     #[default]
     Chat,
@@ -335,10 +339,8 @@ pub enum AutonomyLevel {
     Autonomous,
 }
 
-
 /// ApprovalPolicy - when approval is required
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ApprovalPolicy {
     #[default]
     Auto,
@@ -348,10 +350,8 @@ pub enum ApprovalPolicy {
     ManualAll,
 }
 
-
 /// WorkPriority - priority level for work
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum WorkPriority {
     Low,
     #[default]
@@ -359,7 +359,6 @@ pub enum WorkPriority {
     High,
     Urgent,
 }
-
 
 /// CompletionCriterion - a criterion for work completion
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -183,11 +183,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, run_id: Stri
             event = receiver.recv() => {
                 match event {
                     Ok(event) => {
-                        if let Ok(json) = serde_json::to_string(&event) {
-                            if socket.send(Message::Text(json)).await.is_err() {
+                        if let Ok(json) = serde_json::to_string(&event)
+                            && socket.send(Message::Text(json)).await.is_err() {
                                 break;
                             }
-                        }
                     }
                     Err(_) => break,
                 }

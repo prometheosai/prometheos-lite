@@ -25,23 +25,21 @@ impl PlaybookResolver {
     /// 3-tier fallback: user+domain → domain default → global default
     pub fn resolve_playbook(&self, context: &WorkContext) -> Result<Option<WorkContextPlaybook>> {
         // Tier 1: Try user+domain specific playbook
-        if let Some(ref domain_profile_id) = context.domain_profile_id {
-            if let Some(playbook) = self
+        if let Some(ref domain_profile_id) = context.domain_profile_id
+            && let Some(playbook) = self
                 .db
                 .get_playbook_by_user_and_domain(&context.user_id, domain_profile_id)?
-            {
-                return Ok(Some(playbook));
-            }
+        {
+            return Ok(Some(playbook));
         }
 
         // Tier 2: Try domain default playbook (user_id = "domain-default")
-        if let Some(ref domain_profile_id) = context.domain_profile_id {
-            if let Some(playbook) = self
+        if let Some(ref domain_profile_id) = context.domain_profile_id
+            && let Some(playbook) = self
                 .db
                 .get_playbook_by_user_and_domain("domain-default", domain_profile_id)?
-            {
-                return Ok(Some(playbook));
-            }
+        {
+            return Ok(Some(playbook));
         }
 
         // Tier 3: Try global default playbook (user_id = "global", domain_profile_id = "global")
@@ -107,10 +105,10 @@ impl PlaybookResolver {
         let mut score = playbook.confidence;
 
         // Domain match bonus
-        if let Some(ref domain_profile_id) = context.domain_profile_id {
-            if playbook.domain_profile_id == *domain_profile_id {
-                score += 0.3;
-            }
+        if let Some(ref domain_profile_id) = context.domain_profile_id
+            && playbook.domain_profile_id == *domain_profile_id
+        {
+            score += 0.3;
         }
 
         // Usage boost with diminishing returns
@@ -125,8 +123,8 @@ impl PlaybookResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work::playbook::{CreativityLevel, FlowPreference, ResearchDepth};
-    use crate::work::types::{ApprovalPolicy, WorkDomain};
+    use crate::work::playbook::FlowPreference;
+    use crate::work::types::WorkDomain;
 
     #[test]
     fn test_calculate_score_domain_match() {

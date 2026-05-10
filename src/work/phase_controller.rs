@@ -41,17 +41,17 @@ impl PhaseController {
 
     /// Check if a phase transition is valid
     pub fn can_transition(from: WorkPhase, to: WorkPhase) -> bool {
-        match (from, to) {
-            (WorkPhase::Intake, WorkPhase::Planning) => true,
-            (WorkPhase::Planning, WorkPhase::Execution) => true,
-            (WorkPhase::Planning, WorkPhase::Finalization) => true,
-            (WorkPhase::Execution, WorkPhase::Review) => true,
-            (WorkPhase::Execution, WorkPhase::Finalization) => true,
-            (WorkPhase::Review, WorkPhase::Iteration) => true,
-            (WorkPhase::Review, WorkPhase::Finalization) => true,
-            (WorkPhase::Iteration, WorkPhase::Planning) => true,
-            _ => false,
-        }
+        matches!(
+            (from, to),
+            (WorkPhase::Intake, WorkPhase::Planning)
+                | (WorkPhase::Planning, WorkPhase::Execution)
+                | (WorkPhase::Planning, WorkPhase::Finalization)
+                | (WorkPhase::Execution, WorkPhase::Review)
+                | (WorkPhase::Execution, WorkPhase::Finalization)
+                | (WorkPhase::Review, WorkPhase::Iteration)
+                | (WorkPhase::Review, WorkPhase::Finalization)
+                | (WorkPhase::Iteration, WorkPhase::Planning)
+        )
     }
 
     /// Get the recommended flow for a given phase

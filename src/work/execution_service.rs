@@ -146,13 +146,13 @@ impl WorkExecutionService {
         let next_phase = PhaseController::next_phase(context);
         if let Some(phase) = next_phase
             && PhaseController::requires_approval(context, phase)
-                && (context.approval_policy == ApprovalPolicy::ManualAll
-                    || context.approval_policy == ApprovalPolicy::RequireForSideEffects)
-                {
-                    self.work_context_service
-                        .update_status(context, WorkStatus::AwaitingApproval)?;
-                    anyhow::bail!("Approval required before phase transition to {:?}", phase);
-                }
+            && (context.approval_policy == ApprovalPolicy::ManualAll
+                || context.approval_policy == ApprovalPolicy::RequireForSideEffects)
+        {
+            self.work_context_service
+                .update_status(context, WorkStatus::AwaitingApproval)?;
+            anyhow::bail!("Approval required before phase transition to {:?}", phase);
+        }
 
         // Load flow file directly from flow_ref (bypass intent classification)
         let flow_path = self.resolve_flow_path(flow_ref, &context.domain)?;
@@ -233,7 +233,10 @@ impl WorkExecutionService {
                         *harness_obj = serde_json::json!({});
                     }
                     if let Some(h) = harness_obj.as_object_mut() {
-                        h.insert("patch_result".to_string(), serde_json::json!({"applied": true}));
+                        h.insert(
+                            "patch_result".to_string(),
+                            serde_json::json!({"applied": true}),
+                        );
                         h.insert(
                             "validation_result".to_string(),
                             serde_json::json!({"passed": true, "source": "legacy_flow_bridge"}),
