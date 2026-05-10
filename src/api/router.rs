@@ -21,9 +21,11 @@ use crate::api::messages::{create_message, get_messages};
 use crate::api::projects::{create_project, get_projects};
 use crate::api::websocket::websocket_handler;
 use crate::api::work_contexts::{
-    continue_work_context, create_work_context, get_harness_metadata, get_work_context,
-    get_work_context_artifacts, list_work_contexts, run_harness, run_until_complete, submit_intent,
-    update_work_context_status,
+    continue_work_context, create_work_context, get_harness_completion, get_harness_evidence,
+    get_harness_metadata, get_harness_patches, get_harness_review, get_harness_risk,
+    get_harness_validation, get_trace_by_run, get_work_context, get_work_context_artifacts,
+    get_work_cost, get_work_quality, list_work_contexts, list_work_traces, run_harness,
+    run_until_complete, submit_intent, update_work_context_status,
 };
 
 async fn count_requests_middleware(
@@ -71,6 +73,25 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(run_until_complete),
         )
         .route("/work-contexts/:id/harness/run", post(run_harness))
+        .route(
+            "/work-contexts/:id/harness/evidence",
+            get(get_harness_evidence),
+        )
+        .route("/work-contexts/:id/harness/patches", get(get_harness_patches))
+        .route(
+            "/work-contexts/:id/harness/validation",
+            get(get_harness_validation),
+        )
+        .route("/work-contexts/:id/harness/review", get(get_harness_review))
+        .route("/work-contexts/:id/harness/risk", get(get_harness_risk))
+        .route(
+            "/work-contexts/:id/harness/completion",
+            get(get_harness_completion),
+        )
+        .route("/work-contexts/:id/work-quality", get(get_work_quality))
+        .route("/work-contexts/:id/work-cost", get(get_work_cost))
+        .route("/work-contexts/:id/traces", get(list_work_traces))
+        .route("/work-contexts/:id/traces/:run_id", get(get_trace_by_run))
         .route(
             "/work-contexts/:id/harness/:view",
             get(get_harness_metadata),

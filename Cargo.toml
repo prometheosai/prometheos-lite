@@ -69,4 +69,9 @@ debug = 0
 split-debuginfo = "off"
 incremental = true
 
+[profile.dev]
+debug = 0
+split-debuginfo = "off"
+incremental = true
+
 

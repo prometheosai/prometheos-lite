@@ -77,6 +77,24 @@ enum WorkSubcommand {
         /// New status (draft, in_progress, awaiting_approval, completed, blocked)
         status: String,
     },
+    /// Show persisted harness token/cost metrics
+    Cost {
+        /// WorkContext ID
+        id: String,
+    },
+    /// Show persisted harness quality metrics
+    Quality {
+        /// WorkContext ID
+        id: String,
+    },
+    /// Show persisted harness traces
+    Traces {
+        /// WorkContext ID
+        id: String,
+        /// Optional run ID filter
+        #[arg(short, long)]
+        run_id: Option<String>,
+    },
     /// Harness commands for v1.6 integration
     Harness {
         #[command(subcommand)]
@@ -146,7 +164,7 @@ impl WorkCommand {
         let work_context_service = Arc::new(WorkContextService::new(db.clone()));
 
         // Ensure domain templates are installed
-        let template_loader = TemplateLoader::default()?;
+        let template_loader = TemplateLoader::from_default_templates_dir()?;
         template_loader.install_defaults()?;
 
         let runtime = Arc::new(RuntimeContext::default());
@@ -315,6 +333,72 @@ impl WorkCommand {
                 work_context_service.update_status(&mut context, new_status)?;
 
                 println!("Updated WorkContext status to {:?}", new_status);
+            }
+            WorkSubcommand::Cost { id } => {
+                let context = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                let usage = context.harness_metadata().and_then(|m| m.token_usage);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "work_context_id": id,
+                        "token_usage": usage.unwrap_or_default()
+                    }))?
+                );
+            }
+            WorkSubcommand::Quality { id } => {
+                let context = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                let hm = context.harness_metadata();
+                let quality_metrics = hm
+                    .as_ref()
+                    .and_then(|m| m.quality_metrics.clone())
+                    .unwrap_or_default();
+                let harness = context
+                    .metadata
+                    .get("harness")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "work_context_id": id,
+                        "quality_metrics": quality_metrics,
+                        "review": harness.get("review_issues").cloned().unwrap_or(serde_json::Value::Null),
+                        "risk": harness.get("risk_assessment").cloned().unwrap_or(serde_json::Value::Null),
+                        "completion": harness.get("completion_decision").cloned().unwrap_or(serde_json::Value::Null),
+                    }))?
+                );
+            }
+            WorkSubcommand::Traces { id, run_id } => {
+                let context = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                let latest = context.harness_metadata().and_then(|m| m.latest_run_id);
+                if let Some(filter_run_id) = run_id
+                    && latest.as_deref() != Some(filter_run_id.as_str()) {
+                        anyhow::bail!(
+                            "Run '{}' not found for work context '{}'",
+                            filter_run_id,
+                            id
+                        );
+                    }
+                let harness = context
+                    .metadata
+                    .get("harness")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "work_context_id": id,
+                        "latest_run_id": latest,
+                        "trace_summary": context.harness_metadata().and_then(|m| m.trace_summary).unwrap_or_default(),
+                        "trajectory": harness.get("trajectory").cloned().unwrap_or(serde_json::Value::Null),
+                    }))?
+                );
             }
             WorkSubcommand::Harness { command } => {
                 match command {

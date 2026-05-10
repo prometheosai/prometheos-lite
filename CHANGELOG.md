@@ -1,3 +1,42 @@
+## V1.6.1 Strict Completion - Contract Closure, Runtime Enforcement, and API/CLI Parity
+
+- Replaced harness CLI placeholder failures with real persisted flows in `src/cli/commands/harness.rs`:
+  - `inspect` now loads persisted WorkContext/harness metadata and evidence logs.
+  - `apply` now replays persisted patch diff through patch protocol (`apply_patch_with_rollback`), no raw write fallback.
+  - `rollback` now restores from persisted patch snapshots/transaction metadata.
+- Removed API identity fallback behavior in `src/api/work_contexts.rs`:
+  - list/create/submit paths now require explicit `user_id`.
+  - blank/missing user identity returns `400`.
+- Added explicit V1.6.1 harness/work API matrix in `src/api/router.rs` + `src/api/work_contexts.rs`:
+  - `/work-contexts/:id/harness/evidence`
+  - `/work-contexts/:id/harness/patches`
+  - `/work-contexts/:id/harness/validation`
+  - `/work-contexts/:id/harness/review`
+  - `/work-contexts/:id/harness/risk`
+  - `/work-contexts/:id/harness/completion`
+  - `/work-contexts/:id/work-quality`
+  - `/work-contexts/:id/work-cost`
+  - `/work-contexts/:id/traces`
+  - `/work-contexts/:id/traces/:run_id`
+- Kept compatibility alias route `/work-contexts/:id/harness/:view` with deprecation behavior routed to same canonical extractors.
+- Replaced `harness.*` alias registration with dedicated NodeRegistry-backed node types:
+  - `src/flow/factory/register_harness.rs`
+  - `src/flow/factory/node_factory.rs`
+  - unknown `harness.*` node now hard-fails.
+- Enforced software-path raw write denial in runtime tool gate (`src/flow/intelligence/tool.rs`):
+  - `write_file` denied for harness execution path unless explicit override (`PROMETHEOS_ALLOW_RAW_WRITE=1`).
+- Added first-class persisted harness metadata models in `src/work/types.rs`:
+  - `HarnessTraceSummary` (duration/node/tool/error/tokens/cost)
+  - `HarnessQualityMetrics` (review/critical/rejection/hallucination-risk rates)
+- Wired persistence of these metrics from real run results in `src/harness/work_integration.rs`.
+- Wired API/CLI to expose persisted first-class metrics:
+  - API: `work-quality`, `work-cost`, `traces`, `trace-by-run`
+  - CLI: `work cost`, `work quality`, `work traces`
+- Added regression tests:
+  - harness view matrix extraction test
+  - dedicated `harness.*` node registration/unknown-node hard error tests
+  - runtime gate deny test for `write_file` on harness path
+
 ## V1.6.1 Strict Alignment - Batch A/B + CI Coherence Spine
 
 - Added canonical harness contract types in `src/harness/contract.rs`:

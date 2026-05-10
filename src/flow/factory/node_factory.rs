@@ -215,6 +215,86 @@ impl DefaultNodeFactory {
                     repo_path,
                 )))
             }
+            "harness.repo_map" => {
+                let repo_path = self
+                    .repo_path
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let inner = Arc::new(super::coding_nodes::CodeAnalysisNode::new(
+                    node_config,
+                    repo_path,
+                ));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.repo_map".to_string(),
+                    inner,
+                )))
+            }
+            "harness.patch_apply" => {
+                let inner = Arc::new(super::builtin_nodes::ToolNode::new(
+                    node_config,
+                    self.tool_runtime.clone(),
+                ));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.patch_apply".to_string(),
+                    inner,
+                )))
+            }
+            "harness.validate" => {
+                let inner = Arc::new(super::builtin_nodes::ToolNode::new(
+                    node_config,
+                    self.tool_runtime.clone(),
+                ));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.validate".to_string(),
+                    inner,
+                )))
+            }
+            "harness.review" => {
+                let inner = Arc::new(super::builtin_nodes::ReviewerNode::new(
+                    node_config,
+                    self.model_router.clone(),
+                    context_builder,
+                ));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.review".to_string(),
+                    inner,
+                )))
+            }
+            "harness.risk" => {
+                let inner = Arc::new(super::builtin_nodes::ReviewerNode::new(
+                    node_config,
+                    self.model_router.clone(),
+                    context_builder,
+                ));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.risk".to_string(),
+                    inner,
+                )))
+            }
+            "harness.completion" => {
+                let inner = Arc::new(super::builtin_nodes::TerminalNode::new(node_config));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.completion".to_string(),
+                    inner,
+                )))
+            }
+            "harness.attempt_pool" => {
+                let inner = Arc::new(super::builtin_nodes::ConditionalNode::new(node_config));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.attempt_pool".to_string(),
+                    inner,
+                )))
+            }
+            "harness.context_distill" => {
+                let inner = Arc::new(super::builtin_nodes::ContextLoaderNode::new(
+                    node_config,
+                    self.memory_service.clone(),
+                ));
+                Ok(Arc::new(super::builtin_nodes::IdWrapper::new(
+                    "harness.context_distill".to_string(),
+                    inner,
+                )))
+            }
             _ => anyhow::bail!("Unknown canonical node type '{}'", node_type),
         }
     }
@@ -240,5 +320,37 @@ impl NodeFactory for DefaultNodeFactory {
 impl Default for DefaultNodeFactory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DefaultNodeFactory, NodeFactory};
+
+    #[test]
+    fn harness_nodes_are_registry_backed_and_constructible() {
+        let factory = DefaultNodeFactory::new();
+        for node_type in [
+            "harness.repo_map",
+            "harness.patch_apply",
+            "harness.validate",
+            "harness.review",
+            "harness.risk",
+            "harness.completion",
+            "harness.attempt_pool",
+            "harness.context_distill",
+        ] {
+            let node = factory.create(node_type, None).unwrap();
+            assert_eq!(node.id(), node_type);
+        }
+    }
+
+    #[test]
+    fn unknown_harness_node_is_hard_error() {
+        let factory = DefaultNodeFactory::new();
+        let result = factory.create("harness.unknown_node", None);
+        assert!(result.is_err());
+        let err = result.err().expect("expected error");
+        assert!(err.to_string().contains("Unknown node type"));
     }
 }

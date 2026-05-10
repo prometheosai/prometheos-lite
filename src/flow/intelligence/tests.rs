@@ -4,7 +4,7 @@ use super::provider::{LlmProvider, StreamCallback};
 use super::router::ModelRouter;
 use super::tool::{Tool, ToolInput, ToolOutput, ToolRuntime, ToolSandboxProfile};
 use super::*;
-use std::sync::Arc;
+
 
 // Mock LLM provider for testing
 struct MockLlmProvider {
@@ -156,7 +156,7 @@ async fn test_tool_trait() {
 #[test]
 fn test_tool_sandbox_profile_default() {
     let profile = ToolSandboxProfile::new();
-    assert!(profile.allowed_commands.len() > 0);
+    assert!(!profile.allowed_commands.is_empty());
     assert_eq!(profile.timeout_ms, 30_000);
     assert!(!profile.allow_network);
 }
@@ -268,6 +268,35 @@ async fn test_tool_runtime_command_blocked() {
 }
 
 #[tokio::test]
+async fn test_tool_runtime_denies_harness_write_file_without_override() {
+    use crate::tools::{ToolContext, ToolPermission, ToolPolicy};
+
+    if std::env::var("PROMETHEOS_ALLOW_RAW_WRITE").as_deref() == Ok("1") {
+        return;
+    }
+    let profile = ToolSandboxProfile::with_tool_policy(
+        ToolPolicy::new().with_permission(ToolPermission::FileWrite),
+    );
+    let runtime = ToolRuntime::new(profile);
+
+    let context = ToolContext::new(
+        "test_run".to_string(),
+        "test_trace".to_string(),
+        "harness.patch_apply".to_string(),
+        "write_file".to_string(),
+        ToolPolicy::new().with_permission(ToolPermission::FileWrite),
+    );
+    let tool = MockTool::new("write_file".to_string(), "raw writer".to_string());
+    let result = runtime.execute_tool(&tool, serde_json::json!({"path":"x","content":"y"}), &context).await;
+    assert!(result.is_err());
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("patch_file protocol"));
+}
+
+#[tokio::test]
 async fn test_llm_utilities_call() {
     let provider = Box::new(MockLlmProvider::new(
         "test".to_string(),
@@ -315,3 +344,4 @@ async fn test_llm_utilities_call_stream() {
 
     assert!(result.contains("gpt-4"));
 }
+

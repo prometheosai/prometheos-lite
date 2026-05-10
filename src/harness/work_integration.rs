@@ -11,7 +11,10 @@ use crate::harness::{
 use crate::work::{
     artifact::{Artifact, ArtifactKind},
     service::WorkContextService,
-    types::{HarnessMetadata, TokenUsageSummary, WorkPhase, WorkStatus},
+    types::{
+        HarnessMetadata, HarnessQualityMetrics, HarnessTraceSummary, TokenUsageSummary, WorkPhase,
+        WorkStatus,
+    },
 };
 use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::Arc};
@@ -160,6 +163,42 @@ impl HarnessWorkContextService {
             .update_phase(&mut ctx, WorkPhase::Execution)?;
 
         let result = execute_harness_task(req).await?;
+        let stats = result.trajectory.compute_stats();
+        let total_failures = result.failures.len() as f64;
+        let rejection_failures = result
+            .failures
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    crate::harness::failure::FailureKind::PatchApplyFailure
+                        | crate::harness::failure::FailureKind::PatchParseFailure
+                        | crate::harness::failure::FailureKind::SyntaxError
+                )
+            })
+            .count() as f64;
+        let hallucination_failures = result
+            .failures
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    crate::harness::failure::FailureKind::ModelFailure
+                        | crate::harness::failure::FailureKind::SemanticFailure
+                        | crate::harness::failure::FailureKind::ValidationFailed
+                )
+            })
+            .count() as f64;
+        let critical_issue_count = result
+            .review_issues
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.severity,
+                    crate::harness::review::ReviewSeverity::Critical
+                )
+            })
+            .count() as u32;
         ctx.metadata = serde_json::json!({"harness":serde_json::to_value(&result)?});
         ctx.set_harness_metadata(HarnessMetadata {
             latest_run_id: Some(result.trajectory.id.clone()),
@@ -172,6 +211,31 @@ impl HarnessWorkContextService {
                 output_tokens: 0,
                 total_tokens: result.execution_metrics.tokens_used,
                 estimated_cost_cents: (result.execution_metrics.cost_estimate_usd * 100.0) as u32,
+            }),
+            trace_summary: Some(HarnessTraceSummary {
+                run_id: result.trajectory.id.clone(),
+                duration_ms: stats.total_duration_ms,
+                node_count: stats.total_steps as u32,
+                tool_count: stats.total_tool_calls as u32,
+                error_count: stats.total_errors as u32,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: stats.total_tokens,
+                estimated_cost_cents: (result.execution_metrics.cost_estimate_usd * 100.0) as u32,
+            }),
+            quality_metrics: Some(HarnessQualityMetrics {
+                review_issue_count: result.review_issues.len() as u32,
+                critical_issue_count,
+                rejection_rate: if total_failures > 0.0 {
+                    rejection_failures / total_failures
+                } else {
+                    0.0
+                },
+                hallucination_risk_rate: if total_failures > 0.0 {
+                    hallucination_failures / total_failures
+                } else {
+                    0.0
+                },
             }),
         });
 

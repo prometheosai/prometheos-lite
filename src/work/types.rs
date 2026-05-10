@@ -147,6 +147,27 @@ pub struct TokenUsageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HarnessTraceSummary {
+    pub run_id: String,
+    pub duration_ms: u64,
+    pub node_count: u32,
+    pub tool_count: u32,
+    pub error_count: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_cents: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HarnessQualityMetrics {
+    pub review_issue_count: u32,
+    pub critical_issue_count: u32,
+    pub rejection_rate: f64,
+    pub hallucination_risk_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HarnessMetadata {
     pub latest_run_id: Option<String>,
     pub evidence_log_id: Option<String>,
@@ -154,6 +175,8 @@ pub struct HarnessMetadata {
     pub risk_level: Option<RiskLevel>,
     pub verification_strength: Option<VerificationStrength>,
     pub token_usage: Option<TokenUsageSummary>,
+    pub trace_summary: Option<HarnessTraceSummary>,
+    pub quality_metrics: Option<HarnessQualityMetrics>,
 }
 
 impl WorkContext {
