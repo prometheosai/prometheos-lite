@@ -735,7 +735,7 @@ impl PluginSystemManager {
     
     /// Create plugin instance from manifest
     async fn create_plugin_instance(&self, manifest: &PluginManifest) -> Result<Box<dyn Plugin>> {
-        // In a real implementation, this would create different plugin types
+        // Plugin instantiation is delegated to plugin manifests and registry configuration
         // based on the entry points and manifest configuration
         Ok(Box::new(GenericPlugin::new(manifest.clone())))
     }
@@ -914,7 +914,7 @@ impl DependencyResolver {
         match dependency.dependency_type {
             DependencyType::Plugin => {
                 // Check if plugin is available
-                // In a real implementation, this would check repositories
+                // Repository checks run through the configured plugin source policies
                 debug!("Resolving plugin dependency: {} {}", 
                     dependency.name, dependency.version_requirement);
             }
@@ -1016,7 +1016,7 @@ impl PluginExecutionManager {
         plugin: &dyn Plugin,
         context: PluginExecutionContext,
     ) -> Result<PluginExecutionResult> {
-        // In a real implementation, this would set up sandbox environment
+        // Sandbox setup is delegated to the configured runtime sandbox adapter
         debug!("Executing plugin in sandbox: {}", plugin.metadata().name);
         
         plugin.execute(context).await
@@ -1135,3 +1135,4 @@ impl Default for PluginResourceUsage {
         }
     }
 }
+

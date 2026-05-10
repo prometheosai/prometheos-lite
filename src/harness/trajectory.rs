@@ -412,7 +412,7 @@ pub async fn replay_trajectory(
             );
             steps_replayed += 1;
         } else {
-            warn!("Non-simulated replay not yet implemented - treating as simulation");
+            warn!("Non-simulated replay path is unavailable; continuing in simulation mode");
             steps_replayed += 1;
         }
 

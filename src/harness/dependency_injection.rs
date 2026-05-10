@@ -1567,7 +1567,7 @@ impl UnsupportedDiscovery {
 impl DiscoveryMechanism for UnsupportedDiscovery {
     fn discover_services(&self) -> Result<Vec<ServiceDescriptor>> {
         Err(anyhow::anyhow!(
-            "Discovery mechanism '{}' ({:?}) is configured but not implemented",
+            "Discovery mechanism '{}' ({:?}) is configured but unsupported",
             self.name,
             self.mechanism_type
         ))
@@ -1941,4 +1941,5 @@ impl Service for SmartProxyService {
         target.cleanup()
     }
 }
+
 

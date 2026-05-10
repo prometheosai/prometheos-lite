@@ -158,13 +158,11 @@ impl RepairLoop {
                 tracing::info!("Applying retry with LLM strategy");
                 Ok(current_edits.to_vec())
             }
-            // Other strategies - not yet implemented
             _ => {
-                tracing::info!(
-                    "Strategy {:?} not yet implemented, returning original edits",
+                anyhow::bail!(
+                    "repair strategy {:?} is unsupported by current repair engine",
                     strategy
                 );
-                Ok(current_edits.to_vec())
             }
         }
     }

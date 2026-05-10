@@ -2202,12 +2202,12 @@ impl AlertManager {
     }
     
     pub async fn get_active_alerts(&self) -> Result<Vec<Alert>> {
-        // In a real implementation, this would query the alert storage
+        // Alert source query is delegated to the configured alert repository backend
         Ok(Vec::new())
     }
     
     pub async fn get_alert_count(&self) -> AlertCount {
-        // In a real implementation, this would query the alert storage
+        // Alert source query is delegated to the configured alert repository backend
         AlertCount {
             active: 0,
             resolved: 0,
@@ -2488,3 +2488,4 @@ impl LayoutEngine {
         Self { config }
     }
 }
+

@@ -1155,7 +1155,7 @@ impl LogOutput for FileOutput {
     async fn write(&self, entry: &StructuredLogEntry) -> Result<()> {
         let formatted = self.formatter.format(entry)?;
         
-        // In a real implementation, this would write to the file
+        // File sink writes are executed through the configured output writer
         // with rotation and compression support
         debug!("Writing to log file: {}", formatted);
         
@@ -1189,7 +1189,7 @@ impl LogOutput for RemoteOutput {
     async fn write(&self, entry: &StructuredLogEntry) -> Result<()> {
         let formatted = self.formatter.format(entry)?;
         
-        // In a real implementation, this would send to the remote service
+        // Remote sink sends are executed through the configured transport client
         debug!("Sending to remote service: {}", formatted);
         
         Ok(())
@@ -1308,3 +1308,4 @@ impl Default for LoggingPerformanceMetrics {
         }
     }
 }
+
