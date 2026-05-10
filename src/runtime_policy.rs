@@ -31,10 +31,16 @@ pub fn is_raw_write_allowed(domain: RuntimeDomain) -> bool {
     }
 }
 
-fn is_allowed_detector_file(path: &Path) -> bool {
+fn is_allowed_detector_file(path: &Path, src_root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(src_root) else {
+        return false;
+    };
     matches!(
-        path.file_name().and_then(|s| s.to_str()),
-        Some("ci_enforcement.rs") | Some("review.rs") | Some("reproduction.rs")
+        relative.to_string_lossy().replace('\\', "/").as_str(),
+        "harness/ci_enforcement.rs"
+            | "harness/review.rs"
+            | "harness/reproduction.rs"
+            | "runtime_policy.rs"
     )
 }
 
@@ -45,6 +51,16 @@ pub fn scan_runtime_placeholder_violations(repo_root: &Path) -> Result<Vec<Polic
         ("unimplemented_macro", Regex::new(r"\bunimplemented!\s*\(")?),
         ("todo_comment", Regex::new(r"\bTODO:")?),
         ("fixme_comment", Regex::new(r"\bFIXME:")?),
+        (
+            "suspicious_identifier",
+            Regex::new(r"\b(mock|stub|fake|dummy|placeholder)(_|[A-Z])")?,
+        ),
+        (
+            "suspicious_phrase",
+            Regex::new(
+                r#"(?i)\b(not implemented|not yet implemented|in a real implementation)\b"#,
+            )?,
+        ),
     ];
 
     let mut violations = Vec::new();
@@ -53,7 +69,7 @@ pub fn scan_runtime_placeholder_violations(repo_root: &Path) -> Result<Vec<Polic
         if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        if is_allowed_detector_file(path) {
+        if is_allowed_detector_file(path, &src_root) {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(path) else {
@@ -78,9 +94,22 @@ pub fn scan_runtime_placeholder_violations(repo_root: &Path) -> Result<Vec<Polic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_raw_write_policy() {
         assert!(is_raw_write_allowed(RuntimeDomain::Other));
+    }
+
+    #[test]
+    fn test_detector_exclusion_is_path_scoped() {
+        let src_root = PathBuf::from("repo/src");
+        let detector = src_root.join("harness/ci_enforcement.rs");
+        let non_detector_same_name = src_root.join("other/review.rs");
+        assert!(is_allowed_detector_file(&detector, &src_root));
+        assert!(!is_allowed_detector_file(
+            &non_detector_same_name,
+            &src_root
+        ));
     }
 }
