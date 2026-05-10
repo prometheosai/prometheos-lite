@@ -231,42 +231,32 @@ impl DefaultNodeFactory {
                     self.tool_runtime.clone(),
                 )))
             }
-            "harness.validate" => {
-                Ok(Arc::new(super::builtin_nodes::HarnessValidateNode::new(
-                    node_config,
-                    self.tool_runtime.clone(),
-                )))
-            }
-            "harness.review" => {
-                Ok(Arc::new(super::builtin_nodes::HarnessReviewNode::new(
-                    node_config,
-                    self.model_router.clone(),
-                    context_builder,
-                )))
-            }
-            "harness.risk" => {
-                Ok(Arc::new(super::builtin_nodes::HarnessRiskNode::new(
-                    node_config,
-                    self.model_router.clone(),
-                    context_builder,
-                )))
-            }
-            "harness.completion" => {
-                Ok(Arc::new(super::builtin_nodes::HarnessCompletionNode::new(
-                    node_config,
-                )))
-            }
-            "harness.attempt_pool" => {
-                Ok(Arc::new(super::builtin_nodes::HarnessAttemptPoolNode::new(
-                    node_config,
-                )))
-            }
-            "harness.context_distill" => {
-                Ok(Arc::new(super::builtin_nodes::HarnessContextDistillNode::new(
+            "harness.validate" => Ok(Arc::new(super::builtin_nodes::HarnessValidateNode::new(
+                node_config,
+                self.tool_runtime.clone(),
+            ))),
+            "harness.review" => Ok(Arc::new(super::builtin_nodes::HarnessReviewNode::new(
+                node_config,
+                self.model_router.clone(),
+                context_builder,
+            ))),
+            "harness.risk" => Ok(Arc::new(super::builtin_nodes::HarnessRiskNode::new(
+                node_config,
+                self.model_router.clone(),
+                context_builder,
+            ))),
+            "harness.completion" => Ok(Arc::new(super::builtin_nodes::HarnessCompletionNode::new(
+                node_config,
+            ))),
+            "harness.attempt_pool" => Ok(Arc::new(
+                super::builtin_nodes::HarnessAttemptPoolNode::new(node_config),
+            )),
+            "harness.context_distill" => Ok(Arc::new(
+                super::builtin_nodes::HarnessContextDistillNode::new(
                     node_config,
                     self.memory_service.clone(),
-                )))
-            }
+                ),
+            )),
             _ => anyhow::bail!("Unknown canonical node type '{}'", node_type),
         }
     }

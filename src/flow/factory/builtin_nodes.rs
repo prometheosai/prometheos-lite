@@ -687,14 +687,9 @@ impl Node for ToolNode {
             .get_input("work_phase")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let context = crate::tools::ToolContext::new(
-            run_id,
-            trace_id,
-            node_id,
-            tool_name.clone(),
-            policy,
-        )
-        .with_work_context(work_domain, work_phase);
+        let context =
+            crate::tools::ToolContext::new(run_id, trace_id, node_id, tool_name.clone(), policy)
+                .with_work_context(work_domain, work_phase);
 
         Ok(serde_json::json!({
             "tool_name": tool_name,
@@ -929,7 +924,11 @@ impl HarnessRiskNode {
         model_router: Option<std::sync::Arc<ModelRouter>>,
         context_builder: ContextBuilder,
     ) -> Self {
-        Self(HarnessReviewNode::new(config, model_router, context_builder))
+        Self(HarnessReviewNode::new(
+            config,
+            model_router,
+            context_builder,
+        ))
     }
 }
 

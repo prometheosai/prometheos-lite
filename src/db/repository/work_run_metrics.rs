@@ -61,9 +61,12 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
                 Ok(HarnessRunMetricsRecord {
                     work_context_id: row.get(0)?,
                     run_id: row.get(1)?,
-                    trace_summary: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
-                    token_usage: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                    quality_metrics: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                    trace_summary: serde_json::from_str(&row.get::<_, String>(2)?)
+                        .unwrap_or_default(),
+                    token_usage: serde_json::from_str(&row.get::<_, String>(3)?)
+                        .unwrap_or_default(),
+                    quality_metrics: serde_json::from_str(&row.get::<_, String>(4)?)
+                        .unwrap_or_default(),
                     trajectory: serde_json::from_str(&row.get::<_, String>(5)?)
                         .unwrap_or(serde_json::Value::Null),
                     created_at,
@@ -101,7 +104,8 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
                 run_id: row.get(1)?,
                 trace_summary: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
                 token_usage: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                quality_metrics: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                quality_metrics: serde_json::from_str(&row.get::<_, String>(4)?)
+                    .unwrap_or_default(),
                 trajectory: serde_json::from_str(&row.get::<_, String>(5)?)
                     .unwrap_or(serde_json::Value::Null),
                 created_at,
@@ -176,8 +180,8 @@ mod tests {
             &record.work_context_id,
             "run-1",
         )
-            .expect("get")
-            .expect("exists");
+        .expect("get")
+        .expect("exists");
         assert_eq!(loaded.run_id, "run-1");
         assert_eq!(loaded.trace_summary.total_tokens, 30);
 

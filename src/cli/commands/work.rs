@@ -443,7 +443,9 @@ impl WorkCommand {
                                 .trajectory
                                 .get("steps")
                                 .and_then(|v| v.as_array())
-                                .ok_or_else(|| anyhow::anyhow!("Persisted trajectory has no steps array"))?;
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("Persisted trajectory has no steps array")
+                                })?;
                             if step_num >= steps.len() {
                                 anyhow::bail!(
                                     "Step {} out of bounds for run '{}' ({} steps)",
@@ -477,13 +479,16 @@ impl WorkCommand {
                         let benchmark_test = prometheos_lite::harness::benchmark::BenchmarkTest {
                             id: format!("{}-{}", context.id, benchmark_type),
                             name: format!("work-{}", benchmark_type),
-                            test_type: prometheos_lite::harness::benchmark::TestType::PerformanceTest,
+                            test_type:
+                                prometheos_lite::harness::benchmark::TestType::PerformanceTest,
                             command: "cargo".to_string(),
                             args: vec!["check".to_string(), "--all-targets".to_string()],
                             working_dir: std::path::PathBuf::from("."),
                             iterations: 1,
                             timeout_ms: 120_000,
-                            metrics: vec![prometheos_lite::harness::benchmark::MetricType::Duration],
+                            metrics: vec![
+                                prometheos_lite::harness::benchmark::MetricType::Duration,
+                            ],
                         };
                         let suite = prometheos_lite::harness::benchmark::BenchmarkSuite {
                             id: format!("suite-{}", context.id),
