@@ -118,6 +118,8 @@ pub enum ApiError {
     Internal(String),
     NotFound(String),
     BadRequest(String),
+    Forbidden(String),
+    Conflict(String),
 }
 
 impl IntoResponse for ApiError {
@@ -126,6 +128,8 @@ impl IntoResponse for ApiError {
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
@@ -165,16 +169,10 @@ pub async fn list_work_contexts(
 pub async fn get_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
-    let work_context_service = state
-        .create_work_context_service()
-        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
-
-    let context = work_context_service
-        .get_context(&id)
-        .map_err(|e| ApiError::Internal(format!("Failed to get context: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
-
+    let user_id = required_user_id(&identity)?;
+    let context = get_context_for_user_or_404(&state, &id, user_id).await?;
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -248,15 +246,10 @@ pub async fn update_work_context_status(
 pub async fn get_work_context_artifacts(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
-    let work_context_service = state
-        .create_work_context_service()
-        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
-
-    let context = work_context_service
-        .get_context(&id)
-        .map_err(|e| ApiError::Internal(format!("Failed to get context: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
+    let user_id = required_user_id(&identity)?;
+    let context = get_context_for_user_or_404(&state, &id, user_id).await?;
 
     let response: Vec<ArtifactResponse> = context
         .artifacts
@@ -363,20 +356,19 @@ pub async fn run_harness(
     ))
 }
 
-pub async fn get_harness_metadata(
-    State(_state): State<Arc<AppState>>,
-    Path((_id, _view)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    Err(ApiError::BadRequest(
-        "Deprecated endpoint removed. Use explicit /harness/{evidence|patches|validation|review|risk|completion} endpoints.".to_string(),
-    ))
-}
-
 fn harness_payload(ctx: &crate::work::types::WorkContext) -> serde_json::Value {
     ctx.metadata
         .get("harness")
         .cloned()
         .unwrap_or(serde_json::Value::Null)
+}
+
+fn required_user_id(identity: &UserIdentityQuery) -> Result<&str, ApiError> {
+    let user_id = identity.user_id.trim();
+    if user_id.is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    Ok(user_id)
 }
 
 async fn get_context_or_404(
@@ -389,6 +381,21 @@ async fn get_context_or_404(
     svc.get_context(id)
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))
+}
+
+async fn get_context_for_user_or_404(
+    state: &Arc<AppState>,
+    id: &str,
+    user_id: &str,
+) -> Result<crate::work::types::WorkContext, ApiError> {
+    let context = get_context_or_404(state, id).await?;
+    if context.user_id != user_id {
+        return Err(ApiError::Forbidden(format!(
+            "work context '{}' does not belong to user '{}'",
+            id, user_id
+        )));
+    }
+    Ok(context)
 }
 
 fn extract_harness_view(harness: &serde_json::Value, view: &str) -> Option<serde_json::Value> {
@@ -407,76 +414,91 @@ fn extract_harness_view(harness: &serde_json::Value, view: &str) -> Option<serde
     }
 }
 
+fn required_harness_view(
+    harness: &serde_json::Value,
+    view: &str,
+) -> Result<serde_json::Value, ApiError> {
+    extract_harness_view(harness, view).ok_or_else(|| {
+        ApiError::Conflict(format!(
+            "harness '{}' view is not available for this work context yet",
+            view
+        ))
+    })
+}
+
 pub async fn get_harness_evidence(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
+    let user_id = required_user_id(&identity)?;
+    let ctx = get_context_for_user_or_404(&state, &id, user_id).await?;
     let harness = harness_payload(&ctx);
-    Ok(Json(
-        extract_harness_view(&harness, "evidence").unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(required_harness_view(&harness, "evidence")?))
 }
 
 pub async fn get_harness_patches(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
+    let user_id = required_user_id(&identity)?;
+    let ctx = get_context_for_user_or_404(&state, &id, user_id).await?;
     let harness = harness_payload(&ctx);
-    Ok(Json(
-        extract_harness_view(&harness, "patches").unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(required_harness_view(&harness, "patches")?))
 }
 
 pub async fn get_harness_validation(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
+    let user_id = required_user_id(&identity)?;
+    let ctx = get_context_for_user_or_404(&state, &id, user_id).await?;
     let harness = harness_payload(&ctx);
-    Ok(Json(
-        extract_harness_view(&harness, "validation").unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(required_harness_view(&harness, "validation")?))
 }
 
 pub async fn get_harness_review(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
+    let user_id = required_user_id(&identity)?;
+    let ctx = get_context_for_user_or_404(&state, &id, user_id).await?;
     let harness = harness_payload(&ctx);
-    Ok(Json(
-        extract_harness_view(&harness, "review").unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(required_harness_view(&harness, "review")?))
 }
 
 pub async fn get_harness_risk(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
+    let user_id = required_user_id(&identity)?;
+    let ctx = get_context_for_user_or_404(&state, &id, user_id).await?;
     let harness = harness_payload(&ctx);
-    Ok(Json(
-        extract_harness_view(&harness, "risk").unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(required_harness_view(&harness, "risk")?))
 }
 
 pub async fn get_harness_completion(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = get_context_or_404(&state, &id).await?;
+    let user_id = required_user_id(&identity)?;
+    let ctx = get_context_for_user_or_404(&state, &id, user_id).await?;
     let harness = harness_payload(&ctx);
-    Ok(Json(
-        extract_harness_view(&harness, "completion").unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(required_harness_view(&harness, "completion")?))
 }
 
 pub async fn get_work_quality(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let svc = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -495,7 +517,10 @@ pub async fn get_work_quality(
 pub async fn get_work_cost(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let svc = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -514,7 +539,10 @@ pub async fn get_work_cost(
 pub async fn list_work_traces(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let svc = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -531,7 +559,10 @@ pub async fn list_work_traces(
 pub async fn get_trace_by_run(
     State(state): State<Arc<AppState>>,
     Path((id, run_id)): Path<(String, String)>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let svc = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -557,7 +588,7 @@ pub async fn get_trace_by_run(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_harness_view;
+    use super::{UserIdentityQuery, extract_harness_view, required_harness_view, required_user_id};
 
     #[test]
     fn test_extract_harness_view_matrix() {
@@ -592,5 +623,30 @@ mod tests {
             );
         }
         assert!(extract_harness_view(&harness, "unknown").is_none());
+    }
+
+    #[test]
+    fn test_required_harness_view_errors_when_missing() {
+        let harness = serde_json::json!({
+            "evidence_log": {"entries": []}
+        });
+        let err = required_harness_view(&harness, "completion").unwrap_err();
+        assert!(matches!(err, super::ApiError::Conflict(_)));
+    }
+
+    #[test]
+    fn test_required_user_id_validation() {
+        let ok = UserIdentityQuery {
+            user_id: "user-1".to_string(),
+        };
+        assert_eq!(required_user_id(&ok).unwrap(), "user-1");
+
+        let bad = UserIdentityQuery {
+            user_id: "   ".to_string(),
+        };
+        assert!(matches!(
+            required_user_id(&bad).unwrap_err(),
+            super::ApiError::BadRequest(_)
+        ));
     }
 }
