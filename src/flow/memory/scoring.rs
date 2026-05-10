@@ -137,6 +137,7 @@ pub fn prune_combined(memories: Vec<Memory>, max_count: usize, threshold: f32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
     use chrono::Utc;
 
     fn create_test_memory(importance: f32, days_old: i64, access_count: u32) -> Memory {

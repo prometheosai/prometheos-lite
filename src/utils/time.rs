@@ -38,6 +38,7 @@ pub fn duration_between(start: &str, end: &str) -> Result<Duration, chrono::Pars
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
 
     #[test]
     fn test_now_iso8601() {

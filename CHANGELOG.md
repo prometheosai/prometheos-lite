@@ -10,7 +10,12 @@
 
 - `cargo fix --allow-dirty --allow-staged` completed successfully and applied fixes across affected modules.
 - `cargo fmt` passes.
-- `cargo test --quiet` currently fails in this environment on external toolchain/resource limits during integration test link step (`link.exe` fatal `LNK1102` out-of-memory for `harness_git_checkpoint`), not due to placeholder/stub regressions in changed runtime logic.
+- Added test-profile build hardening in `Cargo.toml`:
+  - `[profile.test] debug = 0`
+  - `[profile.test] split-debuginfo = "off"`
+  - `[profile.test] incremental = true`
+- Fixed two compile regressions introduced during automated hygiene (`chrono::Duration`/`chrono::Datelike` test imports).
+- `cargo test --quiet` now passes end-to-end in this environment.
 
 ## V1.6 Strict Audit Completion - CI Enforcement Integration and De-Placeholdering Pass 2
 

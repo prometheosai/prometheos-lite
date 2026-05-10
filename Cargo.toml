@@ -64,4 +64,9 @@ axum-test = "15.0"
 default = []
 legacy = []  # Enable legacy agent/core modules for backward compatibility
 
+[profile.test]
+debug = 0
+split-debuginfo = "off"
+incremental = true
+
 
