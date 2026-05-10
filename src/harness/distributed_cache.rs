@@ -1154,8 +1154,8 @@ impl ConsistencyManager {
     pub async fn trigger_read_repair(&self, key: &str, correct_value: &serde_json::Value) -> Result<()> {
         info!("Triggering read repair for key: {}", key);
         
-        // Get correct value from primary
-        let ttl_sec = None; // Would need to get TTL from entry
+        // Keep repaired values alive long enough to avoid immediate re-divergence.
+        let ttl_sec = Some(self.read_repair_ttl_sec());
         
         // Update inconsistent replicas
         let nodes = self.cluster_nodes.read().await;
@@ -1180,13 +1180,62 @@ impl ConsistencyManager {
         
         // Get fresh value from primary
         if let Some(fresh_value) = self.cache_backend.get(key).await? {
-            let ttl_sec = None; // Would need to get TTL from entry
+            let ttl_sec = Some(self.read_repair_ttl_sec());
             
             // Update local cache
             self.cache_backend.set(key.to_string(), fresh_value, ttl_sec).await?;
         }
         
         Ok(())
+    }
+
+    fn read_repair_ttl_sec(&self) -> u64 {
+        let floor = 60_u64;
+        let scaled_threshold = self.config.stale_read_threshold_sec.saturating_mul(4);
+        scaled_threshold.max(floor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_repair_ttl_uses_scaled_staleness_with_floor() {
+        let low = ConsistencyConfig {
+            level: ConsistencyLevel::Eventual,
+            read_repair_enabled: true,
+            stale_reads_allowed: true,
+            stale_read_threshold_sec: 10,
+        };
+        let high = ConsistencyConfig {
+            stale_read_threshold_sec: 120,
+            ..low.clone()
+        };
+        let nodes = Arc::new(RwLock::new(HashMap::new()));
+        let backend: Arc<dyn CacheBackend> = Arc::new(InMemoryCache::new(CacheConfig {
+            backend: CacheBackend::InMemory,
+            eviction_policy: EvictionPolicy::LRU,
+            ttl_config: TTLConfig {
+                default_ttl_sec: 3600,
+                max_ttl_sec: 86_400,
+                ttl_by_pattern: HashMap::new(),
+            },
+            size_config: SizeConfig {
+                max_entries: 16,
+                max_size_mb: 8,
+                entry_size_limits: EntrySizeLimits {
+                    max_key_size_bytes: 256,
+                    max_value_size_mb: 1,
+                    max_total_size_mb: 2,
+                },
+            },
+        }));
+        let low_manager = ConsistencyManager::new(low, nodes.clone(), backend.clone());
+        let high_manager = ConsistencyManager::new(high, nodes, backend);
+
+        assert_eq!(low_manager.read_repair_ttl_sec(), 60);
+        assert_eq!(high_manager.read_repair_ttl_sec(), 480);
     }
 }
 
