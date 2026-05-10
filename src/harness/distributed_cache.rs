@@ -1159,10 +1159,16 @@ impl ConsistencyManager {
         
         // Update inconsistent replicas
         let nodes = self.cluster_nodes.read().await;
+        let replica_count = nodes
+            .values()
+            .filter(|node| matches!(node.role, NodeRole::Secondary))
+            .count();
+        if replica_count > 0 {
+            ensure_remote_replication_enabled("trigger_read_repair")?;
+        }
         for node in nodes.values() {
             if matches!(node.role, NodeRole::Secondary) {
                 debug!("Repairing replica node: {}", node.node_id);
-                // In a real implementation, this would update the remote node
             }
         }
         
