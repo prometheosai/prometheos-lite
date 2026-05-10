@@ -1,0 +1,39 @@
+---
+description: Repository file and folder organization standards.
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Repository Organization Rules
+
+## Core Placement Rules
+
+1. Place executable or utility automation scripts in `/scripts`.
+2. Place project documentation in `/docs` and organized subfolders.
+3. Keep root-level files minimal and intentional:
+   - `README.md`
+   - `LICENSE`
+   - `CONTRIBUTING.md`
+   - configuration files (`.gitignore`, `.env.example`, CI files)
+4. Avoid adding new markdown documents to the root unless they are primary repo metadata.
+
+## Documentation Structure
+
+- `/docs/prd` for product requirements and planning docs.
+- `/docs/operations` for project management, release, and process docs.
+- `/docs/guides` for user/developer guides.
+- `/docs/architecture` for technical design and architecture documents.
+
+## Naming Conventions
+
+- Use lowercase kebab-case file names for new docs and scripts.
+- Avoid spaces in file names.
+- Prefer descriptive names:
+  - `docs/operations/project-management.md`
+  - `scripts/sync-prd-issues-to-project.ps1`
+
+## Change Hygiene
+
+- When moving docs, update references in `README.md` and relevant documents.
+- Do not duplicate the same document in multiple locations.
