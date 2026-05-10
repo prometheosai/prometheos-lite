@@ -1,3 +1,27 @@
+## V1.6.1 Repo-Wide Codification - Runtime Policy Enforcement Pass
+
+- Added central runtime policy module `src/runtime_policy.rs` with:
+  - software-harness raw-write policy decision (`is_raw_write_allowed`)
+  - production source scanner for placeholder/stub markers (`scan_runtime_placeholder_violations`)
+  - explicit detector-module exclusions for pattern-vocabulary modules.
+- Wired tool runtime write-policy gate to central runtime policy:
+  - `src/flow/intelligence/tool.rs` now delegates raw-write decision to `runtime_policy` for harness software path.
+- Removed remaining implicit API identity fallback in playbook surface:
+  - `src/api/playbooks.rs` `list_playbooks` now requires explicit `user_id` query and rejects empty identity.
+  - Playbook endpoints are now routed in `src/api/router.rs` and module-exported via `src/api/mod.rs`.
+- Replaced CI placeholder grep heuristics with structured policy test invocation:
+  - `.github/workflows/ci.yml` `Anti-Placeholder Check` and `Stub/placeholder detection` now run `runtime_policy_enforcement` test.
+- Added repository-level enforcement integration test:
+  - `tests/runtime_policy_enforcement.rs` fails build if production `src/` contains runtime placeholder markers outside allowed detector modules.
+
+### Validation Notes
+
+- `cargo fmt --all` passes.
+- `RUSTFLAGS='-D warnings' cargo check --all-targets --all-features` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` passes.
+- `cargo test --quiet` passes end-to-end (including `runtime_policy_enforcement`).
+
 ## V1.6.1 Strict Completion - Contract Closure, Runtime Enforcement, and API/CLI Parity
 
 - Replaced harness CLI placeholder failures with real persisted flows in `src/cli/commands/harness.rs`:

@@ -1,9 +1,9 @@
 //! Playbook API endpoints
 
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
     Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,7 +11,10 @@ use std::sync::Arc;
 use crate::api::state::AppState;
 use crate::db::Db;
 use crate::db::repository::PlaybookOperations;
-use crate::work::playbook::{CreativityLevel, FlowPreference, NodePreference, PatternRecord, PatternType, ResearchDepth, WorkContextPlaybook};
+use crate::work::playbook::{
+    CreativityLevel, FlowPreference, NodePreference, PatternRecord, ResearchDepth,
+    WorkContextPlaybook,
+};
 
 /// Request to create a new Playbook
 #[derive(Debug, Deserialize)]
@@ -66,13 +69,22 @@ pub struct PlaybookResponse {
     pub updated_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UserIdentityQuery {
+    pub user_id: String,
+}
+
 /// List all playbooks for a user
 pub async fn list_playbooks(
     State(state): State<Arc<AppState>>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<Vec<PlaybookResponse>>, StatusCode> {
+    if identity.user_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let playbooks = PlaybookOperations::get_playbooks_for_user(&db, "api-user")
+    let playbooks = PlaybookOperations::get_playbooks_for_user(&db, &identity.user_id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let response: Vec<PlaybookResponse> = playbooks
@@ -159,7 +171,7 @@ pub async fn create_playbook(
         req.description,
     );
 
-    let mut playbook = WorkContextPlaybook {
+    let playbook = WorkContextPlaybook {
         preferred_flows: req.preferred_flows,
         preferred_nodes: req.preferred_nodes,
         default_research_depth: research_depth,

@@ -8,6 +8,7 @@ pub mod conversations;
 pub mod flow_runs;
 pub mod health;
 pub mod messages;
+pub mod playbooks;
 pub mod projects;
 pub mod router;
 pub mod server;

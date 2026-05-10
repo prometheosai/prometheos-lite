@@ -18,6 +18,7 @@ use crate::api::conversations::{create_conversation, get_conversations};
 use crate::api::flow_runs::run_flow;
 use crate::api::health::health_check;
 use crate::api::messages::{create_message, get_messages};
+use crate::api::playbooks::{create_playbook, get_playbook, list_playbooks, update_playbook};
 use crate::api::projects::{create_project, get_projects};
 use crate::api::websocket::websocket_handler;
 use crate::api::work_contexts::{
@@ -51,6 +52,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/conversations", post(create_conversation))
         .route("/conversations/:id/messages", get(get_messages))
         .route("/messages", post(create_message))
+        .route("/playbooks", get(list_playbooks).post(create_playbook))
+        .route("/playbooks/:id", get(get_playbook))
+        .route("/playbooks/:id/update", post(update_playbook))
         .route("/conversations/:id/run", post(run_flow))
         .route("/ws/runs/:id", get(websocket_handler))
         .route(
@@ -77,7 +81,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/work-contexts/:id/harness/evidence",
             get(get_harness_evidence),
         )
-        .route("/work-contexts/:id/harness/patches", get(get_harness_patches))
+        .route(
+            "/work-contexts/:id/harness/patches",
+            get(get_harness_patches),
+        )
         .route(
             "/work-contexts/:id/harness/validation",
             get(get_harness_validation),
