@@ -162,15 +162,15 @@ impl JobQueue {
     /// Cancel a job
     pub async fn cancel_job(&self, job_id: &str) -> Result<()> {
         let mut jobs = self.jobs.write().await;
-        if let Some(job) = jobs.get_mut(job_id) {
-            if job.status == JobStatus::Pending {
-                job.status = JobStatus::Cancelled;
-                job.completed_at = Some(chrono::Utc::now());
+        if let Some(job) = jobs.get_mut(job_id)
+            && job.status == JobStatus::Pending
+        {
+            job.status = JobStatus::Cancelled;
+            job.completed_at = Some(chrono::Utc::now());
 
-                // Remove from pending queue
-                let mut pending = self.pending_jobs.lock().await;
-                pending.retain(|id| id != job_id);
-            }
+            // Remove from pending queue
+            let mut pending = self.pending_jobs.lock().await;
+            pending.retain(|id| id != job_id);
         }
         Ok(())
     }
@@ -218,7 +218,7 @@ impl JobQueue {
 
             tokio::spawn(async move {
                 let result = executor
-                    .execute(&jobs.read().await.get(&job_id_clone).unwrap())
+                    .execute(jobs.read().await.get(&job_id_clone).unwrap())
                     .await;
 
                 let mut jobs = jobs.write().await;

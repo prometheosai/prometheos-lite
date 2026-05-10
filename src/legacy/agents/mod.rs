@@ -23,7 +23,6 @@ pub use coder::CoderAgent;
 pub use planner::PlannerAgent;
 pub use reviewer::ReviewerAgent;
 
-#[deprecated(since = "0.2.0", note = "Use crate::flow::Node trait instead")]
 #[async_trait]
 pub trait Agent: Send + Sync {
     fn name(&self) -> &str;

@@ -48,9 +48,10 @@ jobs:
       - name: Guardrail Tests
         run: cargo test --test guardrail_tests --test guardrail_integration_tests
 
-      - name: Anti-Placeholder Check
+      - name: Anti-Placeholder Check (Structured)
         run: |
           cargo test --test runtime_policy_enforcement --quiet
+          cargo test --test ci_enforcement_tests --quiet
 
       - name: Anti-regression check (no direct LLM calls in API)
         run: |
@@ -62,6 +63,3 @@ jobs:
           fi
           echo "OK: No direct LLM calls in API handlers"
 
-      - name: Stub/placeholder detection
-        run: |
-          cargo test --test runtime_policy_enforcement --quiet

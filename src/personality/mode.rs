@@ -3,9 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Personality modes for the AI assistant
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum PersonalityMode {
     /// Friendly, conversational companion
+    #[default]
     Companion,
     /// Helpful guide that explains reasoning
     Navigator,
@@ -37,19 +38,21 @@ impl PersonalityMode {
     }
 
     /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "companion" => Some(PersonalityMode::Companion),
-            "navigator" => Some(PersonalityMode::Navigator),
-            "anchor" => Some(PersonalityMode::Anchor),
-            "mirror" => Some(PersonalityMode::Mirror),
-            _ => None,
-        }
+    pub fn parse(s: &str) -> Option<Self> {
+        <Self as std::str::FromStr>::from_str(s).ok()
     }
 }
 
-impl Default for PersonalityMode {
-    fn default() -> Self {
-        PersonalityMode::Companion
+impl std::str::FromStr for PersonalityMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "companion" => Ok(PersonalityMode::Companion),
+            "navigator" => Ok(PersonalityMode::Navigator),
+            "anchor" => Ok(PersonalityMode::Anchor),
+            "mirror" => Ok(PersonalityMode::Mirror),
+            _ => Err(()),
+        }
     }
 }
