@@ -17,7 +17,7 @@ mod tests {
             outputs: None,
             nodes: vec![NodeDefinition {
                 id: "node1".to_string(),
-                node_type: "placeholder".to_string(),
+                node_type: "passthrough".to_string(),
                 config: None,
             }],
             transitions: vec![],

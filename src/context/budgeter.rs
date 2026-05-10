@@ -449,7 +449,7 @@ mod tests {
         let json_content = r#"{"key": "value", "nested": {"data": "test"}}"#;
 
         let result = budgeter.trim_content(json_content, 5).unwrap();
-        // Should either be valid JSON or a placeholder
+        // Should either be valid JSON or an explicit truncation marker
         if !result.contains("Content too large") {
             assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok());
         }
