@@ -11,14 +11,12 @@
 //! - enforce_patch_minimality function
 //! - format_analysis_report function
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use prometheos_lite::harness::edit_protocol::EditOperation;
 use prometheos_lite::harness::minimality::{
-    ChangeType, FileChange, MinimalityConfig, MinimalityEnforcer, MinimalityStats,
-    MinimalityViolation, PatchAnalysis, UnrelatedChange, ViolationSeverity,
-    analyze_patch_minimality, enforce_patch_minimality, format_analysis_report,
+    ChangeType, FileChange, MinimalityConfig, MinimalityEnforcer, MinimalityViolation,
+    PatchAnalysis, UnrelatedChange, ViolationSeverity, analyze_patch_minimality,
+    enforce_patch_minimality, format_analysis_report,
 };
 
 // ============================================================================
@@ -214,16 +212,14 @@ fn test_unrelated_change_creation() {
 #[test]
 fn test_minimality_enforcer_new() {
     let config = MinimalityConfig::default();
-    let enforcer = MinimalityEnforcer::new(config);
+    let _enforcer = MinimalityEnforcer::new(config);
     // Enforcer created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_minimality_enforcer_with_defaults() {
-    let enforcer = MinimalityEnforcer::with_defaults();
+    let _enforcer = MinimalityEnforcer::with_defaults();
     // Default enforcer created
-    assert!(true);
 }
 
 // ============================================================================
@@ -237,7 +233,7 @@ fn test_analyze_patch_minimality_small() {
     let analysis = analyze_patch_minimality(patch_content, target_issue);
 
     // Should analyze successfully
-    assert!(analysis.files_changed.len() >= 0);
+    assert!(analysis.files_changed.len() <= 1);
 }
 
 #[test]

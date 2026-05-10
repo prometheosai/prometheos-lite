@@ -115,16 +115,14 @@ fn test_permission_grant_deny() {
 
 #[test]
 fn test_permission_ledger_new() {
-    let ledger = PermissionLedger::new();
+    let _ledger = PermissionLedger::new();
     // Ledger created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_permission_ledger_with_defaults() {
-    let ledger = PermissionLedger::with_defaults();
+    let _ledger = PermissionLedger::with_defaults();
     // Ledger created with defaults
-    assert!(true);
 }
 
 #[test]
@@ -141,7 +139,6 @@ fn test_permission_ledger_grant() {
     });
 
     // Grant added successfully
-    assert!(true);
 }
 
 #[test]

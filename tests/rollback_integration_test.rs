@@ -32,13 +32,13 @@ async fn setup_temp_repo() -> TempDir {
 
     // Configure git user for commits
     Command::new("git")
-        .args(&["config", "user.email", "test@test.com"])
+        .args(["config", "user.email", "test@test.com"])
         .current_dir(repo_path)
         .output()
         .expect("Failed to set git email");
 
     Command::new("git")
-        .args(&["config", "user.name", "Test User"])
+        .args(["config", "user.name", "Test User"])
         .current_dir(repo_path)
         .output()
         .expect("Failed to set git name");
@@ -58,13 +58,13 @@ async fn create_test_file(repo_path: &std::path::Path, content: &str) -> PathBuf
 /// Commits all changes in the repo
 fn commit_all(repo_path: &std::path::Path, message: &str) {
     Command::new("git")
-        .args(&["add", "."])
+        .args(["add", "."])
         .current_dir(repo_path)
         .output()
         .expect("Failed to stage changes");
 
     Command::new("git")
-        .args(&["commit", "-m", message])
+        .args(["commit", "-m", message])
         .current_dir(repo_path)
         .output()
         .expect("Failed to commit");
@@ -100,11 +100,13 @@ async fn test_rollback_file_edit() {
 
     // Build file set and policy
     let policy = FilePolicy::default_for_repo(canonical_policy_root(repo_path));
-    let mut file_set = FileSet::default();
-    file_set.editable = vec![editable_path(&policy, "test_file.rs")];
+    let file_set = FileSet {
+        editable: vec![editable_path(&policy, "test_file.rs")],
+        ..Default::default()
+    };
 
     // Apply patch with rollback
-    let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
+    let (_patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
         .await
         .expect("Patch application failed");
 
@@ -163,11 +165,13 @@ async fn test_rollback_create_file() {
 
     // Build file set and policy
     let policy = FilePolicy::default_for_repo(canonical_policy_root(repo_path));
-    let mut file_set = FileSet::default();
-    file_set.editable = vec![editable_path(&policy, "new_file.rs")];
+    let file_set = FileSet {
+        editable: vec![editable_path(&policy, "new_file.rs")],
+        ..Default::default()
+    };
 
     // Apply patch with rollback
-    let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
+    let (_patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
         .await
         .expect("Patch application failed");
 
@@ -224,11 +228,13 @@ async fn test_rollback_delete_file() {
 
     // Build file set and policy
     let policy = FilePolicy::relaxed(canonical_policy_root(repo_path));
-    let mut file_set = FileSet::default();
-    file_set.editable = vec![editable_path(&policy, "test_file.rs")];
+    let file_set = FileSet {
+        editable: vec![editable_path(&policy, "test_file.rs")],
+        ..Default::default()
+    };
 
     // Apply patch with rollback
-    let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
+    let (_patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
         .await
         .expect("Patch application failed");
 
@@ -285,11 +291,13 @@ async fn test_rollback_conflict_detection() {
 
     // Build file set and policy
     let policy = FilePolicy::default_for_repo(canonical_policy_root(repo_path));
-    let mut file_set = FileSet::default();
-    file_set.editable = vec![editable_path(&policy, "test_file.rs")];
+    let file_set = FileSet {
+        editable: vec![editable_path(&policy, "test_file.rs")],
+        ..Default::default()
+    };
 
     // Apply patch with rollback
-    let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
+    let (_patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
         .await
         .expect("Patch application failed");
 
@@ -349,11 +357,13 @@ fn main() {
 
     // Build file set and policy
     let policy = FilePolicy::default_for_repo(canonical_policy_root(repo_path));
-    let mut file_set = FileSet::default();
-    file_set.editable = vec![editable_path(&policy, "test_file.rs")];
+    let file_set = FileSet {
+        editable: vec![editable_path(&policy, "test_file.rs")],
+        ..Default::default()
+    };
 
     // Apply patch
-    let (patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
+    let (_patch_result, rollback_handle) = apply_patch_with_rollback(&edits, &file_set, &policy)
         .await
         .expect("Patch application failed");
 

@@ -14,13 +14,13 @@
 use std::collections::HashMap;
 
 use prometheos_lite::harness::confidence::ConfidenceScore;
-use prometheos_lite::harness::edit_protocol::EditOperation;
+
 use prometheos_lite::harness::review::ReviewIssue;
 use prometheos_lite::harness::risk::{RiskAssessment, RiskLevel};
 use prometheos_lite::harness::selection::{
     PatchCandidate, ScoredCandidate, SelectionCriteria, SelectionEngine,
 };
-use prometheos_lite::harness::semantic_diff::SemanticDiff;
+
 use prometheos_lite::harness::validation::ValidationResult;
 
 // ============================================================================
@@ -212,16 +212,14 @@ fn test_scored_candidate_ineligible() {
 #[test]
 fn test_selection_engine_new() {
     let criteria = SelectionCriteria::default();
-    let engine = SelectionEngine::new(criteria);
+    let _engine = SelectionEngine::new(criteria);
     // Engine created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_selection_engine_default_criteria() {
-    let engine = SelectionEngine::with_default_criteria();
+    let _engine = SelectionEngine::with_default_criteria();
     // Engine created with default criteria
-    assert!(true);
 }
 
 // ============================================================================
@@ -340,7 +338,7 @@ fn test_empty_candidates() {
 
 #[test]
 fn test_multiple_candidates() {
-    let candidates = vec![
+    let candidates = [
         PatchCandidate {
             id: "patch-a".to_string(),
             edits: vec![],

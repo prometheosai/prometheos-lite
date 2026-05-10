@@ -11,13 +11,12 @@
 //! - Cost estimation functions
 //! - Resource limit checking
 
-use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::execution_loop::{
     ExecutionMetrics, HarnessExecutionRequest, HarnessExecutionResult, HarnessLimits,
-    HarnessProgress, ValidationFailurePolicy, check_resource_limits, estimate_execution_cost,
+    HarnessProgress, check_resource_limits, estimate_execution_cost,
 };
 use prometheos_lite::harness::mode_policy::HarnessMode;
 use prometheos_lite::harness::sandbox::SandboxPolicy;
@@ -155,7 +154,7 @@ fn test_harness_limits_custom() {
 #[test]
 fn test_harness_limits_clone() {
     let limits = HarnessLimits::default();
-    let cloned = limits.clone();
+    let cloned = limits;
 
     assert_eq!(limits.max_steps, cloned.max_steps);
     assert_eq!(limits.max_time_ms, cloned.max_time_ms);

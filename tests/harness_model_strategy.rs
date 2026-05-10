@@ -151,9 +151,8 @@ fn test_task_requirements_simple() {
 
 #[test]
 fn test_model_strategy_engine_new() {
-    let engine = ModelStrategyEngine::new();
+    let _engine = ModelStrategyEngine::new();
     // Engine created successfully
-    assert!(true);
 }
 
 // ============================================================================

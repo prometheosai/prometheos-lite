@@ -211,14 +211,14 @@ fn test_verification_assessment_with_data() {
 
 #[test]
 fn test_verification_assessor_new() {
-    let assessor = VerificationAssessor::new();
+    let _assessor = VerificationAssessor::new();
     // Test that VerificationAssessor can be created
     // Note: Cannot test private level_mapping field
 }
 
 #[test]
 fn test_verification_assessor_default() {
-    let assessor = VerificationAssessor::default();
+    let _assessor = VerificationAssessor::default();
     // Test that VerificationAssessor can be created with default
     // Note: Cannot test private level_mapping field
 }

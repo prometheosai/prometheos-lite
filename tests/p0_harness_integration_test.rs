@@ -7,38 +7,6 @@
 //! 4. EvidenceLog on every decision
 
 use std::path::PathBuf;
-use tempfile::TempDir;
-
-/// Create a minimal test repo with a Rust file
-fn create_test_repo() -> TempDir {
-    let temp_dir = TempDir::new().unwrap();
-    let repo_root = temp_dir.path();
-
-    // Create src directory
-    std::fs::create_dir_all(repo_root.join("src")).unwrap();
-
-    // Create a simple Rust file
-    std::fs::write(
-        repo_root.join("src/main.rs"),
-        r#"fn main() {
-    println!("Hello, world!");
-}"#,
-    )
-    .unwrap();
-
-    // Create Cargo.toml
-    std::fs::write(
-        repo_root.join("Cargo.toml"),
-        r#"[package]
-name = "test-project"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-
-    temp_dir
-}
 
 /// Test that WorkContext integration extracts mentioned files from task
 #[test]
@@ -98,7 +66,7 @@ fn test_llm_patch_provider_strict_mode_default() {
 
     // This would need a mock client in practice
     // For now, just verify the API exists and strict mode is the default
-    let provider = LlmPatchProvider::new(
+    let _provider = LlmPatchProvider::new(
         LlmClient::new("http://localhost:11434", "test-model").unwrap(),
         "test-model".to_string(),
     );

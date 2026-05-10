@@ -10,9 +10,6 @@
 //! - Cache statistics and metrics
 //! - Scope isolation between tasks
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
 // Note: knowledge_cache module doesn't exist in actual codebase
 
 // ============================================================================

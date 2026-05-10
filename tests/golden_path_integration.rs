@@ -648,7 +648,6 @@ use prometheos_lite::harness::*;
 #[tokio::test]
 async fn test_comprehensive_functionality() {
     // Comprehensive integration test
-    assert!(true);
 }
 "#,
         )?;
