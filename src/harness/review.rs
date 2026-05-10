@@ -877,7 +877,7 @@ impl ReviewEngine {
                 "function_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         let name = name_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
@@ -895,7 +895,7 @@ impl ReviewEngine {
                 "struct_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         let name = name_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
@@ -913,7 +913,7 @@ impl ReviewEngine {
                 "enum_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         let name = name_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
@@ -931,7 +931,7 @@ impl ReviewEngine {
                 "trait_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         let name = name_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
@@ -949,7 +949,7 @@ impl ReviewEngine {
                 "impl_item" => {
                     if let Some(type_node) = node.child_by_field_name("type") {
                         let type_name = type_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
@@ -996,7 +996,7 @@ impl ReviewEngine {
                 "function_definition" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         let name = name_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
@@ -1014,7 +1014,7 @@ impl ReviewEngine {
                 "class_definition" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         let name = name_node
-                            .utf8_text(&context.file_content.as_bytes())
+                            .utf8_text(context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;

@@ -259,7 +259,6 @@ impl ContextBudget {
         let mut total_tokens_used = 0;
         let mut section_usage = HashMap::new();
         let mut violations = Vec::new();
-        let mut recommendations = Vec::new();
 
         // Sort sections by priority (highest first)
         let mut sorted_sections: Vec<_> = context_sections.into_iter().collect();
@@ -272,17 +271,17 @@ impl ContextBudget {
         let mut remaining_budget = self.total_budget;
 
         for (section, content) in sorted_sections {
-            let section_budget =
-                self.sections
-                    .get(&section)
-                    .cloned()
-                    .unwrap_or_else(|| SectionBudget {
-                        max_tokens: remaining_budget,
-                        min_tokens: 0,
-                        priority: 50,
-                        can_truncate: true,
-                        can_omit: true,
-                    });
+            let section_budget = self
+                .sections
+                .get(&section)
+                .cloned()
+                .unwrap_or(SectionBudget {
+                    max_tokens: remaining_budget,
+                    min_tokens: 0,
+                    priority: 50,
+                    can_truncate: true,
+                    can_omit: true,
+                });
 
             // Calculate content tokens (rough estimation)
             let content_tokens = self.estimate_tokens(&content);
@@ -412,7 +411,7 @@ impl ContextBudget {
         }
 
         // Generate recommendations
-        recommendations = self.generate_recommendations(&section_usage, &violations);
+        let recommendations = self.generate_recommendations(&section_usage, &violations);
 
         // Update current usage
         self.current_usage = section_usage.clone();

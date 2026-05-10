@@ -35,20 +35,20 @@ fn create_test_repo() -> tempfile::TempDir {
 
     // Initialize git repo
     std::process::Command::new("git")
-        .args(&["init"])
-        .current_dir(&repo_root)
+        .args(["init"])
+        .current_dir(repo_root)
         .output()
         .expect("Failed to init git repo");
 
     // Configure git user for commits
     std::process::Command::new("git")
-        .args(&["config", "user.email", "test@test.com"])
-        .current_dir(&repo_root)
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(repo_root)
         .output()
         .unwrap();
     std::process::Command::new("git")
-        .args(&["config", "user.name", "Test"])
-        .current_dir(&repo_root)
+        .args(["config", "user.name", "Test"])
+        .current_dir(repo_root)
         .output()
         .unwrap();
 
@@ -57,13 +57,13 @@ fn create_test_repo() -> tempfile::TempDir {
     fs::create_dir_all(&src_dir).unwrap();
     fs::write(src_dir.join("main.rs"), "fn main() {}").unwrap();
     std::process::Command::new("git")
-        .args(&["add", "."])
-        .current_dir(&repo_root)
+        .args(["add", "."])
+        .current_dir(repo_root)
         .output()
         .unwrap();
     std::process::Command::new("git")
-        .args(&["commit", "-m", "initial"])
-        .current_dir(&repo_root)
+        .args(["commit", "-m", "initial"])
+        .current_dir(repo_root)
         .output()
         .unwrap();
 

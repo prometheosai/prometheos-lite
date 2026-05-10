@@ -473,8 +473,10 @@ mod tests {
 
     #[test]
     fn test_detects_large_patch() {
-        let mut config = MinimalityConfig::default();
-        config.max_lines_per_file = 5;
+        let config = MinimalityConfig {
+            max_lines_per_file: 5,
+            ..Default::default()
+        };
 
         let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
@@ -505,8 +507,10 @@ mod tests {
 
     #[test]
     fn test_enforce_rejects_violations() {
-        let mut config = MinimalityConfig::default();
-        config.max_files_changed = 1;
+        let config = MinimalityConfig {
+            max_files_changed: 1,
+            ..Default::default()
+        };
 
         let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs

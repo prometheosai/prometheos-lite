@@ -18,7 +18,6 @@ use crate::harness::{
     patch_applier::{PatchResult, RollbackHandle, apply_patch_with_rollback, dry_run_patch},
     patch_provider::{
         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
-        PatchProvider,
     },
     repo_intelligence::{RepoContext, build_repo_context},
     review::{ReviewIssue, ReviewIssueType, ReviewSeverity, review_diff},
@@ -311,6 +310,12 @@ impl HarnessExecutionRequest {
     }
 }
 
+impl Default for HarnessExecutionRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PartialEq for HarnessExecutionRequest {
     fn eq(&self, other: &Self) -> bool {
         self.work_context_id == other.work_context_id
@@ -455,7 +460,7 @@ pub enum HarnessProgress {
     RiskAssessment {
         level: String,
         requires_approval: bool,
-        assessed: bool, // Manual construction - not actually assessed
+        assessed: bool,
     },
     Completing {
         decision: String,
@@ -496,7 +501,7 @@ struct ExecutionContext {
     start_time: Instant,
     step_count: u32,
     cost_accrued: f64,
-    tokens_used: u64,
+    _tokens_used: u64,
     progress_sender: Option<mpsc::UnboundedSender<HarnessProgress>>,
 }
 
@@ -509,7 +514,7 @@ impl ExecutionContext {
             start_time: Instant::now(),
             step_count: 0,
             cost_accrued: 0.0,
-            tokens_used: 0,
+            _tokens_used: 0,
             progress_sender: Some(tx),
         };
 
@@ -544,14 +549,6 @@ impl ExecutionContext {
 
     fn increment_step(&mut self) {
         self.step_count += 1;
-    }
-
-    fn add_cost(&mut self, cost: f64) {
-        self.cost_accrued += cost;
-    }
-
-    fn add_tokens(&mut self, tokens: u64) {
-        self.tokens_used += tokens;
     }
 
     fn send_progress(&self, progress: HarnessProgress) {
@@ -725,7 +722,7 @@ pub async fn execute_harness_task(
             }
             Err(e) => {
                 return Ok(HarnessExecutionResult {
-                    work_context_id: work_context_id,
+                    work_context_id,
                     trace_id: Some(trace_id.clone()),
                     repo_context: repo.clone(),
                     environment: crate::harness::environment::EnvironmentProfile::default(),
@@ -762,7 +759,7 @@ pub async fn execute_harness_task(
                     trajectory: traj,
                     git_checkpoint: None,
                     rollback_handle: None,
-                    validation_failure_policy: validation_failure_policy,
+                    validation_failure_policy,
                     artifacts: vec![],
                     failures: vec![],
                     summary: "Provider resolution failed".to_string(),
@@ -998,7 +995,7 @@ pub async fn execute_harness_task(
                     // Record patch generation evidence with AttemptPool details
                     if !selected_edits.is_empty() {
                         evidence_log.record_patch_generated(
-                            &format!("attempt_pool_selection_{}_candidates", candidates_count),
+                            format!("attempt_pool_selection_{}_candidates", candidates_count),
                             selected_edits.len(),
                             0.8, // Default confidence for AttemptPool selection
                             Some(trace_id.clone()),
@@ -1102,7 +1099,7 @@ pub async fn execute_harness_task(
                     requires_approval: false,
                     can_override: true,
                     override_conditions: vec!["manual review".into()],
-                    assessed: false, // Manual construction - not actually assessed
+                    assessed: false,
                 },
                 confidence: ConfidenceScore {
                     score: 0.0,
@@ -1178,7 +1175,7 @@ pub async fn execute_harness_task(
                 requires_approval: false,
                 can_override: true,
                 override_conditions: vec!["manual review".into()],
-                assessed: false, // Manual construction - not actually assessed
+                assessed: false,
             },
             confidence: ConfidenceScore {
                 score: 0.0,
@@ -1497,7 +1494,7 @@ pub async fn execute_harness_task(
     let gate_decision = policy_gate.check_patch_application(
         dry.failures.is_empty(),
         has_critical_issues,
-        risk.level.clone(),
+        risk.level,
         true, // Assume rollback will be available if needed
     );
 
@@ -1567,7 +1564,7 @@ pub async fn execute_harness_task(
         (_, Err(e)) => {
             // Checkpoint failed in a mode that requires side effects - this is blocking
             evidence_log.record_side_effect_blocked(
-                &format!("Checkpoint creation failed: {}", e),
+                format!("Checkpoint creation failed: {}", e),
                 Some(trace_id.clone()),
             );
             evidence_log.complete();
@@ -1829,94 +1826,91 @@ pub async fn execute_harness_task(
         let selection_engine = SelectionEngine::new(post_validation_criteria);
         let scored = selection_engine.rank_candidates(vec![post_validation_candidate]);
 
-        if let Some(first) = scored.first() {
-            if !first.is_eligible {
-                tracing::info!(
-                    "Post-validation selection rejected candidate: failed stricter criteria"
-                );
-                if validation_passed {
-                    // Validation passed but failed other criteria (risk, review issues)
-                    failures.push(FailureKind::SemanticFailure);
-                }
+        if let Some(first) = scored.first()
+            && !first.is_eligible
+        {
+            tracing::info!(
+                "Post-validation selection rejected candidate: failed stricter criteria"
+            );
+            if validation_passed {
+                // Validation passed but failed other criteria (risk, review issues)
+                failures.push(FailureKind::SemanticFailure);
             }
         }
     }
 
-    if let Some(ref v) = validation {
-        if !v.passed() {
-            failures.push(classify_validation_failure(v));
-        }
+    if let Some(ref v) = validation
+        && !v.passed()
+    {
+        failures.push(classify_validation_failure(v));
     }
 
     // STEP 9: Handle validation failure rollback policy
-    if let Some(ref v) = validation {
-        if !v.passed() && rollback_handle.is_some() {
-            let should_rollback = match req.validation_failure_policy {
-                ValidationFailurePolicy::RollbackAutomatically => {
+    if let Some(ref v) = validation
+        && !v.passed()
+        && rollback_handle.is_some()
+    {
+        let should_rollback = match req.validation_failure_policy {
+            ValidationFailurePolicy::RollbackAutomatically => {
+                ctx.send_progress(HarnessProgress::RollingBack {
+                    reason: "validation failed - automatic rollback".into(),
+                });
+                true
+            }
+            ValidationFailurePolicy::RollbackOnCriticalFailure => {
+                let has_critical = v
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("critical") || e.contains("fatal"));
+                if has_critical {
                     ctx.send_progress(HarnessProgress::RollingBack {
-                        reason: "validation failed - automatic rollback".into(),
+                        reason: "critical validation failure - automatic rollback".into(),
                     });
-                    true
                 }
-                ValidationFailurePolicy::RollbackOnCriticalFailure => {
-                    let has_critical = v
-                        .errors
-                        .iter()
-                        .any(|e| e.contains("critical") || e.contains("fatal"));
-                    if has_critical {
-                        ctx.send_progress(HarnessProgress::RollingBack {
-                            reason: "critical validation failure - automatic rollback".into(),
-                        });
-                    }
-                    has_critical
-                }
-                _ => false,
-            };
+                has_critical
+            }
+            _ => false,
+        };
 
-            if should_rollback {
-                if let Some(ref handle) = rollback_handle {
-                    // P1-010: Child span for rollback phase
-                    let rollback_span = tracing::info_span!(
-                        "harness.rollback",
+        if should_rollback && let Some(ref handle) = rollback_handle {
+            // P1-010: Child span for rollback phase
+            let rollback_span = tracing::info_span!(
+                "harness.rollback",
+                trace_id = %trace_id,
+                phase = "rollback",
+            );
+            let _enter = rollback_span.enter();
+
+            match handle.clone().rollback().await {
+                Ok(result) => {
+                    failures.push(FailureKind::ValidationFailed);
+                    failures.push(FailureKind::PatchRolledBack);
+                    tracing::info!(
                         trace_id = %trace_id,
-                        phase = "rollback",
+                        restored = result.restored.len(),
+                        "P1-010: Rollback successful"
                     );
-                    let _enter = rollback_span.enter();
-
-                    match handle.clone().rollback().await {
-                        Ok(result) => {
-                            failures.push(FailureKind::ValidationFailed);
-                            failures.push(FailureKind::PatchRolledBack);
-                            tracing::info!(
-                                trace_id = %trace_id,
-                                restored = result.restored.len(),
-                                "P1-010: Rollback successful"
-                            );
-                            // Record rollback evidence
-                            evidence_log.record_rollback(
-                                "validation failed - automatic rollback",
-                                Some(trace_id.clone()),
-                            );
-                            ctx.send_progress(HarnessProgress::RolledBack {
-                                restored_files: result.restored.len(),
-                                deleted_files: result.deleted.len(),
-                                recreated_files: result.recreated.len(),
-                            });
-                        }
-                        Err(e) => {
-                            failures.push(FailureKind::ValidationFailed);
-                            failures.push(FailureKind::RollbackFailed);
-                            tracing::error!(trace_id = %trace_id, error = %e, "P1-010: Rollback failed");
-                            // Record rollback failure
-                            evidence_log.record_rollback(
-                                &format!("rollback failed: {}", e),
-                                Some(trace_id.clone()),
-                            );
-                            ctx.send_progress(HarnessProgress::RollbackFailed {
-                                error: e.to_string(),
-                            });
-                        }
-                    }
+                    // Record rollback evidence
+                    evidence_log.record_rollback(
+                        "validation failed - automatic rollback",
+                        Some(trace_id.clone()),
+                    );
+                    ctx.send_progress(HarnessProgress::RolledBack {
+                        restored_files: result.restored.len(),
+                        deleted_files: result.deleted.len(),
+                        recreated_files: result.recreated.len(),
+                    });
+                }
+                Err(e) => {
+                    failures.push(FailureKind::ValidationFailed);
+                    failures.push(FailureKind::RollbackFailed);
+                    tracing::error!(trace_id = %trace_id, error = %e, "P1-010: Rollback failed");
+                    // Record rollback failure
+                    evidence_log
+                        .record_rollback(format!("rollback failed: {}", e), Some(trace_id.clone()));
+                    ctx.send_progress(HarnessProgress::RollbackFailed {
+                        error: e.to_string(),
+                    });
                 }
             }
         }
@@ -2115,10 +2109,10 @@ pub async fn execute_harness_task(
                 }
 
                 // Score for analyzing files
-                if let Some(ref patch_result) = patch {
-                    if patch_result.changed_files.len() > 0 {
-                        score += 0.2;
-                    }
+                if let Some(ref patch_result) = patch
+                    && !patch_result.changed_files.is_empty()
+                {
+                    score += 0.2;
                 }
 
                 // Score for security analysis
@@ -2400,15 +2394,15 @@ pub fn check_resource_limits(
 ) -> Result<(), String> {
     if let Some(max_size) = limits.max_file_size_bytes {
         for file in files_to_process {
-            if let Ok(metadata) = std::fs::metadata(file) {
-                if metadata.len() > max_size {
-                    return Err(format!(
-                        "File {} exceeds size limit: {} bytes > {} bytes",
-                        file.display(),
-                        metadata.len(),
-                        max_size
-                    ));
-                }
+            if let Ok(metadata) = std::fs::metadata(file)
+                && metadata.len() > max_size
+            {
+                return Err(format!(
+                    "File {} exceeds size limit: {} bytes > {} bytes",
+                    file.display(),
+                    metadata.len(),
+                    max_size
+                ));
             }
         }
     }
@@ -2452,7 +2446,7 @@ async fn compute_real_workspace_diff(
         // git diff --no-index returns exit code 1 when differences are found
         // but still provides valid diff output
         if output.status.code() == Some(1) {
-            return Ok(String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")?);
+            return String::from_utf8(output.stdout).context("Diff output is not valid UTF-8");
         } else {
             let stderr =
                 String::from_utf8(output.stderr).unwrap_or_else(|_| "Invalid UTF-8".to_string());
@@ -2460,7 +2454,7 @@ async fn compute_real_workspace_diff(
         }
     }
 
-    Ok(String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")?)
+    String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")
 }
 
 /// P0-4 FIX: Calculate evidence completeness from actual execution state
@@ -2519,10 +2513,10 @@ fn calculate_evidence_completeness_from_state(
     total_weight += 0.15;
 
     // Command execution evidence (10% weight)
-    if let Some(v) = validation {
-        if !v.command_results.is_empty() {
-            completeness += 0.1;
-        }
+    if let Some(v) = validation
+        && !v.command_results.is_empty()
+    {
+        completeness += 0.1;
     }
     total_weight += 0.1;
 
@@ -2694,24 +2688,23 @@ async fn validate_provider_candidates(
             }
 
             // Check 5: Reject binary files
-            if let Ok(metadata) = std::fs::metadata(&full_path) {
-                if metadata.is_file() {
-                    // Simple heuristic: if file extension suggests binary, reject
-                    let binary_extensions = [
-                        ".exe", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".zip", ".tar",
-                        ".gz", ".rar", ".7z", ".pdf", ".doc", ".xls",
-                    ];
+            if let Ok(metadata) = std::fs::metadata(&full_path)
+                && metadata.is_file()
+            {
+                // Simple heuristic: if file extension suggests binary, reject
+                let binary_extensions = [
+                    ".exe", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".zip", ".tar", ".gz",
+                    ".rar", ".7z", ".pdf", ".doc", ".xls",
+                ];
 
-                    if let Some(ext) = edit_path.extension() {
-                        if binary_extensions
-                            .iter()
-                            .any(|bin_ext| ext.to_string_lossy() == **bin_ext)
-                        {
-                            validation_errors
-                                .push(format!("Binary file edit not allowed: {:?}", edit_path));
-                            continue;
-                        }
-                    }
+                if let Some(ext) = edit_path.extension()
+                    && binary_extensions
+                        .iter()
+                        .any(|bin_ext| ext.to_string_lossy() == **bin_ext)
+                {
+                    validation_errors
+                        .push(format!("Binary file edit not allowed: {:?}", edit_path));
+                    continue;
                 }
             }
         }

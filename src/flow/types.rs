@@ -19,7 +19,7 @@ pub type Input = serde_json::Value;
 pub type Output = serde_json::Value;
 
 /// SharedState - explicit state management with typed fields
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SharedState {
     /// Input to the flow
     pub input: HashMap<String, serde_json::Value>,
@@ -56,21 +56,6 @@ impl Clone for SharedState {
             budget_guard: self.budget_guard.clone(),
             playbook_id: self.playbook_id.clone(),
             strict_mode_enforcer: self.strict_mode_enforcer.clone(),
-        }
-    }
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
-        Self {
-            input: HashMap::new(),
-            working: HashMap::new(),
-            output: HashMap::new(),
-            context: HashMap::new(),
-            meta: HashMap::new(),
-            budget_guard: None,
-            playbook_id: None,
-            strict_mode_enforcer: None,
         }
     }
 }
@@ -263,40 +248,40 @@ impl SharedState {
     /// Check if an LLM call is allowed under current budget
     /// Returns error if budget would be exceeded
     pub fn check_llm_budget(&self) -> anyhow::Result<()> {
-        if let Some(guard) = &self.budget_guard {
-            if let Ok(g) = guard.lock() {
-                return g.check_llm_call();
-            }
+        if let Some(guard) = &self.budget_guard
+            && let Ok(g) = guard.lock()
+        {
+            return g.check_llm_call();
         }
         Ok(())
     }
 
     /// Check if a tool call is allowed under current budget
     pub fn check_tool_budget(&self) -> anyhow::Result<()> {
-        if let Some(guard) = &self.budget_guard {
-            if let Ok(g) = guard.lock() {
-                return g.check_tool_call();
-            }
+        if let Some(guard) = &self.budget_guard
+            && let Ok(g) = guard.lock()
+        {
+            return g.check_tool_call();
         }
         Ok(())
     }
 
     /// Check if memory read is allowed under current budget
     pub fn check_memory_read_budget(&self) -> anyhow::Result<()> {
-        if let Some(guard) = &self.budget_guard {
-            if let Ok(g) = guard.lock() {
-                return g.check_memory_read();
-            }
+        if let Some(guard) = &self.budget_guard
+            && let Ok(g) = guard.lock()
+        {
+            return g.check_memory_read();
         }
         Ok(())
     }
 
     /// Check if memory write is allowed under current budget
     pub fn check_memory_write_budget(&self) -> anyhow::Result<()> {
-        if let Some(guard) = &self.budget_guard {
-            if let Ok(g) = guard.lock() {
-                return g.check_memory_write();
-            }
+        if let Some(guard) = &self.budget_guard
+            && let Ok(g) = guard.lock()
+        {
+            return g.check_memory_write();
         }
         Ok(())
     }

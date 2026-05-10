@@ -271,8 +271,6 @@ pub struct SemanticDiffAnalyzer {
     db_patterns: Vec<Regex>,
     dep_patterns: Vec<Regex>,
     config_patterns: Vec<Regex>,
-    breaking_patterns: Vec<Regex>,
-    secret_patterns: Vec<Regex>,
     // P1-Issue9: Enhanced precision patterns
     line_context_patterns: Vec<Regex>,
     semantic_context_patterns: Vec<Regex>,
@@ -316,16 +314,6 @@ impl SemanticDiffAnalyzer {
                 Regex::new(r"(?i)(?:env|environment|dev|prod|test)").unwrap(),
                 Regex::new(r"(?i)(?:toml|yaml|json|xml|ini|cfg)").unwrap(),
             ],
-            breaking_patterns: vec![
-                Regex::new(r"(?i)(?:remove|delete|drop|break|breaking|deprecate)").unwrap(),
-                Regex::new(r"(?i)(?:signature|interface|api|contract)").unwrap(),
-                Regex::new(r"(?i)(?:major|version|v[2-9])").unwrap(),
-            ],
-            secret_patterns: vec![
-                Regex::new(r"(?i)(?:secret|password|token|key|credential|private)").unwrap(),
-                Regex::new(r"(?i)(?:api[_-]?key|access[_-]?token|secret[_-]?key)").unwrap(),
-                Regex::new(r"(?i)(?:aws|azure|gcp|github|gitlab)").unwrap(),
-            ],
             // P1-Issue9: Enhanced precision patterns
             line_context_patterns: vec![
                 // Line-level context patterns
@@ -361,45 +349,45 @@ impl SemanticDiffAnalyzer {
     fn infer_api_change_type(&self, diff: &str, name: &str) -> ApiChangeType {
         match name {
             "fn" => {
-                if self.is_addition(&diff, name) {
+                if self.is_addition(diff, name) {
                     ApiChangeType::FunctionAdded
-                } else if self.is_removal(&diff, name) {
+                } else if self.is_removal(diff, name) {
                     ApiChangeType::FunctionRemoved
                 } else {
                     ApiChangeType::FunctionModified
                 }
             }
             "struct" => {
-                if self.is_addition(&diff, name) {
+                if self.is_addition(diff, name) {
                     ApiChangeType::StructAdded
-                } else if self.is_removal(&diff, name) {
+                } else if self.is_removal(diff, name) {
                     ApiChangeType::StructRemoved
                 } else {
                     ApiChangeType::StructModified
                 }
             }
             "enum" => {
-                if self.is_addition(&diff, name) {
+                if self.is_addition(diff, name) {
                     ApiChangeType::EnumAdded
-                } else if self.is_removal(&diff, name) {
+                } else if self.is_removal(diff, name) {
                     ApiChangeType::EnumRemoved
                 } else {
                     ApiChangeType::EnumModified
                 }
             }
             "trait" => {
-                if self.is_addition(&diff, name) {
+                if self.is_addition(diff, name) {
                     ApiChangeType::TraitAdded
-                } else if self.is_removal(&diff, name) {
+                } else if self.is_removal(diff, name) {
                     ApiChangeType::TraitRemoved
                 } else {
                     ApiChangeType::TraitModified
                 }
             }
             "type" => {
-                if self.is_addition(&diff, name) {
+                if self.is_addition(diff, name) {
                     ApiChangeType::TypeAliasAdded
-                } else if self.is_removal(&diff, name) {
+                } else if self.is_removal(diff, name) {
                     ApiChangeType::TypeAliasRemoved
                 } else {
                     ApiChangeType::TypeAliasModified
@@ -463,23 +451,13 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    fn infer_dep_change_type(&self, _diff: &str, pattern: &str) -> DependencyChangeType {
-        match pattern {
-            p if p.contains("add") => DependencyChangeType::Added,
-            p if p.contains("remove") => DependencyChangeType::Removed,
-            p if p.contains("upgrade") => DependencyChangeType::Upgraded,
-            p if p.contains("downgrade") => DependencyChangeType::Downgraded,
-            _ => DependencyChangeType::Modified,
-        }
-    }
-
     fn infer_file_change_type(&self, diff: &str, file: &Path) -> FileChangeType {
         // Look at the diff to determine change type
         if diff.contains(&format!("+++ b/{}", file.to_string_lossy())) {
             FileChangeType::Added
         } else if diff.contains(&format!("--- a/{}", file.to_string_lossy())) {
             FileChangeType::Removed
-        } else if diff.contains(&format!("rename from")) {
+        } else if diff.contains(&"rename from".to_string()) {
             FileChangeType::Renamed
         } else {
             FileChangeType::Modified
@@ -525,10 +503,6 @@ impl SemanticDiffAnalyzer {
             .any(|pattern| diff.contains(pattern))
     }
 
-    fn requires_migration(&self, _diff: &str, pattern: &str) -> bool {
-        pattern.contains("migration") || pattern.contains("create") || pattern.contains("drop")
-    }
-
     fn assess_auth_risk(&self, _diff: &str, pattern: &str) -> RiskLevel {
         match pattern {
             p if p.contains("secret")
@@ -554,31 +528,6 @@ impl SemanticDiffAnalyzer {
             p if p.contains("minor") => RiskLevel::Medium,
             _ => RiskLevel::Low,
         }
-    }
-
-    // Missing extract_* methods
-    fn extract_api_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<ApiChange> {
-        self.detect_api_changes(diff, files)
-    }
-
-    fn extract_auth_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<AuthChange> {
-        self.detect_auth_changes(diff, files)
-    }
-
-    fn extract_database_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<DatabaseChange> {
-        self.detect_database_changes(diff, files)
-    }
-
-    fn extract_config_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<ConfigChange> {
-        self.detect_config_changes(diff, files)
-    }
-
-    fn extract_dependency_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<DependencyChange> {
-        self.detect_dependency_changes(diff, files)
-    }
-
-    fn extract_file_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<FileChange> {
-        self.analyze_file_changes(diff, files)
     }
 
     pub fn analyze(&self, diff: &str, changed_files: &[PathBuf]) -> SemanticDiff {
@@ -658,11 +607,11 @@ impl SemanticDiffAnalyzer {
 
             // Detect function signature changes
             for pattern in &self.api_patterns {
-                for cap in pattern.captures_iter(&diff) {
+                for cap in pattern.captures_iter(diff) {
                     if let Some(name) = cap.get(1) {
-                        let change_type = self.infer_api_change_type(&diff, name.as_str());
+                        let change_type = self.infer_api_change_type(diff, name.as_str());
                         let line = self.estimate_line(diff, cap.get(0).unwrap().start());
-                        let breaking = self.is_breaking_change(&diff, name.as_str());
+                        let breaking = self.is_breaking_change(diff, name.as_str());
 
                         changes.push(ApiChange {
                             file: file.clone(),
@@ -688,8 +637,8 @@ impl SemanticDiffAnalyzer {
             for cap in pattern.find_iter(&diff_lower) {
                 let line = self.estimate_line(diff, cap.start());
                 let matched_text = cap.as_str();
-                let change_type = self.infer_auth_change_type(&diff, matched_text);
-                let risk_level = self.assess_auth_risk(&diff, matched_text);
+                let change_type = self.infer_auth_change_type(diff, matched_text);
+                let risk_level = self.assess_auth_risk(diff, matched_text);
                 let description = format!("Authentication/authorization change at line {}", line);
 
                 for file in files.iter().take(1) {
@@ -722,7 +671,7 @@ impl SemanticDiffAnalyzer {
                     for cap in pattern.find_iter(&diff_lower) {
                         let line = self.estimate_line(diff, cap.start());
                         let matched_text = cap.as_str();
-                        let change_type = self.infer_db_change_type(&diff, matched_text);
+                        let change_type = self.infer_db_change_type(diff, matched_text);
                         let migration_required = matches!(
                             change_type,
                             DatabaseChangeType::SchemaModified
@@ -781,6 +730,7 @@ impl SemanticDiffAnalyzer {
     fn detect_config_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<ConfigChange> {
         let mut changes = vec![];
         let diff_lower = diff.to_lowercase();
+        let key_pattern = Regex::new(r"(?i)([a-z_][a-z0-9_]*)\s*=\s*([^\n]+)").unwrap();
 
         for file in files {
             let is_config = self
@@ -790,13 +740,12 @@ impl SemanticDiffAnalyzer {
 
             if is_config {
                 let environment =
-                    self.infer_config_environment(&diff, file.to_string_lossy().as_ref());
+                    self.infer_config_environment(diff, file.to_string_lossy().as_ref());
 
                 // Detect key-value changes
-                let key_pattern = Regex::new(r"(?i)([a-z_][a-z0-9_]*)\s*=\s*([^\n]+)").unwrap();
-                for cap in key_pattern.captures_iter(&diff) {
+                for cap in key_pattern.captures_iter(diff) {
                     if let (Some(key), Some(value)) = (cap.get(1), cap.get(2)) {
-                        let change_type = self.infer_config_change_type(&diff, key.as_str());
+                        let change_type = self.infer_config_change_type(diff, key.as_str());
 
                         changes.push(ConfigChange {
                             file: file.clone(),
@@ -850,7 +799,7 @@ impl SemanticDiffAnalyzer {
                     DependencyChangeType::Modified
                 };
 
-                let risk_level = self.assess_dep_risk(&diff, name.as_str());
+                let risk_level = self.assess_dep_risk(diff, name.as_str());
 
                 changes.push(DependencyChange {
                     file: PathBuf::from("Cargo.toml"),
@@ -881,7 +830,7 @@ impl SemanticDiffAnalyzer {
                     DependencyChangeType::Modified
                 };
 
-                let risk_level = self.assess_dep_risk(&diff, name.as_str());
+                let risk_level = self.assess_dep_risk(diff, name.as_str());
 
                 changes.push(DependencyChange {
                     file: PathBuf::from("package.json"),
@@ -912,7 +861,7 @@ impl SemanticDiffAnalyzer {
                     DependencyChangeType::Modified
                 };
 
-                let risk_level = self.assess_dep_risk(&diff, name.as_str());
+                let risk_level = self.assess_dep_risk(diff, name.as_str());
 
                 changes.push(DependencyChange {
                     file: PathBuf::from("requirements.txt"),
@@ -1109,12 +1058,12 @@ fn extract_changed_files(diff: &str) -> Vec<PathBuf> {
     let file_pattern = Regex::new(r"^[+-]{3}\s+(?:[ab]/)?(.+)$").unwrap();
 
     for line in diff.lines() {
-        if let Some(cap) = file_pattern.captures(line) {
-            if let Some(file) = cap.get(1) {
-                let path = file.as_str();
-                if path != "/dev/null" && !path.is_empty() {
-                    files.insert(PathBuf::from(path));
-                }
+        if let Some(cap) = file_pattern.captures(line)
+            && let Some(file) = cap.get(1)
+        {
+            let path = file.as_str();
+            if path != "/dev/null" && !path.is_empty() {
+                files.insert(PathBuf::from(path));
             }
         }
     }

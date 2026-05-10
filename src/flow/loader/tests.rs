@@ -1,7 +1,7 @@
 //! Tests for flow file loaders
 
 #[cfg(test)]
-mod tests {
+mod loader_tests {
     use crate::flow::{
         FlowFile, FlowInputs, FlowLoader, FlowOutputs, JsonLoader, NodeDefinition, YamlLoader,
         validate_flow_file,

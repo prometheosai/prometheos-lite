@@ -319,7 +319,7 @@ pub fn format_artifact_summary(artifact: &HarnessArtifact) -> String {
 
     format!(
         "[{}] {:?} - {} bytes{}{}",
-        artifact.id[..8].to_string(),
+        &artifact.id[..8],
         artifact.kind,
         artifact.size_bytes,
         compression_ratio,

@@ -322,10 +322,10 @@ impl TrustReportBuilder {
             if let Some(level) = entry.output_summary.get("risk_level") {
                 details.push(format!("Risk assessment: {}", level));
             }
-            if let Some(requires_approval) = entry.output_summary.get("requires_approval") {
-                if requires_approval == "true" {
-                    details.push("This change requires user approval".to_string());
-                }
+            if let Some(requires_approval) = entry.output_summary.get("requires_approval")
+                && requires_approval == "true"
+            {
+                details.push("This change requires user approval".to_string());
             }
         }
 
@@ -641,7 +641,7 @@ impl TrustReport {
             "- Blocked operations: {}\n",
             self.statistics.blocked_operations
         ));
-        md.push_str("\n");
+        md.push('\n');
 
         // Sections
         for section in &self.sections {
@@ -658,7 +658,7 @@ impl TrustReport {
                 for detail in &section.details {
                     md.push_str(&format!("- {}\n", detail));
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
 
@@ -668,7 +668,7 @@ impl TrustReport {
             for rec in &self.recommendations {
                 md.push_str(&format!("- {}\n", rec));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         // Footer

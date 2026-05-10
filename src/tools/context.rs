@@ -4,11 +4,12 @@ use crate::tools::permissions::ToolPolicy;
 use serde::{Deserialize, Serialize};
 
 /// Trust level for tools and sources
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum TrustLevel {
     /// Fully trusted (built-in core tools)
     Trusted,
     /// Local tools and flows
+    #[default]
     Local,
     /// Community-contributed tools
     Community,
@@ -18,16 +19,11 @@ pub enum TrustLevel {
     Untrusted,
 }
 
-impl Default for TrustLevel {
-    fn default() -> Self {
-        TrustLevel::Local
-    }
-}
-
 /// Approval policy for tool execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ApprovalPolicy {
     /// No approval required
+    #[default]
     Auto,
     /// Approval required for all tools
     RequireForTools,
@@ -37,12 +33,6 @@ pub enum ApprovalPolicy {
     RequireForUntrusted,
     /// Manual approval for everything
     ManualAll,
-}
-
-impl Default for ApprovalPolicy {
-    fn default() -> Self {
-        ApprovalPolicy::Auto
-    }
 }
 
 /// Execution context for tool calls with guardrail information
@@ -64,6 +54,10 @@ pub struct ToolContext {
     pub approval_policy: ApprovalPolicy,
     /// Optional idempotency key for preventing duplicate side effects
     pub idempotency_key: Option<String>,
+    /// Work domain for policy enforcement.
+    pub work_domain: Option<String>,
+    /// Work phase for policy enforcement.
+    pub work_phase: Option<String>,
 }
 
 impl ToolContext {
@@ -84,6 +78,8 @@ impl ToolContext {
             trust_level: TrustLevel::default(),
             approval_policy: ApprovalPolicy::default(),
             idempotency_key: None,
+            work_domain: None,
+            work_phase: None,
         }
     }
 
@@ -103,6 +99,19 @@ impl ToolContext {
     pub fn with_idempotency_key(mut self, key: String) -> Self {
         self.idempotency_key = Some(key);
         self
+    }
+
+    pub fn with_work_context(mut self, domain: Option<String>, phase: Option<String>) -> Self {
+        self.work_domain = domain;
+        self.work_phase = phase;
+        self
+    }
+
+    pub fn is_software_patch_only_context(&self) -> bool {
+        self.work_domain
+            .as_deref()
+            .map(|d| d.eq_ignore_ascii_case("software"))
+            .unwrap_or(false)
     }
 
     /// Check if approval is required based on policy and trust level
@@ -132,7 +141,7 @@ impl ToolContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::permissions::{ToolPermission, ToolPolicy};
+    use crate::tools::permissions::ToolPolicy;
 
     #[test]
     fn test_tool_context_creation() {

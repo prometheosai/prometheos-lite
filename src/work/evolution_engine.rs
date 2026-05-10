@@ -221,29 +221,43 @@ impl EvolutionEngine {
         // Extract patterns from FlowPerformanceRecords in metadata
         if let Some(obj) = context.metadata.as_object() {
             for (key, value) in obj {
-                if key.starts_with("flow_perf_") {
-                    if let Ok(perf_record) =
+                if key.starts_with("flow_perf_")
+                    && let Ok(perf_record) =
                         serde_json::from_value::<FlowPerformanceRecord>(value.clone())
-                    {
-                        let pattern_type = if perf_record.success_score > 0.7 {
-                            PatternType::Success
-                        } else {
-                            PatternType::Failure
-                        };
+                {
+                    let pattern_type = if perf_record.success_score > 0.7 {
+                        PatternType::Success
+                    } else {
+                        PatternType::Failure
+                    };
 
-                        // Pattern: flow performance
+                    // Pattern: flow performance
+                    let pattern = PatternRecord {
+                        pattern_type: pattern_type.clone(),
+                        signal: format!(
+                            "flow_performance_{}_{}",
+                            perf_record.flow_id,
+                            if perf_record.success_score > 0.7 {
+                                "success"
+                            } else {
+                                "failure"
+                            }
+                        ),
+                        weight: perf_record.success_score,
+                        created_at: chrono::Utc::now(),
+                    };
+                    if pattern_type == PatternType::Success {
+                        success_patterns.push(pattern);
+                    } else {
+                        failure_patterns.push(pattern);
+                    }
+
+                    // Pattern: high duration
+                    if perf_record.duration_ms > 10000 {
                         let pattern = PatternRecord {
                             pattern_type: pattern_type.clone(),
-                            signal: format!(
-                                "flow_performance_{}_{}",
-                                perf_record.flow_id,
-                                if perf_record.success_score > 0.7 {
-                                    "success"
-                                } else {
-                                    "failure"
-                                }
-                            ),
-                            weight: perf_record.success_score,
+                            signal: format!("high_duration_flow_{}", perf_record.flow_id),
+                            weight: 0.6,
                             created_at: chrono::Utc::now(),
                         };
                         if pattern_type == PatternType::Success {
@@ -251,35 +265,20 @@ impl EvolutionEngine {
                         } else {
                             failure_patterns.push(pattern);
                         }
+                    }
 
-                        // Pattern: high duration
-                        if perf_record.duration_ms > 10000 {
-                            let pattern = PatternRecord {
-                                pattern_type: pattern_type.clone(),
-                                signal: format!("high_duration_flow_{}", perf_record.flow_id),
-                                weight: 0.6,
-                                created_at: chrono::Utc::now(),
-                            };
-                            if pattern_type == PatternType::Success {
-                                success_patterns.push(pattern);
-                            } else {
-                                failure_patterns.push(pattern);
-                            }
-                        }
-
-                        // Pattern: high cost
-                        if perf_record.token_cost > 0.5 {
-                            let pattern = PatternRecord {
-                                pattern_type: pattern_type.clone(),
-                                signal: format!("high_cost_flow_{}", perf_record.flow_id),
-                                weight: 0.5,
-                                created_at: chrono::Utc::now(),
-                            };
-                            if pattern_type == PatternType::Success {
-                                success_patterns.push(pattern);
-                            } else {
-                                failure_patterns.push(pattern);
-                            }
+                    // Pattern: high cost
+                    if perf_record.token_cost > 0.5 {
+                        let pattern = PatternRecord {
+                            pattern_type: pattern_type.clone(),
+                            signal: format!("high_cost_flow_{}", perf_record.flow_id),
+                            weight: 0.5,
+                            created_at: chrono::Utc::now(),
+                        };
+                        if pattern_type == PatternType::Success {
+                            success_patterns.push(pattern);
+                        } else {
+                            failure_patterns.push(pattern);
                         }
                     }
                 }
@@ -1039,8 +1038,7 @@ impl EvolutionEngine {
         let results_json = test
             .results
             .as_ref()
-            .map(|r| serde_json::to_string(r).ok())
-            .flatten()
+            .and_then(|r| serde_json::to_string(r).ok())
             .unwrap_or_default();
 
         self.db
@@ -1294,7 +1292,7 @@ mod tests {
                 cost: Some(0.01),
             });
 
-        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+        let (success_patterns, _failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
         // Should have success patterns from model usage and high latency
         assert!(!success_patterns.is_empty());
@@ -1322,7 +1320,7 @@ mod tests {
         context.status = WorkStatus::Blocked;
         context.blocked_reason = Some("Security violation".to_string());
 
-        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+        let (_success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
         // Should have failure patterns from blocked reason
         assert!(!failure_patterns.is_empty());
@@ -1360,7 +1358,7 @@ mod tests {
             "flow_perf_planning": perf_json
         });
 
-        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+        let (success_patterns, _failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
         // Should have patterns from flow performance
         assert!(!success_patterns.is_empty());
@@ -1427,7 +1425,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         });
 
-        let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
+        let (success_patterns, _failure_patterns) = EvolutionEngine::extract_patterns(&context);
 
         // Should have high revision count pattern
         assert!(

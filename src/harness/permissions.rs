@@ -59,6 +59,12 @@ pub struct PermissionCheck {
     pub reason: String,
 }
 
+impl Default for PermissionLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PermissionLedger {
     pub fn new() -> Self {
         Self {
@@ -224,10 +230,6 @@ impl PermissionLedger {
                 1.0
             },
         }
-    }
-
-    pub(crate) fn get_denied_operations(&self) -> &[DeniedOperation] {
-        &self.denied_operations
     }
 }
 

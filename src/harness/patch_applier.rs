@@ -339,7 +339,7 @@ async fn apply_edit_to_transaction(
                 return Err(fail(
                     &x.file,
                     "search_replace",
-                    format!("Search block not found in file"),
+                    "Search block not found in file".to_string(),
                     Some(content.lines().take(10).collect::<Vec<_>>().join("\n")),
                 ));
             }
@@ -588,12 +588,12 @@ async fn commit_transaction(transaction: &Transaction, _policy: &FilePolicy) -> 
     let changes: Vec<_> = transaction.pending_changes.iter().collect();
 
     for (path, _new_content) in changes.iter().rev() {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
     }
 
@@ -794,6 +794,18 @@ impl PatchIdentity {
     }
 }
 
+impl Default for PatchHashVerification {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for PatchIdentity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PatchHashVerification {
     pub fn new() -> Self {
         Self {
@@ -860,7 +872,7 @@ impl PatchHashVerification {
             }
             _ => {
                 self.hash_verification_passed = false;
-                let missing = vec![
+                let missing = [
                     if self.generated_patch_hash.is_none() {
                         "generated"
                     } else {

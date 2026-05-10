@@ -200,7 +200,7 @@ impl<T: AsDb> WorkContextOperations for T {
                 &context.last_activity_at.to_rfc3339(),
                 serde_json::to_string(&context.metadata)?,
                 &context.playbook_id,
-                &context.evaluation_result.as_ref().map(|v| serde_json::to_string(v).ok()).flatten(),
+                &context.evaluation_result.as_ref().and_then(|v| serde_json::to_string(v).ok()),
                 &context.updated_at.to_rfc3339(),
                 &context.id,
             ],

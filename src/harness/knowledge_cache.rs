@@ -142,25 +142,25 @@ impl TaskLocalKnowledgeCache {
 
         let now = self.now();
 
-        if let Some(scope_entries) = scopes.get_mut(&scope_str) {
-            if let Some(entry) = scope_entries.get_mut(key) {
-                if let Some(expires) = entry.expires_at {
-                    if now > expires {
-                        scope_entries.remove(key);
-                        stats.entries_count = stats.entries_count.saturating_sub(1);
-                        stats.misses += 1;
-                        self.update_hit_rate(&mut stats);
-                        return None;
-                    }
-                }
-
-                entry.access_count += 1;
-                entry.last_accessed = now;
-                stats.hits += 1;
+        if let Some(scope_entries) = scopes.get_mut(&scope_str)
+            && let Some(entry) = scope_entries.get_mut(key)
+        {
+            if let Some(expires) = entry.expires_at
+                && now > expires
+            {
+                scope_entries.remove(key);
+                stats.entries_count = stats.entries_count.saturating_sub(1);
+                stats.misses += 1;
                 self.update_hit_rate(&mut stats);
-
-                return Some(entry.value.clone());
+                return None;
             }
+
+            entry.access_count += 1;
+            entry.last_accessed = now;
+            stats.hits += 1;
+            self.update_hit_rate(&mut stats);
+
+            return Some(entry.value.clone());
         }
 
         stats.misses += 1;
@@ -179,7 +179,7 @@ impl TaskLocalKnowledgeCache {
         let key_str = key.into();
         let now = self.now();
 
-        let expires_at = ttl.or(self.default_ttl).map(|d| now + d.as_secs() as u64);
+        let expires_at = ttl.or(self.default_ttl).map(|d| now + d.as_secs());
 
         let entry = CacheEntry {
             key: CacheKey::new(scope_str.clone(), key_str.clone()),
@@ -229,10 +229,10 @@ impl TaskLocalKnowledgeCache {
         scope: CacheScope,
         key: &str,
     ) -> Result<Option<T>> {
-        if let Some(value) = self.get(scope, key).await {
-            if let Some(json) = value.as_json() {
-                return Ok(Some(serde_json::from_value(json.clone())?));
-            }
+        if let Some(value) = self.get(scope, key).await
+            && let Some(json) = value.as_json()
+        {
+            return Ok(Some(serde_json::from_value(json.clone())?));
         }
         Ok(None)
     }
@@ -242,13 +242,13 @@ impl TaskLocalKnowledgeCache {
         let mut scopes = self.scopes.write().await;
         let mut stats = self.stats.write().await;
 
-        if let Some(scope_entries) = scopes.get_mut(&scope_str) {
-            if let Some(entry) = scope_entries.remove(key) {
-                let size = entry.value.estimate_size();
-                stats.entries_count = stats.entries_count.saturating_sub(1);
-                stats.total_size_bytes = stats.total_size_bytes.saturating_sub(size);
-                return true;
-            }
+        if let Some(scope_entries) = scopes.get_mut(&scope_str)
+            && let Some(entry) = scope_entries.remove(key)
+        {
+            let size = entry.value.estimate_size();
+            stats.entries_count = stats.entries_count.saturating_sub(1);
+            stats.total_size_bytes = stats.total_size_bytes.saturating_sub(size);
+            return true;
         }
 
         false

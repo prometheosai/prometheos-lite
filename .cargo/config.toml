@@ -1,3 +1,8 @@
 [build]
 jobs = 1
 incremental = true
+target-dir = ".cargo-target"
+
+[env]
+TMP = { value = "E:\\Projects\\PrometheOS-Lite\\.tmp", force = true }
+TEMP = { value = "E:\\Projects\\PrometheOS-Lite\\.tmp", force = true }

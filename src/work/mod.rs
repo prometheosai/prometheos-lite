@@ -47,6 +47,6 @@ pub use templates::{
     bug_fix_template, planning_template, research_template, software_development_template,
 };
 pub use types::{
-    ApprovalPolicy, AutonomyLevel, CompletionCriterion, TestExecutionResult, WorkContext,
-    WorkDomain, WorkPhase, WorkPriority, WorkStatus,
+    ApprovalPolicy, AutonomyLevel, CompletionCriterion, HarnessMetadata, TestExecutionResult,
+    TokenUsageSummary, WorkContext, WorkDomain, WorkPhase, WorkPriority, WorkStatus,
 };

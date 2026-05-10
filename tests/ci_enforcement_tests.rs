@@ -73,9 +73,11 @@ fn test_custom_patterns() {
 
 #[test]
 fn test_severity_filtering() {
-    let mut config = CIConfig::default();
-    config.strict_mode = false;
-    config.max_todo_comments = 1;
+    let config = CIConfig {
+        strict_mode: false,
+        max_todo_comments: 1,
+        ..Default::default()
+    };
 
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("test.rs");
@@ -98,11 +100,13 @@ fn main() {
 
 #[test]
 fn test_disable_unimplemented_check() {
-    let mut config = CIConfig::default();
-    config.check_unimplemented = false;
-    config.check_panics = false;
-    config.check_debug_prints = false;
-    config.strict_mode = true;
+    let config = CIConfig {
+        check_unimplemented: false,
+        check_panics: false,
+        check_debug_prints: false,
+        strict_mode: true,
+        ..Default::default()
+    };
 
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("test.rs");
@@ -122,11 +126,13 @@ fn test_disable_unimplemented_check() {
 
 #[test]
 fn test_disable_debug_print_check() {
-    let mut config = CIConfig::default();
-    config.check_debug_prints = false;
-    config.check_panics = false;
-    config.check_unimplemented = false;
-    config.strict_mode = true;
+    let config = CIConfig {
+        check_debug_prints: false,
+        check_panics: false,
+        check_unimplemented: false,
+        strict_mode: true,
+        ..Default::default()
+    };
 
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("test.rs");

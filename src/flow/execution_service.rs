@@ -22,7 +22,7 @@ use crate::flow::{RuntimeContext, SharedState};
 use crate::intent::{DefaultFlowSelector, FlowSelector, Intent, IntentClassifier};
 
 /// Options for flow execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecutionOptions {
     /// Optional personality mode to inject
     pub personality_mode: Option<String>,
@@ -38,20 +38,6 @@ pub struct ExecutionOptions {
     pub work_context_id: Option<String>,
     /// Optional strict mode enforcer
     pub strict_mode: Option<crate::flow::StrictModeEnforcer>,
-}
-
-impl Default for ExecutionOptions {
-    fn default() -> Self {
-        Self {
-            personality_mode: None,
-            budget: None,
-            tracer: None,
-            override_intent: None,
-            flows_dir: None,
-            work_context_id: None,
-            strict_mode: None,
-        }
-    }
 }
 
 impl ExecutionOptions {
@@ -118,20 +104,20 @@ impl FlowExecutionService {
         ];
 
         for key in preferred_keys {
-            if let Some(value) = state.get_output(key) {
-                if !value.is_null() {
-                    return (value.clone(), Some(key.to_string()));
-                }
+            if let Some(value) = state.get_output(key)
+                && !value.is_null()
+            {
+                return (value.clone(), Some(key.to_string()));
             }
         }
 
         let mut keys: Vec<String> = state.output.keys().cloned().collect();
         keys.sort();
         for key in keys {
-            if let Some(value) = state.get_output(&key) {
-                if !value.is_null() {
-                    return (value.clone(), Some(key));
-                }
+            if let Some(value) = state.get_output(&key)
+                && !value.is_null()
+            {
+                return (value.clone(), Some(key));
             }
         }
 
@@ -232,18 +218,18 @@ impl FlowExecutionService {
             .unwrap_or("unknown")
             .to_string();
 
-        if let Some(tracer) = tracer {
-            if let Ok(mut t) = tracer.lock() {
-                t.log_flow_event(
-                    TraceEvent::FlowLoaded {
-                        run_id: "".to_string(), // No run_id yet at load time
-                        flow_name: flow_name.clone(),
-                        path: flow_path.display().to_string(),
-                    },
-                    None,
-                    format!("Loaded flow: {}", flow_name),
-                );
-            }
+        if let Some(tracer) = tracer
+            && let Ok(mut t) = tracer.lock()
+        {
+            t.log_flow_event(
+                TraceEvent::FlowLoaded {
+                    run_id: "".to_string(), // No run_id yet at load time
+                    flow_name: flow_name.clone(),
+                    path: flow_path.display().to_string(),
+                },
+                None,
+                format!("Loaded flow: {}", flow_name),
+            );
         }
 
         let flow_file = if flow_path.extension().and_then(|s| s.to_str()) == Some("yaml") {
@@ -311,9 +297,7 @@ impl FlowExecutionService {
         let trace_id = crate::flow::tracing::Tracer::generate_trace_id();
 
         // 2. Classify intent
-        let classification = self
-            .classify(message, options.override_intent.clone())
-            .await?;
+        let classification = self.classify(message, options.override_intent).await?;
         let intent = classification.intent;
 
         // 3. Load flow
@@ -439,31 +423,31 @@ impl FlowExecutionService {
         );
 
         // 10. Emit OutputGenerated and EvaluationCompleted events
-        if let Some(tracer) = &options.tracer {
-            if let Ok(mut t) = tracer.lock() {
-                t.log_flow_event(
-                    TraceEvent::OutputGenerated {
-                        run_id: run_id.clone(),
-                        trace_id: trace_id.clone(),
-                        output_key: "primary".to_string(),
-                    },
-                    None,
-                    format!("FinalOutput generated for {}", flow_name),
-                );
+        if let Some(tracer) = &options.tracer
+            && let Ok(mut t) = tracer.lock()
+        {
+            t.log_flow_event(
+                TraceEvent::OutputGenerated {
+                    run_id: run_id.clone(),
+                    trace_id: trace_id.clone(),
+                    output_key: "primary".to_string(),
+                },
+                None,
+                format!("FinalOutput generated for {}", flow_name),
+            );
 
-                t.log_flow_event(
-                    TraceEvent::EvaluationCompleted {
-                        run_id: run_id.clone(),
-                        trace_id: trace_id.clone(),
-                        score: Some(evaluation.success_rate()),
-                    },
-                    None,
-                    format!(
-                        "Evaluation completed: {:.2} success rate",
-                        evaluation.success_rate()
-                    ),
-                );
-            }
+            t.log_flow_event(
+                TraceEvent::EvaluationCompleted {
+                    run_id: run_id.clone(),
+                    trace_id: trace_id.clone(),
+                    score: Some(evaluation.success_rate()),
+                },
+                None,
+                format!(
+                    "Evaluation completed: {:.2} success rate",
+                    evaluation.success_rate()
+                ),
+            );
         }
 
         // 11. Extract execution metadata from state
@@ -471,28 +455,28 @@ impl FlowExecutionService {
             state.get_execution_metadata().into_iter().collect();
 
         // 12. Save checkpoint if continuation engine is available
-        if let Some(ref continuation_engine) = self.continuation_engine {
-            if let Ok(engine) = continuation_engine.lock() {
-                let _ = engine.save_checkpoint(&run_id, &state);
-            }
+        if let Some(ref continuation_engine) = self.continuation_engine
+            && let Ok(engine) = continuation_engine.lock()
+        {
+            let _ = engine.save_checkpoint(&run_id, &state);
         }
 
         // 13. Persist run to database if RunDb is available
-        if let Some(ref run_db) = self.run_db {
-            if let Ok(db) = run_db.lock() {
-                use crate::flow::execution::FlowRun;
-                let mut flow_run = FlowRun::new(flow_name.clone());
-                flow_run.id = run_id.clone();
-                match result {
-                    Ok(()) => {
-                        flow_run.mark_completed(state.clone());
-                    }
-                    Err(_) => {
-                        flow_run.mark_failed("Execution failed".to_string());
-                    }
+        if let Some(ref run_db) = self.run_db
+            && let Ok(db) = run_db.lock()
+        {
+            use crate::flow::execution::FlowRun;
+            let mut flow_run = FlowRun::new(flow_name.clone());
+            flow_run.id = run_id.clone();
+            match result {
+                Ok(()) => {
+                    flow_run.mark_completed(state.clone());
                 }
-                let _ = db.save_run(&flow_run);
+                Err(_) => {
+                    flow_run.mark_failed("Execution failed".to_string());
+                }
             }
+            let _ = db.save_run(&flow_run);
         }
 
         // 14. Produce FinalOutput
@@ -508,7 +492,7 @@ impl FlowExecutionService {
                 });
 
                 // Extract memory operations metadata from state
-                let memory_operations = state.get_meta("memory_operations").and_then(|v| {
+                let memory_operations = state.get_meta("memory_operations").map(|v| {
                     let compression = v
                         .get("compression_performed")
                         .and_then(|c| c.as_bool())
@@ -521,11 +505,11 @@ impl FlowExecutionService {
                         .get("total_memory_count")
                         .and_then(|c| c.as_u64())
                         .unwrap_or(0) as usize;
-                    Some(crate::flow::output::MemoryExecutionMetadata {
+                    crate::flow::output::MemoryExecutionMetadata {
                         compressions_performed: if compression { 1 } else { 0 },
                         prunes_performed: prunes,
                         total_memory_count: total_count,
-                    })
+                    }
                 });
 
                 let mut output = FinalOutput::success(
@@ -553,10 +537,10 @@ impl FlowExecutionService {
         };
 
         // 15. Validate output if strict mode is enabled
-        if let Some(ref strict_mode) = options.strict_mode {
-            if final_output.success {
-                strict_mode.validate_output(&final_output.primary, "primary_output")?;
-            }
+        if let Some(ref strict_mode) = options.strict_mode
+            && final_output.success
+        {
+            strict_mode.validate_output(&final_output.primary, "primary_output")?;
         }
 
         Ok(final_output)
@@ -618,31 +602,31 @@ impl FlowExecutionService {
         );
 
         // Emit OutputGenerated and EvaluationCompleted events
-        if let Some(tracer) = &options.tracer {
-            if let Ok(mut t) = tracer.lock() {
-                t.log_flow_event(
-                    TraceEvent::OutputGenerated {
-                        run_id: run_id.clone(),
-                        trace_id: trace_id.clone(),
-                        output_key: "primary".to_string(),
-                    },
-                    None,
-                    format!("FinalOutput generated for {}", flow_name),
-                );
+        if let Some(tracer) = &options.tracer
+            && let Ok(mut t) = tracer.lock()
+        {
+            t.log_flow_event(
+                TraceEvent::OutputGenerated {
+                    run_id: run_id.clone(),
+                    trace_id: trace_id.clone(),
+                    output_key: "primary".to_string(),
+                },
+                None,
+                format!("FinalOutput generated for {}", flow_name),
+            );
 
-                t.log_flow_event(
-                    TraceEvent::EvaluationCompleted {
-                        run_id: run_id.clone(),
-                        trace_id: trace_id.clone(),
-                        score: Some(evaluation.success_rate()),
-                    },
-                    None,
-                    format!(
-                        "Evaluation completed: {:.2} success rate",
-                        evaluation.success_rate()
-                    ),
-                );
-            }
+            t.log_flow_event(
+                TraceEvent::EvaluationCompleted {
+                    run_id: run_id.clone(),
+                    trace_id: trace_id.clone(),
+                    score: Some(evaluation.success_rate()),
+                },
+                None,
+                format!(
+                    "Evaluation completed: {:.2} success rate",
+                    evaluation.success_rate()
+                ),
+            );
         }
 
         // Extract execution metadata from state
@@ -650,28 +634,28 @@ impl FlowExecutionService {
             state.get_execution_metadata().into_iter().collect();
 
         // Save checkpoint if continuation engine is available
-        if let Some(ref continuation_engine) = self.continuation_engine {
-            if let Ok(engine) = continuation_engine.lock() {
-                let _ = engine.save_checkpoint(&run_id, &state);
-            }
+        if let Some(ref continuation_engine) = self.continuation_engine
+            && let Ok(engine) = continuation_engine.lock()
+        {
+            let _ = engine.save_checkpoint(&run_id, &state);
         }
 
         // Persist run to database if RunDb is available
-        if let Some(ref run_db) = self.run_db {
-            if let Ok(db) = run_db.lock() {
-                use crate::flow::execution::FlowRun;
-                let mut flow_run = FlowRun::new(flow_name.clone());
-                flow_run.id = run_id.clone();
-                match result {
-                    Ok(()) => {
-                        flow_run.mark_completed(state.clone());
-                    }
-                    Err(_) => {
-                        flow_run.mark_failed("Execution failed".to_string());
-                    }
+        if let Some(ref run_db) = self.run_db
+            && let Ok(db) = run_db.lock()
+        {
+            use crate::flow::execution::FlowRun;
+            let mut flow_run = FlowRun::new(flow_name.clone());
+            flow_run.id = run_id.clone();
+            match result {
+                Ok(()) => {
+                    flow_run.mark_completed(state.clone());
                 }
-                let _ = db.save_run(&flow_run);
+                Err(_) => {
+                    flow_run.mark_failed("Execution failed".to_string());
+                }
             }
+            let _ = db.save_run(&flow_run);
         }
 
         match result {
@@ -686,7 +670,7 @@ impl FlowExecutionService {
                 });
 
                 // Extract memory operations metadata from state
-                let memory_operations = state.get_meta("memory_operations").and_then(|v| {
+                let memory_operations = state.get_meta("memory_operations").map(|v| {
                     let compression = v
                         .get("compression_performed")
                         .and_then(|c| c.as_bool())
@@ -699,11 +683,11 @@ impl FlowExecutionService {
                         .get("total_memory_count")
                         .and_then(|c| c.as_u64())
                         .unwrap_or(0) as usize;
-                    Some(crate::flow::output::MemoryExecutionMetadata {
+                    crate::flow::output::MemoryExecutionMetadata {
                         compressions_performed: if compression { 1 } else { 0 },
                         prunes_performed: prunes,
                         total_memory_count: total_count,
-                    })
+                    }
                 });
 
                 let mut output = FinalOutput::success(

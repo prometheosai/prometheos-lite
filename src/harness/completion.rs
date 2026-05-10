@@ -681,7 +681,7 @@ pub struct CompletionEvaluator {
     min_confidence_threshold: f32,
     require_validation: bool,
     require_review: bool,
-    require_risk_assessment: bool,
+    _require_risk_assessment: bool,
 }
 
 impl Default for CompletionEvaluator {
@@ -696,7 +696,7 @@ impl CompletionEvaluator {
             min_confidence_threshold: 0.6,
             require_validation: true,
             require_review: true,
-            require_risk_assessment: true,
+            _require_risk_assessment: true,
         }
     }
 
@@ -705,7 +705,7 @@ impl CompletionEvaluator {
             min_confidence_threshold: threshold,
             require_validation: true,
             require_review: true,
-            require_risk_assessment: true,
+            _require_risk_assessment: true,
         }
     }
 
@@ -1014,8 +1014,7 @@ pub fn create_evidence_from_components(
             if review
                 .summary
                 .by_type
-                .get(&crate::harness::review::ReviewIssueType::Security)
-                .is_some()
+                .contains_key(&crate::harness::review::ReviewIssueType::Security)
             {
                 score += 0.2;
             }
@@ -1043,8 +1042,7 @@ pub fn create_evidence_from_components(
             if review
                 .summary
                 .by_type
-                .get(&crate::harness::review::ReviewIssueType::Security)
-                .is_some()
+                .contains_key(&crate::harness::review::ReviewIssueType::Security)
             {
                 indicators.push("Security analysis performed".to_string());
             }
@@ -1255,11 +1253,11 @@ pub fn create_evidence_from_components(
         confidence_evidence,
         process_evidence: ProcessEvidence {
             git_checkpoint_created: git_checkpoint_available,
-            rollback_available: rollback_available,
+            rollback_available,
             all_phases_completed: validation.validation_performed && review.review_performed,
             no_critical_errors: validation.passed() && review.passed,
-            time_limit_respected: time_limit_respected,
-            step_limit_respected: step_limit_respected,
+            time_limit_respected,
+            step_limit_respected,
         },
         // Sandbox evidence is populated by execution loop when available.
         sandbox_evidence: Vec::new(),

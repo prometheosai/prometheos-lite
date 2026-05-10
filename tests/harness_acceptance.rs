@@ -14,8 +14,8 @@
 
 use prometheos_lite::harness::acceptance::{
     AcceptanceCompiler, AcceptanceCriterion, CompiledAcceptanceCriteria, CriterionPriority,
-    CriterionStatus, VerificationMethod, compile_acceptance_criteria,
-    compile_acceptance_criteria_with_env, get_verification_summary, update_criterion_status,
+    CriterionStatus, VerificationMethod, compile_acceptance_criteria, get_verification_summary,
+    update_criterion_status,
 };
 
 // ============================================================================
@@ -149,16 +149,14 @@ fn test_compiled_acceptance_criteria_multiple_commands() {
 
 #[test]
 fn test_acceptance_compiler_new() {
-    let compiler = AcceptanceCompiler::new();
+    let _compiler = AcceptanceCompiler::new();
     // Compiler created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_acceptance_compiler_default() {
-    let compiler = AcceptanceCompiler::default();
+    let _compiler = AcceptanceCompiler::default();
     // Default compiler created
-    assert!(true);
 }
 
 // ============================================================================

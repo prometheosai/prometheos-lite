@@ -13,8 +13,7 @@ use std::path::PathBuf;
 
 use prometheos_lite::harness::repo_intelligence::{
     CodeSymbol, DependencyGraph, DependencySpec, EdgeKind, PackageManagerType, RankedFile,
-    RepoCache, RepoContext, RepoMap, SymbolEdge, SymbolKind, Visibility, build_repo_context,
-    parse_dependency_graph,
+    RepoCache, RepoContext, RepoMap, SymbolEdge, SymbolKind, Visibility, parse_dependency_graph,
 };
 
 // ============================================================================

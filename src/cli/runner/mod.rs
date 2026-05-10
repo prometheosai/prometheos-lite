@@ -1,7 +1,6 @@
 //! CLI Runner for flow execution and flow file loading
 
-mod runner;
+mod flow_runner;
 mod tests;
-mod types;
 
-pub use runner::FlowRunner;
+pub use flow_runner::FlowRunner;

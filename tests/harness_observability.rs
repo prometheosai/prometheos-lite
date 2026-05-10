@@ -82,9 +82,8 @@ fn test_harness_metrics_with_custom() {
 
 #[test]
 fn test_observability_collector_new() {
-    let collector = ObservabilityCollector::new("test-exec".to_string());
+    let _collector = ObservabilityCollector::new("test-exec".to_string());
     // Collector created successfully
-    assert!(true);
 }
 
 // ============================================================================

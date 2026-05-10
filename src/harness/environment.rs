@@ -121,23 +121,22 @@ fn detect_nodejs(root: &Path, profile: &mut EnvironmentProfile) -> Result<()> {
 
         let scripts = package.get("scripts").and_then(|s| s.as_object());
 
-        let mut detected_pm = None;
-
-        if root.join("pnpm-lock.yaml").exists() {
-            detected_pm = Some("pnpm".to_string());
+        let detected_pm = if root.join("pnpm-lock.yaml").exists() {
             profile.detected_files.push("pnpm-lock.yaml".into());
+            Some("pnpm".to_string())
         } else if root.join("yarn.lock").exists() {
-            detected_pm = Some("yarn".to_string());
             profile.detected_files.push("yarn.lock".into());
+            Some("yarn".to_string())
         } else if root.join("package-lock.json").exists() {
-            detected_pm = Some("npm".to_string());
             profile.detected_files.push("package-lock.json".into());
+            Some("npm".to_string())
         } else if root.join("bun.lockb").exists() || root.join("bun.lock").exists() {
-            detected_pm = Some("bun".to_string());
+            // Prefer canonical lockfile marker in output even when bun.lockb is present.
             profile.detected_files.push("bun.lock".into());
+            Some("bun".to_string())
         } else {
-            detected_pm = Some("npm".to_string());
-        }
+            Some("npm".to_string())
+        };
 
         profile.package_manager = detected_pm.clone();
         let pm = detected_pm.as_deref().unwrap_or("npm");
@@ -440,7 +439,7 @@ fn detect_docker(root: &Path, profile: &mut EnvironmentProfile) -> Result<()> {
     if has_dockerfile || has_docker_compose || has_k8s {
         let mut container_config = ContainerConfig {
             has_docker: has_dockerfile,
-            has_docker_compose: has_docker_compose,
+            has_docker_compose,
             has_kubernetes: has_k8s,
             services: vec![],
         };
@@ -462,28 +461,24 @@ fn detect_docker(root: &Path, profile: &mut EnvironmentProfile) -> Result<()> {
             };
             profile.detected_files.push(compose_file.into());
 
-            if let Ok(content) = fs::read_to_string(root.join(compose_file)) {
-                if let Ok(compose) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                    if let Some(services) = compose.get("services").and_then(|s| s.as_mapping()) {
-                        for (name, _) in services {
-                            if let Some(name_str) = name.as_str() {
-                                container_config.services.push(name_str.to_string());
+            if let Ok(content) = fs::read_to_string(root.join(compose_file))
+                && let Ok(compose) = serde_yaml::from_str::<serde_yaml::Value>(&content)
+                && let Some(services) = compose.get("services").and_then(|s| s.as_mapping())
+            {
+                for (name, _) in services {
+                    if let Some(name_str) = name.as_str() {
+                        container_config.services.push(name_str.to_string());
 
-                                profile.services.push(ServiceDependency {
-                                    name: name_str.to_string(),
-                                    required: true,
-                                    startup_command: Some(format!(
-                                        "docker compose up -d {}",
-                                        name_str
-                                    )),
-                                    health_check: Some(format!(
-                                        "docker compose ps {} | grep healthy",
-                                        name_str
-                                    )),
-                                    port: None,
-                                });
-                            }
-                        }
+                        profile.services.push(ServiceDependency {
+                            name: name_str.to_string(),
+                            required: true,
+                            startup_command: Some(format!("docker compose up -d {}", name_str)),
+                            health_check: Some(format!(
+                                "docker compose ps {} | grep healthy",
+                                name_str
+                            )),
+                            port: None,
+                        });
                     }
                 }
             }
@@ -528,24 +523,21 @@ fn detect_ci(root: &Path, profile: &mut EnvironmentProfile) -> Result<()> {
 
         if let Ok(entries) = fs::read_dir(&github_workflows) {
             for entry in entries.flatten() {
-                if let Some(ext) = entry.path().extension() {
-                    if ext == "yml" || ext == "yaml" {
-                        if let Ok(content) = fs::read_to_string(entry.path()) {
-                            if content.contains("test")
-                                || content.contains("pytest")
-                                || content.contains("cargo test")
-                            {
-                                ci_config.test_command =
-                                    Some("github actions test workflow".into());
-                            }
-                            if content.contains("lint")
-                                || content.contains("clippy")
-                                || content.contains("eslint")
-                            {
-                                ci_config.lint_command =
-                                    Some("github actions lint workflow".into());
-                            }
-                        }
+                if let Some(ext) = entry.path().extension()
+                    && (ext == "yml" || ext == "yaml")
+                    && let Ok(content) = fs::read_to_string(entry.path())
+                {
+                    if content.contains("test")
+                        || content.contains("pytest")
+                        || content.contains("cargo test")
+                    {
+                        ci_config.test_command = Some("github actions test workflow".into());
+                    }
+                    if content.contains("lint")
+                        || content.contains("clippy")
+                        || content.contains("eslint")
+                    {
+                        ci_config.lint_command = Some("github actions lint workflow".into());
                     }
                 }
             }

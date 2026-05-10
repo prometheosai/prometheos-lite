@@ -76,8 +76,7 @@ pub struct ProviderCandidate {
     pub estimated_risk: RiskEstimate,
 }
 
-/// Deprecated alias - use ProviderCandidate instead
-#[deprecated(since = "1.6.0", note = "Use ProviderCandidate instead")]
+/// Backward-compatible alias for ProviderCandidate.
 pub type PatchCandidate = ProviderCandidate;
 
 /// Risk estimate for a candidate
@@ -207,6 +206,12 @@ pub struct ProviderCapabilities {
 
 /// Simple heuristic provider for basic repairs
 pub struct HeuristicPatchProvider;
+
+impl Default for HeuristicPatchProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl HeuristicPatchProvider {
     pub fn new() -> Self {
@@ -557,6 +562,12 @@ pub struct AggregatePatchProvider {
     providers: Vec<Box<dyn PatchProvider>>,
 }
 
+impl Default for AggregatePatchProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AggregatePatchProvider {
     pub fn new() -> Self {
         Self {
@@ -743,13 +754,7 @@ impl ProviderRegistry {
         Ok(Self { aggregate })
     }
 
-    /// DEPRECATED: Use mode-specific constructors instead
-    ///
-    /// This method is deprecated and will be removed in V1.7.
-    /// Use for_testing(), for_review_only(), for_assisted(), or for_autonomous() instead.
-    #[deprecated(
-        note = "Use mode-specific constructors: for_testing(), for_review_only(), for_assisted(), or for_autonomous()"
-    )]
+    /// Retained constructor that fails fast and points callers to mode-specific constructors.
     pub fn new() -> anyhow::Result<Self> {
         anyhow::bail!(
             "ProviderRegistry::new() is deprecated. \
@@ -799,11 +804,7 @@ impl ProviderRegistry {
         }
     }
 
-    /// DEPRECATED: Use from_config_with_mode instead
-    ///
-    /// This method is deprecated and will be removed in V1.7.
-    /// Use from_config_with_mode() with explicit mode parameter.
-    #[deprecated(note = "Use from_config_with_mode() with explicit mode parameter")]
+    /// Compatibility constructor that maps configuration to an explicit mode.
     pub fn from_config(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
         // Check if we have a valid LLM configuration
         if config.provider.is_empty() || config.model.is_empty() {
@@ -1144,28 +1145,26 @@ impl ScriptPatchProvider {
         }
 
         // Validate operations if present
-        if let Some(candidates) = parsed.get("candidates") {
-            if let Some(candidates_array) = candidates.as_array() {
-                for candidate in candidates_array {
-                    if let Some(operations) = candidate.get("edits") {
-                        if let Some(operations_array) = operations.as_array() {
-                            for operation in operations_array {
-                                if let Some(op_type) = operation.get("type") {
-                                    if let Some(op_str) = op_type.as_str() {
-                                        if !self
-                                            .output_schema
-                                            .allowed_operations
-                                            .contains(&op_str.to_string())
-                                        {
-                                            anyhow::bail!(
-                                                "Operation '{}' not allowed. Allowed: {:?}",
-                                                op_str,
-                                                self.output_schema.allowed_operations
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+        if let Some(candidates) = parsed.get("candidates")
+            && let Some(candidates_array) = candidates.as_array()
+        {
+            for candidate in candidates_array {
+                if let Some(operations) = candidate.get("edits")
+                    && let Some(operations_array) = operations.as_array()
+                {
+                    for operation in operations_array {
+                        if let Some(op_type) = operation.get("type")
+                            && let Some(op_str) = op_type.as_str()
+                            && !self
+                                .output_schema
+                                .allowed_operations
+                                .contains(&op_str.to_string())
+                        {
+                            anyhow::bail!(
+                                "Operation '{}' not allowed. Allowed: {:?}",
+                                op_str,
+                                self.output_schema.allowed_operations
+                            );
                         }
                     }
                 }
@@ -1200,7 +1199,7 @@ impl PatchProvider for ScriptPatchProvider {
             // Use sandboxed runtime
             runtime
                 .run_command(
-                    &std::path::Path::new("."),
+                    std::path::Path::new("."),
                     &script_command,
                     30000, // 30 second timeout
                 )
@@ -1275,7 +1274,7 @@ impl PatchProvider for ScriptPatchProvider {
             // Use sandboxed runtime
             runtime
                 .run_command(
-                    &std::path::Path::new("."),
+                    std::path::Path::new("."),
                     &script_command,
                     30000, // 30 second timeout
                 )
@@ -1355,11 +1354,17 @@ pub struct TemplatePatchProvider {
 }
 
 #[derive(Debug, Clone)]
-struct Template {
+pub(crate) struct Template {
     name: String,
     pattern: String,
-    replacements: HashMap<String, String>,
+    _replacements: HashMap<String, String>,
     confidence: u8,
+}
+
+impl Default for TemplatePatchProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TemplatePatchProvider {
@@ -1372,7 +1377,7 @@ impl TemplatePatchProvider {
             Template {
                 name: "add_import".into(),
                 pattern: "use {import};".into(),
-                replacements: HashMap::new(),
+                _replacements: HashMap::new(),
                 confidence: 85,
             },
         );
@@ -1382,7 +1387,7 @@ impl TemplatePatchProvider {
             Template {
                 name: "fix_missing_semicolon".into(),
                 pattern: "{line};".into(),
-                replacements: HashMap::new(),
+                _replacements: HashMap::new(),
                 confidence: 90,
             },
         );
@@ -1390,16 +1395,11 @@ impl TemplatePatchProvider {
         templates.insert("add_error_handling".into(), Template {
             name: "add_error_handling".into(),
             pattern: "match {expr} {{\n    Ok(result) => result,\n    Err(e) => return Err(e.into()),\n}}".into(),
-            replacements: HashMap::new(),
+            _replacements: HashMap::new(),
             confidence: 75,
         });
 
         Self { templates }
-    }
-
-    pub fn with_template(mut self, template: Template) -> Self {
-        self.templates.insert(template.name.clone(), template);
-        self
     }
 }
 
@@ -1523,9 +1523,9 @@ impl LlmPatchProvider {
     }
 
     fn build_repair_prompt(&self, request: &RepairRequest) -> String {
-        let mut prompt = format!(
+        let mut prompt =
             "You are a code repair expert. A patch application failed and needs to be fixed.\n\n"
-        );
+                .to_string();
 
         // Add task context
         prompt.push_str(&format!("Task: {}\n", request.context.task));
@@ -1596,7 +1596,7 @@ impl LlmPatchProvider {
         #[cfg(test)]
         {
             tracing::info!("P0: Attempting markdown fallback parsing (test mode only)");
-            return self.parse_markdown_fallback(response);
+            self.parse_markdown_fallback(response)
         }
         #[cfg(not(test))]
         {
@@ -1667,128 +1667,6 @@ impl LlmPatchProvider {
                             replace_all: Some(false),
                             context_lines: Some(3),
                         }));
-                    }
-                }
-            }
-            i += 1;
-        }
-
-        // If no structured edits found, try to parse as whole file
-        if edits.is_empty() {
-            edits = Self::parse_whole_file_edits(response);
-        }
-
-        edits
-    }
-
-    /// Parse whole-file edits from LLM response
-    ///
-    /// Supports formats:
-    /// - fenced block with `whole_file` marker and `FILE: <path>` header
-    /// - generic fenced block with `FILE: <path>` header
-    ///
-    /// Example payload (text format):
-    /// `FILE: path/to/file.rs`
-    /// `<content>`
-    fn parse_whole_file_edits(response: &str) -> Vec<EditOperation> {
-        let mut edits = Vec::new();
-        let lines: Vec<&str> = response.lines().collect();
-        let mut i = 0;
-
-        while i < lines.len() {
-            // Look for code block start with optional language marker
-            if lines[i].contains("```") {
-                let _block_marker = lines[i];
-
-                // Check if next line is FILE: marker indicating whole-file content
-                if i + 1 < lines.len() && lines[i + 1].starts_with("FILE:") {
-                    let file_line = lines[i + 1];
-                    let file_path = file_line.strip_prefix("FILE:").unwrap_or("").trim();
-
-                    if !file_path.is_empty() {
-                        // Collect all content until closing ```
-                        let mut content = String::new();
-                        i += 2;
-
-                        while i < lines.len() && !lines[i].contains("```") {
-                            if !content.is_empty() {
-                                content.push('\n');
-                            }
-                            content.push_str(lines[i]);
-                            i += 1;
-                        }
-
-                        if !content.is_empty() {
-                            edits.push(EditOperation::WholeFile(WholeFileEdit {
-                                file: std::path::PathBuf::from(file_path),
-                                content,
-                            }));
-                        }
-                        continue;
-                    }
-                }
-
-                // Also check for WHOLE_FILE: marker
-                if i + 1 < lines.len() && lines[i + 1].starts_with("WHOLE_FILE:") {
-                    let file_line = lines[i + 1];
-                    let file_path = file_line.strip_prefix("WHOLE_FILE:").unwrap_or("").trim();
-
-                    if !file_path.is_empty() {
-                        let mut content = String::new();
-                        i += 2;
-
-                        while i < lines.len() && !lines[i].contains("```") {
-                            if !content.is_empty() {
-                                content.push('\n');
-                            }
-                            content.push_str(lines[i]);
-                            i += 1;
-                        }
-
-                        if !content.is_empty() {
-                            edits.push(EditOperation::WholeFile(WholeFileEdit {
-                                file: std::path::PathBuf::from(file_path),
-                                content,
-                            }));
-                        }
-                        continue;
-                    }
-                }
-            }
-            i += 1;
-        }
-
-        // Alternative: Look for explicit CREATE_FILE markers
-        let mut i = 0;
-        while i < lines.len() {
-            if lines[i].starts_with("CREATE_FILE:") || lines[i].starts_with("CREATE:") {
-                let file_path = lines[i]
-                    .strip_prefix("CREATE_FILE:")
-                    .or_else(|| lines[i].strip_prefix("CREATE:"))
-                    .unwrap_or("")
-                    .trim();
-
-                if !file_path.is_empty() && i + 1 < lines.len() {
-                    // Check if next line starts a code block
-                    if lines[i + 1].contains("```") {
-                        let mut content = String::new();
-                        i += 2;
-
-                        while i < lines.len() && !lines[i].contains("```") {
-                            if !content.is_empty() {
-                                content.push('\n');
-                            }
-                            content.push_str(lines[i]);
-                            i += 1;
-                        }
-
-                        if !content.is_empty() {
-                            edits.push(EditOperation::CreateFile(CreateFileEdit {
-                                file: std::path::PathBuf::from(file_path),
-                                content,
-                                executable: None,
-                            }));
-                        }
                     }
                 }
             }
@@ -2203,18 +2081,18 @@ fn apply_semicolon_fix(edits: &[EditOperation]) -> Vec<EditOperation> {
 /// without relying on external services or random generation.
 pub struct DeterministicPatchProvider {
     /// Seed for deterministic behavior
-    seed: u64,
+    _seed: u64,
 }
 
 impl DeterministicPatchProvider {
     /// Create a new deterministic patch provider with the given seed
     pub fn new(seed: u64) -> Self {
-        Self { seed }
+        Self { _seed: seed }
     }
 
     /// Create a deterministic patch provider with default seed
     pub fn new_default() -> Self {
-        Self { seed: 42 }
+        Self { _seed: 42 }
     }
 }
 
@@ -2262,7 +2140,7 @@ impl PatchProvider for DeterministicPatchProvider {
 
         let repair_applied = repaired_edits
             .as_ref()
-            .map_or(false, |edits| edits != &request.failed_edits);
+            .is_ok_and(|edits| edits != &request.failed_edits);
 
         Ok(RepairResponse {
             repaired_edits: repaired_edits.unwrap_or(request.failed_edits),
@@ -2481,10 +2359,10 @@ impl DeterministicPatchProvider {
                 EditOperation::SearchReplace(sr) => {
                     let mut new_sr = sr.clone();
                     // Add more specific context by including the first line
-                    if let Some(first_line) = sr.search.lines().next() {
-                        if !sr.search.starts_with(first_line) {
-                            new_sr.search = format!("{}\n{}", first_line, sr.search);
-                        }
+                    if let Some(first_line) = sr.search.lines().next()
+                        && !sr.search.starts_with(first_line)
+                    {
+                        new_sr.search = format!("{}\n{}", first_line, sr.search);
                     }
                     narrowed.push(EditOperation::SearchReplace(new_sr));
                 }

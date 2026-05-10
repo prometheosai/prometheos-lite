@@ -7,13 +7,15 @@ use uuid::Uuid;
 use super::{
     CompletionCriterion,
     event::WorkContextEvent,
-    types::{WorkContext, WorkPhase, WorkStatus},
+    types::{WorkContext, WorkDomain, WorkPhase, WorkStatus},
 };
 use crate::db::Db;
 use crate::db::repository::work_artifacts::WorkArtifactOperations;
 use crate::db::repository::work_context::WorkContextOperations;
 use crate::db::repository::work_context_events::WorkContextEventOperations;
+use crate::db::repository::work_run_metrics::WorkRunMetricsOperations;
 use crate::harness::evidence::EvidenceLog;
+use crate::work::types::HarnessRunMetricsRecord;
 
 /// WorkContextService - handles WorkContext CRUD and lifecycle operations
 pub struct WorkContextService {
@@ -113,6 +115,19 @@ impl WorkContextService {
 
     /// Update the status of a WorkContext
     pub fn update_status(&self, context: &mut WorkContext, status: WorkStatus) -> Result<()> {
+        if context.domain == WorkDomain::Software && status == WorkStatus::Completed {
+            let completion_ok = context
+                .harness_metadata()
+                .and_then(|m| m.completion_decision)
+                .map(|d| matches!(d, crate::harness::completion::CompletionDecision::Complete))
+                .unwrap_or(false);
+            if !completion_ok {
+                anyhow::bail!(
+                    "Software WorkContext cannot be Completed without CompletionDecision::Complete evidence"
+                );
+            }
+        }
+
         let old_status = context.status;
         context.status = status;
         context.touch();
@@ -132,6 +147,63 @@ impl WorkContextService {
 
     /// Update the phase of a WorkContext
     pub fn update_phase(&self, context: &mut WorkContext, phase: WorkPhase) -> Result<()> {
+        if !crate::work::PhaseController::can_transition(context.current_phase, phase)
+            && context.current_phase != phase
+        {
+            anyhow::bail!(
+                "Invalid phase transition: {:?} -> {:?}",
+                context.current_phase,
+                phase
+            );
+        }
+
+        if context.domain == WorkDomain::Software {
+            let meta = context.harness_metadata().unwrap_or_default();
+            match (context.current_phase, phase) {
+                (WorkPhase::Execution, WorkPhase::Review) => {
+                    let has_patch = !context.artifacts.is_empty()
+                        || context
+                            .metadata
+                            .get("harness")
+                            .and_then(|h| h.get("patch_result"))
+                            .map(|v| !v.is_null())
+                            .unwrap_or(false);
+                    let validation_ok = context
+                        .metadata
+                        .get("harness")
+                        .and_then(|h| h.get("validation_result"))
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                    if !has_patch || !validation_ok {
+                        anyhow::bail!(
+                            "Software Execution -> Review requires patch evidence and validation evidence"
+                        );
+                    }
+                }
+                (WorkPhase::Review, WorkPhase::Finalization) => {
+                    let review_present = context
+                        .metadata
+                        .get("harness")
+                        .and_then(|h| h.get("review_issues"))
+                        .map(|v| v.is_array())
+                        .unwrap_or(false);
+                    let risk_present = meta.risk_level.is_some()
+                        || context
+                            .metadata
+                            .get("harness")
+                            .and_then(|h| h.get("risk_assessment"))
+                            .map(|v| !v.is_null())
+                            .unwrap_or(false);
+                    if !review_present || !risk_present {
+                        anyhow::bail!(
+                            "Software Review -> Finalization requires review and risk evidence"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let old_phase = context.current_phase;
         context.current_phase = phase;
         context.touch();
@@ -225,6 +297,25 @@ impl WorkContextService {
         WorkContextOperations::list_work_contexts(&*self.db, user_id)
     }
 
+    pub fn upsert_harness_run_metrics(&self, record: &HarnessRunMetricsRecord) -> Result<()> {
+        WorkRunMetricsOperations::upsert_harness_run_metrics(&*self.db, record)
+    }
+
+    pub fn list_harness_run_metrics(
+        &self,
+        work_context_id: &str,
+    ) -> Result<Vec<HarnessRunMetricsRecord>> {
+        WorkRunMetricsOperations::list_harness_run_metrics(&*self.db, work_context_id)
+    }
+
+    pub fn get_harness_run_metrics(
+        &self,
+        work_context_id: &str,
+        run_id: &str,
+    ) -> Result<Option<HarnessRunMetricsRecord>> {
+        WorkRunMetricsOperations::get_harness_run_metrics(&*self.db, work_context_id, run_id)
+    }
+
     /// Get the active context for a conversation
     pub fn get_active_context_for_conversation(
         &self,
@@ -259,10 +350,10 @@ impl WorkContextService {
         }
 
         // Priority 2: Active context for conversation
-        if let Some(conv_id) = conversation_id {
-            if let Some(context) = self.get_active_context_for_conversation(conv_id)? {
-                return Ok(Some(context));
-            }
+        if let Some(conv_id) = conversation_id
+            && let Some(context) = self.get_active_context_for_conversation(conv_id)?
+        {
+            return Ok(Some(context));
         }
 
         // Priority 3: Create new context (caller's responsibility)

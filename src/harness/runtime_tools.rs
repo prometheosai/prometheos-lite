@@ -320,6 +320,12 @@ pub enum IssueSeverity {
     Hint,
 }
 
+impl Default for RuntimeToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -597,12 +603,12 @@ impl RuntimeToolRegistry {
         for part in line.split_whitespace() {
             if part.contains(":") && !part.starts_with("http") {
                 let parts: Vec<_> = part.split(':').collect();
-                if parts.len() >= 2 {
-                    if let Ok(num) = parts[1].parse::<u32>() {
-                        file = Some(PathBuf::from(parts[0]));
-                        line_num = Some(num);
-                        break;
-                    }
+                if parts.len() >= 2
+                    && let Ok(num) = parts[1].parse::<u32>()
+                {
+                    file = Some(PathBuf::from(parts[0]));
+                    line_num = Some(num);
+                    break;
                 }
             }
         }
@@ -653,7 +659,7 @@ impl RuntimeToolRegistry {
                     return Ok(false);
                 }
 
-                let mut cmd = Command::new(&parts[0]);
+                let mut cmd = Command::new(parts[0]);
                 if parts.len() > 1 {
                     cmd.args(&parts[1..]);
                 }
@@ -674,7 +680,10 @@ impl RuntimeToolRegistry {
         self.validate_temporary_tool(&tool)?;
 
         // Generate request ID
-        let request_id = format!("req_{}", chrono::Utc::now().timestamp_nanos());
+        let request_id = format!(
+            "req_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
 
         let mut pending_tool = tool;
         pending_tool.approval_status = ApprovalStatus::Pending;
@@ -751,20 +760,20 @@ impl RuntimeToolRegistry {
             );
         }
 
-        if let Some(expires_at) = temporary_tool.expires_at {
-            if chrono::Utc::now() > expires_at {
-                temporary_tool.approval_status = ApprovalStatus::Expired;
-                bail!("Temporary tool '{}' approval has expired", tool_id);
-            }
+        if let Some(expires_at) = temporary_tool.expires_at
+            && chrono::Utc::now() > expires_at
+        {
+            temporary_tool.approval_status = ApprovalStatus::Expired;
+            bail!("Temporary tool '{}' approval has expired", tool_id);
         }
 
-        if let Some(max_uses) = temporary_tool.max_uses {
-            if temporary_tool.usage_count >= max_uses {
-                bail!(
-                    "Temporary tool '{}' exceeded its maximum usage count",
-                    tool_id
-                );
-            }
+        if let Some(max_uses) = temporary_tool.max_uses
+            && temporary_tool.usage_count >= max_uses
+        {
+            bail!(
+                "Temporary tool '{}' exceeded its maximum usage count",
+                tool_id
+            );
         }
 
         temporary_tool.usage_count += 1;
@@ -775,7 +784,10 @@ impl RuntimeToolRegistry {
             .sandbox_requirements
             .resource_limits
             .clone();
-        let execution_id = format!("exec_{}", chrono::Utc::now().timestamp_nanos());
+        let execution_id = format!(
+            "exec_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let start_time = std::time::Instant::now();
 
         let extension = match script_type {
@@ -1027,7 +1039,7 @@ impl RuntimeToolRegistry {
     pub fn get_temporary_tool_stats(&self) -> HashMap<String, TemporaryToolStats> {
         let mut stats = HashMap::new();
 
-        for (tool_name, _tool) in &self.tools {
+        for tool_name in self.tools.keys() {
             let tool_stats = TemporaryToolStats {
                 total_proposed: 0,
                 total_approved: 0,
@@ -1065,7 +1077,10 @@ impl TemporaryTool {
         script_type: ScriptType,
         proposed_by: String,
     ) -> Self {
-        let id = format!("temp_{}", chrono::Utc::now().timestamp_nanos());
+        let id = format!(
+            "temp_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
 
         Self {
             id,
@@ -1201,21 +1216,21 @@ impl RuntimeToolRegistry {
 
     /// P1-009: Get tool version by running the version command
     pub async fn get_tool_version(&self, tool_id: &str) -> Option<String> {
-        if let Some(tool) = self.tools.get(tool_id) {
-            if let Some(version_cmd) = &tool.version_cmd {
-                let parts: Vec<_> = version_cmd.split_whitespace().collect();
-                if parts.is_empty() {
-                    return None;
-                }
+        if let Some(tool) = self.tools.get(tool_id)
+            && let Some(version_cmd) = &tool.version_cmd
+        {
+            let parts: Vec<_> = version_cmd.split_whitespace().collect();
+            if parts.is_empty() {
+                return None;
+            }
 
-                let output = Command::new(parts[0])
-                    .args(&parts[1..])
-                    .output()
-                    .await
-                    .ok()?;
-                if output.status.success() {
-                    return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
-                }
+            let output = Command::new(parts[0])
+                .args(&parts[1..])
+                .output()
+                .await
+                .ok()?;
+            if output.status.success() {
+                return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
             }
         }
         None

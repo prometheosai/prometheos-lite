@@ -273,7 +273,7 @@ mod tests {
     fn test_workspace_strategy_selection() {
         // ReviewOnly can use InPlace
         // Other modes should fall back to TempCopy
-        let repo_root = PathBuf::from("/tmp/test-repo");
+        let _repo_root = PathBuf::from("/tmp/test-repo");
 
         // Note: Actual async tests would require a real git repo
         // These are compile-time checks

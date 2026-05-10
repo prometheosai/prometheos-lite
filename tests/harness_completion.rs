@@ -13,7 +13,7 @@ use prometheos_lite::harness::completion::{
     CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
     ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence, VerificationEvidence,
 };
-use prometheos_lite::harness::confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact};
+use prometheos_lite::harness::confidence::ConfidenceScore;
 use prometheos_lite::harness::verification::VerificationStrength;
 
 // ============================================================================

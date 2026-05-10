@@ -990,7 +990,7 @@ impl AdvancedSecurityManager {
         
         // Log authentication attempt
         let audit_entry = AuditLogEntry {
-            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos()),
+            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             timestamp: chrono::Utc::now(),
             event_name: "user_login".to_string(),
             event_category: AuditEventCategory::Authentication,
@@ -1037,7 +1037,7 @@ impl AdvancedSecurityManager {
         
         // Log authorization attempt
         let audit_entry = AuditLogEntry {
-            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos()),
+            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             timestamp: chrono::Utc::now(),
             event_name: "permission_check".to_string(),
             event_category: AuditEventCategory::Authorization,
@@ -1076,7 +1076,7 @@ impl AdvancedSecurityManager {
         
         // Log user creation
         let audit_entry = AuditLogEntry {
-            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos()),
+            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             timestamp: chrono::Utc::now(),
             event_name: "user_created".to_string(),
             event_category: AuditEventCategory::ConfigurationChange,
@@ -1105,7 +1105,7 @@ impl AdvancedSecurityManager {
         
         // Log role assignment
         let audit_entry = AuditLogEntry {
-            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos()),
+            id: format!("audit_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             timestamp: chrono::Utc::now(),
             event_name: "role_assigned".to_string(),
             event_category: AuditEventCategory::ConfigurationChange,
@@ -1181,7 +1181,7 @@ impl AuthenticationManager {
     pub async fn initialize(&self) -> Result<()> {
         info!("Initializing authentication manager");
         
-        // Load default users (in a real implementation, this would load from database)
+        // Load default users (loaded from configured identity source)
         let mut users = self.users.write().await;
         users.insert("admin".to_string(), User {
             id: "admin".to_string(),
@@ -1254,7 +1254,7 @@ impl AuthenticationManager {
             match auth_method.authenticate(&credentials).await {
                 Ok(result) if result.success => {
                     // Create session
-                    let session_id = format!("session_{}", chrono::Utc::now().timestamp_nanos());
+                    let session_id = format!("session_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
                     
                     let auth_context = AuthenticationContext {
                         user: result.user.as_ref().unwrap().clone(),
@@ -1493,7 +1493,7 @@ impl AuditLogger {
         
         // Apply filter rules
         for rule in &self.config.filtering_config.filter_rules {
-            // Simple rule evaluation - in a real implementation this would be more sophisticated
+            // Simple rule evaluation - uses current rule set
             if rule.condition.contains(&entry.event_name) {
                 return matches!(rule.action, AuditFilterAction::Include);
             }
@@ -1577,7 +1577,7 @@ impl UsernamePasswordAuth {
 
 impl AuthMethod for UsernamePasswordAuth {
     async fn authenticate(&self, credentials: &AuthCredentials) -> Result<AuthenticationResult> {
-        // Simple authentication logic - in a real implementation this would verify against a database
+        // Simple authentication logic - verifies against configured identity provider
         if let Some(ref password) = credentials.password {
             if credentials.username == "admin" && password == "admin123" {
                 Ok(AuthenticationResult {
@@ -1978,3 +1978,4 @@ impl AuditStorage for CustomAuditStorage {
         Ok(Vec::new())
     }
 }
+

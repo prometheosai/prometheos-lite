@@ -3,7 +3,8 @@
 //! This module implements the flow-centric architecture where everything is a Flow,
 //! execution equals node lifecycle, and state is explicit.
 
-mod adapter;
+#[cfg(feature = "legacy")]
+pub mod adapter;
 pub mod budget;
 pub mod debug;
 pub mod execution;

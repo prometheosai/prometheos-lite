@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::client::LlmClient;
+use super::llm_client::LlmClient;
 use crate::config::AppConfig;
 
 /// Generate a response using the configured LLM

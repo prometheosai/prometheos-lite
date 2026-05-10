@@ -999,7 +999,7 @@ impl ValidationComparisonEngine {
         baseline: crate::harness::validation::ValidationResult,
         current: crate::harness::validation::ValidationResult,
     ) -> Result<ValidationComparison> {
-        let comparison_id = format!("comp_{}", chrono::Utc::now().timestamp_nanos());
+        let comparison_id = format!("comp_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
         
         info!("Starting validation comparison: {}", comparison_id);
         
@@ -1676,7 +1676,7 @@ impl ComparisonAnalyzer for RegressionAnalyzer {
         // Check for performance regressions
         if matches!(comparison.summary.performance_change.assessment, PerformanceAssessment::Regressed) {
             regressions.push(Regression {
-                id: format!("perf_regress_{}", chrono::Utc::now().timestamp_nanos()),
+                id: format!("perf_regress_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
                 regression_type: RegressionType::Performance,
                 description: "Performance regression detected".to_string(),
                 severity: RegressionSeverity::Medium,
@@ -1688,7 +1688,7 @@ impl ComparisonAnalyzer for RegressionAnalyzer {
         // Check for functional regressions
         if matches!(comparison.summary.status_change, StatusChange::Regressed) {
             regressions.push(Regression {
-                id: format!("func_regress_{}", chrono::Utc::now().timestamp_nanos()),
+                id: format!("func_regress_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
                 regression_type: RegressionType::Functional,
                 description: "Functional regression detected".to_string(),
                 severity: RegressionSeverity::High,
@@ -1728,7 +1728,7 @@ impl ComparisonAnalyzer for ImprovementAnalyzer {
         // Check for performance improvements
         if matches!(comparison.summary.performance_change.assessment, PerformanceAssessment::Improved) {
             improvements.push(Improvement {
-                id: format!("perf_improve_{}", chrono::Utc::now().timestamp_nanos()),
+                id: format!("perf_improve_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
                 improvement_type: ImprovementType::Performance,
                 description: "Performance improvement detected".to_string(),
                 magnitude: ImprovementMagnitude::Moderate,

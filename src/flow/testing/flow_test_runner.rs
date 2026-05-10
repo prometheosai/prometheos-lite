@@ -178,16 +178,16 @@ impl FlowTestRunner {
                 .unwrap_or(0)
         };
 
-        if let Some(min_steps) = expectations.min_steps {
-            if event_count < min_steps {
-                anyhow::bail!("Too few steps: {} (minimum {})", event_count, min_steps);
-            }
+        if let Some(min_steps) = expectations.min_steps
+            && event_count < min_steps
+        {
+            anyhow::bail!("Too few steps: {} (minimum {})", event_count, min_steps);
         }
 
-        if let Some(max_steps) = expectations.max_steps {
-            if event_count > max_steps {
-                anyhow::bail!("Too many steps: {} (maximum {})", event_count, max_steps);
-            }
+        if let Some(max_steps) = expectations.max_steps
+            && event_count > max_steps
+        {
+            anyhow::bail!("Too many steps: {} (maximum {})", event_count, max_steps);
         }
 
         Ok(result)

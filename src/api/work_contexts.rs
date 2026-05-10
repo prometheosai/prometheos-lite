@@ -1,7 +1,7 @@
 //! WorkContext API endpoints
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
@@ -21,9 +21,8 @@ use crate::work::types::{WorkDomain, WorkStatus};
 pub struct CreateWorkContextRequest {
     pub title: String,
     pub domain: String,
-    pub goal: String,
-    #[serde(default)]
     pub user_id: String,
+    pub goal: String,
 }
 
 /// Request to submit a user intent
@@ -33,6 +32,11 @@ pub struct SubmitIntentRequest {
     pub message: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserIdentityQuery {
+    pub user_id: String,
 }
 
 /// Request to run a WorkContext until blocked or complete
@@ -136,13 +140,17 @@ impl From<anyhow::Error> for ApiError {
 /// List WorkContexts
 pub async fn list_work_contexts(
     State(state): State<Arc<AppState>>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<Vec<WorkContextResponse>>, ApiError> {
+    if identity.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let contexts = work_context_service
-        .list_contexts("api-user")
+        .list_contexts(&identity.user_id)
         .map_err(|e| ApiError::Internal(format!("Failed to list contexts: {}", e)))?;
 
     let response = contexts
@@ -175,6 +183,9 @@ pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWorkContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
+    if req.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
@@ -190,14 +201,8 @@ pub async fn create_work_context(
         _ => WorkDomain::General,
     };
 
-    let user_id = if req.user_id.is_empty() {
-        "api-user".to_string()
-    } else {
-        req.user_id
-    };
-
     let context = work_context_service
-        .create_context(user_id, req.title, domain, req.goal)
+        .create_context(req.user_id, req.title, domain, req.goal)
         .map_err(|e| ApiError::Internal(format!("Failed to create context: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -300,6 +305,9 @@ pub async fn submit_intent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitIntentRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
+    if req.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -356,35 +364,233 @@ pub async fn run_harness(
 }
 
 pub async fn get_harness_metadata(
+    State(_state): State<Arc<AppState>>,
+    Path((_id, _view)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Err(ApiError::BadRequest(
+        "Deprecated endpoint removed. Use explicit /harness/{evidence|patches|validation|review|risk|completion} endpoints.".to_string(),
+    ))
+}
+
+fn harness_payload(ctx: &crate::work::types::WorkContext) -> serde_json::Value {
+    ctx.metadata
+        .get("harness")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+async fn get_context_or_404(
+    state: &Arc<AppState>,
+    id: &str,
+) -> Result<crate::work::types::WorkContext, ApiError> {
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    svc.get_context(id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))
+}
+
+fn extract_harness_view(harness: &serde_json::Value, view: &str) -> Option<serde_json::Value> {
+    match view {
+        "evidence" => harness.get("evidence_log").cloned(),
+        "patches" => harness.get("patch_result").cloned(),
+        "validation" => harness.get("validation_result").cloned(),
+        "review" => harness.get("review_issues").cloned(),
+        "risk" => harness.get("risk_assessment").cloned(),
+        "completion" => harness.get("completion_decision").cloned(),
+        "trajectory" => harness.get("trajectory").cloned(),
+        "artifacts" => harness.get("artifacts").cloned(),
+        "confidence" => harness.get("confidence").cloned(),
+        "replay" => Some(harness.clone()),
+        _ => None,
+    }
+}
+
+pub async fn get_harness_evidence(
     State(state): State<Arc<AppState>>,
-    Path((id, view)): Path<(String, String)>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = get_context_or_404(&state, &id).await?;
+    let harness = harness_payload(&ctx);
+    Ok(Json(
+        extract_harness_view(&harness, "evidence").unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+pub async fn get_harness_patches(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = get_context_or_404(&state, &id).await?;
+    let harness = harness_payload(&ctx);
+    Ok(Json(
+        extract_harness_view(&harness, "patches").unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+pub async fn get_harness_validation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = get_context_or_404(&state, &id).await?;
+    let harness = harness_payload(&ctx);
+    Ok(Json(
+        extract_harness_view(&harness, "validation").unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+pub async fn get_harness_review(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = get_context_or_404(&state, &id).await?;
+    let harness = harness_payload(&ctx);
+    Ok(Json(
+        extract_harness_view(&harness, "review").unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+pub async fn get_harness_risk(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = get_context_or_404(&state, &id).await?;
+    let harness = harness_payload(&ctx);
+    Ok(Json(
+        extract_harness_view(&harness, "risk").unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+pub async fn get_harness_completion(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = get_context_or_404(&state, &id).await?;
+    let harness = harness_payload(&ctx);
+    Ok(Json(
+        extract_harness_view(&harness, "completion").unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+pub async fn get_work_quality(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let svc = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let ctx = svc
-        .get_context(&id)
+    let runs = svc
+        .list_harness_run_metrics(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let latest = runs.first().cloned();
+    Ok(Json(serde_json::json!({
+        "work_context_id": id,
+        "quality_metrics": latest.as_ref().map(|r| r.quality_metrics.clone()).unwrap_or_default(),
+        "latest_run_id": latest.as_ref().map(|r| r.run_id.clone()),
+        "runs": runs,
+    })))
+}
+
+pub async fn get_work_cost(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let runs = svc
+        .list_harness_run_metrics(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let latest = runs.first().cloned();
+    Ok(Json(serde_json::json!({
+        "work_context_id": id,
+        "token_usage": latest.as_ref().map(|r| r.token_usage.clone()).unwrap_or_default(),
+        "latest_run_id": latest.as_ref().map(|r| r.run_id.clone()),
+        "runs": runs,
+    })))
+}
+
+pub async fn list_work_traces(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let runs = svc
+        .list_harness_run_metrics(&id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "work_context_id": id,
+        "latest_run_id": runs.first().map(|r| r.run_id.clone()),
+        "runs": runs
+    })))
+}
+
+pub async fn get_trace_by_run(
+    State(state): State<Arc<AppState>>,
+    Path((id, run_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let svc = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let run = svc
+        .get_harness_run_metrics(&id, &run_id)
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
-    let h = ctx
-        .metadata
-        .get("harness")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let v = match view.as_str() {
-        "trajectory" => h.get("trajectory").cloned(),
-        "artifacts" => h.get("artifacts").cloned(),
-        "confidence" => h.get("confidence").cloned(),
-        "replay" => Some(h.clone()),
-        "risk" => h.get("risk_assessment").cloned(),
-        "completion" => h.get("completion_decision").cloned(),
-        _ => {
-            return Err(ApiError::BadRequest(format!(
-                "Unknown harness view: {}",
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "Run '{}' not found for work context '{}'",
+                run_id, id
+            ))
+        })?;
+    Ok(Json(serde_json::json!({
+        "work_context_id": id,
+        "run_id": run_id,
+        "trace_summary": run.trace_summary,
+        "token_usage": run.token_usage,
+        "quality_metrics": run.quality_metrics,
+        "trajectory": run.trajectory,
+        "created_at": run.created_at,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_harness_view;
+
+    #[test]
+    fn test_extract_harness_view_matrix() {
+        let harness = serde_json::json!({
+            "evidence_log": {"entries": []},
+            "patch_result": {"applied": true},
+            "validation_result": {"passed": true},
+            "review_issues": [],
+            "risk_assessment": {"level": "low"},
+            "completion_decision": "Complete",
+            "trajectory": {"id": "run-1"},
+            "artifacts": [],
+            "confidence": {"score": 0.9}
+        });
+
+        for view in [
+            "evidence",
+            "patches",
+            "validation",
+            "review",
+            "risk",
+            "completion",
+            "trajectory",
+            "artifacts",
+            "confidence",
+            "replay",
+        ] {
+            assert!(
+                extract_harness_view(&harness, view).is_some(),
+                "expected view '{}' to resolve",
                 view
-            )));
+            );
         }
+        assert!(extract_harness_view(&harness, "unknown").is_none());
     }
-    .unwrap_or(serde_json::Value::Null);
-    Ok(Json(v))
 }

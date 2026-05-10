@@ -14,17 +14,16 @@ pub struct FlowRunner {
     flow: Flow,
     tracer: Option<prometheos_lite::flow::tracing::SharedTracer>,
     debug_mode: bool,
-    runtime: Option<prometheos_lite::flow::RuntimeContext>,
 }
 
 impl FlowRunner {
     /// Create a new FlowRunner from a Flow
+    #[cfg(test)]
     pub fn new(flow: Flow) -> Self {
         Self {
             flow,
             tracer: None,
             debug_mode: false,
-            runtime: None,
         }
     }
 
@@ -36,27 +35,6 @@ impl FlowRunner {
     /// Get the tracer if set
     pub fn tracer(&self) -> Option<&prometheos_lite::flow::tracing::SharedTracer> {
         self.tracer.as_ref()
-    }
-
-    /// Get the flow
-    pub fn get_flow(&self) -> &Flow {
-        &self.flow
-    }
-
-    /// Set the runtime context for service injection
-    pub fn with_runtime(mut self, runtime: prometheos_lite::flow::RuntimeContext) -> Self {
-        self.runtime = Some(runtime);
-        self
-    }
-
-    /// Load a flow from a JSON file
-    pub fn from_json_file(path: std::path::PathBuf) -> Result<Self> {
-        Self::from_json_file_with_runtime(path, None)
-    }
-
-    /// Load a flow from a YAML file
-    pub fn from_yaml_file(path: std::path::PathBuf) -> Result<Self> {
-        Self::from_yaml_file_with_runtime(path, None)
     }
 
     /// Load a flow from a JSON file with a RuntimeContext
@@ -79,7 +57,6 @@ impl FlowRunner {
             flow,
             tracer: Some(tracer),
             debug_mode: false,
-            runtime,
         })
     }
 
@@ -103,7 +80,6 @@ impl FlowRunner {
             flow,
             tracer: Some(tracer),
             debug_mode: false,
-            runtime,
         })
     }
 
@@ -139,6 +115,7 @@ impl FlowRunner {
     }
 
     /// Execute the flow with the given state
+    #[cfg(test)]
     pub async fn run(&mut self, state: &mut SharedState) -> Result<()> {
         self.flow.run(state).await
     }

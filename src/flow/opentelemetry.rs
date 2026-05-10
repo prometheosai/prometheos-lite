@@ -11,8 +11,6 @@ use opentelemetry_sdk::trace::{self as sdktrace};
 use super::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 
 /// Span type alias for the SDK
-type Span = sdktrace::Span;
-
 /// OpenTelemetry exporter configuration
 #[derive(Debug, Clone)]
 pub struct OtelConfig {
@@ -64,7 +62,7 @@ impl OtelConfig {
 pub struct OtelExporter {
     tracer: sdktrace::Tracer,
     provider: Option<sdktrace::TracerProvider>,
-    config: OtelConfig,
+    _config: OtelConfig,
 }
 
 impl OtelExporter {
@@ -97,7 +95,7 @@ impl OtelExporter {
         Ok(Self {
             tracer,
             provider: Some(provider),
-            config,
+            _config: config,
         })
     }
 

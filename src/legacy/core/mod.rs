@@ -56,7 +56,6 @@ impl ExecutionResult {
     }
 }
 
-#[deprecated(since = "0.2.0", note = "Use crate::flow::FlowBuilder instead")]
 #[derive(Debug, Clone)]
 pub struct SequentialOrchestrator {
     llm: LlmClient,

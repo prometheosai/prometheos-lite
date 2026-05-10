@@ -145,7 +145,7 @@ impl MemoryExtractorNode {
         // Extract preferences
         if combined.contains("prefer") || combined.contains("like") || combined.contains("want") {
             memories.push(ExtractedMemory {
-                content: format!("User preference detected in conversation"),
+                content: "User preference detected in conversation".to_string(),
                 kind: MemoryKind::Preference,
                 summary: Some("User expressed a preference".to_string()),
                 importance_score: 0.7,
@@ -161,7 +161,7 @@ impl MemoryExtractorNode {
         if combined.contains("decided") || combined.contains("choose") || combined.contains("will")
         {
             memories.push(ExtractedMemory {
-                content: format!("Decision made in conversation"),
+                content: "Decision made in conversation".to_string(),
                 kind: MemoryKind::Decision,
                 summary: Some("A decision was made".to_string()),
                 importance_score: 0.8,
@@ -177,7 +177,7 @@ impl MemoryExtractorNode {
         if combined.contains("must") || combined.contains("should") || combined.contains("require")
         {
             memories.push(ExtractedMemory {
-                content: format!("Constraint identified in conversation"),
+                content: "Constraint identified in conversation".to_string(),
                 kind: MemoryKind::Constraint,
                 summary: Some("A constraint was identified".to_string()),
                 importance_score: 0.75,
@@ -193,7 +193,7 @@ impl MemoryExtractorNode {
         if combined.contains("file") || combined.contains("function") || combined.contains("class")
         {
             memories.push(ExtractedMemory {
-                content: format!("Project fact mentioned in conversation"),
+                content: "Project fact mentioned in conversation".to_string(),
                 kind: MemoryKind::ProjectFact,
                 summary: Some("Project-related information".to_string()),
                 importance_score: 0.6,
@@ -351,7 +351,10 @@ impl Node for MemoryWriteNode {
             .memory_service
             .create_memory(
                 content.to_string(),
-                super::types::MemoryType::Semantic,
+                match self.kind {
+                    MemoryKind::Episodic => super::types::MemoryType::Episodic,
+                    _ => super::types::MemoryType::Semantic,
+                },
                 metadata,
             )
             .await?;

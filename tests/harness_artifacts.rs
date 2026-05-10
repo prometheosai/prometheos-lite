@@ -126,16 +126,14 @@ fn test_artifact_metadata_creation() {
 
 #[test]
 fn test_artifact_generator_new() {
-    let generator = ArtifactGenerator::new();
+    let _generator = ArtifactGenerator::new();
     // Generator created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_artifact_generator_with_compression() {
-    let generator = ArtifactGenerator::with_compression(true);
+    let _generator = ArtifactGenerator::with_compression(true);
     // Generator created with compression enabled
-    assert!(true);
 }
 
 // ============================================================================
@@ -175,7 +173,7 @@ fn test_artifact_workflow() {
 
 #[test]
 fn test_multiple_artifact_types() {
-    let artifacts = vec![
+    let artifacts = [
         HarnessArtifact {
             id: "patch-1".to_string(),
             kind: ArtifactKind::Patch,

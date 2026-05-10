@@ -113,14 +113,14 @@ impl ObservabilityCollector {
     }
 
     pub fn add_event(&mut self, name: &str, attributes: HashMap<String, String>) {
-        if let Some(idx) = self.current_span {
-            if let Some(span) = self.spans.get_mut(idx) {
-                span.events.push(SpanEvent {
-                    timestamp: chrono::Utc::now(),
-                    name: name.to_string(),
-                    attributes,
-                });
-            }
+        if let Some(idx) = self.current_span
+            && let Some(span) = self.spans.get_mut(idx)
+        {
+            span.events.push(SpanEvent {
+                timestamp: chrono::Utc::now(),
+                name: name.to_string(),
+                attributes,
+            });
         }
     }
 
@@ -314,7 +314,6 @@ mod tests {
 /// - `OTEL_TRACES_SAMPLER`: Sampler configuration (default: "parentbased_always_on")
 pub mod otel {
     use opentelemetry::KeyValue;
-    use opentelemetry::trace::Tracer;
     use opentelemetry_sdk::Resource;
     use opentelemetry_sdk::trace::{Config as TraceConfig, TracerProvider as SdkTracerProvider};
     use std::env;
@@ -460,8 +459,8 @@ pub mod otel {
         );
 
         HarnessSpan {
-            name: name.to_string(),
-            trace_id: trace_id.to_string(),
+            _name: name.to_string(),
+            _trace_id: trace_id.to_string(),
             start_time: std::time::Instant::now(),
             _span: span,
         }
@@ -471,8 +470,8 @@ pub mod otel {
     /// Uses tracing spans which integrate with OTEL when configured
     #[derive(Debug)]
     pub struct HarnessSpan {
-        name: String,
-        trace_id: String,
+        _name: String,
+        _trace_id: String,
         start_time: std::time::Instant,
         _span: tracing::Span,
     }
@@ -545,8 +544,8 @@ pub mod otel {
         fn test_harness_span() {
             let span = start_span("test-operation", "test-trace-123");
             span.add_event("test-event", vec![("key".to_string(), "value".to_string())]);
-            assert_eq!(span.name, "test-operation");
-            assert_eq!(span.trace_id, "test-trace-123");
+            assert_eq!(span._name, "test-operation");
+            assert_eq!(span._trace_id, "test-trace-123");
             // Span drops here, should log closure
         }
     }

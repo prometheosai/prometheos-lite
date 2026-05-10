@@ -141,22 +141,20 @@ impl LlmClient {
         let mut full_content = String::new();
 
         for line in text.lines() {
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+            if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
                     continue;
                 }
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(content) = parsed
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                    && let Some(content) = parsed
                         .get("choices")
                         .and_then(|c| c.get(0))
                         .and_then(|c| c.get("delta"))
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
-                    {
-                        callback(content);
-                        full_content.push_str(content);
-                    }
+                {
+                    callback(content);
+                    full_content.push_str(content);
                 }
             }
         }

@@ -636,7 +636,7 @@ impl AdvancedValidationCache {
                 
                 // Record invalidation event
                 self.invalidation_engine.record_invalidation(InvalidationEvent {
-                    id: format!("inv_{}", chrono::Utc::now().timestamp_nanos()),
+                    id: format!("inv_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
                     event_type: InvalidationEventType::Manual,
                     timestamp: Instant::now(),
                     affected_entries: vec![key.to_string()],

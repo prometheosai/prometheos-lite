@@ -129,6 +129,8 @@ impl RunBenchCommand {
             std::collections::HashMap::new();
 
         for result in results {
+            let _ = result.iteration;
+            let _ = &result.error;
             let stats = task_stats
                 .entry(result.task.clone())
                 .or_insert_with(TaskStats::new);
@@ -160,17 +162,15 @@ impl RunBenchCommand {
                 0
             };
 
-            let llm_calls_per_run = if stats.successful_runs > 0 {
-                stats.total_llm_calls / stats.successful_runs
-            } else {
-                0
-            };
+            let llm_calls_per_run = stats
+                .total_llm_calls
+                .checked_div(stats.successful_runs)
+                .unwrap_or(0);
 
-            let tool_calls_per_run = if stats.successful_runs > 0 {
-                stats.total_tool_calls / stats.successful_runs
-            } else {
-                0
-            };
+            let tool_calls_per_run = stats
+                .total_tool_calls
+                .checked_div(stats.successful_runs)
+                .unwrap_or(0);
 
             let budget_exceeded_rate = if stats.total_runs > 0 {
                 stats.budget_exceeded_count as f64 / stats.total_runs as f64

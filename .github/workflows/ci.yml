@@ -48,25 +48,10 @@ jobs:
       - name: Guardrail Tests
         run: cargo test --test guardrail_tests --test guardrail_integration_tests
 
-      - name: Anti-Placeholder Check
+      - name: Anti-Placeholder Check (Structured)
         run: |
-          # P0-Audit-007: Block TODO/FIXME/mock leakage in production code
-          echo "Checking for placeholder patterns in production code..."
-          
-          # Check for forbidden patterns outside tests/docs
-          if grep -r -E "TODO|FIXME|mock|placeholder|stub|unimplemented!|todo!|panic!.*TODO" src/ --exclude-dir=target; then
-            echo "::error::Found placeholder patterns in production code"
-            echo "CI should fail on TODO/FIXME/mock outside tests/docs"
-            exit 1
-          fi
-          
-          # Check for placeholder patterns in tests (allowed but should be minimal)
-          TODO_COUNT=$(grep -r "TODO" tests/ | wc -l || true)
-          if [ "$TODO_COUNT" -gt 5 ]; then
-            echo "::warning::High number of TODOs in tests ($TODO_COUNT). Consider implementing."
-          fi
-          
-          echo "Anti-placeholder check passed"
+          cargo test --test runtime_policy_enforcement --quiet
+          cargo test --test ci_enforcement_tests --quiet
 
       - name: Anti-regression check (no direct LLM calls in API)
         run: |
@@ -78,24 +63,3 @@ jobs:
           fi
           echo "OK: No direct LLM calls in API handlers"
 
-      - name: Stub/placeholder detection
-        run: |
-          # Fail if production code contains TODO/FIXME/unimplemented!/todo! placeholders
-          # Excludes test files and comments about the patterns themselves
-          echo "Checking for stubs in production code..."
-
-          # Check for unimplemented!() and todo!() macros in src/ (excluding tests)
-          if grep -rn "unimplemented!\|todo!" src/ --include="*.rs" | grep -v "//.*unimplemented\|//.*todo\|review.rs.*todo!" | head -20; then
-            echo "ERROR: Found unimplemented!() or todo!() macros in production code."
-            echo "These must be resolved before merging to main."
-            exit 1
-          fi
-
-          # Check for TODO/FIXME comments in src/ (excluding legitimate detection patterns)
-          if grep -rn "TODO:\|FIXME:" src/ --include="*.rs" | grep -v "STYLE001\|BUG005\|BUG006\|reproduction.rs" | head -20; then
-            echo "WARNING: Found TODO/FIXME comments in production code."
-            echo "These should be resolved or converted to tracked issues."
-            # Allowing this as warning only - can be made strict after cleanup
-          fi
-
-          echo "OK: No critical stubs found in production code"

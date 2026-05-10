@@ -21,6 +21,7 @@ mod trust_policies;
 pub mod work_artifacts;
 pub mod work_context;
 pub mod work_context_events;
+pub mod work_run_metrics;
 
 pub use artifacts::*;
 pub use conversations::*;
@@ -43,3 +44,4 @@ pub use trust_policies::*;
 pub use work_artifacts::*;
 pub use work_context::*;
 pub use work_context_events::*;
+pub use work_run_metrics::*;

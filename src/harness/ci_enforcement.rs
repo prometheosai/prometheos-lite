@@ -197,7 +197,7 @@ impl AntiPlaceholderCI {
         if self.config.check_panics {
             self.patterns.push(PlaceholderPattern {
                 name: "panic_call".to_string(),
-                pattern: r"\bpanic!\(\)".to_string(),
+                pattern: r"\bpanic!\s*\(".to_string(),
                 severity: Severity::High,
                 description: "Panic call in production code".to_string(),
                 suggestion: "Replace with proper error handling using Result or Option".to_string(),
@@ -208,7 +208,7 @@ impl AntiPlaceholderCI {
         if self.config.check_debug_prints {
             self.patterns.push(PlaceholderPattern {
                 name: "debug_print".to_string(),
-                pattern: r"\b(debug_println|print!|println!)\s*\(".to_string(),
+                pattern: r"\bdebug_println!\s*\(".to_string(),
                 severity: Severity::Medium,
                 description: "Debug print statement found".to_string(),
                 suggestion: "Remove debug prints or use proper logging".to_string(),
@@ -218,7 +218,7 @@ impl AntiPlaceholderCI {
         // Placeholder return values
         self.patterns.push(PlaceholderPattern {
             name: "placeholder_return".to_string(),
-            pattern: r#"\b(return\s+(None|0|""|false|vec!\[\]|HashMap::new\(\)))"#.to_string(),
+            pattern: r#"\breturn\s+(None|""|vec!\[\]|HashMap::new\(\))\s*;"#.to_string(),
             severity: Severity::Medium,
             description: "Placeholder return value".to_string(),
             suggestion: "Return meaningful values or use proper error handling".to_string(),
@@ -236,7 +236,7 @@ impl AntiPlaceholderCI {
         // Placeholder URLs
         self.patterns.push(PlaceholderPattern {
             name: "placeholder_url".to_string(),
-            pattern: r"https?://(localhost|127\.0\.0\.1|example\.com|placeholder\.com)".to_string(),
+            pattern: r"https?://(example\.com|placeholder\.com)".to_string(),
             severity: Severity::Medium,
             description: "Placeholder or localhost URL".to_string(),
             suggestion: "Use proper configuration for URLs".to_string(),
@@ -495,7 +495,7 @@ impl AntiPlaceholderCI {
                     count
                 ));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Detailed violations

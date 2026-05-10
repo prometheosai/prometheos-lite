@@ -8,6 +8,7 @@ pub mod compiler_diagnostics;
 pub mod completion;
 pub mod confidence;
 pub mod context_budget;
+pub mod contract;
 pub mod edit_protocol;
 pub mod environment;
 pub mod evidence;
@@ -79,6 +80,7 @@ pub use confidence::{
     ConfidenceCalibrator, ConfidenceClassification, ConfidenceFactor, ConfidenceScore,
     ConfidenceWeights, FactorImpact, compute_confidence,
 };
+pub use contract::{HarnessRequest, HarnessResult, WorkContextBudget};
 pub use edit_protocol::*;
 pub use environment::*;
 pub use evidence::*;

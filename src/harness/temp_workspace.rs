@@ -8,7 +8,6 @@ use crate::harness::{
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use walkdir::WalkDir;
 
 /// P0-C4: Resource and file limits for temp workspace creation
 #[derive(Debug, Clone)]
@@ -169,19 +168,19 @@ impl TempWorkspace {
             let target_path = temp_root.join(&relative_path);
 
             // Create parent directories if needed
-            if let Some(parent) = target_path.parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .context("Failed to create parent directory in temp workspace")?;
+            if let Some(parent) = target_path.parent()
+                && !parent.exists()
+            {
+                fs::create_dir_all(parent)
+                    .await
+                    .context("Failed to create parent directory in temp workspace")?;
 
-                    subdirectories_created += 1;
-                    if subdirectories_created > limits.max_subdirectories {
-                        bail!(
-                            "Reached maximum subdirectory limit during copy: {} directories",
-                            subdirectories_created
-                        );
-                    }
+                subdirectories_created += 1;
+                if subdirectories_created > limits.max_subdirectories {
+                    bail!(
+                        "Reached maximum subdirectory limit during copy: {} directories",
+                        subdirectories_created
+                    );
                 }
             }
 
@@ -231,201 +230,6 @@ impl TempWorkspace {
         Ok(())
     }
 
-    /// Copy relevant files from original repo to temp workspace
-    ///
-    /// P0-FIX: Correctly handles absolute paths in FileSet by normalizing to relative
-    /// before joining with temp_root. Fails loudly on copy errors for required files.
-    async fn copy_repo_files(
-        original_root: &Path,
-        temp_root: &Path,
-        file_set: &FileSet,
-    ) -> Result<()> {
-        // Canonicalize original_root for consistent path handling
-        let canonical_original = original_root
-            .canonicalize()
-            .context("Failed to canonicalize original root")?;
-
-        // Copy editable files
-        for file in &file_set.editable {
-            // P0-FIX: Normalize file path to be relative to original_root
-            let relative_path = normalize_to_relative(&canonical_original, file)
-                .context(format!("Failed to normalize path: {:?}", file))?;
-
-            let src = canonical_original.join(&relative_path);
-            let dst = temp_root.join(&relative_path);
-
-            // P0-FIX: Fail loudly if source doesn't exist (required file)
-            if !src.exists() {
-                anyhow::bail!(
-                    "Required file does not exist: {:?} (normalized from {:?})",
-                    src,
-                    file
-                );
-            }
-
-            // Create parent directories
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)
-                    .await
-                    .context(format!("Failed to create parent directories for {:?}", dst))?;
-            }
-
-            // P0-FIX: Fail loudly on copy errors for required files
-            fs::copy(&src, &dst)
-                .await
-                .context(format!("Failed to copy file from {:?} to {:?}", src, dst))?;
-        }
-
-        // Copy important config files
-        let config_files = [
-            "Cargo.toml",
-            "Cargo.lock",
-            "package.json",
-            "package-lock.json",
-            "yarn.lock",
-            "pnpm-lock.yaml",
-            "bun.lockb",
-            "pyproject.toml",
-            "requirements.txt",
-            "requirements-dev.txt",
-            "setup.py",
-            "setup.cfg",
-            "go.mod",
-            "go.sum",
-            "go.work",
-            "go.work.sum",
-            "pom.xml",
-            "build.gradle",
-            "gradle.properties",
-            "settings.gradle",
-            "tsconfig.json",
-            "jsconfig.json",
-            ".babelrc",
-            ".eslintrc",
-            ".prettierrc",
-            ".gitignore",
-            ".dockerignore",
-            "Dockerfile",
-            "Makefile",
-            "justfile",
-            "Justfile",
-            ".cargo/config.toml",
-            ".cargo/config",
-        ];
-
-        for config in &config_files {
-            let src = original_root.join(config);
-            let dst = temp_root.join(config);
-            if src.exists() {
-                if let Some(parent) = dst.parent() {
-                    fs::create_dir_all(parent).await.ok();
-                }
-                fs::copy(&src, &dst).await.ok();
-            }
-        }
-
-        // Copy test directories and fixtures
-        let important_dirs = [
-            "tests",
-            "test",
-            "__tests__",
-            "spec",
-            "specs",
-            "fixtures",
-            "fixture",
-            "testdata",
-            "test_data",
-            "data",
-            "examples",
-            "example",
-            "demo",
-            "demos",
-            "benches",
-            "benchmarks",
-            "bench",
-            "migrations",
-            "migration",
-            "alembic",
-            "scripts",
-            "script",
-            "bin",
-            "static",
-            "assets",
-            "public",
-            "resources",
-            "templates",
-            "template",
-            "proto",
-            "protobuf",
-            "protos",
-            "thrift",
-            "idl",
-        ];
-
-        for dir_name in &important_dirs {
-            let src_dir = original_root.join(dir_name);
-            if src_dir.exists() && src_dir.is_dir() {
-                let dst_dir = temp_root.join(dir_name);
-                Self::copy_directory(&src_dir, &dst_dir).await.ok();
-            }
-        }
-
-        // Copy Cargo workspace members if this is a Rust project
-        Self::copy_workspace_members(original_root, temp_root)
-            .await
-            .ok();
-
-        Ok(())
-    }
-
-    /// Recursively copy a directory
-    async fn copy_directory(src: &Path, dst: &Path) -> Result<()> {
-        for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() {
-                let relative = path.strip_prefix(src)?;
-                let dst_path = dst.join(relative);
-
-                if let Some(parent) = dst_path.parent() {
-                    fs::create_dir_all(parent).await.ok();
-                }
-                fs::copy(path, dst_path).await.ok();
-            }
-        }
-        Ok(())
-    }
-
-    /// Copy Cargo workspace member directories
-    async fn copy_workspace_members(original_root: &Path, temp_root: &Path) -> Result<()> {
-        let cargo_toml = original_root.join("Cargo.toml");
-        if !cargo_toml.exists() {
-            return Ok(());
-        }
-
-        // Parse workspace members from Cargo.toml
-        let content = fs::read_to_string(&cargo_toml).await.ok();
-        if let Some(content) = content {
-            // Simple parsing for workspace.members array
-            if content.contains("[workspace]") {
-                // Try to find member directories
-                for entry in walkdir::WalkDir::new(original_root)
-                    .max_depth(2)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                {
-                    let path = entry.path();
-                    if path.is_dir() && path.join("Cargo.toml").exists() {
-                        let relative = path.strip_prefix(original_root)?;
-                        let dst_path = temp_root.join(relative);
-                        Self::copy_directory(path, &dst_path).await.ok();
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Clean up the temp workspace
     pub async fn cleanup(&self) -> Result<()> {
         if self.root.exists() {
@@ -435,38 +239,6 @@ impl TempWorkspace {
         }
         Ok(())
     }
-}
-
-/// P0-FIX: Normalize a path to be relative to the base directory
-///
-/// Handles both absolute and relative paths correctly:
-/// - If path is absolute and under base, returns relative path
-/// - If path is already relative, validates it's under base and returns as-is
-/// - If path is absolute and outside base, returns error
-fn normalize_to_relative(base: &Path, path: &Path) -> Result<PathBuf> {
-    let canonical_path = if path.is_absolute() {
-        path.canonicalize()
-            .context(format!("Failed to canonicalize path: {:?}", path))?
-    } else {
-        base.join(path)
-            .canonicalize()
-            .context(format!("Failed to canonicalize relative path: {:?}", path))?
-    };
-
-    // Ensure the path is under the base directory (security check)
-    if !canonical_path.starts_with(base) {
-        anyhow::bail!(
-            "Path {:?} is outside base directory {:?}",
-            canonical_path,
-            base
-        );
-    }
-
-    // Strip the base prefix to get relative path
-    Ok(canonical_path
-        .strip_prefix(base)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// Determine the validation target based on execution mode and patch state

@@ -241,7 +241,6 @@ impl EvidencePersistenceManager {
 mod tests {
     use super::*;
     use crate::harness::evidence::{EvidenceEntry, EvidenceEntryKind};
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_file_evidence_sink_persistence() -> Result<()> {

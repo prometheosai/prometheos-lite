@@ -190,27 +190,24 @@ impl BenchmarkRunner {
             match self.execute_iteration(test).await {
                 Ok(metrics) => {
                     for (metric_type, value) in metrics {
-                        metric_values
-                            .entry(metric_type)
-                            .or_insert_with(Vec::new)
-                            .push(value);
+                        metric_values.entry(metric_type).or_default().push(value);
                     }
                     iterations_completed = i + 1;
 
                     // Check if we have enough samples
                     if i >= self.config.min_iterations {
                         // Calculate confidence interval for duration
-                        if let Some(durations) = metric_values.get(&MetricType::Duration) {
-                            if let Some(stats) = self.calculate_stats(durations) {
-                                let ci_width =
-                                    stats.confidence_interval.1 - stats.confidence_interval.0;
-                                let relative_ci = ci_width / stats.mean;
+                        if let Some(durations) = metric_values.get(&MetricType::Duration)
+                            && let Some(stats) = self.calculate_stats(durations)
+                        {
+                            let ci_width =
+                                stats.confidence_interval.1 - stats.confidence_interval.0;
+                            let relative_ci = ci_width / stats.mean;
 
-                                // Stop if confidence interval is tight enough
-                                if relative_ci < 0.05 {
-                                    // 5% relative CI
-                                    break;
-                                }
+                            // Stop if confidence interval is tight enough
+                            if relative_ci < 0.05 {
+                                // 5% relative CI
+                                break;
                             }
                         }
                     }
@@ -291,7 +288,7 @@ impl BenchmarkRunner {
         // Calculate median
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = if sorted.len() % 2 == 0 {
+        let median = if sorted.len().is_multiple_of(2) {
             (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
         } else {
             sorted[sorted.len() / 2]
@@ -330,10 +327,10 @@ impl BenchmarkRunner {
     fn parse_memory_usage(&self, output: &str) -> Option<f64> {
         // Look for memory usage patterns in output
         for line in output.lines() {
-            if line.to_lowercase().contains("memory") || line.to_lowercase().contains("mem") {
-                if let Some(num) = self.extract_number(line) {
-                    return Some(num);
-                }
+            if (line.to_lowercase().contains("memory") || line.to_lowercase().contains("mem"))
+                && let Some(num) = self.extract_number(line)
+            {
+                return Some(num);
             }
         }
         None
@@ -342,13 +339,12 @@ impl BenchmarkRunner {
     fn parse_throughput(&self, output: &str) -> Option<f64> {
         // Look for throughput patterns
         for line in output.lines() {
-            if line.to_lowercase().contains("ops/sec")
+            if (line.to_lowercase().contains("ops/sec")
                 || line.to_lowercase().contains("req/sec")
-                || line.to_lowercase().contains("throughput")
+                || line.to_lowercase().contains("throughput"))
+                && let Some(num) = self.extract_number(line)
             {
-                if let Some(num) = self.extract_number(line) {
-                    return Some(num);
-                }
+                return Some(num);
             }
         }
         None
@@ -441,7 +437,7 @@ impl BenchmarkRunner {
             if result.suite_id == suite_id {
                 results_by_test
                     .entry(result.test_id.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(result);
             }
         }

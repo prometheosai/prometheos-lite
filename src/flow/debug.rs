@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::flow::{Action, Flow, FlowLifecycleHooks, Input, NodeId, Output, SharedState};
 
@@ -159,11 +160,11 @@ impl DebugSession {
     /// Check if execution should pause at a node
     fn should_pause(&mut self, node_id: &NodeId) -> bool {
         // Check breakpoints
-        if let Some(bp) = self.breakpoints.get_mut(node_id) {
-            if bp.enabled {
-                bp.hit_count += 1;
-                return true;
-            }
+        if let Some(bp) = self.breakpoints.get_mut(node_id)
+            && bp.enabled
+        {
+            bp.hit_count += 1;
+            return true;
         }
 
         // Check step mode
@@ -183,7 +184,7 @@ impl DebugSession {
 
     /// Execute flow with debugging using lifecycle hooks
     pub async fn run_debug(&mut self, state: &mut SharedState) -> Result<DebugResult> {
-        let session_arc = Arc::new(Mutex::new(self.clone_without_flow()));
+        let session_arc = Arc::new(Mutex::new(self.clone_withoutflow()));
         let hooks = DebugHooks::new(session_arc.clone());
 
         // Reset pause state
@@ -211,7 +212,7 @@ impl DebugSession {
     }
 
     /// Clone the session without the flow (to avoid cloning the flow)
-    fn clone_without_flow(&self) -> DebugSession {
+    fn clone_withoutflow(&self) -> DebugSession {
         DebugSession {
             flow: self.flow.clone(),
             breakpoints: self.breakpoints.clone(),
@@ -242,28 +243,25 @@ pub struct DebugResult {
 
 /// Debug wrapper for Flow to add debug capabilities
 pub struct DebugFlow {
-    flow: Flow,
-    debug_session: Arc<Mutex<DebugSession>>,
+    _flow: Flow,
+    debug_session: Arc<AsyncMutex<DebugSession>>,
 }
 
 impl DebugFlow {
     pub fn new(flow: Flow) -> Self {
-        let debug_session = Arc::new(Mutex::new(DebugSession::new(flow.clone())));
+        let debug_session = Arc::new(AsyncMutex::new(DebugSession::new(flow.clone())));
         Self {
-            flow,
+            _flow: flow,
             debug_session,
         }
     }
 
-    pub fn debug_session(&self) -> Arc<Mutex<DebugSession>> {
+    pub fn debug_session(&self) -> Arc<AsyncMutex<DebugSession>> {
         self.debug_session.clone()
     }
 
     pub async fn run_debug(&self, state: &mut SharedState) -> Result<DebugResult> {
-        let mut session = self
-            .debug_session
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Mutex lock failed: {}", e))?;
+        let mut session = self.debug_session.lock().await;
         session.run_debug(state).await
     }
 }

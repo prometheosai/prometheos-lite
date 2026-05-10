@@ -253,11 +253,7 @@ impl ContextBudgeter {
             .sum();
 
         let available = self.available_input_tokens();
-        let usage_percentage = if available > 0 {
-            (total_tokens * 100) / available
-        } else {
-            100
-        };
+        let usage_percentage = (total_tokens * 100).checked_div(available).unwrap_or(100);
 
         report.insert("total_tokens".to_string(), total_tokens);
         report.insert("available_tokens".to_string(), available);

@@ -22,10 +22,7 @@ impl IntentClassifier {
     /// Create a new intent classifier
     pub fn new() -> Result<Self> {
         let llm_client = match AppConfig::load() {
-            Ok(config) => match LlmClient::from_config(&config) {
-                Ok(client) => Some(client),
-                Err(_) => None,
-            },
+            Ok(config) => LlmClient::from_config(&config).ok(),
             Err(_) => None,
         };
 

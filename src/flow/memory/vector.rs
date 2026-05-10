@@ -101,6 +101,12 @@ pub struct BruteForceBackend {
     vectors: HashMap<String, Vec<f32>>,
 }
 
+impl Default for BruteForceBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BruteForceBackend {
     pub fn new() -> Self {
         Self {

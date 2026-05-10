@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use prometheos_lite::harness::edit_protocol::{EditOperation, SearchReplaceEdit};
 use prometheos_lite::harness::patch_applier::{FileSnapshot, PatchFailure, PatchResult};
 
 // ============================================================================

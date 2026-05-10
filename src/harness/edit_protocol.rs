@@ -267,8 +267,8 @@ fn parse_hunk(lines: &[&str]) -> Result<(DiffHunk, usize)> {
             break;
         }
 
-        if line.starts_with('+') {
-            diff_lines.push(DiffLine::Added(line[1..].to_string()));
+        if let Some(stripped) = line.strip_prefix('+') {
+            diff_lines.push(DiffLine::Added(stripped.to_string()));
         } else if line.starts_with('-') && !line.starts_with("---") {
             diff_lines.push(DiffLine::Removed(line[1..].to_string()));
         } else if line.starts_with(' ') || line.is_empty() {
@@ -416,12 +416,11 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
         // Apply operations
         for (pos, op, content) in operations {
             match op {
-                '-' => {
+                '-'
                     // Remove line
-                    if pos < result.len() {
+                    if pos < result.len() => {
                         result.remove(pos);
                     }
-                }
                 '+' => {
                     // Insert line
                     if let Some(text) = content {
@@ -537,28 +536,6 @@ pub fn validate_edit_operations(
     }
 
     Ok(())
-}
-
-fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
-    // For existing paths, use canonicalization
-    let canonical = path.canonicalize()?;
-    let repo_root = policy.repo_root.canonicalize()?;
-
-    if !canonical.starts_with(&repo_root) {
-        return Ok(true);
-    }
-
-    let relative = canonical
-        .strip_prefix(&repo_root)
-        .map_err(|_| anyhow::anyhow!("Failed to get relative path"))?;
-
-    for denied in &policy.denied_paths {
-        if relative.starts_with(denied) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
 }
 
 /// Check if a repo-relative path is denied (for CreateFile where file doesn't exist yet)

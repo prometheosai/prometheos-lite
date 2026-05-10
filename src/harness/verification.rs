@@ -180,10 +180,11 @@ impl VerificationAssessor {
 
                 // Check if this command maps to a verification level
                 for (pattern, level) in &self.level_mapping {
-                    if cmd_str.contains(&pattern.to_lowercase()) && !achieved.contains(level) {
-                        if cmd_result.exit_code == Some(0) {
-                            achieved.push(*level);
-                        }
+                    if cmd_str.contains(&pattern.to_lowercase())
+                        && !achieved.contains(level)
+                        && cmd_result.exit_code == Some(0)
+                    {
+                        achieved.push(*level);
                     }
                 }
 

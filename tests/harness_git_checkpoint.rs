@@ -76,17 +76,15 @@ fn test_git_checkpoint_committed() {
 
 #[test]
 fn test_git_checkpoint_manager_new() {
-    let manager = GitCheckpointManager::new(PathBuf::from("/tmp/repo"));
+    let _manager = GitCheckpointManager::new(PathBuf::from("/tmp/repo"));
     // Manager created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_git_checkpoint_manager_with_prefix() {
-    let manager =
+    let _manager =
         GitCheckpointManager::with_prefix(PathBuf::from("/tmp/repo"), "custom-prefix".to_string());
     // Manager created with custom prefix
-    assert!(true);
 }
 
 // ============================================================================

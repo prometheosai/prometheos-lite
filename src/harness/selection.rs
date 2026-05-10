@@ -375,10 +375,6 @@ impl SelectionEngine {
         scores
     }
 
-    pub(crate) fn get_selection_history(&self) -> &[SelectionRecord] {
-        &self.scoring_history
-    }
-
     pub fn clear_history(&mut self) {
         self.scoring_history.clear();
     }
@@ -452,9 +448,11 @@ mod tests {
 
     #[test]
     fn test_eligibility_threshold() {
-        let mut criteria = SelectionCriteria::default();
-        criteria.min_confidence_threshold = 0.8;
-        criteria.require_validation = false; // Disable validation for test
+        let criteria = SelectionCriteria {
+            min_confidence_threshold: 0.8,
+            require_validation: false, // Disable validation for test
+            ..Default::default()
+        };
 
         let mut engine = SelectionEngine::new(criteria);
         let candidates = vec![

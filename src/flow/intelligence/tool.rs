@@ -35,6 +35,12 @@ pub struct ToolSandboxProfile {
     pub tool_policy: ToolPolicy,
 }
 
+impl Default for ToolSandboxProfile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolSandboxProfile {
     pub fn new() -> Self {
         let tool_policy = ToolPolicy::conservative();
@@ -476,29 +482,38 @@ impl ToolRuntime {
         input: ToolInput,
         context: &ToolContext,
     ) -> Result<ToolOutput> {
+        if tool.name() == "write_file"
+            && context.is_software_patch_only_context()
+            && !crate::runtime_policy::is_raw_write_allowed(
+                crate::runtime_policy::RuntimeDomain::SoftwareHarness,
+            )
+        {
+            anyhow::bail!(
+                "write_file is denied for software execution path. Use patch_file protocol instead."
+            );
+        }
+
         // Check tool whitelist if strict mode is enabled
-        if self.strict_mode {
-            if !self.registry.is_tool_allowed(&context.run_id, &tool.name()) {
-                anyhow::bail!(
-                    "Tool '{}' is not in the whitelist for context '{}'",
-                    tool.name(),
-                    context.run_id
-                );
-            }
+        if self.strict_mode && !self.registry.is_tool_allowed(&context.run_id, &tool.name()) {
+            anyhow::bail!(
+                "Tool '{}' is not in the whitelist for context '{}'",
+                tool.name(),
+                context.run_id
+            );
         }
 
         let result = tool.call(input).await?;
 
         // In strict mode, check for empty outputs
-        if self.strict_mode {
-            if result.is_null()
-                || (result.is_object() && result.as_object().map(|o| o.is_empty()).unwrap_or(false))
-            {
-                anyhow::bail!(
-                    "Tool '{}' returned empty output in strict mode",
-                    tool.name()
-                );
-            }
+        if self.strict_mode
+            && (result.is_null()
+                || (result.is_object()
+                    && result.as_object().map(|o| o.is_empty()).unwrap_or(false)))
+        {
+            anyhow::bail!(
+                "Tool '{}' returned empty output in strict mode",
+                tool.name()
+            );
         }
 
         Ok(result)

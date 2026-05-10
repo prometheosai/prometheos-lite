@@ -345,7 +345,7 @@ impl RustAnalyzerData {
         use std::process::Command;
 
         let output = Command::new("cargo")
-            .args(&["metadata", "--no-deps", "--format-version", "1"])
+            .args(["metadata", "--no-deps", "--format-version", "1"])
             .current_dir(repo_path)
             .output()
             .context("Failed to run cargo metadata")?;
@@ -398,7 +398,7 @@ impl RustAnalyzerData {
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|dep| Self::parse_cargo_dependency(dep))
+                    .filter_map(Self::parse_cargo_dependency)
                     .collect()
             })
             .unwrap_or_default();
@@ -406,11 +406,7 @@ impl RustAnalyzerData {
         let targets = package
             .get("targets")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|target| Self::parse_cargo_target(target))
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(Self::parse_cargo_target).collect())
             .unwrap_or_default();
 
         let features = package
@@ -418,7 +414,7 @@ impl RustAnalyzerData {
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
-                    .filter_map(|(k, v)| {
+                    .map(|(k, v)| {
                         let feature_list = v
                             .as_array()
                             .map(|arr| {
@@ -428,7 +424,7 @@ impl RustAnalyzerData {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        Some((k.clone(), feature_list))
+                        (k.clone(), feature_list)
                     })
                     .collect()
             })
@@ -532,7 +528,7 @@ impl RustAnalyzerData {
         let src_path = target
             .get("src_path")
             .and_then(|v| v.as_str())
-            .map(|s| PathBuf::from(s));
+            .map(PathBuf::from);
         let edition = target
             .get("edition")
             .and_then(|v| v.as_str())
@@ -631,10 +627,10 @@ impl RustAnalyzerData {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            if let Some(ext) = path.extension() {
-                if ext == "rs" {
-                    rust_files.push(path.to_path_buf());
-                }
+            if let Some(ext) = path.extension()
+                && ext == "rs"
+            {
+                rust_files.push(path.to_path_buf());
             }
         }
 
@@ -671,10 +667,10 @@ impl RustAnalyzerData {
 
         // Use AST-based parsing if content is Rust
         if file_path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            Self::parse_rust_module_ast(file_path, content, &module_name, &relative_path)
+            Self::parse_rust_module_ast(file_path, content, &module_name, relative_path)
         } else {
             // Fallback to basic parsing for non-Rust files
-            Self::parse_basic_module(file_path, content, &module_name, &relative_path)
+            Self::parse_basic_module(file_path, content, &module_name, relative_path)
         }
     }
 
@@ -733,15 +729,6 @@ impl RustAnalyzerData {
             documentation,
             submodules,
         }))
-    }
-
-    /// Detect inline module declarations (mod name { ... })
-    fn detect_inline_modules(
-        _root_node: &Node,
-        _cursor: &mut tree_sitter::TreeCursor,
-        _content: &str,
-    ) -> bool {
-        false
     }
 
     /// Fallback basic module parsing for non-Rust files
@@ -895,7 +882,7 @@ impl RustAnalyzerData {
         let mut reexports = Vec::new();
 
         // Analyze each module for public API items
-        for (_module_path, module_info) in &module_graph.modules {
+        for module_info in module_graph.modules.values() {
             if let Some(file_path) = &module_info.file_path {
                 let content = fs::read_to_string(file_path)
                     .context(format!("Failed to read file: {}", file_path.display()))?;
@@ -1084,8 +1071,8 @@ impl RustAnalyzerData {
                 let type_name = parts[1].trim().to_string();
 
                 // Handle visibility
-                let (name, visibility) = if name_part.starts_with("pub ") {
-                    (name_part[4..].trim().to_string(), Visibility::Public)
+                let (name, visibility) = if let Some(stripped) = name_part.strip_prefix("pub ") {
+                    (stripped.trim().to_string(), Visibility::Public)
                 } else {
                     (name_part.to_string(), Visibility::Private)
                 };
@@ -1304,24 +1291,24 @@ impl RustAnalyzerData {
 
         // Find additional test files in tests/ directory
         for entry in walkdir::WalkDir::new(repo_path.join("tests")) {
-            if let Ok(entry) = entry {
-                if entry.path().extension() == Some(std::ffi::OsStr::new("rs")) {
-                    let test_path = entry.path().to_path_buf();
-                    source_files.insert(test_path.clone(), SourceFileType::Test);
+            if let Ok(entry) = entry
+                && entry.path().extension() == Some(std::ffi::OsStr::new("rs"))
+            {
+                let test_path = entry.path().to_path_buf();
+                source_files.insert(test_path.clone(), SourceFileType::Test);
 
-                    // Create TestFile for additional test files
-                    let content = fs::read_to_string(&test_path).unwrap_or_default();
-                    let test_functions = Self::extract_test_functions(&content);
-                    let test_path_clone = test_path.clone();
+                // Create TestFile for additional test files
+                let content = fs::read_to_string(&test_path).unwrap_or_default();
+                let test_functions = Self::extract_test_functions(&content);
+                let test_path_clone = test_path.clone();
 
-                    test_files.push(TestFile {
-                        path: test_path_clone,
-                        test_functions,
-                        integration_tests: true, // Files in tests/ are integration tests
-                        doc_tests: Self::has_doc_tests(&content),
-                        coverage_estimate: Self::estimate_test_coverage(&content),
-                    });
-                }
+                test_files.push(TestFile {
+                    path: test_path_clone,
+                    test_functions,
+                    integration_tests: true, // Files in tests/ are integration tests
+                    doc_tests: Self::has_doc_tests(&content),
+                    coverage_estimate: Self::estimate_test_coverage(&content),
+                });
             }
         }
 
@@ -1467,19 +1454,19 @@ impl RustAnalyzerData {
         let mut count = 0;
 
         for entry in walkdir::WalkDir::new(repo_path) {
-            if let Ok(entry) = entry {
-                if entry.path().extension() == Some(std::ffi::OsStr::new("rs")) {
-                    let content = fs::read_to_string(entry.path()).unwrap_or_default();
+            if let Ok(entry) = entry
+                && entry.path().extension() == Some(std::ffi::OsStr::new("rs"))
+            {
+                let content = fs::read_to_string(entry.path()).unwrap_or_default();
 
-                    // Count use statements and direct references
-                    use regex::Regex;
-                    if let Ok(re) = Regex::new(&format!(r"use\s+{}\b", regex::escape(dep_name))) {
-                        count += re.captures_iter(&content).count();
-                    }
+                // Count use statements and direct references
+                use regex::Regex;
+                if let Ok(re) = Regex::new(&format!(r"use\s+{}\b", regex::escape(dep_name))) {
+                    count += re.captures_iter(&content).count();
+                }
 
-                    if let Ok(re) = Regex::new(&format!(r"{}::", regex::escape(dep_name))) {
-                        count += re.captures_iter(&content).count();
-                    }
+                if let Ok(re) = Regex::new(&format!(r"{}::", regex::escape(dep_name))) {
+                    count += re.captures_iter(&content).count();
                 }
             }
         }
@@ -1499,7 +1486,7 @@ impl RustAnalyzerData {
         let rust_files = fs::read_dir(repo_path)
             .map_err(|e| anyhow::anyhow!("Failed to read directory: {}", e))?
             .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "rs"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
             .collect::<Vec<_>>();
 
         // Analyze each file for dependency usage
@@ -1510,10 +1497,10 @@ impl RustAnalyzerData {
 
             // Look for usage patterns of the dependency
             let usage_pattern = format!(r"use\s+{}|::\s*{}|{}::", dep_name, dep_name, dep_name);
-            if let Ok(re) = Regex::new(&usage_pattern) {
-                if re.is_match(&content) {
-                    paths.push(file_path.to_string_lossy().to_string());
-                }
+            if let Ok(re) = Regex::new(&usage_pattern)
+                && re.is_match(&content)
+            {
+                paths.push(file_path.to_string_lossy().to_string());
             }
         }
 
@@ -1541,7 +1528,7 @@ pub struct DependencyGraph {
     pub package_manager: PackageManagerType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DependencySpec {
     pub version: Option<String>,
     pub path: Option<PathBuf>,
@@ -1551,7 +1538,7 @@ pub struct DependencySpec {
     pub target: Option<String>, // platform-specific dep
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum PackageManagerType {
     Cargo,
     Npm,
@@ -1559,13 +1546,8 @@ pub enum PackageManagerType {
     Pnpm,
     Poetry,
     Pip,
+    #[default]
     Unknown,
-}
-
-impl Default for PackageManagerType {
-    fn default() -> Self {
-        PackageManagerType::Unknown
-    }
 }
 
 /// Incremental cache entry for a single file's symbols
@@ -1656,7 +1638,7 @@ impl RepoMap {
 }
 
 /// P1-Issue7: Quality metrics for RepoMap
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RepoMapQualityMetrics {
     /// Coverage metrics
     pub coverage: CoverageMetrics,
@@ -1718,17 +1700,6 @@ pub struct ConsistencyMetrics {
     pub symbol_consistency: f64,
     /// Language consistency percentage
     pub language_consistency: f64,
-}
-
-impl Default for RepoMapQualityMetrics {
-    fn default() -> Self {
-        Self {
-            coverage: CoverageMetrics::default(),
-            performance: PerformanceMetrics::default(),
-            accuracy: AccuracyMetrics::default(),
-            consistency: ConsistencyMetrics::default(),
-        }
-    }
 }
 
 impl Default for CoverageMetrics {
@@ -1843,12 +1814,6 @@ pub enum EdgeKind {
     Contains,
 }
 
-#[derive(Debug, Clone)]
-struct LanguageParser {
-    language: tree_sitter::Language,
-    file_extensions: Vec<String>,
-}
-
 pub async fn build_repo_context(
     root: &Path,
     task: &str,
@@ -1870,18 +1835,17 @@ pub async fn build_repo_context(
         let lang = detect_language(file);
         *language_breakdown.entry(lang.clone()).or_insert(0) += 1;
 
-        if let Ok(content) = fs::read_to_string(file) {
-            if let Some((symbols, relationships)) =
+        if let Ok(content) = fs::read_to_string(file)
+            && let Some((symbols, relationships)) =
                 extract_symbols_and_relationships(file, &content, &lang)
-            {
-                for sym in &symbols {
-                    all_symbols.push(sym.clone());
-                }
-                for rel in &relationships {
-                    all_relationships.push(rel.clone());
-                }
-                file_symbols_map.insert(file.clone(), symbols);
+        {
+            for sym in &symbols {
+                all_symbols.push(sym.clone());
             }
+            for rel in &relationships {
+                all_relationships.push(rel.clone());
+            }
+            file_symbols_map.insert(file.clone(), symbols);
         }
     }
 
@@ -1907,7 +1871,7 @@ pub async fn build_repo_context(
         }
     }
 
-    ranked_files.sort_by(|a, b| b.score.cmp(&a.score));
+    ranked_files.sort_by_key(|b| std::cmp::Reverse(b.score));
 
     let compressed_context = build_compressed_context(&ranked_files, &all_symbols, token_budget);
     let token_estimate = compressed_context.len() / 4;
@@ -1972,12 +1936,10 @@ fn collect_files(p: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         .add_custom_ignore_filename(".prometheosignore")
         .build();
 
-    for entry in walker {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.is_file() && is_code_file(path) {
-                out.push(path.to_path_buf());
-            }
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.is_file() && is_code_file(path) {
+            out.push(path.to_path_buf());
         }
     }
 
@@ -2063,7 +2025,7 @@ fn extract_from_node(
     file: &Path,
     content: &str,
     node: &Node,
-    language: &tree_sitter::Language,
+    _language: &tree_sitter::Language,
     symbols: &mut Vec<CodeSymbol>,
     relationships: &mut Vec<SymbolEdge>,
 ) {
@@ -2118,19 +2080,18 @@ fn extract_from_node(
 
                 if let Some(body) = find_child_by_kind(node, "field_declaration_list") {
                     for i in 0..body.child_count() {
-                        if let Some(child) = body.child(i as u32) {
-                            if child.kind().contains("field") {
-                                if let Some(field_name) = find_child_by_kind(&child, "identifier") {
-                                    let field = content[field_name.byte_range()].to_string();
-                                    relationships.push(SymbolEdge {
-                                        from: name.clone(),
-                                        to: field,
-                                        file: file.to_path_buf(),
-                                        line: line_start,
-                                        kind: EdgeKind::Contains,
-                                    });
-                                }
-                            }
+                        if let Some(child) = body.child(i as u32)
+                            && child.kind().contains("field")
+                            && let Some(field_name) = find_child_by_kind(&child, "identifier")
+                        {
+                            let field = content[field_name.byte_range()].to_string();
+                            relationships.push(SymbolEdge {
+                                from: name.clone(),
+                                to: field,
+                                file: file.to_path_buf(),
+                                line: line_start,
+                                kind: EdgeKind::Contains,
+                            });
                         }
                     }
                 }
@@ -2185,17 +2146,17 @@ fn extract_from_node(
         "impl_item" => {
             if let Some(type_node) = find_child_by_kind(node, "type_identifier") {
                 let impl_for = content[type_node.byte_range()].to_string();
-                if let Some(trait_node) = node.child(1) {
-                    if trait_node.kind() == "type_identifier" {
-                        let trait_name = content[trait_node.byte_range()].to_string();
-                        relationships.push(SymbolEdge {
-                            from: impl_for,
-                            to: trait_name,
-                            file: file.to_path_buf(),
-                            line: 0,
-                            kind: EdgeKind::Implements,
-                        });
-                    }
+                if let Some(trait_node) = node.child(1)
+                    && trait_node.kind() == "type_identifier"
+                {
+                    let trait_name = content[trait_node.byte_range()].to_string();
+                    relationships.push(SymbolEdge {
+                        from: impl_for,
+                        to: trait_name,
+                        file: file.to_path_buf(),
+                        line: 0,
+                        kind: EdgeKind::Implements,
+                    });
                 }
             }
         }
@@ -2232,23 +2193,23 @@ fn extract_from_node(
             }
         }
         "call_expression" => {
-            if let Some(func) = node.child(0) {
-                if func.kind() == "identifier" {
-                    let called = content[func.byte_range()].to_string();
-                    let (line, _) = position_from_byte(content, node.start_byte());
+            if let Some(func) = node.child(0)
+                && func.kind() == "identifier"
+            {
+                let called = content[func.byte_range()].to_string();
+                let (line, _) = position_from_byte(content, node.start_byte());
 
-                    relationships.push(SymbolEdge {
-                        from: file
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                        to: called,
-                        file: file.to_path_buf(),
-                        line,
-                        kind: EdgeKind::Call,
-                    });
-                }
+                relationships.push(SymbolEdge {
+                    from: file
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                    to: called,
+                    file: file.to_path_buf(),
+                    line,
+                    kind: EdgeKind::Call,
+                });
             }
         }
         _ => {}
@@ -2256,17 +2217,17 @@ fn extract_from_node(
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
-            extract_from_node(file, content, &child, language, symbols, relationships);
+            extract_from_node(file, content, &child, _language, symbols, relationships);
         }
     }
 }
 
 fn find_child_by_kind<'a>(node: &'a Node<'a>, kind: &str) -> Option<Node<'a>> {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == kind {
-                return Some(child);
-            }
+        if let Some(child) = node.child(i as u32)
+            && child.kind() == kind
+        {
+            return Some(child);
         }
     }
     None
@@ -2326,7 +2287,7 @@ fn extract_import_names(import_text: &str) -> Vec<String> {
         let inner = &import_text[start + 1..end];
 
         for part in inner.split(',') {
-            let name = part.trim().split_whitespace().next().unwrap_or("");
+            let name = part.split_whitespace().next().unwrap_or("");
             if !name.is_empty() {
                 names.push(name.to_string());
             }
@@ -2422,7 +2383,7 @@ fn rank_files_by_relevance(
         });
     }
 
-    ranked.sort_by(|a, b| b.score.cmp(&a.score));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.score));
     ranked
 }
 
@@ -2690,14 +2651,14 @@ fn parse_cargo_dependency(_name: &str, spec: &toml::Value) -> DependencySpec {
 fn parse_cargo_lock(content: &str) -> HashMap<String, String> {
     let mut locked = HashMap::new();
 
-    if let Ok(toml_value) = content.parse::<toml::Value>() {
-        if let Some(packages) = toml_value.get("package").and_then(|p| p.as_array()) {
-            for pkg in packages {
-                if let Some(name) = pkg.get("name").and_then(|n| n.as_str()) {
-                    if let Some(version) = pkg.get("version").and_then(|v| v.as_str()) {
-                        locked.insert(name.to_string(), version.to_string());
-                    }
-                }
+    if let Ok(toml_value) = content.parse::<toml::Value>()
+        && let Some(packages) = toml_value.get("package").and_then(|p| p.as_array())
+    {
+        for pkg in packages {
+            if let Some(name) = pkg.get("name").and_then(|n| n.as_str())
+                && let Some(version) = pkg.get("version").and_then(|v| v.as_str())
+            {
+                locked.insert(name.to_string(), version.to_string());
             }
         }
     }
@@ -2792,10 +2753,10 @@ fn parse_npm_lock(content: &str, manager: PackageManagerType) -> HashMap<String,
                     let parts: Vec<&str> = line.split('@').collect();
                     if parts.len() >= 2 {
                         let name = parts[0].trim_matches('"');
-                        if let Some(version_part) = parts.last() {
-                            if let Some(version) = version_part.split(':').next() {
-                                locked.insert(name.to_string(), version.trim().to_string());
-                            }
+                        if let Some(version_part) = parts.last()
+                            && let Some(version) = version_part.split(':').next()
+                        {
+                            locked.insert(name.to_string(), version.trim().to_string());
                         }
                     }
                 }
@@ -2803,17 +2764,16 @@ fn parse_npm_lock(content: &str, manager: PackageManagerType) -> HashMap<String,
         }
         _ => {
             // package-lock.json format
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
-                if let Some(deps) = json
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(content)
+                && let Some(deps) = json
                     .get("packages")
                     .and_then(|p| p.get(""))
                     .and_then(|d| d.get("dependencies"))
                     .and_then(|d| d.as_object())
-                {
-                    for (name, version) in deps {
-                        if let Some(v) = version.as_str() {
-                            locked.insert(name.clone(), v.to_string());
-                        }
+            {
+                for (name, version) in deps {
+                    if let Some(v) = version.as_str() {
+                        locked.insert(name.clone(), v.to_string());
                     }
                 }
             }
@@ -2903,17 +2863,17 @@ fn parse_pyproject_toml(path: &Path) -> DependencyGraph {
                 for (_, dep_array) in opt_deps {
                     if let Some(deps) = dep_array.as_array() {
                         for dep_str in deps {
-                            if let Some(spec) = dep_str.as_str() {
-                                if let Some((name, version)) = parse_pep621_dep(spec) {
-                                    graph.dependencies.insert(
-                                        name,
-                                        DependencySpec {
-                                            version: Some(version),
-                                            optional: true,
-                                            ..Default::default()
-                                        },
-                                    );
-                                }
+                            if let Some(spec) = dep_str.as_str()
+                                && let Some((name, version)) = parse_pep621_dep(spec)
+                            {
+                                graph.dependencies.insert(
+                                    name,
+                                    DependencySpec {
+                                        version: Some(version),
+                                        optional: true,
+                                        ..Default::default()
+                                    },
+                                );
                             }
                         }
                     }
@@ -2930,10 +2890,10 @@ fn parse_pyproject_toml(path: &Path) -> DependencyGraph {
         parent.join("Pipfile.lock")
     };
 
-    if let Ok(lock_content) = fs::read_to_string(&lockfile) {
-        if graph.package_manager == PackageManagerType::Poetry {
-            graph.locked_versions = parse_poetry_lock(&lock_content);
-        }
+    if let Ok(lock_content) = fs::read_to_string(&lockfile)
+        && graph.package_manager == PackageManagerType::Poetry
+    {
+        graph.locked_versions = parse_poetry_lock(&lock_content);
     }
 
     graph.build_reverse_deps();
@@ -2997,14 +2957,14 @@ fn parse_poetry_lock(content: &str) -> HashMap<String, String> {
     let mut locked = HashMap::new();
 
     // Poetry lock is TOML format
-    if let Ok(toml_value) = content.parse::<toml::Value>() {
-        if let Some(packages) = toml_value.get("package").and_then(|p| p.as_array()) {
-            for pkg in packages {
-                if let Some(name) = pkg.get("name").and_then(|n| n.as_str()) {
-                    if let Some(version) = pkg.get("version").and_then(|v| v.as_str()) {
-                        locked.insert(name.to_string(), version.to_string());
-                    }
-                }
+    if let Ok(toml_value) = content.parse::<toml::Value>()
+        && let Some(packages) = toml_value.get("package").and_then(|p| p.as_array())
+    {
+        for pkg in packages {
+            if let Some(name) = pkg.get("name").and_then(|n| n.as_str())
+                && let Some(version) = pkg.get("version").and_then(|v| v.as_str())
+            {
+                locked.insert(name.to_string(), version.to_string());
             }
         }
     }
@@ -3018,9 +2978,9 @@ impl DependencyGraph {
         let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
 
         // Collect all dependency relationships
-        let all_deps: Vec<_> = self.dependencies.iter().map(|(k, _)| k.clone()).collect();
+        let all_deps: Vec<_> = self.dependencies.keys().cloned().collect();
 
-        for (dependent, _spec) in &self.dependencies {
+        for dependent in self.dependencies.keys() {
             // Add to reverse map
             reverse
                 .entry(dependent.clone())
@@ -3037,12 +2997,12 @@ impl DependencyGraph {
         let mut stack = vec![package.to_string()];
 
         while let Some(current) = stack.pop() {
-            if visited.insert(current.clone()) {
-                if let Some(deps) = self.reverse_deps.get(&current) {
-                    for dep in deps {
-                        if !visited.contains(dep) {
-                            stack.push(dep.clone());
-                        }
+            if visited.insert(current.clone())
+                && let Some(deps) = self.reverse_deps.get(&current)
+            {
+                for dep in deps {
+                    if !visited.contains(dep) {
+                        stack.push(dep.clone());
                     }
                 }
             }
@@ -3059,19 +3019,6 @@ impl DependencyGraph {
     /// Get the exact locked version of a package
     pub fn locked_version(&self, package: &str) -> Option<&String> {
         self.locked_versions.get(package)
-    }
-}
-
-impl Default for DependencySpec {
-    fn default() -> Self {
-        DependencySpec {
-            version: None,
-            path: None,
-            git: None,
-            features: Vec::new(),
-            optional: false,
-            target: None,
-        }
     }
 }
 
@@ -3293,13 +3240,13 @@ impl RepoCache {
     pub fn get_dependency_graph(&self) -> Option<&DependencyGraph> {
         // Check if manifest files have changed
         let manifest = self.dependency_graph.source_file.clone();
-        if manifest.exists() {
-            if let Ok(metadata) = fs::metadata(&manifest) {
-                let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                // Only return if cache is newer than manifest modification
-                if self.cached_at > mtime {
-                    return Some(&self.dependency_graph);
-                }
+        if manifest.exists()
+            && let Ok(metadata) = fs::metadata(&manifest)
+        {
+            let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            // Only return if cache is newer than manifest modification
+            if self.cached_at > mtime {
+                return Some(&self.dependency_graph);
             }
         }
         None
@@ -3437,7 +3384,7 @@ pub async fn build_repo_context_with_cache(
     }
 
     // Sort ranked files by score
-    ranked_files.sort_by(|a, b| b.score.cmp(&a.score));
+    ranked_files.sort_by_key(|b| std::cmp::Reverse(b.score));
 
     // Generate compressed context
     let compressed_context = build_compressed_context(&ranked_files, &all_symbols, max_tokens);
@@ -3927,51 +3874,38 @@ impl RepoMapQualityBenchmarkSuite {
         actual: &RepoMapQualityMetrics,
         tolerance: f64,
     ) -> Vec<MetricDeviation> {
-        let mut deviations = Vec::new();
-
-        // Compare coverage metrics
-        deviations.push(self.compare_single_metric(
-            "coverage.file_coverage",
-            expected.coverage.file_coverage,
-            actual.coverage.file_coverage,
-            tolerance,
-        ));
-
-        deviations.push(self.compare_single_metric(
-            "coverage.symbol_coverage",
-            expected.coverage.symbol_coverage,
-            actual.coverage.symbol_coverage,
-            tolerance,
-        ));
-
-        // Compare performance metrics
-        deviations.push(self.compare_single_metric(
-            "performance.processing_rate",
-            expected.performance.processing_rate,
-            actual.performance.processing_rate,
-            tolerance * 2.0, // Allow more tolerance for performance
-        ));
-
-        // Compare accuracy metrics
-        deviations.push(self.compare_single_metric(
-            "accuracy.symbol_name_accuracy",
-            expected.accuracy.symbol_name_accuracy,
-            actual.accuracy.symbol_name_accuracy,
-            tolerance,
-        ));
-
-        // Compare consistency metrics
-        deviations.push(self.compare_single_metric(
-            "consistency.score_consistency",
-            expected.consistency.score_consistency,
-            actual.consistency.score_consistency,
-            tolerance,
-        ));
-
-        // Overall score is not a field in RepoMapQualityMetrics
-        // Use weighted average of component metrics instead
-
-        deviations
+        vec![
+            self.compare_single_metric(
+                "coverage.file_coverage",
+                expected.coverage.file_coverage,
+                actual.coverage.file_coverage,
+                tolerance,
+            ),
+            self.compare_single_metric(
+                "coverage.symbol_coverage",
+                expected.coverage.symbol_coverage,
+                actual.coverage.symbol_coverage,
+                tolerance,
+            ),
+            self.compare_single_metric(
+                "performance.processing_rate",
+                expected.performance.processing_rate,
+                actual.performance.processing_rate,
+                tolerance * 2.0, // Allow more tolerance for performance
+            ),
+            self.compare_single_metric(
+                "accuracy.symbol_name_accuracy",
+                expected.accuracy.symbol_name_accuracy,
+                actual.accuracy.symbol_name_accuracy,
+                tolerance,
+            ),
+            self.compare_single_metric(
+                "consistency.score_consistency",
+                expected.consistency.score_consistency,
+                actual.consistency.score_consistency,
+                tolerance,
+            ),
+        ]
     }
 
     /// Compare a single metric
@@ -4004,15 +3938,14 @@ impl RepoMapQualityBenchmarkSuite {
         let mut count = 0;
         for entry in walkdir::WalkDir::new(repo_path) {
             let entry = entry?;
-            if entry.file_type().is_file() {
-                if let Some(ext) = entry.path().extension() {
-                    if matches!(
-                        ext.to_str(),
-                        Some("rs") | Some("js") | Some("ts") | Some("py") | Some("go")
-                    ) {
-                        count += 1;
-                    }
-                }
+            if entry.file_type().is_file()
+                && let Some(ext) = entry.path().extension()
+                && matches!(
+                    ext.to_str(),
+                    Some("rs") | Some("js") | Some("ts") | Some("py") | Some("go")
+                )
+            {
+                count += 1;
             }
         }
         Ok(count)

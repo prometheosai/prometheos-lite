@@ -226,19 +226,19 @@ impl MemoryService {
         metadata: serde_json::Value,
     ) -> Result<()> {
         // Check for deduplication before queuing
-        if let Ok(similar) = self.find_similar_memory(&content, &kind, project_id.as_deref()) {
-            if let Some(existing) = similar {
-                // Update existing memory instead of creating new one
-                if let Err(e) = self.update_memory_importance(&existing.id, importance_score) {
-                    tracing::warn!(
-                        "Failed to update memory importance for {}: {}",
-                        existing.id,
-                        e
-                    );
-                    // Continue with creating new memory instead of failing silently
-                } else {
-                    return Ok(()); // Successfully updated existing memory
-                }
+        if let Ok(similar) = self.find_similar_memory(&content, &kind, project_id.as_deref())
+            && let Some(existing) = similar
+        {
+            // Update existing memory instead of creating new one
+            if let Err(e) = self.update_memory_importance(&existing.id, importance_score) {
+                tracing::warn!(
+                    "Failed to update memory importance for {}: {}",
+                    existing.id,
+                    e
+                );
+                // Continue with creating new memory instead of failing silently
+            } else {
+                return Ok(()); // Successfully updated existing memory
             }
         }
 

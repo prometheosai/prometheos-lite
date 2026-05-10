@@ -1,3 +1,106 @@
+## V1.6.1 Repo-Wide Codification - Runtime Policy Enforcement Pass
+
+- Added central runtime policy module `src/runtime_policy.rs` with:
+  - software-harness raw-write policy decision (`is_raw_write_allowed`)
+  - production source scanner for placeholder/stub markers (`scan_runtime_placeholder_violations`)
+  - explicit detector-module exclusions for pattern-vocabulary modules.
+- Wired tool runtime write-policy gate to central runtime policy:
+  - `src/flow/intelligence/tool.rs` now delegates raw-write decision to `runtime_policy` for harness software path.
+- Removed remaining implicit API identity fallback in playbook surface:
+  - `src/api/playbooks.rs` `list_playbooks` now requires explicit `user_id` query and rejects empty identity.
+  - Playbook endpoints are now routed in `src/api/router.rs` and module-exported via `src/api/mod.rs`.
+- Replaced CI placeholder grep heuristics with structured policy test invocation:
+  - `.github/workflows/ci.yml` `Anti-Placeholder Check` and `Stub/placeholder detection` now run `runtime_policy_enforcement` test.
+- Added repository-level enforcement integration test:
+  - `tests/runtime_policy_enforcement.rs` fails build if production `src/` contains runtime placeholder markers outside allowed detector modules.
+
+### Validation Notes
+
+- `cargo fmt --all` passes.
+- `RUSTFLAGS='-D warnings' cargo check --all-targets --all-features` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` passes.
+- `cargo test --quiet` passes end-to-end (including `runtime_policy_enforcement`).
+
+## V1.6.1 Strict Completion - Contract Closure, Runtime Enforcement, and API/CLI Parity
+
+- Replaced harness CLI placeholder failures with real persisted flows in `src/cli/commands/harness.rs`:
+  - `inspect` now loads persisted WorkContext/harness metadata and evidence logs.
+  - `apply` now replays persisted patch diff through patch protocol (`apply_patch_with_rollback`), no raw write fallback.
+  - `rollback` now restores from persisted patch snapshots/transaction metadata.
+- Removed API identity fallback behavior in `src/api/work_contexts.rs`:
+  - list/create/submit paths now require explicit `user_id`.
+  - blank/missing user identity returns `400`.
+- Added explicit V1.6.1 harness/work API matrix in `src/api/router.rs` + `src/api/work_contexts.rs`:
+  - `/work-contexts/:id/harness/evidence`
+  - `/work-contexts/:id/harness/patches`
+  - `/work-contexts/:id/harness/validation`
+  - `/work-contexts/:id/harness/review`
+  - `/work-contexts/:id/harness/risk`
+  - `/work-contexts/:id/harness/completion`
+  - `/work-contexts/:id/work-quality`
+  - `/work-contexts/:id/work-cost`
+  - `/work-contexts/:id/traces`
+  - `/work-contexts/:id/traces/:run_id`
+- Kept compatibility alias route `/work-contexts/:id/harness/:view` with deprecation behavior routed to same canonical extractors.
+- Replaced `harness.*` alias registration with dedicated NodeRegistry-backed node types:
+  - `src/flow/factory/register_harness.rs`
+  - `src/flow/factory/node_factory.rs`
+  - unknown `harness.*` node now hard-fails.
+- Enforced software-path raw write denial in runtime tool gate (`src/flow/intelligence/tool.rs`):
+  - `write_file` denied for harness execution path unless explicit override (`PROMETHEOS_ALLOW_RAW_WRITE=1`).
+- Added first-class persisted harness metadata models in `src/work/types.rs`:
+  - `HarnessTraceSummary` (duration/node/tool/error/tokens/cost)
+  - `HarnessQualityMetrics` (review/critical/rejection/hallucination-risk rates)
+- Wired persistence of these metrics from real run results in `src/harness/work_integration.rs`.
+- Wired API/CLI to expose persisted first-class metrics:
+  - API: `work-quality`, `work-cost`, `traces`, `trace-by-run`
+  - CLI: `work cost`, `work quality`, `work traces`
+- Added regression tests:
+  - harness view matrix extraction test
+  - dedicated `harness.*` node registration/unknown-node hard error tests
+  - runtime gate deny test for `write_file` on harness path
+
+## V1.6.1 Strict Alignment - Batch A/B + CI Coherence Spine
+
+- Added canonical harness contract types in `src/harness/contract.rs`:
+  - `HarnessRequest`
+  - `HarnessResult`
+  - `WorkContextBudget`
+- Added typed WorkContext harness metadata model in `src/work/types.rs`:
+  - `HarnessMetadata`
+  - `TokenUsageSummary`
+  - `WorkContext::harness_metadata()` and `WorkContext::set_harness_metadata()`
+- Wired harness result metadata persistence in `src/harness/work_integration.rs` so runs consistently persist:
+  - latest run/evidence IDs
+  - completion decision
+  - risk level
+  - verification strength
+  - token usage summary
+- Enforced strict software lifecycle gates in `WorkContextService`:
+  - software `Execution -> Review` requires patch + validation evidence
+  - software `Review -> Finalization` requires review + risk evidence
+  - software `Completed` status requires `CompletionDecision::Complete` evidence
+  - invalid phase transitions are rejected centrally
+- Added NodeRegistry-based node resolution and registration modules:
+  - `src/flow/factory/registry.rs`
+  - `src/flow/factory/register_builtin.rs`
+  - `src/flow/factory/register_harness.rs`
+  - `DefaultNodeFactory` now resolves all node types via `NodeRegistry`, including `harness.*` aliases, and returns strict unknown-node errors from registry lookup.
+- Added compatibility bridge in `WorkExecutionService` for legacy software flow execution path:
+  - successful legacy execution emits explicit transition evidence needed by strict software gates
+  - orchestrator completion path stamps software completion decision evidence before setting `Completed`
+- Fixed CI anti-placeholder coherence in `.github/workflows/ci.yml`:
+  - detector vocabulary files excluded from blunt pattern grep checks
+  - runtime stub/placeholder checks remain strict for production paths
+
+### Validation Notes
+
+- `RUSTFLAGS='-D warnings' cargo check --all-targets --all-features` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` passes.
+- `cargo test --quiet` passes end-to-end.
+
 ## V1.6 Strict Audit Completion - Production Hygiene Sweep (No Stub/Placeholder Runtime Paths)
 
 - Executed a full compiler-driven production hygiene pass with `cargo fix --allow-dirty --allow-staged` across harness, flow, CLI, tooling, DB, context, queue, and work modules.

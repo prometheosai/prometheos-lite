@@ -357,8 +357,10 @@ mod tests {
 
     #[test]
     fn test_max_attempts_terminates() {
-        let mut config = ScalingConfig::default();
-        config.max_attempts = 2;
+        let config = ScalingConfig {
+            max_attempts: 2,
+            ..Default::default()
+        };
         let mut engine = ScalingEngine::new(config);
 
         let _ = engine.next_attempt(None);

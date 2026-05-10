@@ -234,6 +234,23 @@ impl Db {
 
         self.conn
             .execute(
+                "CREATE TABLE IF NOT EXISTS harness_run_metrics (
+                work_context_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                trace_summary TEXT NOT NULL,
+                token_usage TEXT NOT NULL,
+                quality_metrics TEXT NOT NULL,
+                trajectory TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (work_context_id, run_id),
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create harness_run_metrics table")?;
+
+        self.conn
+            .execute(
                 "CREATE TABLE IF NOT EXISTS conversation_work_contexts (
                 conversation_id TEXT NOT NULL,
                 work_context_id TEXT NOT NULL,

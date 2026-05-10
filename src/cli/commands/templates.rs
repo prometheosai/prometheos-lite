@@ -24,7 +24,7 @@ enum TemplatesSubcommand {
 
 impl TemplatesCommand {
     pub async fn execute(self) -> Result<()> {
-        let loader = TemplateLoader::default()?;
+        let loader = TemplateLoader::from_default_templates_dir()?;
 
         match self.command {
             TemplatesSubcommand::List => {

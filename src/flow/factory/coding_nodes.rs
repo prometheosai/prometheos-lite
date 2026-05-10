@@ -52,24 +52,24 @@ impl AstParser {
         match language {
             Language::Rust => {
                 for line in content.lines() {
-                    if line.trim().starts_with("pub fn ") || line.trim().starts_with("fn ") {
-                        if let Some(name) = line.split('(').next() {
-                            let name = name.split("fn ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                functions.push(name.to_string());
-                            }
+                    if (line.trim().starts_with("pub fn ") || line.trim().starts_with("fn "))
+                        && let Some(name) = line.split('(').next()
+                    {
+                        let name = name.split("fn ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            functions.push(name.to_string());
                         }
                     }
                 }
             }
             Language::Python => {
                 for line in content.lines() {
-                    if line.trim().starts_with("def ") {
-                        if let Some(name) = line.split('(').next() {
-                            let name = name.split("def ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                functions.push(name.to_string());
-                            }
+                    if line.trim().starts_with("def ")
+                        && let Some(name) = line.split('(').next()
+                    {
+                        let name = name.split("def ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            functions.push(name.to_string());
                         }
                     }
                 }
@@ -77,24 +77,24 @@ impl AstParser {
             Language::JavaScript | Language::TypeScript => {
                 for line in content.lines() {
                     let trimmed = line.trim();
-                    if trimmed.starts_with("function ") {
-                        if let Some(name) = trimmed.split('(').next() {
-                            let name = name.split("function ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                functions.push(name.to_string());
-                            }
+                    if trimmed.starts_with("function ")
+                        && let Some(name) = trimmed.split('(').next()
+                    {
+                        let name = name.split("function ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            functions.push(name.to_string());
                         }
                     }
                 }
             }
             Language::Go => {
                 for line in content.lines() {
-                    if line.trim().starts_with("func ") {
-                        if let Some(name) = line.split('(').next() {
-                            let name = name.split("func ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                functions.push(name.to_string());
-                            }
+                    if line.trim().starts_with("func ")
+                        && let Some(name) = line.split('(').next()
+                    {
+                        let name = name.split("func ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            functions.push(name.to_string());
                         }
                     }
                 }
@@ -113,38 +113,37 @@ impl AstParser {
             Language::Rust => {
                 for line in content.lines() {
                     let trimmed = line.trim();
-                    if trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ") {
-                        if let Some(name) = trimmed.split('{').next() {
-                            let name = name.split("struct ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                classes.push(name.to_string());
-                            }
+                    if (trimmed.starts_with("pub struct ") || trimmed.starts_with("struct "))
+                        && let Some(name) = trimmed.split('{').next()
+                    {
+                        let name = name.split("struct ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            classes.push(name.to_string());
                         }
                     }
                 }
             }
             Language::Python => {
                 for line in content.lines() {
-                    if line.trim().starts_with("class ") {
-                        if let Some(name) =
+                    if line.trim().starts_with("class ")
+                        && let Some(name) =
                             line.split('(').next().or_else(|| line.split(':').next())
-                        {
-                            let name = name.split("class ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                classes.push(name.to_string());
-                            }
+                    {
+                        let name = name.split("class ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            classes.push(name.to_string());
                         }
                     }
                 }
             }
             Language::JavaScript | Language::TypeScript => {
                 for line in content.lines() {
-                    if line.trim().starts_with("class ") {
-                        if let Some(name) = line.split('{').next() {
-                            let name = name.split("class ").last().unwrap_or(name).trim();
-                            if !name.is_empty() {
-                                classes.push(name.to_string());
-                            }
+                    if line.trim().starts_with("class ")
+                        && let Some(name) = line.split('{').next()
+                    {
+                        let name = name.split("class ").last().unwrap_or(name).trim();
+                        if !name.is_empty() {
+                            classes.push(name.to_string());
                         }
                     }
                 }
@@ -404,12 +403,12 @@ impl DependencyParser {
                 }
 
                 // Extract package name (between quotes)
-                if let Some(start) = trimmed.find('"') {
-                    if let Some(end) = trimmed[start + 1..].find('"') {
-                        let name = &trimmed[start + 1..start + 1 + end];
-                        if !name.is_empty() {
-                            deps.push(name.to_string());
-                        }
+                if let Some(start) = trimmed.find('"')
+                    && let Some(end) = trimmed[start + 1..].find('"')
+                {
+                    let name = &trimmed[start + 1..start + 1 + end];
+                    if !name.is_empty() {
+                        deps.push(name.to_string());
                     }
                 }
             }
@@ -529,10 +528,10 @@ impl Node for SymbolResolutionNode {
 
         if let Some(fp) = file_path {
             let full_path = self.repo_path.join(fp);
-            if full_path.exists() {
-                if let Some(def) = self.search_file_for_symbol(&full_path, symbol).await? {
-                    definitions.push(def);
-                }
+            if full_path.exists()
+                && let Some(def) = self.search_file_for_symbol(&full_path, symbol).await?
+            {
+                definitions.push(def);
             }
         }
 
@@ -569,18 +568,17 @@ impl SymbolResolutionNode {
             .unwrap_or("unknown");
 
         // Try heuristic-based resolution first
-        if let Some(lang) = Language::from_extension(extension) {
-            if let Some((line_num, line_content)) =
+        if let Some(lang) = Language::from_extension(extension)
+            && let Some((line_num, line_content)) =
                 AstParser::find_symbol_definition(&content, symbol, lang)
-            {
-                return Ok(Some(json!({
-                    "file": path.to_string_lossy(),
-                    "line": line_num,
-                    "content": line_content.trim(),
-                    "language": extension,
-                    "method": "heuristic"
-                })));
-            }
+        {
+            return Ok(Some(json!({
+                "file": path.to_string_lossy(),
+                "line": line_num,
+                "content": line_content.trim(),
+                "language": extension,
+                "method": "heuristic"
+            })));
         }
 
         // Fallback: Simple text search if heuristic fails or language not supported

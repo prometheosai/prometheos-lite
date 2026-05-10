@@ -57,7 +57,17 @@ impl GitCheckpointManager {
     }
 
     pub fn is_git_repo(&self) -> bool {
-        self.run_git(&["rev-parse", "--git-dir"]).is_ok()
+        let top = match self.run_git(&["rev-parse", "--show-toplevel"]) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        let reported = std::path::PathBuf::from(top.trim());
+        let reported = reported.canonicalize().unwrap_or(reported);
+        let root = self
+            .repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.repo_root.clone());
+        reported == root
     }
 
     pub async fn create_checkpoint(&self, work_context_id: &str) -> Result<GitCheckpoint> {

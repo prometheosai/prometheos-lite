@@ -234,9 +234,8 @@ fn test_trajectory_metadata_creation() {
 
 #[test]
 fn test_trajectory_store_new() {
-    let store = TrajectoryStore::new(PathBuf::from("/tmp/trajectories"));
+    let _store = TrajectoryStore::new(PathBuf::from("/tmp/trajectories"));
     // Store created successfully
-    assert!(true);
 }
 
 // ============================================================================

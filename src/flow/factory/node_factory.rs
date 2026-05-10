@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::context::ContextBuilder;
+use crate::flow::factory::{NodeRegistry, register_builtin_nodes, register_harness_nodes};
 use crate::flow::{MemoryService, ModelRouter, Node, NodeConfig, ToolRuntime};
 
 /// NodeFactory trait - creates concrete nodes based on node_type
@@ -19,16 +20,21 @@ pub struct DefaultNodeFactory {
     memory_service: Option<std::sync::Arc<MemoryService>>,
     context_builder: Option<ContextBuilder>,
     repo_path: Option<std::path::PathBuf>,
+    registry: NodeRegistry,
 }
 
 impl DefaultNodeFactory {
     pub fn new() -> Self {
+        let mut registry = NodeRegistry::new();
+        register_builtin_nodes(&mut registry);
+        register_harness_nodes(&mut registry);
         Self {
             model_router: None,
             tool_runtime: None,
             memory_service: None,
             context_builder: None,
             repo_path: None,
+            registry,
         }
     }
 
@@ -55,6 +61,12 @@ impl DefaultNodeFactory {
             memory_service: runtime.memory_service,
             context_builder,
             repo_path: None,
+            registry: {
+                let mut r = NodeRegistry::new();
+                register_builtin_nodes(&mut r);
+                register_harness_nodes(&mut r);
+                r
+            },
         }
     }
 
@@ -75,6 +87,12 @@ impl DefaultNodeFactory {
             memory_service: runtime.memory_service,
             context_builder,
             repo_path: Some(repo_path),
+            registry: {
+                let mut r = NodeRegistry::new();
+                register_builtin_nodes(&mut r);
+                register_harness_nodes(&mut r);
+                r
+            },
         }
     }
 
@@ -113,16 +131,14 @@ impl DefaultNodeFactory {
             Ok(NodeConfig::default())
         }
     }
-}
 
-impl NodeFactory for DefaultNodeFactory {
-    fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
-        let node_config = Self::parse_config(&config)?;
-        let context_builder = self
-            .context_builder
-            .clone()
-            .unwrap_or_else(ContextBuilder::default);
-
+    fn create_known_node(
+        &self,
+        node_type: &str,
+        node_config: NodeConfig,
+        config: Option<serde_json::Value>,
+        context_builder: ContextBuilder,
+    ) -> Result<Arc<dyn Node>> {
         match node_type {
             "planner" => Ok(Arc::new(super::builtin_nodes::PlannerNode::new(
                 node_config,
@@ -169,7 +185,6 @@ impl NodeFactory for DefaultNodeFactory {
             "passthrough" => Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(
                 node_config,
             ))),
-            // V1.5.2: AST-based coding harness nodes
             "code_analysis" => {
                 let repo_path = self
                     .repo_path
@@ -200,18 +215,111 @@ impl NodeFactory for DefaultNodeFactory {
                     repo_path,
                 )))
             }
-            _ => {
-                anyhow::bail!(
-                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, terminal, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough, code_analysis, symbol_resolution, dependency_analysis",
-                    node_type
-                )
+            "harness.repo_map" => {
+                let repo_path = self
+                    .repo_path
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                Ok(Arc::new(super::builtin_nodes::HarnessRepoMapNode::new(
+                    node_config,
+                    repo_path,
+                )))
             }
+            "harness.patch_apply" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessPatchApplyNode::new(
+                    node_config,
+                    self.tool_runtime.clone(),
+                )))
+            }
+            "harness.validate" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessValidateNode::new(
+                    node_config,
+                    self.tool_runtime.clone(),
+                )))
+            }
+            "harness.review" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessReviewNode::new(
+                    node_config,
+                    self.model_router.clone(),
+                    context_builder,
+                )))
+            }
+            "harness.risk" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessRiskNode::new(
+                    node_config,
+                    self.model_router.clone(),
+                    context_builder,
+                )))
+            }
+            "harness.completion" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessCompletionNode::new(
+                    node_config,
+                )))
+            }
+            "harness.attempt_pool" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessAttemptPoolNode::new(
+                    node_config,
+                )))
+            }
+            "harness.context_distill" => {
+                Ok(Arc::new(super::builtin_nodes::HarnessContextDistillNode::new(
+                    node_config,
+                    self.memory_service.clone(),
+                )))
+            }
+            _ => anyhow::bail!("Unknown canonical node type '{}'", node_type),
         }
+    }
+}
+
+impl NodeFactory for DefaultNodeFactory {
+    fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
+        let node_config = Self::parse_config(&config)?;
+        let context_builder = self.context_builder.clone().unwrap_or_default();
+        let resolved = self.registry.resolve(node_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown node type '{}'. NodeRegistry has no registration for this type.",
+                node_type
+            )
+        })?;
+        self.create_known_node(resolved, node_config, config, context_builder)
     }
 }
 
 impl Default for DefaultNodeFactory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DefaultNodeFactory, NodeFactory};
+
+    #[test]
+    fn harness_nodes_are_registry_backed_and_constructible() {
+        let factory = DefaultNodeFactory::new();
+        for node_type in [
+            "harness.repo_map",
+            "harness.patch_apply",
+            "harness.validate",
+            "harness.review",
+            "harness.risk",
+            "harness.completion",
+            "harness.attempt_pool",
+            "harness.context_distill",
+        ] {
+            let node = factory.create(node_type, None).unwrap();
+            assert_eq!(node.id(), node_type);
+        }
+    }
+
+    #[test]
+    fn unknown_harness_node_is_hard_error() {
+        let factory = DefaultNodeFactory::new();
+        let result = factory.create("harness.unknown_node", None);
+        assert!(result.is_err());
+        let err = result.err().expect("expected error");
+        assert!(err.to_string().contains("Unknown node type"));
     }
 }

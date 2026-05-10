@@ -10,7 +10,6 @@
 //! - validate_reproduction function
 //! - gather_reproduction_context function
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::reproduction::{
