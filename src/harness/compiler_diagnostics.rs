@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// P0-HARNESS-010: Structured compiler diagnostic for intelligent repair
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,21 +49,21 @@ pub enum DiagnosticCategory {
 
 /// P0-HARNESS-010: Language-specific diagnostic parser
 pub trait DiagnosticParser {
-    fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>>;
+    fn parse(&self, output: &str, working_dir: &Path) -> Result<Vec<CompilerDiagnostic>>;
 }
 
 /// P0-HARNESS-010: Rust diagnostic parser (cargo check --message-format=json)
 pub struct RustDiagnosticParser;
 
 impl DiagnosticParser for RustDiagnosticParser {
-    fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
+    fn parse(&self, output: &str, working_dir: &Path) -> Result<Vec<CompilerDiagnostic>> {
         let mut diagnostics = Vec::new();
 
         for line in output.lines() {
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(diag) = parse_rust_diagnostic(&json_value, working_dir) {
-                    diagnostics.push(diag);
-                }
+            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line)
+                && let Some(diag) = parse_rust_diagnostic(&json_value, working_dir)
+            {
+                diagnostics.push(diag);
             }
         }
 
@@ -74,7 +74,7 @@ impl DiagnosticParser for RustDiagnosticParser {
 /// P0-HARNESS-010: Parse individual Rust diagnostic from JSON
 fn parse_rust_diagnostic(
     value: &serde_json::Value,
-    working_dir: &PathBuf,
+    working_dir: &Path,
 ) -> Option<CompilerDiagnostic> {
     let message = value.get("message")?.as_str()?.to_string();
     let level = value.get("level")?.as_str()?;
@@ -146,7 +146,7 @@ fn categorize_rust_diagnostic(message: &str, code: &Option<String>) -> Diagnosti
         DiagnosticCategory::Import
     } else if msg_lower.contains("format") || msg_lower.contains("style") {
         DiagnosticCategory::Format
-    } else if code.as_ref().map_or(false, |c| c.contains("clippy")) {
+    } else if code.as_ref().is_some_and(|c| c.contains("clippy")) {
         DiagnosticCategory::Clippy
     } else if msg_lower.contains("test") {
         DiagnosticCategory::Test
@@ -161,7 +161,7 @@ fn categorize_rust_diagnostic(message: &str, code: &Option<String>) -> Diagnosti
 pub struct TypeScriptDiagnosticParser;
 
 impl DiagnosticParser for TypeScriptDiagnosticParser {
-    fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
+    fn parse(&self, output: &str, working_dir: &Path) -> Result<Vec<CompilerDiagnostic>> {
         let mut diagnostics = Vec::new();
 
         for line in output.lines() {
@@ -175,7 +175,7 @@ impl DiagnosticParser for TypeScriptDiagnosticParser {
 }
 
 /// P0-HARNESS-010: Parse individual TypeScript diagnostic
-fn parse_typescript_diagnostic(line: &str, working_dir: &PathBuf) -> Option<CompilerDiagnostic> {
+fn parse_typescript_diagnostic(line: &str, working_dir: &Path) -> Option<CompilerDiagnostic> {
     // TypeScript error format: file(line,column): error TS1234: message
     let ts_regex =
         regex::Regex::new(r"^(.+)\((\d+),(\d+)\):\s+(error|warning|info)\s+TS(\d+):\s+(.+)$")
@@ -230,7 +230,7 @@ fn categorize_typescript_diagnostic(message: &str) -> DiagnosticCategory {
 pub struct PythonDiagnosticParser;
 
 impl DiagnosticParser for PythonDiagnosticParser {
-    fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
+    fn parse(&self, output: &str, working_dir: &Path) -> Result<Vec<CompilerDiagnostic>> {
         let mut diagnostics = Vec::new();
 
         for line in output.lines() {
@@ -244,7 +244,7 @@ impl DiagnosticParser for PythonDiagnosticParser {
 }
 
 /// P0-HARNESS-010: Parse individual Python diagnostic
-fn parse_python_diagnostic(line: &str, working_dir: &PathBuf) -> Option<CompilerDiagnostic> {
+fn parse_python_diagnostic(line: &str, working_dir: &Path) -> Option<CompilerDiagnostic> {
     // Python error format: file.py:line: error message
     let py_regex = regex::Regex::new(r"^(.+):(\d+):\s+(error|warning|info):\s+(.+)$").ok()?;
 
@@ -318,7 +318,7 @@ impl DiagnosticParserFactory {
 pub struct GenericDiagnosticParser;
 
 impl DiagnosticParser for GenericDiagnosticParser {
-    fn parse(&self, output: &str, _working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
+    fn parse(&self, output: &str, _working_dir: &Path) -> Result<Vec<CompilerDiagnostic>> {
         // Simple line-based parsing for unknown tools
         let mut diagnostics = Vec::new();
         let mut line_num = 1;

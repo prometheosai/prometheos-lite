@@ -1279,7 +1279,7 @@ impl AlertManager {
             if self.evaluate_rule(rule, result).await? {
                 // Create alert
                 let alert = Alert {
-                    id: format!("alert_{}", chrono::Utc::now().timestamp_nanos()),
+                    id: format!("alert_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
                     title: format!("Anomaly Detected: {}", rule.name),
                     message: format!("Anomaly score: {:.3}", result.anomaly_score),
                     severity: rule.severity,

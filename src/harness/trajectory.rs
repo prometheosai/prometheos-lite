@@ -205,7 +205,7 @@ impl Trajectory {
     }
 
     pub fn total_elapsed_ms(&self) -> u64 {
-        let end = self.completed_at.unwrap_or_else(|| Utc::now());
+        let end = self.completed_at.unwrap_or_else(Utc::now);
         (end - self.started_at).num_milliseconds() as u64
     }
 
@@ -286,7 +286,7 @@ impl TrajectoryStore {
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json") {
                 match fs::read_to_string(&path).await {
                     Ok(content) => {
                         if let Ok(trajectory) = Trajectory::from_json(&content) {
@@ -302,7 +302,7 @@ impl TrajectoryStore {
             }
         }
 
-        trajectories.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        trajectories.sort_by_key(|b| std::cmp::Reverse(b.started_at));
         Ok(trajectories)
     }
 
@@ -386,11 +386,11 @@ pub async fn replay_trajectory(
     let mut divergence_details = Vec::new();
 
     for (idx, step) in trajectory.steps.iter().enumerate() {
-        if let Some(max) = config.max_steps {
-            if idx >= max {
-                debug!("Reached max steps limit ({})", max);
-                break;
-            }
+        if let Some(max) = config.max_steps
+            && idx >= max
+        {
+            debug!("Reached max steps limit ({})", max);
+            break;
         }
 
         if config.skip_phases.contains(&step.phase) {
@@ -453,8 +453,8 @@ pub mod export {
     pub fn to_text_report(trajectory: &Trajectory) -> String {
         let mut report = String::new();
 
-        report.push_str(&format!("Trajectory Report\n"));
-        report.push_str(&format!("==================\n\n"));
+        report.push_str("Trajectory Report\n");
+        report.push_str("==================\n\n");
         report.push_str(&format!("ID: {}\n", trajectory.id));
         report.push_str(&format!("Work Context: {}\n", trajectory.work_context_id));
         report.push_str(&format!(
@@ -483,8 +483,8 @@ pub mod export {
         ));
 
         let stats = trajectory.compute_stats();
-        report.push_str(&format!("Statistics\n"));
-        report.push_str(&format!("----------\n"));
+        report.push_str("Statistics\n");
+        report.push_str("----------\n");
         report.push_str(&format!("Total Steps: {}\n", stats.total_steps));
         report.push_str(&format!("Total Duration: {}ms\n", stats.total_duration_ms));
         report.push_str(&format!(
@@ -503,8 +503,8 @@ pub mod export {
             stats.phases_used.join(", ")
         ));
 
-        report.push_str(&format!("Step Details\n"));
-        report.push_str(&format!("------------\n"));
+        report.push_str("Step Details\n");
+        report.push_str("------------\n");
         for (idx, step) in trajectory.steps.iter().enumerate() {
             report.push_str(&format!("\n[Step {}] {}\n", idx + 1, step.phase));
             report.push_str(&format!("  Duration: {}ms\n", step.duration_ms));
@@ -518,7 +518,7 @@ pub mod export {
                 }
             }
             if !step.errors.is_empty() {
-                report.push_str(&format!("  Errors:\n"));
+                report.push_str("  Errors:\n");
                 for error in &step.errors {
                     report.push_str(&format!("    ! {}\n", error));
                 }

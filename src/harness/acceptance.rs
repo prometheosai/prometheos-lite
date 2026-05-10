@@ -227,9 +227,9 @@ impl AcceptanceCompiler {
                             "cargo test".into()
                         } else if env.languages.contains(&"python".to_string()) {
                             "pytest".into()
-                        } else if env.languages.contains(&"javascript".to_string()) {
-                            "npm test".into()
-                        } else if env.languages.contains(&"typescript".to_string()) {
+                        } else if env.languages.contains(&"javascript".to_string())
+                            || env.languages.contains(&"typescript".to_string())
+                        {
                             "npm test".into()
                         } else {
                             "test".into()

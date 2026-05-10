@@ -174,7 +174,7 @@ pub fn generate_patch_report(result: &HarnessExecutionResult) -> PatchReport {
 
     // Risk summary
     let risk = RiskSummary {
-        level: result.risk_assessment.level.clone(),
+        level: result.risk_assessment.level,
         level_string: format!("{:?}", result.risk_assessment.level),
         requires_approval: result.risk_assessment.requires_approval,
         reasons: result

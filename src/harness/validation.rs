@@ -638,8 +638,8 @@ struct CachedResult {
     result: CommandResult,
     timestamp: Instant,
     file_hashes: HashMap<PathBuf, String>,
-    validation_category: ValidationCategory,
-    cache_hit_count: u32,
+    _validation_category: ValidationCategory,
+    _cache_hit_count: u32,
 }
 
 impl ValidationCache {
@@ -747,8 +747,8 @@ impl ValidationCache {
                 result,
                 timestamp: Instant::now(),
                 file_hashes,
-                validation_category: category,
-                cache_hit_count: 0,
+                _validation_category: category,
+                _cache_hit_count: 0,
             },
         );
 
@@ -759,49 +759,9 @@ impl ValidationCache {
             is_post_apply
         );
     }
-
-    async fn clear(&self) {
-        let mut entries = self.entries.lock().await;
-        entries.clear();
-        tracing::debug!("Validation cache cleared");
-    }
-
-    /// P1-Issue5: Get cache statistics
-    pub async fn get_stats(&self) -> ValidationCacheStats {
-        let entries = self.entries.lock().await;
-        let total_entries = entries.len();
-        let mut category_counts = HashMap::new();
-        let mut total_cache_hits = 0;
-
-        for cached in entries.values() {
-            *category_counts
-                .entry(cached.validation_category.clone())
-                .or_insert(0) += 1;
-            total_cache_hits += cached.cache_hit_count;
-        }
-
-        ValidationCacheStats {
-            total_entries,
-            category_counts,
-            total_cache_hits,
-            ttl_ms: self.ttl_ms,
-            enabled: self.config.enabled,
-            disable_post_apply: self.config.disable_post_apply,
-        }
-    }
 }
 
 /// P1-Issue5: Cache statistics
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ValidationCacheStats {
-    pub total_entries: usize,
-    pub category_counts: HashMap<ValidationCategory, usize>,
-    pub total_cache_hits: u32,
-    pub ttl_ms: u64,
-    pub enabled: bool,
-    pub disable_post_apply: bool,
-}
-
 static GLOBAL_CACHE: Lazy<ValidationCache> = Lazy::new(|| ValidationCache::new(300_000)); // 5 minute TTL
 
 pub async fn run_validation(
@@ -812,7 +772,7 @@ pub async fn run_validation(
     run_validation_with_cache(root, plan, sandbox, &GLOBAL_CACHE).await
 }
 
-pub async fn run_validation_with_cache(
+async fn run_validation_with_cache(
     root: &Path,
     plan: &ValidationPlan,
     sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
@@ -1011,7 +971,7 @@ async fn run_parallel(
         let root = root.to_path_buf();
         let cache_key = create_cache_key(&root, &cmd, &file_hashes);
 
-        if let Some(cached) = cache.get(&cache_key, &file_hashes, &_cat, false).await {
+        if let Some(cached) = cache.get(&cache_key, &file_hashes, _cat, false).await {
             cached_results.push((cmd, cached));
         } else {
             // This command needs to run - create a task for it

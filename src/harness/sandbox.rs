@@ -266,15 +266,10 @@ pub trait CommandRuntime: Send + Sync {
     ) -> Result<CommandResult>;
 }
 
-// Backward compatibility trait - will be removed in v2.0
-#[deprecated(
-    since = "1.6.0",
-    note = "Use CommandRuntime instead. This is not true sandboxing."
-)]
+// Backward compatibility trait maintained for transition to CommandRuntime.
 pub trait SandboxRuntime: CommandRuntime {}
 
-// Auto-implement SandboxRuntime for any type that implements CommandRuntime
-#[allow(deprecated)]
+// Auto-implement SandboxRuntime for any type that implements CommandRuntime.
 impl<T: CommandRuntime + ?Sized> SandboxRuntime for T {}
 
 /// Security policy for command execution
@@ -294,8 +289,7 @@ pub struct CommandSecurityPolicy {
     pub autonomous_shell_approved: bool,
 }
 
-// Backward compatibility alias - will be removed in v2.0
-#[deprecated(since = "1.6.0", note = "Use CommandSecurityPolicy instead")]
+// Backward compatibility alias for transition to CommandSecurityPolicy.
 pub type SandboxSecurityPolicy = CommandSecurityPolicy;
 
 impl Default for CommandSecurityPolicy {
@@ -396,21 +390,13 @@ impl Default for CommandSecurityPolicy {
 ///
 /// ⚠️ WARNING: This runs commands directly on the host. It filters commands
 /// by program name but does NOT isolate the process.
+#[derive(Default)]
 pub struct LocalCommandRuntime {
     policy: CommandSecurityPolicy,
 }
 
-// Backward compatibility alias - will be removed in v2.0
-#[deprecated(since = "1.6.0", note = "Use LocalCommandRuntime instead")]
+// Backward compatibility alias for transition to LocalCommandRuntime.
 pub type LocalSandboxRuntime = LocalCommandRuntime;
-
-impl Default for LocalCommandRuntime {
-    fn default() -> Self {
-        Self {
-            policy: CommandSecurityPolicy::default(),
-        }
-    }
-}
 
 impl LocalCommandRuntime {
     pub fn new() -> Self {
@@ -419,7 +405,7 @@ impl LocalCommandRuntime {
         }
     }
 
-    pub fn with_policy(policy: CommandSecurityPolicy) -> Self {
+    pub fn withpolicy(policy: CommandSecurityPolicy) -> Self {
         Self { policy }
     }
 
@@ -662,7 +648,6 @@ pub struct DockerSandboxRuntime {
     memory: Option<String>,
     /// Timeout for container operations
     timeout_ms: u64,
-    policy: CommandSecurityPolicy,
     /// P0-Issue2: Mount mode for volume mounts
     mount_mode: MountMode,
 }
@@ -673,14 +658,6 @@ impl DockerSandboxRuntime {
         Self {
             image: image.into(),
             workdir: "/workspace".to_string(),
-            policy: CommandSecurityPolicy {
-                allowed_programs: vec![],
-                blocked_programs: vec![],
-                allow_shell: false,
-                max_command_length: 8192,
-                max_args: 100,
-                autonomous_shell_approved: false,
-            },
             volumes: vec![],
             env_vars: vec![],
             network_mode: "none".to_string(), // Secure default
@@ -756,7 +733,7 @@ impl DockerSandboxRuntime {
     }
 
     /// P0-Issue2: Set network policy for Docker runtime
-    pub fn set_network_policy(&mut self, policy: NetworkPolicy) {
+    pub fn set_networkpolicy(&mut self, policy: NetworkPolicy) {
         self.network_mode = match policy {
             NetworkPolicy::Disabled => "none".to_string(),
             NetworkPolicy::Enabled => "bridge".to_string(),
@@ -807,7 +784,7 @@ impl DockerSandboxRuntime {
 
         // Verify Docker daemon is healthy
         let health_output = Command::new("docker")
-            .args(&["system", "info", "--format", "{{.ServerState.Health}}"])
+            .args(["system", "info", "--format", "{{.ServerState.Health}}"])
             .output()
             .await;
 
@@ -832,7 +809,7 @@ impl DockerSandboxRuntime {
 
         // Test container creation capability
         let test_output = Command::new("docker")
-            .args(&[
+            .args([
                 "run",
                 "--rm",
                 "--name",
@@ -857,7 +834,7 @@ impl DockerSandboxRuntime {
 
         // Test resource limits capability
         let limits_output = Command::new("docker")
-            .args(&[
+            .args([
                 "run",
                 "--rm",
                 "--cpus",
@@ -884,7 +861,7 @@ impl DockerSandboxRuntime {
 
         // Test network policy capability
         let network_output = Command::new("docker")
-            .args(&["run", "--rm", "--network", "none", "hello-world"])
+            .args(["run", "--rm", "--network", "none", "hello-world"])
             .output()
             .await;
 
@@ -903,7 +880,7 @@ impl DockerSandboxRuntime {
 
         // Test security options capability
         let security_output = Command::new("docker")
-            .args(&[
+            .args([
                 "run",
                 "--rm",
                 "--security-opt",
@@ -1150,7 +1127,7 @@ pub struct SandboxRuntimeFactory;
 
 impl SandboxRuntimeFactory {
     /// P0-Issue2: Create sandbox runtime based on enhanced policy
-    pub async fn create_with_policy(
+    pub async fn create_withpolicy(
         policy: &SandboxPolicy,
     ) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
         // Check if Docker is available and preferred
@@ -1226,7 +1203,7 @@ impl SandboxRuntimeFactory {
             let mut docker_runtime = DockerSandboxRuntime::new(image);
 
             // Apply policy settings
-            docker_runtime.set_network_policy(policy.network.clone());
+            docker_runtime.set_networkpolicy(policy.network.clone());
             docker_runtime.set_mount_mode(policy.mount_mode.clone());
             if let Some(ref cpu_limit) = policy.cpu_limit {
                 docker_runtime.set_cpu_limit(cpu_limit.clone());
@@ -1273,7 +1250,7 @@ impl SandboxRuntimeFactory {
             docker_image: image,
         };
 
-        Self::create_with_policy(&policy).await.unwrap_or_else(|e| {
+        Self::create_withpolicy(&policy).await.unwrap_or_else(|e| {
             tracing::error!("Failed to create sandbox runtime: {}", e);
             std::sync::Arc::new(LocalCommandRuntime::new()) // Fallback to local runtime
         })
@@ -1330,9 +1307,9 @@ mod tests {
     }
 
     #[test]
-    fn test_security_policy_blocks_dangerous() {
+    fn test_securitypolicy_blocks_dangerous() {
         let policy = SandboxSecurityPolicy::default();
-        let runtime = LocalSandboxRuntime::with_policy(policy);
+        let runtime = LocalSandboxRuntime::withpolicy(policy);
 
         assert!(!runtime.is_program_allowed("rm"));
         assert!(!runtime.is_program_allowed("sudo"));
@@ -1348,7 +1325,7 @@ mod tests {
             allowed_programs: vec![], // Empty list allows all non-blocked programs
             ..Default::default()
         };
-        let runtime = LocalSandboxRuntime::with_policy(policy);
+        let runtime = LocalSandboxRuntime::withpolicy(policy);
 
         let cmd = StructuredCommand::parse("cat file | grep pattern").unwrap();
         let result = runtime.validate_command(&cmd);
@@ -1359,7 +1336,7 @@ mod tests {
     #[test]
     fn test_security_validation_accepts_simple_commands() {
         let policy = SandboxSecurityPolicy::default();
-        let runtime = LocalSandboxRuntime::with_policy(policy);
+        let runtime = LocalSandboxRuntime::withpolicy(policy);
 
         let cmd = StructuredCommand::parse("cargo build --release").unwrap();
         assert!(runtime.validate_command(&cmd).is_ok());

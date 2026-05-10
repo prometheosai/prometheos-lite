@@ -14,7 +14,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
     time::Instant,
 };
 
@@ -190,7 +189,7 @@ impl RepairLoop {
         evidence_log.record_repair_action(
             "repair_loop",
             "started",
-            &format!(
+            format!(
                 "Starting repair loop for failure: {:?}",
                 request.failure.kind
             ),
@@ -207,7 +206,7 @@ impl RepairLoop {
             evidence_log.record_repair_action(
                 "repair_loop",
                 "strategy_selected",
-                &format!("Attempt {}: Selected strategy {:?}", attempt, strategy),
+                format!("Attempt {}: Selected strategy {:?}", attempt, strategy),
                 trace_id.clone(),
             );
 
@@ -218,7 +217,7 @@ impl RepairLoop {
             evidence_log.record_repair_action(
                 "repair_loop",
                 "edits_generated",
-                &format!(
+                format!(
                     "Attempt {}: Generated {} repair edits using {:?}",
                     attempt,
                     repair_edits.len(),
@@ -240,7 +239,7 @@ impl RepairLoop {
                 evidence_log.record_repair_action(
                     "repair_loop",
                     "dry_run_failed",
-                    &format!(
+                    format!(
                         "Attempt {}: Dry-run failed with {} failures",
                         attempt,
                         dry_result.failures.len()
@@ -287,14 +286,14 @@ impl RepairLoop {
                             evidence_log.record_repair_action(
                                 "repair_loop",
                                 "validation_failed",
-                                &format!(
+                                format!(
                                     "Attempt {}: Validation failed with {} errors",
                                     attempt,
                                     validation.errors.len()
                                 ),
                                 trace_id.clone(),
                             );
-                            let failure = classify_validation_failure(&validation);
+                            let failure = classify_validation_failure(validation);
                             AttemptResult::PartialSuccess {
                                 remaining_failures: vec![create_failure_from_kind(
                                     failure,
@@ -308,14 +307,14 @@ impl RepairLoop {
                         evidence_log.record_repair_action(
                             "repair_loop",
                             "validation_error",
-                            &format!("Attempt {}: Validation error: {}", attempt, e),
+                            format!("Attempt {}: Validation error: {}", attempt, e),
                             trace_id.clone(),
                         );
                         AttemptResult::Failure {
                             reason: e.to_string(),
                             failure: create_failure_from_kind(
                                 FailureKind::ToolFailure,
-                                &e.to_string(),
+                                e.to_string(),
                             ),
                         }
                     }
@@ -330,7 +329,7 @@ impl RepairLoop {
                 if should_rollback {
                     tracing::info!("Repair validation failed, rolling back patch");
                     evidence_log.record_rollback(
-                        &format!("Attempt {}: Repair validation failed", attempt),
+                        format!("Attempt {}: Repair validation failed", attempt),
                         trace_id.clone(),
                     );
                     if let Err(e) = rollback.rollback().await {
@@ -370,7 +369,7 @@ impl RepairLoop {
                     evidence_log.record_repair_action(
                         "repair_loop",
                         "completed",
-                        &format!(
+                        format!(
                             "Repair succeeded after {} attempts using {:?}",
                             attempt, strategy
                         ),
@@ -394,7 +393,7 @@ impl RepairLoop {
                         evidence_log.record_repair_action(
                             "repair_loop",
                             "failed",
-                            &format!("Repair failed after {} max attempts", self.max_attempts),
+                            format!("Repair failed after {} max attempts", self.max_attempts),
                             trace_id.clone(),
                         );
                         return Ok(RepairResult {
@@ -414,7 +413,7 @@ impl RepairLoop {
         evidence_log.record_repair_action(
             "repair_loop",
             "exhausted",
-            &format!("Repair loop exhausted after {} attempts", self.max_attempts),
+            format!("Repair loop exhausted after {} attempts", self.max_attempts),
             trace_id.clone(),
         );
 
@@ -463,7 +462,7 @@ impl RepairLoop {
         ];
 
         let mut sorted = strategy_scores;
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         for (strategy, _) in sorted {
             let times_tried = self.strategies_tried.get(&strategy).copied().unwrap_or(0);
@@ -608,17 +607,6 @@ fn create_failure_from_kind(kind: FailureKind, message: impl Into<String>) -> Fa
         context: FailureContext::default(),
         suggestion: None,
         recovery_action: kind.default_recovery(),
-    }
-}
-
-fn get_edit_file(edit: &EditOperation) -> Option<PathBuf> {
-    match edit {
-        EditOperation::SearchReplace(e) => Some(e.file.clone()),
-        EditOperation::WholeFile(e) => Some(e.file.clone()),
-        EditOperation::CreateFile(e) => Some(e.file.clone()),
-        EditOperation::DeleteFile(e) => Some(e.file.clone()),
-        EditOperation::RenameFile(e) => Some(e.from.clone()),
-        _ => None,
     }
 }
 

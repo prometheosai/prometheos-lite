@@ -31,10 +31,10 @@ fn extract_container_id_from_command_result(command: &str, stderr: &str) -> Opti
     // Look for patterns like "Container ID: <hash>" or just the hash itself
     if command.starts_with("docker run") {
         use regex::Regex;
-        if let Ok(re) = Regex::new(r"[a-f0-9]{64}") {
-            if let Some(caps) = re.find(stderr) {
-                return Some(caps.as_str().to_string());
-            }
+        if let Ok(re) = Regex::new(r"[a-f0-9]{64}")
+            && let Some(caps) = re.find(stderr)
+        {
+            return Some(caps.as_str().to_string());
         }
     }
     None
@@ -59,7 +59,7 @@ pub struct AttemptRecord {
 pub struct AttemptPool {
     max_concurrent: usize,
     max_candidates: usize,
-    workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy,
+    _workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy,
 }
 
 impl AttemptPool {
@@ -68,7 +68,7 @@ impl AttemptPool {
         Self {
             max_concurrent,
             max_candidates: max_concurrent, // Default to same value for backward compatibility
-            workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy::TempCopy,
+            _workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy::TempCopy,
         }
     }
 
@@ -77,26 +77,8 @@ impl AttemptPool {
         Self {
             max_concurrent,
             max_candidates,
-            workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy::TempCopy,
+            _workspace_strategy: crate::harness::mode_policy::WorkspaceStrategy::TempCopy,
         }
-    }
-
-    /// P0-Issue1: Helper method to extract container ID from command result
-    fn extract_container_id_from_command_result(
-        &self,
-        command: &str,
-        stderr: &str,
-    ) -> Option<String> {
-        // Look for Docker command and extract container ID
-        if command.starts_with("docker run") {
-            use regex::Regex;
-            if let Ok(re) = Regex::new(r"[a-f0-9]{64}") {
-                if let Some(caps) = re.find(stderr) {
-                    return Some(caps.as_str().to_string());
-                }
-            }
-        }
-        None
     }
 
     /// Evaluate multiple candidates in parallel
@@ -312,18 +294,18 @@ impl AttemptPool {
 
         // If there is a passing candidate, ensure it's not just the highest confidence
         // that failed validation (this would indicate a bug)
-        if let Some(highest) = highest_confidence {
-            if let Some(passing) = best_passing {
-                // The passing candidate should either be the highest confidence that passed
-                // or a lower confidence candidate that passed while higher ones failed
-                let highest_passed = highest
-                    .validation_result
-                    .as_ref()
-                    .map(|v| v.passed())
-                    .unwrap_or(false);
-                return highest_passed
-                    || (passing.candidate.confidence.score <= highest.candidate.confidence.score);
-            }
+        if let Some(highest) = highest_confidence
+            && let Some(passing) = best_passing
+        {
+            // The passing candidate should either be the highest confidence that passed
+            // or a lower confidence candidate that passed while higher ones failed
+            let highest_passed = highest
+                .validation_result
+                .as_ref()
+                .map(|v| v.passed())
+                .unwrap_or(false);
+            return highest_passed
+                || (passing.candidate.confidence.score <= highest.candidate.confidence.score);
         }
 
         false
@@ -395,7 +377,7 @@ async fn evaluate_single_candidate(
         .cloned()
         .unwrap_or_else(|| SandboxPolicy::from_mode(mode));
     let sandbox_runtime =
-        match crate::harness::sandbox::SandboxRuntimeFactory::create_with_policy(&effective_policy)
+        match crate::harness::sandbox::SandboxRuntimeFactory::create_withpolicy(&effective_policy)
             .await
         {
             Ok(runtime) => runtime,
@@ -588,7 +570,7 @@ async fn compute_real_workspace_diff(
         // git diff --no-index returns exit code 1 when differences are found
         // but still provides valid diff output
         if output.status.code() == Some(1) {
-            return Ok(String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")?);
+            return String::from_utf8(output.stdout).context("Diff output is not valid UTF-8");
         } else {
             let stderr =
                 String::from_utf8(output.stderr).unwrap_or_else(|_| "Invalid UTF-8".to_string());
@@ -596,7 +578,7 @@ async fn compute_real_workspace_diff(
         }
     }
 
-    Ok(String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")?)
+    String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")
 }
 
 /// Generate diff from edits for review (fallback only)
@@ -668,6 +650,6 @@ mod tests {
         };
 
         let score = compute_attempt_score(&record);
-        assert!(score >= 0.0 && score <= 1.0);
+        assert!((0.0..=1.0).contains(&score));
     }
 }

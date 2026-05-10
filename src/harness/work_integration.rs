@@ -12,11 +12,12 @@ use crate::work::{
     artifact::{Artifact, ArtifactKind},
     service::WorkContextService,
     types::{
-        HarnessMetadata, HarnessQualityMetrics, HarnessTraceSummary, TokenUsageSummary, WorkPhase,
-        WorkStatus,
+        HarnessMetadata, HarnessQualityMetrics, HarnessRunMetricsRecord, HarnessTraceSummary,
+        TokenUsageSummary, WorkPhase, WorkStatus,
     },
 };
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::{path::PathBuf, sync::Arc};
 
 /// P0-FIX: Extract mentioned files and symbols from task text
@@ -192,12 +193,7 @@ impl HarnessWorkContextService {
         let critical_issue_count = result
             .review_issues
             .iter()
-            .filter(|i| {
-                matches!(
-                    i.severity,
-                    crate::harness::review::ReviewSeverity::Critical
-                )
-            })
+            .filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Critical))
             .count() as u32;
         ctx.metadata = serde_json::json!({"harness":serde_json::to_value(&result)?});
         ctx.set_harness_metadata(HarnessMetadata {
@@ -238,6 +234,46 @@ impl HarnessWorkContextService {
                 },
             }),
         });
+        self.work_context_service
+            .upsert_harness_run_metrics(&HarnessRunMetricsRecord {
+                work_context_id: ctx.id.clone(),
+                run_id: result.trajectory.id.clone(),
+                trace_summary: HarnessTraceSummary {
+                    run_id: result.trajectory.id.clone(),
+                    duration_ms: stats.total_duration_ms,
+                    node_count: stats.total_steps as u32,
+                    tool_count: stats.total_tool_calls as u32,
+                    error_count: stats.total_errors as u32,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: stats.total_tokens,
+                    estimated_cost_cents: (result.execution_metrics.cost_estimate_usd * 100.0)
+                        as u32,
+                },
+                token_usage: TokenUsageSummary {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: result.execution_metrics.tokens_used,
+                    estimated_cost_cents: (result.execution_metrics.cost_estimate_usd * 100.0)
+                        as u32,
+                },
+                quality_metrics: HarnessQualityMetrics {
+                    review_issue_count: result.review_issues.len() as u32,
+                    critical_issue_count,
+                    rejection_rate: if total_failures > 0.0 {
+                        rejection_failures / total_failures
+                    } else {
+                        0.0
+                    },
+                    hallucination_risk_rate: if total_failures > 0.0 {
+                        hallucination_failures / total_failures
+                    } else {
+                        0.0
+                    },
+                },
+                trajectory: serde_json::to_value(&result.trajectory)?,
+                created_at: Utc::now(),
+            })?;
 
         // P0-HARNESS-009: Persist EvidenceLog with explicit persistence contract
         let evidence_dir = std::env::current_dir()?.join("evidence");

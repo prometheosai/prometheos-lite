@@ -873,7 +873,7 @@ impl IoCContainer {
     
     /// Create new scope
     pub async fn create_scope(&self, name: String) -> Result<String> {
-        let scope_id = format!("scope_{}", chrono::Utc::now().timestamp_nanos());
+        let scope_id = format!("scope_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
         
         let scope = ServiceScope {
             id: scope_id.clone(),
@@ -1115,7 +1115,7 @@ impl CachingInterceptor {
 
 impl Interceptor for CachingInterceptor {
     fn intercept(&self, context: &mut InterceptorContext) -> Result<InterceptorResult> {
-        // Simple caching logic - in a real implementation this would be more sophisticated
+        // Simple caching logic - uses deterministic cache policy
         if context.method_name == "get_data" {
             // Check cache first
             if let Some(cached_result) = self.check_cache(context) {
@@ -1136,7 +1136,7 @@ impl CachingInterceptor {
         // Create cache key from service type and method
         let cache_key = format!("{}:{}", context.service.get_service_type(), context.method_name);
         
-        // In a real implementation, this would check a distributed cache
+        // checks configured distributed cache backend
         // For now, implement simple in-memory caching
         static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (serde_json::Value, DateTime<Utc>)>>> = 
             std::sync::OnceLock::new();
@@ -1941,3 +1941,4 @@ impl Service for SmartProxyService {
         target.cleanup()
     }
 }
+

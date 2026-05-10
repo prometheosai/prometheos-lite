@@ -120,6 +120,12 @@ pub struct PathMatch {
     pub reason: String,
 }
 
+impl Default for GoldenPathRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GoldenPathRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
@@ -505,10 +511,10 @@ impl GoldenPathRegistry {
 
         for path in self.paths.values() {
             // Check category filter
-            if let Some(cat) = category {
-                if path.category != cat {
-                    continue;
-                }
+            if let Some(cat) = category
+                && path.category != cat
+            {
+                continue;
             }
 
             // Calculate match score

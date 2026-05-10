@@ -175,16 +175,14 @@ pub fn classify_patch_failure(failure: &PatchFailure) -> FailureKind {
         }
     }
 
-    if operation_lower.contains("create") {
-        if reason_lower.contains("exists") {
-            return FailureKind::PatchApplyFailure;
-        }
+    if operation_lower.contains("create") && reason_lower.contains("exists") {
+        return FailureKind::PatchApplyFailure;
     }
 
-    if operation_lower.contains("delete") || operation_lower.contains("rename") {
-        if reason_lower.contains("not exist") || reason_lower.contains("cannot find") {
-            return FailureKind::PatchApplyFailure;
-        }
+    if (operation_lower.contains("delete") || operation_lower.contains("rename"))
+        && (reason_lower.contains("not exist") || reason_lower.contains("cannot find"))
+    {
+        return FailureKind::PatchApplyFailure;
     }
 
     if reason_lower.contains("denied") || reason_lower.contains("permission") {

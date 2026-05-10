@@ -5,10 +5,10 @@ pub mod attempt_pool;
 pub mod benchmark;
 pub mod ci_enforcement;
 pub mod compiler_diagnostics;
-pub mod contract;
 pub mod completion;
 pub mod confidence;
 pub mod context_budget;
+pub mod contract;
 pub mod edit_protocol;
 pub mod environment;
 pub mod evidence;
@@ -76,11 +76,11 @@ pub use completion::{
     SemanticEvidence, ValidationEvidence, VerificationEvidence, create_evidence_from_components,
     evaluate_completion, format_completion_decision,
 };
-pub use contract::{HarnessRequest, HarnessResult, WorkContextBudget};
 pub use confidence::{
     ConfidenceCalibrator, ConfidenceClassification, ConfidenceFactor, ConfidenceScore,
     ConfidenceWeights, FactorImpact, compute_confidence,
 };
+pub use contract::{HarnessRequest, HarnessResult, WorkContextBudget};
 pub use edit_protocol::*;
 pub use environment::*;
 pub use evidence::*;

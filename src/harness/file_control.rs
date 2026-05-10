@@ -140,7 +140,7 @@ impl FilePolicy {
 
 #[derive(Debug, Clone)]
 struct FileClassification {
-    path: PathBuf,
+    _path: PathBuf,
     is_binary: bool,
     is_sensitive: bool,
     is_generated: bool,
@@ -167,10 +167,10 @@ pub fn build_file_set(
 
     for mentioned in mentioned_files {
         let full_path = normalize_path(&policy.repo_root, mentioned)?;
-        if !classifications.contains_key(&full_path) {
-            if let Ok(classification) = classify_file(&full_path, &mut gitignore, policy) {
-                classifications.insert(full_path.clone(), classification);
-            }
+        if !classifications.contains_key(&full_path)
+            && let Ok(classification) = classify_file(&full_path, &mut gitignore, policy)
+        {
+            classifications.insert(full_path.clone(), classification);
         }
     }
 
@@ -228,7 +228,7 @@ fn classify_file(
     };
 
     Ok(FileClassification {
-        path: path.to_path_buf(),
+        _path: path.to_path_buf(),
         is_binary,
         is_sensitive,
         is_generated,
@@ -283,12 +283,11 @@ fn build_gitignore(repo_root: &Path) -> Result<Option<ignore::gitignore::Gitigno
     }
 
     let global_gitignore = dirs::home_dir().map(|h| h.join(".gitignore_global"));
-    if let Some(ref global) = global_gitignore {
-        if global.exists() {
-            if let Some(e) = builder.add(global) {
-                eprintln!("Warning: Failed to parse global .gitignore: {}", e);
-            }
-        }
+    if let Some(ref global) = global_gitignore
+        && global.exists()
+        && let Some(e) = builder.add(global)
+    {
+        eprintln!("Warning: Failed to parse global .gitignore: {}", e);
     }
 
     Ok(Some(builder.build()?))
@@ -354,10 +353,10 @@ fn is_binary_file(path: &Path) -> Result<bool> {
     .cloned()
     .collect();
 
-    if let Some(ref ext) = extension {
-        if text_extensions.contains(ext.as_str()) {
-            return Ok(false);
-        }
+    if let Some(ref ext) = extension
+        && text_extensions.contains(ext.as_str())
+    {
+        return Ok(false);
     }
 
     let binary_extensions: HashSet<&str> = [
@@ -371,10 +370,10 @@ fn is_binary_file(path: &Path) -> Result<bool> {
     .cloned()
     .collect();
 
-    if let Some(ref ext) = extension {
-        if binary_extensions.contains(ext.as_str()) {
-            return Ok(true);
-        }
+    if let Some(ref ext) = extension
+        && binary_extensions.contains(ext.as_str())
+    {
+        return Ok(true);
     }
 
     let mut file = fs::File::open(path)
@@ -538,8 +537,7 @@ fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
-    if pattern.ends_with('/') {
-        let dir_pattern = &pattern[..pattern.len() - 1];
+    if let Some(dir_pattern) = pattern.strip_suffix('/') {
         return text.contains(&format!("{}/", dir_pattern)) || text.ends_with(dir_pattern);
     }
 
@@ -548,13 +546,11 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         return text.contains(middle);
     }
 
-    if pattern.starts_with("*") {
-        let suffix = &pattern[1..];
+    if let Some(suffix) = pattern.strip_prefix("*") {
         return text.ends_with(suffix);
     }
 
-    if pattern.ends_with("*") {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix("*") {
         return text.starts_with(prefix);
     }
 
@@ -712,10 +708,6 @@ pub fn resolve_repo_path(root: &Path, rel_path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-#[deprecated(
-    since = "1.6.0",
-    note = "Use validate_repo_relative_path and resolve_repo_path instead"
-)]
 pub(crate) fn normalize_path(root: &Path, path: &Path) -> Result<PathBuf> {
     // Legacy behavior preserved for backward compatibility during transition
     // This will be removed in v2.0

@@ -1618,7 +1618,7 @@ impl MultiTenantManager {
     
     /// Generate tenant ID
     fn generate_tenant_id(&self, name: &str) -> String {
-        format!("tenant_{}", chrono::Utc::now().timestamp_nanos())
+        format!("tenant_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0))
     }
     
     /// Discover existing tenants

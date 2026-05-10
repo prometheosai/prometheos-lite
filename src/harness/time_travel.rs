@@ -115,6 +115,12 @@ pub struct VariableChange {
     pub scope: String,
 }
 
+impl Default for TimeTravelDebugger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeTravelDebugger {
     pub fn new() -> Self {
         Self {
@@ -264,7 +270,7 @@ impl TimeTravelDebugger {
         }
 
         let start_index = session.current_index;
-        drop(session); // Release borrow
+        let _ = session; // Release borrow
 
         for i in (start_index + 1)..self.sessions.get(session_id).unwrap().checkpoints.len() {
             // Check if any breakpoint condition matches

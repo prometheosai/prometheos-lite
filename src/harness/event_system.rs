@@ -1476,7 +1476,7 @@ impl SagaManager {
     }
     
     pub async fn create_saga(&self, saga_type: String, steps: Vec<SagaStep>) -> Result<String> {
-        let saga_id = format!("saga_{}", chrono::Utc::now().timestamp_nanos());
+        let saga_id = format!("saga_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
         
         let context = SagaContext {
             saga_id: saga_id.clone(),

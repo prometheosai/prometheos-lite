@@ -169,12 +169,11 @@ impl FileImpactScore {
                     crate::harness::repo_intelligence::SymbolKind::Function
                     | crate::harness::repo_intelligence::SymbolKind::Struct
                     | crate::harness::repo_intelligence::SymbolKind::Enum
-                    | crate::harness::repo_intelligence::SymbolKind::Trait => {
+                    | crate::harness::repo_intelligence::SymbolKind::Trait
                         if symbol.visibility
-                            == crate::harness::repo_intelligence::Visibility::Public
-                        {
-                            critical_symbols.push(symbol.name.clone());
-                        }
+                            == crate::harness::repo_intelligence::Visibility::Public =>
+                    {
+                        critical_symbols.push(symbol.name.clone());
                     }
                     _ => {}
                 }
@@ -287,7 +286,7 @@ impl FileImpactScore {
             score -= 0.2;
         }
 
-        score = score.max(0.0).min(1.0);
+        score = score.clamp(0.0, 1.0);
 
         Ok(ImportGraphImpact {
             score,
@@ -333,10 +332,8 @@ impl FileImpactScore {
         }
 
         // Check if test depends on production code
-        if is_test_file {
-            if let Ok(re) = Regex::new(r"use\s+crate::") {
-                production_code_dep = re.is_match(&file_content);
-            }
+        if is_test_file && let Ok(re) = Regex::new(r"use\s+crate::") {
+            production_code_dep = re.is_match(&file_content);
         }
 
         // Estimate test coverage (simplified)
@@ -397,9 +394,9 @@ impl FileImpactScore {
 
         let mut public_api_changes = 0;
         let mut breaking_changes = 0;
-        let mut semver_impact = SemverImpact::None;
+        let semver_impact;
         let mut api_stability = ApiStability::Stable;
-        let mut consumer_impact = ConsumerImpact::None;
+        let consumer_impact;
 
         // Count public API items
         use regex::Regex;
@@ -596,10 +593,8 @@ impl FileImpactScore {
 
         // Check if this file is both imported and exports to the same modules
         for relationship in &repo_context.relationships {
-            if relationship.file == file_path {
-                if relationship.from == relationship.to {
-                    return true;
-                }
+            if relationship.file == file_path && relationship.from == relationship.to {
+                return true;
             }
         }
 
