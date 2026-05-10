@@ -11,7 +11,7 @@ use crate::harness::{
 use crate::work::{
     artifact::{Artifact, ArtifactKind},
     service::WorkContextService,
-    types::{WorkPhase, WorkStatus},
+    types::{HarnessMetadata, TokenUsageSummary, WorkPhase, WorkStatus},
 };
 use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::Arc};
@@ -161,6 +161,19 @@ impl HarnessWorkContextService {
 
         let result = execute_harness_task(req).await?;
         ctx.metadata = serde_json::json!({"harness":serde_json::to_value(&result)?});
+        ctx.set_harness_metadata(HarnessMetadata {
+            latest_run_id: Some(result.trajectory.id.clone()),
+            evidence_log_id: Some(result.evidence_log.execution_id.clone()),
+            completion_decision: Some(result.completion_decision.clone()),
+            risk_level: Some(result.risk_assessment.level),
+            verification_strength: Some(result.verification_strength),
+            token_usage: Some(TokenUsageSummary {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: result.execution_metrics.tokens_used,
+                estimated_cost_cents: (result.execution_metrics.cost_estimate_usd * 100.0) as u32,
+            }),
+        });
 
         // P0-HARNESS-009: Persist EvidenceLog with explicit persistence contract
         let evidence_dir = std::env::current_dir()?.join("evidence");

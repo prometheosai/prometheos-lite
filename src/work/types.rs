@@ -4,6 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{artifact::Artifact, decision::DecisionRecord, plan::ExecutionPlan};
+use crate::harness::completion::CompletionDecision;
+use crate::harness::risk::RiskLevel;
+use crate::harness::verification::VerificationStrength;
 
 /// ExecutionRecord - metadata for individual execution steps
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +138,24 @@ pub struct WorkContext {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsageSummary {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_cents: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HarnessMetadata {
+    pub latest_run_id: Option<String>,
+    pub evidence_log_id: Option<String>,
+    pub completion_decision: Option<CompletionDecision>,
+    pub risk_level: Option<RiskLevel>,
+    pub verification_strength: Option<VerificationStrength>,
+    pub token_usage: Option<TokenUsageSummary>,
+}
+
 impl WorkContext {
     /// Create a new WorkContext with minimal required fields
     pub fn new(
@@ -211,10 +232,32 @@ impl WorkContext {
     pub fn is_completion_satisfied(&self) -> bool {
         self.completion_criteria.iter().all(|c| c.satisfied)
     }
+
+    pub fn harness_metadata(&self) -> Option<HarnessMetadata> {
+        self.metadata
+            .get("harness_metadata")
+            .and_then(|v| serde_json::from_value::<HarnessMetadata>(v.clone()).ok())
+    }
+
+    pub fn set_harness_metadata(&mut self, metadata: HarnessMetadata) {
+        let mut root = self.metadata.clone();
+        if !root.is_object() {
+            root = serde_json::json!({});
+        }
+        if let Some(obj) = root.as_object_mut() {
+            obj.insert(
+                "harness_metadata".to_string(),
+                serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        self.metadata = root;
+        self.touch();
+    }
 }
 
 /// WorkDomain - the domain of work
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum WorkDomain {
     Software,
     Business,
@@ -223,19 +266,17 @@ pub enum WorkDomain {
     Creative,
     Research,
     Operations,
+    #[default]
     General,
     Custom(String),
 }
 
-impl Default for WorkDomain {
-    fn default() -> Self {
-        WorkDomain::General
-    }
-}
 
 /// WorkStatus - the status of a WorkContext
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum WorkStatus {
+    #[default]
     Draft,
     Planning,
     AwaitingApproval,
@@ -246,15 +287,12 @@ pub enum WorkStatus {
     Archived,
 }
 
-impl Default for WorkStatus {
-    fn default() -> Self {
-        WorkStatus::Draft
-    }
-}
 
 /// WorkPhase - the current phase of work
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum WorkPhase {
+    #[default]
     Intake,
     Planning,
     Execution,
@@ -263,29 +301,23 @@ pub enum WorkPhase {
     Finalization,
 }
 
-impl Default for WorkPhase {
-    fn default() -> Self {
-        WorkPhase::Intake
-    }
-}
 
 /// AutonomyLevel - the autonomy level for execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum AutonomyLevel {
+    #[default]
     Chat,
     Review,
     Autonomous,
 }
 
-impl Default for AutonomyLevel {
-    fn default() -> Self {
-        AutonomyLevel::Chat
-    }
-}
 
 /// ApprovalPolicy - when approval is required
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ApprovalPolicy {
+    #[default]
     Auto,
     RequireForTools,
     RequireForSideEffects,
@@ -293,26 +325,18 @@ pub enum ApprovalPolicy {
     ManualAll,
 }
 
-impl Default for ApprovalPolicy {
-    fn default() -> Self {
-        ApprovalPolicy::Auto
-    }
-}
 
 /// WorkPriority - priority level for work
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum WorkPriority {
     Low,
+    #[default]
     Medium,
     High,
     Urgent,
 }
 
-impl Default for WorkPriority {
-    fn default() -> Self {
-        WorkPriority::Medium
-    }
-}
 
 /// CompletionCriterion - a criterion for work completion
 #[derive(Debug, Clone, Serialize, Deserialize)]

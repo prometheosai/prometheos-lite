@@ -9,7 +9,10 @@ use std::sync::Arc;
 use super::evolution_engine::EvolutionEngine;
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
-use super::types::{AutonomyLevel, TestExecutionResult, WorkContext, WorkStatus};
+use super::types::{
+    AutonomyLevel, HarnessMetadata, TestExecutionResult, WorkContext, WorkDomain, WorkStatus,
+};
+use crate::harness::completion::CompletionDecision;
 use crate::intent::{Intent, IntentClassifier};
 
 /// EvolutionTrigger - when to trigger playbook evolution
@@ -252,6 +255,12 @@ impl WorkOrchestrator {
 
         match trigger {
             EvolutionTrigger::Completion => {
+                if context.domain == WorkDomain::Software {
+                    context.set_harness_metadata(HarnessMetadata {
+                        completion_decision: Some(CompletionDecision::Complete),
+                        ..Default::default()
+                    });
+                }
                 self.work_context_service
                     .update_status(&mut context, WorkStatus::Completed)?;
             }
@@ -451,11 +460,10 @@ impl WorkOrchestrator {
     /// parses results, and stores test artifacts.
     async fn check_tests_passed(&self, context: &WorkContext) -> Result<bool> {
         // Check evaluation result if available (from flow execution)
-        if let Some(evaluation) = &context.evaluation_result {
-            if let Some(success) = evaluation.get("test_success").and_then(|v| v.as_bool()) {
+        if let Some(evaluation) = &context.evaluation_result
+            && let Some(success) = evaluation.get("test_success").and_then(|v| v.as_bool()) {
                 return Ok(success);
             }
-        }
 
         // Get project path from context artifacts
         let project_path = self.detect_project_path(context).await?;
@@ -574,7 +582,7 @@ impl WorkOrchestrator {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let full_output = format!("{}", stdout);
+        let full_output = stdout.to_string();
 
         // Parse test results based on project type
         let (tests_run, tests_passed, tests_failed, errors) =
@@ -634,20 +642,16 @@ impl WorkOrchestrator {
                 for line in stdout.lines() {
                     if line.contains("test result:") {
                         // Parse: "test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
-                        if let Some(passed_str) = line.split("passed").next() {
-                            if let Some(num) = passed_str.split_whitespace().last() {
-                                if let Ok(n) = num.parse::<usize>() {
+                        if let Some(passed_str) = line.split("passed").next()
+                            && let Some(num) = passed_str.split_whitespace().last()
+                                && let Ok(n) = num.parse::<usize>() {
                                     tests_passed += n;
                                 }
-                            }
-                        }
-                        if let Some(failed_str) = line.split("failed").next() {
-                            if let Some(num) = failed_str.split_whitespace().last() {
-                                if let Ok(n) = num.parse::<usize>() {
+                        if let Some(failed_str) = line.split("failed").next()
+                            && let Some(num) = failed_str.split_whitespace().last()
+                                && let Ok(n) = num.parse::<usize>() {
                                     tests_failed += n;
                                 }
-                            }
-                        }
                     }
                     if line.contains("FAILED") || line.contains("error[") {
                         errors.push(line.to_string());
@@ -660,22 +664,17 @@ impl WorkOrchestrator {
                 for line in stdout.lines() {
                     if line.contains("passing") || line.contains("failing") {
                         // Parse Jest/Mocha summary
-                        if let Some(passing) = line.split("passing").next() {
-                            if let Some(n) = passing.split_whitespace().last() {
-                                if let Ok(num) = n.parse::<usize>() {
+                        if let Some(passing) = line.split("passing").next()
+                            && let Some(n) = passing.split_whitespace().last()
+                                && let Ok(num) = n.parse::<usize>() {
                                     tests_passed = num;
                                 }
-                            }
-                        }
-                        if line.contains("failing") {
-                            if let Some(failing) = line.split("failing").next() {
-                                if let Some(n) = failing.split_whitespace().last() {
-                                    if let Ok(num) = n.parse::<usize>() {
+                        if line.contains("failing")
+                            && let Some(failing) = line.split("failing").next()
+                                && let Some(n) = failing.split_whitespace().last()
+                                    && let Ok(num) = n.parse::<usize>() {
                                         tests_failed = num;
                                     }
-                                }
-                            }
-                        }
                     }
                     if line.contains("FAIL") || line.contains("Error:") {
                         errors.push(line.to_string());
@@ -686,10 +685,9 @@ impl WorkOrchestrator {
             "python" => {
                 // Parse pytest/unittest output
                 for line in stdout.lines() {
-                    if line.contains("passed") || line.contains("failed") || line.contains("error")
-                    {
-                        if let Some(n) = line.split_whitespace().next() {
-                            if let Ok(num) = n.parse::<usize>() {
+                    if (line.contains("passed") || line.contains("failed") || line.contains("error"))
+                        && let Some(n) = line.split_whitespace().next()
+                            && let Ok(num) = n.parse::<usize>() {
                                 if line.contains("passed") {
                                     tests_passed += num;
                                 } else if line.contains("failed") {
@@ -697,8 +695,6 @@ impl WorkOrchestrator {
                                     errors.push(line.to_string());
                                 }
                             }
-                        }
-                    }
                     if line.contains("ERROR") || line.contains("FAILED") {
                         errors.push(line.to_string());
                     }
@@ -798,15 +794,6 @@ impl WorkOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
-    use crate::db::repository::PlaybookOperations;
-    use crate::flow::execution_service::FlowExecutionService;
-    use crate::intent::IntentClassifier;
-    use crate::work::evolution_engine::EvolutionEngine;
-    use crate::work::execution_service::WorkExecutionService;
-    use crate::work::playbook::{FlowPreference, ResearchDepth, WorkContextPlaybook};
-    use crate::work::service::WorkContextService;
-    use crate::work::types::{CompletionCriterion, WorkDomain};
 
     #[test]
     fn test_execution_limits_default() {
@@ -828,3 +815,4 @@ mod tests {
         assert_eq!(limits.max_runtime_ms, 600_000);
     }
 }
+

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::context::ContextBuilder;
 use crate::flow::{MemoryService, ModelRouter, Node, NodeConfig, ToolRuntime};
+use crate::flow::factory::{NodeRegistry, register_builtin_nodes, register_harness_nodes};
 
 /// NodeFactory trait - creates concrete nodes based on node_type
 pub trait NodeFactory: Send + Sync {
@@ -19,16 +20,21 @@ pub struct DefaultNodeFactory {
     memory_service: Option<std::sync::Arc<MemoryService>>,
     context_builder: Option<ContextBuilder>,
     repo_path: Option<std::path::PathBuf>,
+    registry: NodeRegistry,
 }
 
 impl DefaultNodeFactory {
     pub fn new() -> Self {
+        let mut registry = NodeRegistry::new();
+        register_builtin_nodes(&mut registry);
+        register_harness_nodes(&mut registry);
         Self {
             model_router: None,
             tool_runtime: None,
             memory_service: None,
             context_builder: None,
             repo_path: None,
+            registry,
         }
     }
 
@@ -55,6 +61,12 @@ impl DefaultNodeFactory {
             memory_service: runtime.memory_service,
             context_builder,
             repo_path: None,
+            registry: {
+                let mut r = NodeRegistry::new();
+                register_builtin_nodes(&mut r);
+                register_harness_nodes(&mut r);
+                r
+            },
         }
     }
 
@@ -75,6 +87,12 @@ impl DefaultNodeFactory {
             memory_service: runtime.memory_service,
             context_builder,
             repo_path: Some(repo_path),
+            registry: {
+                let mut r = NodeRegistry::new();
+                register_builtin_nodes(&mut r);
+                register_harness_nodes(&mut r);
+                r
+            },
         }
     }
 
@@ -113,16 +131,14 @@ impl DefaultNodeFactory {
             Ok(NodeConfig::default())
         }
     }
-}
 
-impl NodeFactory for DefaultNodeFactory {
-    fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
-        let node_config = Self::parse_config(&config)?;
-        let context_builder = self
-            .context_builder
-            .clone()
-            .unwrap_or_else(ContextBuilder::default);
-
+    fn create_known_node(
+        &self,
+        node_type: &str,
+        node_config: NodeConfig,
+        config: Option<serde_json::Value>,
+        context_builder: ContextBuilder,
+    ) -> Result<Arc<dyn Node>> {
         match node_type {
             "planner" => Ok(Arc::new(super::builtin_nodes::PlannerNode::new(
                 node_config,
@@ -169,7 +185,6 @@ impl NodeFactory for DefaultNodeFactory {
             "passthrough" => Ok(Arc::new(super::builtin_nodes::PassthroughNode::new(
                 node_config,
             ))),
-            // V1.5.2: AST-based coding harness nodes
             "code_analysis" => {
                 let repo_path = self
                     .repo_path
@@ -200,13 +215,25 @@ impl NodeFactory for DefaultNodeFactory {
                     repo_path,
                 )))
             }
-            _ => {
-                anyhow::bail!(
-                    "Unknown node type '{}'. Valid types: planner, coder, reviewer, terminal, llm, tool, file_writer, context_loader, memory_write, conditional, passthrough, code_analysis, symbol_resolution, dependency_analysis",
-                    node_type
-                )
-            }
+            _ => anyhow::bail!("Unknown canonical node type '{}'", node_type),
         }
+    }
+}
+
+impl NodeFactory for DefaultNodeFactory {
+    fn create(&self, node_type: &str, config: Option<serde_json::Value>) -> Result<Arc<dyn Node>> {
+        let node_config = Self::parse_config(&config)?;
+        let context_builder = self
+            .context_builder
+            .clone()
+            .unwrap_or_default();
+        let resolved = self.registry.resolve(node_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown node type '{}'. NodeRegistry has no registration for this type.",
+                node_type
+            )
+        })?;
+        self.create_known_node(resolved, node_config, config, context_builder)
     }
 }
 

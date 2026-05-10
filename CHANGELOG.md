@@ -1,3 +1,43 @@
+## V1.6.1 Strict Alignment - Batch A/B + CI Coherence Spine
+
+- Added canonical harness contract types in `src/harness/contract.rs`:
+  - `HarnessRequest`
+  - `HarnessResult`
+  - `WorkContextBudget`
+- Added typed WorkContext harness metadata model in `src/work/types.rs`:
+  - `HarnessMetadata`
+  - `TokenUsageSummary`
+  - `WorkContext::harness_metadata()` and `WorkContext::set_harness_metadata()`
+- Wired harness result metadata persistence in `src/harness/work_integration.rs` so runs consistently persist:
+  - latest run/evidence IDs
+  - completion decision
+  - risk level
+  - verification strength
+  - token usage summary
+- Enforced strict software lifecycle gates in `WorkContextService`:
+  - software `Execution -> Review` requires patch + validation evidence
+  - software `Review -> Finalization` requires review + risk evidence
+  - software `Completed` status requires `CompletionDecision::Complete` evidence
+  - invalid phase transitions are rejected centrally
+- Added NodeRegistry-based node resolution and registration modules:
+  - `src/flow/factory/registry.rs`
+  - `src/flow/factory/register_builtin.rs`
+  - `src/flow/factory/register_harness.rs`
+  - `DefaultNodeFactory` now resolves all node types via `NodeRegistry`, including `harness.*` aliases, and returns strict unknown-node errors from registry lookup.
+- Added compatibility bridge in `WorkExecutionService` for legacy software flow execution path:
+  - successful legacy execution emits explicit transition evidence needed by strict software gates
+  - orchestrator completion path stamps software completion decision evidence before setting `Completed`
+- Fixed CI anti-placeholder coherence in `.github/workflows/ci.yml`:
+  - detector vocabulary files excluded from blunt pattern grep checks
+  - runtime stub/placeholder checks remain strict for production paths
+
+### Validation Notes
+
+- `RUSTFLAGS='-D warnings' cargo check --all-targets --all-features` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` passes.
+- `cargo test --quiet` passes end-to-end.
+
 ## V1.6 Strict Audit Completion - Production Hygiene Sweep (No Stub/Placeholder Runtime Paths)
 
 - Executed a full compiler-driven production hygiene pass with `cargo fix --allow-dirty --allow-staged` across harness, flow, CLI, tooling, DB, context, queue, and work modules.

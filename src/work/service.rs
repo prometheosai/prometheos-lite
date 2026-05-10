@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::{
     CompletionCriterion,
     event::WorkContextEvent,
-    types::{WorkContext, WorkPhase, WorkStatus},
+    types::{WorkContext, WorkDomain, WorkPhase, WorkStatus},
 };
 use crate::db::Db;
 use crate::db::repository::work_artifacts::WorkArtifactOperations;
@@ -113,6 +113,19 @@ impl WorkContextService {
 
     /// Update the status of a WorkContext
     pub fn update_status(&self, context: &mut WorkContext, status: WorkStatus) -> Result<()> {
+        if context.domain == WorkDomain::Software && status == WorkStatus::Completed {
+            let completion_ok = context
+                .harness_metadata()
+                .and_then(|m| m.completion_decision)
+                .map(|d| matches!(d, crate::harness::completion::CompletionDecision::Complete))
+                .unwrap_or(false);
+            if !completion_ok {
+                anyhow::bail!(
+                    "Software WorkContext cannot be Completed without CompletionDecision::Complete evidence"
+                );
+            }
+        }
+
         let old_status = context.status;
         context.status = status;
         context.touch();
@@ -132,6 +145,63 @@ impl WorkContextService {
 
     /// Update the phase of a WorkContext
     pub fn update_phase(&self, context: &mut WorkContext, phase: WorkPhase) -> Result<()> {
+        if !crate::work::PhaseController::can_transition(context.current_phase, phase)
+            && context.current_phase != phase
+        {
+            anyhow::bail!(
+                "Invalid phase transition: {:?} -> {:?}",
+                context.current_phase,
+                phase
+            );
+        }
+
+        if context.domain == WorkDomain::Software {
+            let meta = context.harness_metadata().unwrap_or_default();
+            match (context.current_phase, phase) {
+                (WorkPhase::Execution, WorkPhase::Review) => {
+                    let has_patch = !context.artifacts.is_empty()
+                        || context
+                            .metadata
+                            .get("harness")
+                            .and_then(|h| h.get("patch_result"))
+                            .map(|v| !v.is_null())
+                            .unwrap_or(false);
+                    let validation_ok = context
+                        .metadata
+                        .get("harness")
+                        .and_then(|h| h.get("validation_result"))
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                    if !has_patch || !validation_ok {
+                        anyhow::bail!(
+                            "Software Execution -> Review requires patch evidence and validation evidence"
+                        );
+                    }
+                }
+                (WorkPhase::Review, WorkPhase::Finalization) => {
+                    let review_present = context
+                        .metadata
+                        .get("harness")
+                        .and_then(|h| h.get("review_issues"))
+                        .map(|v| v.is_array())
+                        .unwrap_or(false);
+                    let risk_present = meta.risk_level.is_some()
+                        || context
+                            .metadata
+                            .get("harness")
+                            .and_then(|h| h.get("risk_assessment"))
+                            .map(|v| !v.is_null())
+                            .unwrap_or(false);
+                    if !review_present || !risk_present {
+                        anyhow::bail!(
+                            "Software Review -> Finalization requires review and risk evidence"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let old_phase = context.current_phase;
         context.current_phase = phase;
         context.touch();
@@ -259,11 +329,10 @@ impl WorkContextService {
         }
 
         // Priority 2: Active context for conversation
-        if let Some(conv_id) = conversation_id {
-            if let Some(context) = self.get_active_context_for_conversation(conv_id)? {
+        if let Some(conv_id) = conversation_id
+            && let Some(context) = self.get_active_context_for_conversation(conv_id)? {
                 return Ok(Some(context));
             }
-        }
 
         // Priority 3: Create new context (caller's responsibility)
         Ok(None)

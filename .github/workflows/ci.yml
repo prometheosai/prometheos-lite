@@ -50,13 +50,15 @@ jobs:
 
       - name: Anti-Placeholder Check
         run: |
-          # P0-Audit-007: Block TODO/FIXME/mock leakage in production code
-          echo "Checking for placeholder patterns in production code..."
-          
-          # Check for forbidden patterns outside tests/docs
-          if grep -r -E "TODO|FIXME|mock|placeholder|stub|unimplemented!|todo!|panic!.*TODO" src/ --exclude-dir=target; then
-            echo "::error::Found placeholder patterns in production code"
-            echo "CI should fail on TODO/FIXME/mock outside tests/docs"
+          # V1.6.1: Block runtime placeholder leakage while excluding detector vocabulary modules
+          echo "Checking for placeholder patterns in runtime production code..."
+
+          # Detector modules intentionally contain pattern vocabulary and must be excluded.
+          EXCLUDES="--exclude=ci_enforcement.rs --exclude=review.rs --exclude=reproduction.rs"
+          if grep -r -E "TODO|FIXME|mock|placeholder|stub|unimplemented!|todo!|panic!.*TODO" \
+            src/ --exclude-dir=target --include="*.rs" $EXCLUDES | head -20; then
+            echo "::error::Found placeholder patterns in runtime production code"
+            echo "Detector/review modules are excluded; all other runtime paths are strict."
             exit 1
           fi
           
@@ -85,7 +87,7 @@ jobs:
           echo "Checking for stubs in production code..."
 
           # Check for unimplemented!() and todo!() macros in src/ (excluding tests)
-          if grep -rn "unimplemented!\|todo!" src/ --include="*.rs" | grep -v "//.*unimplemented\|//.*todo\|review.rs.*todo!" | head -20; then
+          if grep -rn "unimplemented!\|todo!" src/ --include="*.rs" | grep -v "//.*unimplemented\|//.*todo\|review.rs.*todo!\|ci_enforcement.rs\|reproduction.rs" | head -20; then
             echo "ERROR: Found unimplemented!() or todo!() macros in production code."
             echo "These must be resolved before merging to main."
             exit 1
