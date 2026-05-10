@@ -26,7 +26,7 @@ pub struct SymbolRelevanceScore {
     pub symbols_mentioned: Vec<String>,
     pub symbols_defined: Vec<String>,
     pub symbols_used: Vec<String>,
-    pub symbol_density: f32, // symbols per line
+    pub symbol_density: f32,           // symbols per line
     pub critical_symbols: Vec<String>, // pub, unsafe, async, etc.
 }
 
@@ -104,20 +104,28 @@ impl FileImpactScore {
         repo_context: &crate::harness::repo_intelligence::RepoContext,
         rust_analyzer: Option<&crate::harness::repo_intelligence::RustAnalyzerData>,
     ) -> Result<Self> {
-        let symbol_relevance = Self::calculate_symbol_relevance(file_path, task_symbols, repo_context)?;
-        let import_graph_impact = Self::calculate_import_graph_impact(file_path, repo_context, rust_analyzer)?;
-        let test_file_impact = Self::calculate_test_file_impact(file_path, repo_context, rust_analyzer)?;
-        let api_surface_impact = Self::calculate_api_surface_impact(file_path, repo_context, rust_analyzer)?;
-        let change_risk = Self::assess_change_risk(&symbol_relevance, &import_graph_impact, &test_file_impact, &api_surface_impact);
-        
+        let symbol_relevance =
+            Self::calculate_symbol_relevance(file_path, task_symbols, repo_context)?;
+        let import_graph_impact =
+            Self::calculate_import_graph_impact(file_path, repo_context, rust_analyzer)?;
+        let test_file_impact =
+            Self::calculate_test_file_impact(file_path, repo_context, rust_analyzer)?;
+        let api_surface_impact =
+            Self::calculate_api_surface_impact(file_path, repo_context, rust_analyzer)?;
+        let change_risk = Self::assess_change_risk(
+            &symbol_relevance,
+            &import_graph_impact,
+            &test_file_impact,
+            &api_surface_impact,
+        );
+
         // Calculate overall score as weighted average
-        let overall_score = (
-            symbol_relevance.score * 0.3 +
-            import_graph_impact.score * 0.2 +
-            test_file_impact.score * 0.2 +
-            api_surface_impact.score * 0.3
-        ).min(1.0);
-        
+        let overall_score = (symbol_relevance.score * 0.3
+            + import_graph_impact.score * 0.2
+            + test_file_impact.score * 0.2
+            + api_surface_impact.score * 0.3)
+            .min(1.0);
+
         Ok(Self {
             file_path: file_path.to_path_buf(),
             overall_score,
@@ -128,7 +136,7 @@ impl FileImpactScore {
             change_risk,
         })
     }
-    
+
     /// Calculate symbol relevance score
     fn calculate_symbol_relevance(
         file_path: &std::path::Path,
@@ -137,32 +145,34 @@ impl FileImpactScore {
     ) -> Result<SymbolRelevanceScore> {
         let file_content = std::fs::read_to_string(file_path)
             .context(format!("Failed to read file: {}", file_path.display()))?;
-        
+
         let lines: Vec<&str> = file_content.lines().collect();
         let mut symbols_mentioned = Vec::new();
         let mut symbols_defined = Vec::new();
         let mut symbols_used = Vec::new();
         let mut critical_symbols = Vec::new();
-        
+
         // Find symbols mentioned in task
         for task_symbol in task_symbols {
             if file_content.contains(task_symbol) {
                 symbols_mentioned.push(task_symbol.clone());
             }
         }
-        
+
         // Extract symbols from repo context
         for symbol in &repo_context.symbols {
             if symbol.file == file_path {
                 symbols_defined.push(symbol.name.clone());
-                
+
                 // Check for critical symbols
                 match symbol.kind {
-                    crate::harness::repo_intelligence::SymbolKind::Function | 
-                    crate::harness::repo_intelligence::SymbolKind::Struct |
-                    crate::harness::repo_intelligence::SymbolKind::Enum |
-                    crate::harness::repo_intelligence::SymbolKind::Trait => {
-                        if symbol.visibility == crate::harness::repo_intelligence::Visibility::Public {
+                    crate::harness::repo_intelligence::SymbolKind::Function
+                    | crate::harness::repo_intelligence::SymbolKind::Struct
+                    | crate::harness::repo_intelligence::SymbolKind::Enum
+                    | crate::harness::repo_intelligence::SymbolKind::Trait => {
+                        if symbol.visibility
+                            == crate::harness::repo_intelligence::Visibility::Public
+                        {
                             critical_symbols.push(symbol.name.clone());
                         }
                     }
@@ -170,7 +180,7 @@ impl FileImpactScore {
                 }
             }
         }
-        
+
         // Find symbol usage in relationships
         for relationship in &repo_context.relationships {
             if relationship.file == file_path {
@@ -178,30 +188,32 @@ impl FileImpactScore {
                 symbols_used.push(relationship.to.clone());
             }
         }
-        
+
         // Calculate symbol density
-        let symbol_density = if lines.is_empty() { 0.0 } else { 
-            (symbols_defined.len() + symbols_used.len()) as f32 / lines.len() as f32 
+        let symbol_density = if lines.is_empty() {
+            0.0
+        } else {
+            (symbols_defined.len() + symbols_used.len()) as f32 / lines.len() as f32
         };
-        
+
         // Calculate relevance score
         let mut score = 0.0;
-        
+
         // Task symbol mentions (highest weight)
         score += symbols_mentioned.len() as f32 * 0.4;
-        
+
         // Critical symbols (high weight)
         score += critical_symbols.len() as f32 * 0.3;
-        
+
         // Symbol density (medium weight)
         score += symbol_density * 0.2;
-        
+
         // Total symbols (low weight)
         score += (symbols_defined.len() + symbols_used.len()) as f32 * 0.1;
-        
+
         // Normalize to 0-1 range
         score = (score / 10.0).min(1.0);
-        
+
         Ok(SymbolRelevanceScore {
             score,
             symbols_mentioned,
@@ -211,7 +223,7 @@ impl FileImpactScore {
             critical_symbols,
         })
     }
-    
+
     /// Calculate import graph impact
     fn calculate_import_graph_impact(
         file_path: &std::path::Path,
@@ -220,11 +232,11 @@ impl FileImpactScore {
     ) -> Result<ImportGraphImpact> {
         let file_content = std::fs::read_to_string(file_path)
             .context(format!("Failed to read file: {}", file_path.display()))?;
-        
+
         let mut imports_count = 0;
         let mut exports_count = 0;
         let mut critical_dependencies = Vec::new();
-        
+
         // Count imports and exports
         use regex::Regex;
         if let Ok(re) = Regex::new(r"use\s+([^;]+);") {
@@ -232,7 +244,7 @@ impl FileImpactScore {
                 if let Some(import_path) = caps.get(1) {
                     imports_count += 1;
                     let import_str = import_path.as_str();
-                    
+
                     // Check for critical dependencies
                     if Self::is_critical_dependency(import_str) {
                         critical_dependencies.push(import_str.to_string());
@@ -240,43 +252,43 @@ impl FileImpactScore {
                 }
             }
         }
-        
+
         if let Ok(re) = Regex::new(r"pub\s+use\s+([^;]+);") {
             exports_count += re.captures_iter(&file_content).count();
         }
-        
+
         // Calculate transitive imports and dependency depth
         let (transitive_imports, dependency_depth) = if let Some(rust_data) = rust_analyzer {
             Self::analyze_transitive_imports(file_path, rust_data)
         } else {
             (0, 0)
         };
-        
+
         // Check for circular imports
         let circular_imports = Self::check_circular_imports(file_path, repo_context);
-        
+
         // Calculate impact score
         let mut score = 0.0;
-        
+
         // Import count (medium weight)
         score += (imports_count as f32 / 20.0).min(1.0) * 0.3;
-        
+
         // Export count (medium weight)
         score += (exports_count as f32 / 10.0).min(1.0) * 0.2;
-        
+
         // Critical dependencies (high weight)
         score += (critical_dependencies.len() as f32 / 5.0).min(1.0) * 0.3;
-        
+
         // Dependency depth (medium weight)
         score += (dependency_depth as f32 / 10.0).min(1.0) * 0.1;
-        
+
         // Circular imports penalty (high negative weight)
         if circular_imports {
             score -= 0.2;
         }
-        
+
         score = score.max(0.0).min(1.0);
-        
+
         Ok(ImportGraphImpact {
             score,
             imports_count,
@@ -287,7 +299,7 @@ impl FileImpactScore {
             dependency_depth,
         })
     }
-    
+
     /// Calculate test file impact
     fn calculate_test_file_impact(
         file_path: &std::path::Path,
@@ -296,22 +308,22 @@ impl FileImpactScore {
     ) -> Result<TestFileImpact> {
         let file_content = std::fs::read_to_string(file_path)
             .context(format!("Failed to read file: {}", file_path.display()))?;
-        
-        let is_test_file = file_path.to_string_lossy().contains("test") || 
-                           file_path.to_string_lossy().contains("spec");
-        
+
+        let is_test_file = file_path.to_string_lossy().contains("test")
+            || file_path.to_string_lossy().contains("spec");
+
         let mut test_functions_count = 0;
         let mut integration_tests = false;
         let mut unit_tests = false;
         let mut doc_tests = false;
         let mut production_code_dep = false;
-        
+
         // Count test functions
         use regex::Regex;
         if let Ok(re) = Regex::new(r"#\[test\]\s*fn\s+(\w+)") {
             test_functions_count = re.captures_iter(&file_content).count();
         }
-        
+
         // Check test types
         if file_path.starts_with(repo_context.root.join("tests")) {
             integration_tests = true;
@@ -319,36 +331,36 @@ impl FileImpactScore {
             unit_tests = true;
             doc_tests = file_content.contains("///");
         }
-        
+
         // Check if test depends on production code
         if is_test_file {
             if let Ok(re) = Regex::new(r"use\s+crate::") {
                 production_code_dep = re.is_match(&file_content);
             }
         }
-        
+
         // Estimate test coverage (simplified)
         let test_coverage = if test_functions_count > 0 {
             (test_functions_count as f32 / 10.0).min(1.0) * 0.8 // Assume good coverage
         } else {
             0.0
         };
-        
+
         // Calculate impact score
         let mut score = 0.0;
-        
+
         if is_test_file {
             // Test files have high impact
             score += 0.6;
-            
+
             // More test functions = higher impact
             score += (test_functions_count as f32 / 20.0).min(1.0) * 0.2;
-            
+
             // Integration tests have higher impact
             if integration_tests {
                 score += 0.1;
             }
-            
+
             // Tests that depend on production code have higher impact
             if production_code_dep {
                 score += 0.1;
@@ -359,9 +371,9 @@ impl FileImpactScore {
                 score += 0.3;
             }
         }
-        
+
         score = score.min(1.0);
-        
+
         Ok(TestFileImpact {
             score,
             is_test_file,
@@ -373,7 +385,7 @@ impl FileImpactScore {
             production_code_dep,
         })
     }
-    
+
     /// Calculate API surface impact
     fn calculate_api_surface_impact(
         file_path: &std::path::Path,
@@ -382,48 +394,48 @@ impl FileImpactScore {
     ) -> Result<ApiSurfaceImpact> {
         let file_content = std::fs::read_to_string(file_path)
             .context(format!("Failed to read file: {}", file_path.display()))?;
-        
+
         let mut public_api_changes = 0;
         let mut breaking_changes = 0;
         let mut semver_impact = SemverImpact::None;
         let mut api_stability = ApiStability::Stable;
         let mut consumer_impact = ConsumerImpact::None;
-        
+
         // Count public API items
         use regex::Regex;
-        
+
         // Public functions
         if let Ok(re) = Regex::new(r"pub\s+(async\s+)?(unsafe\s+)?fn\s+(\w+)") {
             public_api_changes += re.captures_iter(&file_content).count();
         }
-        
+
         // Public structs
         if let Ok(re) = Regex::new(r"pub\s+struct\s+(\w+)") {
             public_api_changes += re.captures_iter(&file_content).count();
         }
-        
+
         // Public enums
         if let Ok(re) = Regex::new(r"pub\s+enum\s+(\w+)") {
             public_api_changes += re.captures_iter(&file_content).count();
         }
-        
+
         // Public traits
         if let Ok(re) = Regex::new(r"pub\s+trait\s+(\w+)") {
             public_api_changes += re.captures_iter(&file_content).count();
             // Traits are breaking changes
             breaking_changes += re.captures_iter(&file_content).count();
         }
-        
+
         // Check for deprecated items
         if file_content.contains("#[deprecated]") {
             api_stability = ApiStability::Deprecated;
         }
-        
+
         // Check for experimental items
         if file_content.contains("#[unstable]") || file_content.contains("#[feature(") {
             api_stability = ApiStability::Experimental;
         }
-        
+
         // Determine semver impact
         if breaking_changes > 0 {
             semver_impact = SemverImpact::Major;
@@ -435,16 +447,16 @@ impl FileImpactScore {
             semver_impact = SemverImpact::Patch;
             consumer_impact = ConsumerImpact::Low;
         }
-        
+
         // Calculate impact score
         let mut score = 0.0;
-        
+
         // Public API changes (high weight)
         score += (public_api_changes as f32 / 10.0).min(1.0) * 0.4;
-        
+
         // Breaking changes (very high weight)
         score += (breaking_changes as f32 / 5.0).min(1.0) * 0.4;
-        
+
         // API stability (medium weight)
         match api_stability {
             ApiStability::Stable => score += 0.1,
@@ -452,7 +464,7 @@ impl FileImpactScore {
             ApiStability::Experimental => score += 0.0,
             ApiStability::Deprecated => score += 0.02,
         }
-        
+
         // Consumer impact (medium weight)
         match consumer_impact {
             ConsumerImpact::None => score += 0.0,
@@ -461,9 +473,9 @@ impl FileImpactScore {
             ConsumerImpact::High => score += 0.15,
             ConsumerImpact::Critical => score += 0.2,
         }
-        
+
         score = score.min(1.0);
-        
+
         Ok(ApiSurfaceImpact {
             score,
             public_api_changes,
@@ -473,7 +485,7 @@ impl FileImpactScore {
             consumer_impact,
         })
     }
-    
+
     /// Assess overall change risk
     fn assess_change_risk(
         symbol_relevance: &SymbolRelevanceScore,
@@ -481,30 +493,28 @@ impl FileImpactScore {
         test_file_impact: &TestFileImpact,
         api_surface_impact: &ApiSurfaceImpact,
     ) -> ChangeRisk {
-        let risk_score = (
-            symbol_relevance.score * 0.3 +
-            import_graph_impact.score * 0.2 +
-            test_file_impact.score * 0.2 +
-            api_surface_impact.score * 0.3
-        );
-        
+        let risk_score = symbol_relevance.score * 0.3
+            + import_graph_impact.score * 0.2
+            + test_file_impact.score * 0.2
+            + api_surface_impact.score * 0.3;
+
         // Additional risk factors
         if api_surface_impact.breaking_changes > 0 {
             return ChangeRisk::Critical;
         }
-        
+
         if import_graph_impact.circular_imports {
             return ChangeRisk::High;
         }
-        
+
         if test_file_impact.is_test_file && test_file_impact.production_code_dep {
             return ChangeRisk::High;
         }
-        
+
         if !symbol_relevance.critical_symbols.is_empty() {
             return ChangeRisk::Medium;
         }
-        
+
         match risk_score {
             s if s >= 0.8 => ChangeRisk::High,
             s if s >= 0.6 => ChangeRisk::Medium,
@@ -512,56 +522,70 @@ impl FileImpactScore {
             _ => ChangeRisk::Low,
         }
     }
-    
+
     /// Check if a dependency is critical
     fn is_critical_dependency(import_path: &str) -> bool {
         let critical_crates = [
-            "std", "core", "alloc", "proc_macro",
-            "tokio", "serde", "anyhow", "thiserror",
-            "async_trait", "futures", "tracing",
-            "clap", "serde_json", "regex",
+            "std",
+            "core",
+            "alloc",
+            "proc_macro",
+            "tokio",
+            "serde",
+            "anyhow",
+            "thiserror",
+            "async_trait",
+            "futures",
+            "tracing",
+            "clap",
+            "serde_json",
+            "regex",
         ];
-        
+
         for critical in &critical_crates {
             if import_path.starts_with(critical) {
                 return true;
             }
         }
-        
+
         false
     }
-    
+
     /// Analyze transitive imports
     fn analyze_transitive_imports(
         file_path: &std::path::Path,
         rust_analyzer: &crate::harness::repo_intelligence::RustAnalyzerData,
     ) -> (usize, usize) {
         // Find the module for this file
-        let module_name = rust_analyzer.module_graph.modules
+        let module_name = rust_analyzer
+            .module_graph
+            .modules
             .iter()
-            .find(|(_, module)| {
-                module.file_path.as_deref() == Some(file_path)
-            })
+            .find(|(_, module)| module.file_path.as_deref() == Some(file_path))
             .map(|(path, _)| {
-                path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
             })
             .unwrap_or("unknown");
-        
+
         // Get imports for this module
-        let imports = rust_analyzer.module_graph.imports
+        let imports = rust_analyzer
+            .module_graph
+            .imports
             .get(module_name)
             .map(|imports| imports.len())
             .unwrap_or(0);
-        
+
         // Calculate dependency depth (simplified)
         let dependency_depth = imports.min(10);
-        
+
         // Transitive imports (simplified calculation)
         let transitive_imports = dependency_depth * 2;
-        
+
         (transitive_imports, dependency_depth)
     }
-    
+
     /// Check for circular imports
     fn check_circular_imports(
         file_path: &std::path::Path,
@@ -569,7 +593,7 @@ impl FileImpactScore {
     ) -> bool {
         // Simplified circular import detection
         let file_str = file_path.to_string_lossy();
-        
+
         // Check if this file is both imported and exports to the same modules
         for relationship in &repo_context.relationships {
             if relationship.file == file_path {
@@ -578,17 +602,17 @@ impl FileImpactScore {
                 }
             }
         }
-        
+
         false
     }
-    
+
     /// Check if a file is tested
     fn is_file_tested(
         file_path: &std::path::Path,
         repo_context: &crate::harness::repo_intelligence::RepoContext,
     ) -> bool {
         let file_str = file_path.to_string_lossy();
-        
+
         // Check if any test file imports this file
         for ranked_file in &repo_context.ranked_files {
             if ranked_file.path.to_string_lossy().contains("test") {
@@ -596,7 +620,7 @@ impl FileImpactScore {
                 return true;
             }
         }
-        
+
         false
     }
 }
