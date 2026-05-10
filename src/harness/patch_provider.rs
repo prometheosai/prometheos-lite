@@ -250,13 +250,21 @@ impl PatchProvider for HeuristicPatchProvider {
             }
         };
 
-        let repair_applied =
-            repaired.is_ok() && repaired.as_ref().unwrap() != &request.failed_edits;
+        let repaired_edits = repaired.unwrap_or_else(|_| request.failed_edits.clone());
+        let repair_applied = repaired_edits != request.failed_edits;
+        let repair_notes = if repair_applied {
+            format!("Applied {:?} repair strategy", request.repair_strategy)
+        } else {
+            format!(
+                "{:?} repair strategy did not modify the patch",
+                request.repair_strategy
+            )
+        };
 
         Ok(RepairResponse {
-            repaired_edits: repaired.unwrap_or(request.failed_edits),
+            repaired_edits,
             repair_applied,
-            repair_notes: format!("Applied {:?} repair strategy", request.repair_strategy),
+            repair_notes,
             repair_time_ms: start.elapsed().as_millis() as u64,
         })
     }
@@ -588,22 +596,37 @@ impl PatchProvider for AggregatePatchProvider {
 
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
         // Try each provider that can generate
+        let mut last_error: Option<anyhow::Error> = None;
+        let mut last_empty_with_notes: Option<GenerateResponse> = None;
         for provider in &self.providers {
             if provider.capabilities().can_generate {
                 match provider.generate(request.clone()).await {
-                    Ok(response) if !response.candidates.is_empty() => {
-                        // V1.6-FIX-012: Require provider diagnostics on empty candidates
-                        if response.candidates.is_empty() && response.provider_notes.is_none() {
+                    Ok(response) if response.candidates.is_empty() => {
+                        if response.provider_notes.is_none() {
                             anyhow::bail!(
                                 "Provider returned empty candidates without diagnostic information. \
                                 Provider must include diagnostic details when no candidates are generated."
                             );
                         }
+                        last_empty_with_notes = Some(response);
+                        continue;
+                    }
+                    Ok(response) => {
                         return Ok(response);
                     }
-                    _ => continue,
+                    Err(err) => {
+                        last_error = Some(err);
+                        continue;
+                    }
                 }
             }
+        }
+
+        if let Some(response) = last_empty_with_notes {
+            return Ok(response);
+        }
+        if let Some(err) = last_error {
+            return Err(err);
         }
 
         Ok(GenerateResponse {
