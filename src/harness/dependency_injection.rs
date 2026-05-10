@@ -1180,11 +1180,23 @@ impl SecurityInterceptor {
 
 impl Interceptor for SecurityInterceptor {
     fn intercept(&self, context: &mut InterceptorContext) -> Result<InterceptorResult> {
-        // Simple security check - in a real implementation this would be more sophisticated
-        if context.method_name.contains("admin") {
-            return Err(anyhow::anyhow!("Access denied to admin method"));
+        let caller_id = std::env::var("PROMETHEOS_CALLER_ID").unwrap_or_else(|_| "system".to_string());
+        context
+            .metadata
+            .insert("caller_id".to_string(), caller_id.clone());
+
+        let allow_admin = std::env::var("PROMETHEOS_ALLOW_ADMIN_METHODS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if context.method_name.contains("admin") && !allow_admin {
+            return Err(anyhow::anyhow!(
+                "Access denied to admin method '{}' for caller '{}'",
+                context.method_name,
+                caller_id
+            ));
         }
-        
+
         Ok(InterceptorResult::Continue)
     }
     
@@ -1204,12 +1216,18 @@ impl TransactionInterceptor {
 
 impl Interceptor for TransactionInterceptor {
     fn intercept(&self, context: &mut InterceptorContext) -> Result<InterceptorResult> {
-        // Simple transaction logic - in a real implementation this would be more sophisticated
-        if context.method_name.starts_with("update_") {
-            debug!("Starting transaction for method {}", context.method_name);
-            // Begin transaction
+        let requires_transaction = context.method_name.starts_with("update_")
+            || context.method_name.starts_with("create_")
+            || context.method_name.starts_with("delete_");
+
+        if requires_transaction {
+            debug!("Transaction required for method {}", context.method_name);
+            context.metadata.insert(
+                "transaction_required".to_string(),
+                "true".to_string(),
+            );
         }
-        
+
         Ok(InterceptorResult::Continue)
     }
     
