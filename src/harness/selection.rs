@@ -126,7 +126,7 @@ pub struct SelectionEngine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SelectionRecord {
+pub(crate) struct SelectionRecord {
     selected_candidate_id: String,
     scores: HashMap<String, f32>,
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -227,7 +227,12 @@ impl SelectionEngine {
 
     fn calculate_risk_score(&self, candidate: &PatchCandidate) -> f32 {
         // Higher score for lower risk
-        match candidate.risk.as_ref().map(|r| r.level).unwrap_or(RiskLevel::Low) {
+        match candidate
+            .risk
+            .as_ref()
+            .map(|r| r.level)
+            .unwrap_or(RiskLevel::Low)
+        {
             RiskLevel::None => 1.0,
             RiskLevel::Critical => 0.0,
             RiskLevel::High => 0.4,
@@ -300,7 +305,11 @@ impl SelectionEngine {
         }
 
         // Check risk level
-        let risk_level = candidate.risk.as_ref().map(|r| r.level).unwrap_or(RiskLevel::Low);
+        let risk_level = candidate
+            .risk
+            .as_ref()
+            .map(|r| r.level)
+            .unwrap_or(RiskLevel::Low);
         let risk_level_value = match risk_level {
             RiskLevel::None => 0,
             RiskLevel::Low => 1,
@@ -366,7 +375,7 @@ impl SelectionEngine {
         scores
     }
 
-    pub fn get_selection_history(&self) -> &[SelectionRecord] {
+    pub(crate) fn get_selection_history(&self) -> &[SelectionRecord] {
         &self.scoring_history
     }
 

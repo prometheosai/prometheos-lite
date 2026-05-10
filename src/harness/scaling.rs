@@ -32,7 +32,7 @@ pub struct ScalingEngine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AttemptRecord {
+pub(crate) struct AttemptRecord {
     attempt_number: u32,
     strategy: String,
     duration_ms: u64,
@@ -248,7 +248,7 @@ impl ScalingEngine {
         }
     }
 
-    pub fn get_attempt_history(&self) -> &[AttemptRecord] {
+    pub(crate) fn get_attempt_history(&self) -> &[AttemptRecord] {
         &self.attempt_history
     }
 

@@ -45,7 +45,7 @@ pub struct PermissionLedger {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeniedOperation {
+pub(crate) struct DeniedOperation {
     permission: Permission,
     path: Option<PathBuf>,
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -227,7 +227,7 @@ impl PermissionLedger {
         }
     }
 
-    pub fn get_denied_operations(&self) -> &[DeniedOperation] {
+    pub(crate) fn get_denied_operations(&self) -> &[DeniedOperation] {
         &self.denied_operations
     }
 }
