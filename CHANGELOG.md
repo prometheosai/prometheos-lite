@@ -1,3 +1,21 @@
+## V1.6.1 Strict Audit Closure - Policy and API Hardening
+
+- Removed machine-local environment contamination from committed Cargo config:
+  - deleted hardcoded Windows-only `TMP`/`TEMP` overrides from `.cargo/config.toml`.
+- Hardened runtime policy scanning in `src/runtime_policy.rs`:
+  - detector-module exclusions are now path-scoped (`src/harness/{ci_enforcement,review,reproduction}.rs`) instead of filename-wide.
+  - expanded runtime violation detection to include placeholder identifiers and phrases (`mock/stub/fake/dummy/placeholder`, `not implemented`, `in a real implementation`).
+- Enforced explicit ownership identity on WorkContext read surfaces in `src/api/work_contexts.rs`:
+  - read endpoints now require non-empty `user_id` and return `403` for cross-user access.
+  - coverage includes context read, artifacts, harness views, quality/cost, traces, and trace-by-run.
+- Removed dead deprecated handler:
+  - dropped `get_harness_metadata` endpoint implementation after full explicit endpoint migration.
+- Strengthened harness API semantics:
+  - harness view endpoints now return `409 Conflict` when the requested view is not yet available, replacing silent `null` payload fallbacks.
+- Added targeted tests:
+  - runtime policy detector exclusion scope test.
+  - harness view availability and user identity validation tests in API module.
+
 ## V1.6.1 Repo-Wide Codification - Runtime Policy Enforcement Pass
 
 - Added central runtime policy module `src/runtime_policy.rs` with:
