@@ -210,16 +210,15 @@ pub async fn create_work_context(
 pub async fn update_work_context_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
     Json(req): Json<UpdateStatusRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
+    let user_id = required_user_id(&identity)?;
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
-    let mut context = work_context_service
-        .get_context(&id)
-        .map_err(|e| ApiError::Internal(format!("Failed to get context: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("WorkContext not found: {}", id)))?;
+    let mut context = get_context_for_user_or_404(&state, &id, user_id).await?;
 
     let new_status = match req.status.to_lowercase().as_str() {
         "draft" => WorkStatus::Draft,
@@ -282,7 +281,10 @@ pub async fn get_work_context_artifacts(
 pub async fn continue_work_context(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -315,8 +317,11 @@ pub async fn submit_intent(
 pub async fn run_until_complete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
     Json(req): Json<RunContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -337,8 +342,11 @@ pub async fn run_until_complete(
 pub async fn run_harness(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
     Json(req): Json<HarnessRunRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;

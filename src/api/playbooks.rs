@@ -114,12 +114,19 @@ pub async fn list_playbooks(
 pub async fn get_playbook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<PlaybookResponse>, StatusCode> {
+    if identity.user_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let playbook = PlaybookOperations::get_playbook(&db, &id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if playbook.user_id != identity.user_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let response = PlaybookResponse {
         id: playbook.id,
@@ -146,6 +153,9 @@ pub async fn create_playbook(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePlaybookRequest>,
 ) -> Result<Json<PlaybookResponse>, StatusCode> {
+    if req.user_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let research_depth = match req.default_research_depth.to_lowercase().as_str() {
@@ -206,13 +216,20 @@ pub async fn create_playbook(
 pub async fn update_playbook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
     Json(req): Json<UpdatePlaybookRequest>,
 ) -> Result<Json<PlaybookResponse>, StatusCode> {
+    if identity.user_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut playbook = PlaybookOperations::get_playbook(&db, &id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if playbook.user_id != identity.user_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     if let Some(name) = req.name {
         playbook.name = name;
