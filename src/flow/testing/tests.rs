@@ -82,12 +82,12 @@ fn test_flow_test_runner_creation() {
 }
 
 #[test]
-fn test_flow_test_runner_with_mock_response() {
+fn test_flow_test_runner_with_scripted_response() {
     let flow_path = PathBuf::from("test.flow.yaml");
     let _runner = FlowTestRunner::new(flow_path)
-        .with_mock_response("node1".to_string(), "mock response".to_string());
+        .with_scripted_response("node1".to_string(), "scripted response".to_string());
 
-    // Runner with mock response created successfully
+    // Runner with scripted response created successfully
 }
 
 #[test]

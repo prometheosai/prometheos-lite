@@ -1,4 +1,4 @@
-//! Flow testing framework - mock LLM mode, fixtures, and test runner
+//! Flow testing framework - deterministic scripted mode, fixtures, and test runner
 
 mod fixtures;
 mod flow_test_runner;

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 pub struct FlowTestRunner {
     /// Path to the flow file
     flow_path: PathBuf,
-    /// Mock LLM responses (node_id -> response)
-    mock_responses: std::collections::HashMap<String, String>,
+    /// Scripted node responses (node_id -> response)
+    scripted_responses: std::collections::HashMap<String, String>,
     /// Tracer for capturing events
     tracer: Option<std::sync::Arc<std::sync::Mutex<Tracer>>>,
 }
@@ -23,15 +23,20 @@ impl FlowTestRunner {
     pub fn new(flow_path: PathBuf) -> Self {
         Self {
             flow_path,
-            mock_responses: std::collections::HashMap::new(),
+            scripted_responses: std::collections::HashMap::new(),
             tracer: None,
         }
     }
 
-    /// Add a mock response for a specific node
-    pub fn with_mock_response(mut self, node_id: String, response: String) -> Self {
-        self.mock_responses.insert(node_id, response);
+    /// Add a deterministic scripted response for a specific node.
+    pub fn with_scripted_response(mut self, node_id: String, response: String) -> Self {
+        self.scripted_responses.insert(node_id, response);
         self
+    }
+
+    /// Backward-compatible alias for scripted responses.
+    pub fn with_mock_response(self, node_id: String, response: String) -> Self {
+        self.with_scripted_response(node_id, response)
     }
 
     /// Enable tracing
@@ -102,6 +107,16 @@ impl FlowTestRunner {
             .ok_or_else(|| anyhow::anyhow!("Input must be an object"))?
         {
             state.set_input(key.clone(), value.clone());
+        }
+        if !self.scripted_responses.is_empty() {
+            let mut response_map = serde_json::Map::new();
+            for (node_id, response) in &self.scripted_responses {
+                response_map.insert(node_id.clone(), serde_json::Value::String(response.clone()));
+            }
+            state.set_input(
+                "__scripted_responses".to_string(),
+                serde_json::Value::Object(response_map),
+            );
         }
 
         // Execute the flow
