@@ -3,7 +3,7 @@
 //! This module provides memory scoring based on relevance, recency, and usage,
 //! along with ranking and pruning functions to keep memory size bounded.
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::flow::memory::types::Memory;

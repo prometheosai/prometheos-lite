@@ -1,9 +1,6 @@
 use crate::harness::{
     acceptance::{AcceptanceCriterion, compile_acceptance_criteria},
-    artifacts::{
-        ArtifactKind, ArtifactMetadata, CompressionType, HarnessArtifact,
-        generate_completion_artifact,
-    },
+    artifacts::{ArtifactKind, ArtifactMetadata, CompressionType, HarnessArtifact},
     attempt_pool::AttemptPool,
     completion::{
         CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
@@ -18,39 +15,31 @@ use crate::harness::{
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
     mode_policy::{GateDecision, HarnessMode, HarnessPolicyGate},
-    patch_applier::{
-        PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
-    },
+    patch_applier::{PatchResult, RollbackHandle, apply_patch_with_rollback, dry_run_patch},
     patch_provider::{
         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
-        PatchProvider, PatchProviderContext, RiskEstimate,
+        PatchProvider,
     },
     repo_intelligence::{RepoContext, build_repo_context},
     review::{ReviewIssue, ReviewIssueType, ReviewSeverity, review_diff},
     risk::{RiskAssessment, RiskCategory, RiskLevel, RiskReason, RiskSeverity, assess_risk},
     sandbox::LocalSandboxRuntime,
-    selection::{
-        PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine, SelectionPhase,
-    },
+    selection::{PatchCandidate as SelectionCandidate, SelectionPhase},
     semantic_diff::analyze_semantic_diff,
-    temp_workspace::{TempWorkspace, ValidationTarget, create_validation_target},
+    temp_workspace::{TempWorkspace, ValidationTarget},
     trajectory::Trajectory,
     validation::{ValidationCategory, ValidationPlan, ValidationResult, run_validation},
     verification::{VerificationStrength, assess_verification_strength},
 };
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Instant,
 };
 use tokio::sync::mpsc;
-use tokio::time::timeout;
-use tracing::instrument;
 
 /// P0-Issue1: Extract sandbox evidence from evidence log for completion verification
 fn extract_sandbox_evidence_from_log(evidence_log: &EvidenceLog) -> Vec<SandboxEvidence> {
@@ -1257,7 +1246,7 @@ pub async fn execute_harness_task(
     // Record dry-run evidence
     evidence_log.record_dry_run(&dry, dry_run_ms, Some(trace_id.clone()));
 
-    let dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
+    let _dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
 
     // P1-FIX: Attempt repair if dry-run failed and we have a provider
     let (selected_edits, dry, repaired) =
@@ -1387,7 +1376,7 @@ pub async fn execute_harness_task(
     // P0-2 FIX: Compute actual diff from workspace changes, not synthetic from edits
     let diff = {
         // Create a temporary workspace to apply edits and compute real diff
-        let temp_workspace_root = req
+        let _temp_workspace_root = req
             .repo_root
             .join(format!("prometheos_temp_diff_{}", uuid::Uuid::new_v4()));
         let temp_workspace_result =
@@ -1837,7 +1826,7 @@ pub async fn execute_harness_task(
         };
 
         // Use SelectionEngine to score with post-validation criteria
-        let mut selection_engine = SelectionEngine::new(post_validation_criteria);
+        let selection_engine = SelectionEngine::new(post_validation_criteria);
         let scored = selection_engine.rank_candidates(vec![post_validation_candidate]);
 
         if let Some(first) = scored.first() {
@@ -1966,7 +1955,7 @@ pub async fn execute_harness_task(
         .map(|p| format!("{:x}", md5::compute(&p.diff)));
     let dry_run_patch_hash = patch
         .as_ref()
-        .filter(|p| dry.failures.is_empty())
+        .filter(|_p| dry.failures.is_empty())
         .map(|p| format!("{:x}", md5::compute(&p.diff)));
     let applied_patch_hash = patch
         .as_ref()
@@ -2616,7 +2605,7 @@ fn generate_diff_from_edits(edits: &[EditOperation]) -> String {
 async fn validate_provider_candidates(
     candidates: &[ProviderCandidate],
     file_set: &FileSet,
-    policy: &FilePolicy,
+    _policy: &FilePolicy,
     repo_root: &Path,
     evidence_log: &mut EvidenceLog,
     trace_id: Option<String>,

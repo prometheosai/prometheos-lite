@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::budgeter::{ContextBudgeter, ContextItem, ContextPriority, TrimmedContext};
+use super::budgeter::{ContextBudgeter, ContextItem, ContextPriority};
 use crate::flow::memory::service::MemoryService;
 use crate::flow::memory::types::Memory;
 

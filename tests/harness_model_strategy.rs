@@ -86,7 +86,10 @@ fn test_model_profile_fast() {
 #[test]
 fn test_complexity_level_variants() {
     assert!(matches!(ComplexityLevel::Simple, ComplexityLevel::Simple));
-    assert!(matches!(ComplexityLevel::Moderate, ComplexityLevel::Moderate));
+    assert!(matches!(
+        ComplexityLevel::Moderate,
+        ComplexityLevel::Moderate
+    ));
     assert!(matches!(ComplexityLevel::Complex, ComplexityLevel::Complex));
     assert!(matches!(ComplexityLevel::Expert, ComplexityLevel::Expert));
 }
@@ -167,9 +170,17 @@ fn test_model_selection_workflow() {
         context_window: 200000,
         cost_per_1k_tokens: 0.015,
         avg_latency_ms: 3000,
-        strengths: vec!["reasoning".to_string(), "code".to_string(), "analysis".to_string()],
+        strengths: vec![
+            "reasoning".to_string(),
+            "code".to_string(),
+            "analysis".to_string(),
+        ],
         weaknesses: vec!["cost".to_string()],
-        supported_languages: vec!["rust".to_string(), "python".to_string(), "typescript".to_string()],
+        supported_languages: vec![
+            "rust".to_string(),
+            "python".to_string(),
+            "typescript".to_string(),
+        ],
         max_file_size_kb: 2048,
     };
 

@@ -1,27 +1,21 @@
 use crate::harness::{
-    edit_protocol::{EditOperation, SearchReplaceEdit, WholeFileEdit},
+    edit_protocol::EditOperation,
     failure::{
         FailureContext, FailureDetails, FailureKind, classify_patch_failure,
         classify_validation_failure,
     },
     file_control::{FilePolicy, FileSet},
-    patch_applier::{PatchFailure, PatchResult, RollbackHandle, apply_patch_with_rollback, dry_run_patch},
-    patch_provider::{
-        AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
-        HeuristicPatchProvider, LlmPatchProvider, PatchProvider, PatchProviderContext,
-        ProviderCandidate, ProviderCapabilities, RepairRequest as ProviderRepairRequest,
-        RepairResponse, RepairStrategy as ProviderRepairStrategy, RiskEstimate,
-    },
-    repo_intelligence::RepoMap,
+    patch_applier::{PatchResult, apply_patch_with_rollback, dry_run_patch},
+    patch_provider::{PatchProvider, PatchProviderContext},
     sandbox::{LocalSandboxRuntime, SandboxRuntime},
     validation::{ValidationPlan, ValidationResult},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,7 +104,7 @@ impl RepairLoop {
     /// Generate repair edits based on failure details and strategy
     fn generate_repair_edits(
         &self,
-        failure: &FailureDetails,
+        _failure: &FailureDetails,
         current_edits: &[EditOperation],
         strategy: RepairStrategy,
     ) -> anyhow::Result<Vec<EditOperation>> {
@@ -142,7 +136,7 @@ impl RepairLoop {
                                 crate::harness::edit_protocol::WholeFileEdit {
                                     file: sr.file.clone(),
                                     content: new_content,
-                                }
+                                },
                             ));
                         } else {
                             whole_file_edits.push(edit.clone());
@@ -167,7 +161,10 @@ impl RepairLoop {
             }
             // Other strategies - not yet implemented
             _ => {
-                tracing::info!("Strategy {:?} not yet implemented, returning original edits", strategy);
+                tracing::info!(
+                    "Strategy {:?} not yet implemented, returning original edits",
+                    strategy
+                );
                 Ok(current_edits.to_vec())
             }
         }
@@ -181,8 +178,8 @@ impl RepairLoop {
         request: RepairRequest,
         file_set: &FileSet,
         policy: &FilePolicy,
-        sandbox: &dyn SandboxRuntime,
-        provider: Option<&dyn PatchProvider>,
+        _sandbox: &dyn SandboxRuntime,
+        _provider: Option<&dyn PatchProvider>,
         evidence_log: &mut crate::harness::evidence::EvidenceLog,
         trace_id: Option<String>,
     ) -> Result<RepairResult> {
@@ -193,7 +190,10 @@ impl RepairLoop {
         evidence_log.record_repair_action(
             "repair_loop",
             "started",
-            &format!("Starting repair loop for failure: {:?}", request.failure.kind),
+            &format!(
+                "Starting repair loop for failure: {:?}",
+                request.failure.kind
+            ),
             trace_id.clone(),
         );
 
@@ -211,18 +211,19 @@ impl RepairLoop {
                 trace_id.clone(),
             );
 
-            let repair_edits = self.generate_repair_edits(
-                &request.failure,
-                &current_edits,
-                strategy,
-            )?;
+            let repair_edits =
+                self.generate_repair_edits(&request.failure, &current_edits, strategy)?;
 
             // P2-011: Record repair edits generation
             evidence_log.record_repair_action(
                 "repair_loop",
                 "edits_generated",
-                &format!("Attempt {}: Generated {} repair edits using {:?}",
-                    attempt, repair_edits.len(), strategy),
+                &format!(
+                    "Attempt {}: Generated {} repair edits using {:?}",
+                    attempt,
+                    repair_edits.len(),
+                    strategy
+                ),
                 trace_id.clone(),
             );
 
@@ -230,19 +231,28 @@ impl RepairLoop {
 
             // P2-011: Record dry-run result
             if dry_result.failures.is_empty() {
-                evidence_log.record_dry_run(&dry_result, attempt_start.elapsed().as_millis() as u64, trace_id.clone());
+                evidence_log.record_dry_run(
+                    &dry_result,
+                    attempt_start.elapsed().as_millis() as u64,
+                    trace_id.clone(),
+                );
             } else {
                 evidence_log.record_repair_action(
                     "repair_loop",
                     "dry_run_failed",
-                    &format!("Attempt {}: Dry-run failed with {} failures", attempt, dry_result.failures.len()),
+                    &format!(
+                        "Attempt {}: Dry-run failed with {} failures",
+                        attempt,
+                        dry_result.failures.len()
+                    ),
                     trace_id.clone(),
                 );
             }
 
-            let (patch_result, attempt_result) = if dry_result.failures.is_empty() {
+            let (_patch_result, attempt_result) = if dry_result.failures.is_empty() {
                 // P0 SAFETY: Use apply_patch_with_rollback so failed repairs can be undone
-                let (patch, rollback) = apply_patch_with_rollback(&repair_edits, file_set, policy).await?;
+                let (patch, rollback) =
+                    apply_patch_with_rollback(&repair_edits, file_set, policy).await?;
 
                 let validation_plan = ValidationPlan {
                     format_commands: vec![],
@@ -256,9 +266,9 @@ impl RepairLoop {
                 };
 
                 // Clone the sandbox Arc for validation
-                let sandbox_arc: std::sync::Arc<dyn crate::harness::sandbox::SandboxRuntime + Send + Sync> = std::sync::Arc::new(
-                    LocalSandboxRuntime::default()
-                );
+                let sandbox_arc: std::sync::Arc<
+                    dyn crate::harness::sandbox::SandboxRuntime + Send + Sync,
+                > = std::sync::Arc::new(LocalSandboxRuntime::default());
                 let validation_result = crate::harness::validation::run_validation(
                     &policy.repo_root,
                     &validation_plan,
@@ -277,7 +287,11 @@ impl RepairLoop {
                             evidence_log.record_repair_action(
                                 "repair_loop",
                                 "validation_failed",
-                                &format!("Attempt {}: Validation failed with {} errors", attempt, validation.errors.len()),
+                                &format!(
+                                    "Attempt {}: Validation failed with {} errors",
+                                    attempt,
+                                    validation.errors.len()
+                                ),
                                 trace_id.clone(),
                             );
                             let failure = classify_validation_failure(&validation);
@@ -299,9 +313,12 @@ impl RepairLoop {
                         );
                         AttemptResult::Failure {
                             reason: e.to_string(),
-                            failure: create_failure_from_kind(FailureKind::ToolFailure, &e.to_string()),
+                            failure: create_failure_from_kind(
+                                FailureKind::ToolFailure,
+                                &e.to_string(),
+                            ),
                         }
-                    },
+                    }
                 };
 
                 // P0 SAFETY: Rollback failed repair attempts to avoid partial/corrupt state
@@ -312,7 +329,10 @@ impl RepairLoop {
 
                 if should_rollback {
                     tracing::info!("Repair validation failed, rolling back patch");
-                    evidence_log.record_rollback(&format!("Attempt {}: Repair validation failed", attempt), trace_id.clone());
+                    evidence_log.record_rollback(
+                        &format!("Attempt {}: Repair validation failed", attempt),
+                        trace_id.clone(),
+                    );
                     if let Err(e) = rollback.rollback().await {
                         tracing::error!("Failed to rollback repair patch: {}", e);
                     }
@@ -350,7 +370,10 @@ impl RepairLoop {
                     evidence_log.record_repair_action(
                         "repair_loop",
                         "completed",
-                        &format!("Repair succeeded after {} attempts using {:?}", attempt, strategy),
+                        &format!(
+                            "Repair succeeded after {} attempts using {:?}",
+                            attempt, strategy
+                        ),
                         trace_id.clone(),
                     );
                     return Ok(RepairResult {
@@ -625,7 +648,15 @@ pub async fn run_repair_loop(
 
     let mut loop_state = RepairLoop::new(max_attempts);
     loop_state
-        .execute_repair(request, file_set, policy, sandbox, provider, evidence_log, trace_id)
+        .execute_repair(
+            request,
+            file_set,
+            policy,
+            sandbox,
+            provider,
+            evidence_log,
+            trace_id,
+        )
         .await
 }
 

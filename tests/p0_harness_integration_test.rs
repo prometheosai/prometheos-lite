@@ -51,11 +51,15 @@ fn test_extract_task_hints_finds_files() {
     let (files, symbols) = extract_task_hints(task, &requirements);
 
     assert!(
-        files.iter().any(|f| f.to_string_lossy().contains("execution_loop.rs")),
+        files
+            .iter()
+            .any(|f| f.to_string_lossy().contains("execution_loop.rs")),
         "Should extract execution_loop.rs from task"
     );
     assert!(
-        symbols.iter().any(|s| s.contains("error") || s.contains("handling")),
+        symbols
+            .iter()
+            .any(|s| s.contains("error") || s.contains("handling")),
         "Should extract relevant symbols"
     );
 }
@@ -71,12 +75,16 @@ fn test_extract_task_hints_finds_symbols() {
     let (_files, symbols) = extract_task_hints(task, &requirements);
 
     assert!(
-        symbols.iter().any(|s| s == "execute_harness_task" || s.contains("execute_harness")),
+        symbols
+            .iter()
+            .any(|s| s == "execute_harness_task" || s.contains("execute_harness")),
         "Should extract execute_harness_task symbol, got: {:?}",
         symbols
     );
     assert!(
-        symbols.iter().any(|s| s.contains("HarnessExecutionRequest")),
+        symbols
+            .iter()
+            .any(|s| s.contains("HarnessExecutionRequest")),
         "Should extract HarnessExecutionRequest symbol, got: {:?}",
         symbols
     );
@@ -119,7 +127,10 @@ async fn test_provider_context_includes_hints() {
 
     assert_eq!(ctx.mentioned_files.len(), 1);
     assert_eq!(ctx.mentioned_symbols.len(), 1);
-    assert!(ctx.mentioned_symbols.contains(&"execute_harness_task".to_string()));
+    assert!(
+        ctx.mentioned_symbols
+            .contains(&"execute_harness_task".to_string())
+    );
 }
 
 /// Test EvidenceLog records side-effect blocks

@@ -74,7 +74,7 @@ impl SandboxPolicy {
     pub fn autonomous() -> Self {
         Self {
             prefer_docker: true,
-            require_docker: true, // Docker required for autonomous mode
+            require_docker: true,     // Docker required for autonomous mode
             fallback_to_local: false, // No fallback for autonomous mode
             network: NetworkPolicy::Disabled, // Network disabled for safety
             mount_mode: MountMode::ReadWrite, // Read-write for temp workspace validation
@@ -88,7 +88,7 @@ impl SandboxPolicy {
     pub fn assisted() -> Self {
         Self {
             prefer_docker: true,
-            require_docker: false, // Docker preferred but not required
+            require_docker: false,   // Docker preferred but not required
             fallback_to_local: true, // Allow fallback in assisted mode
             network: NetworkPolicy::OutboundOnly, // Limited network access
             mount_mode: MountMode::ReadWrite, // Read-write for temp workspace validation
@@ -267,7 +267,10 @@ pub trait CommandRuntime: Send + Sync {
 }
 
 // Backward compatibility trait - will be removed in v2.0
-#[deprecated(since = "1.6.0", note = "Use CommandRuntime instead. This is not true sandboxing.")]
+#[deprecated(
+    since = "1.6.0",
+    note = "Use CommandRuntime instead. This is not true sandboxing."
+)]
 pub trait SandboxRuntime: CommandRuntime {}
 
 // Auto-implement SandboxRuntime for any type that implements CommandRuntime
@@ -299,13 +302,74 @@ impl Default for CommandSecurityPolicy {
     fn default() -> Self {
         Self {
             allowed_programs: vec![
-                "cargo", "rustc", "rustfmt", "clippy", "npm", "node", "yarn", "pnpm", "python", "python3",
-                "pip", "pip3", "pytest", "black", "flake8", "mypy", "go", "go fmt", "go vet", "gofmt",
-                "javac", "java", "mvn", "gradle", "gcc", "g++", "make", "cmake", "dotnet", "nuget",
-                "git", "docker", "kubectl", "helm", "terraform", "ansible", "vault", "consul",
-                "aws", "az", "gcloud", "kubectl", "oc", "istioctl", "jq", "yq", "curl", "wget",
-                "cat", "ls", "find", "grep", "sed", "awk", "sort", "uniq", "wc", "head", "tail",
-                "diff", "patch", "tar", "gzip", "gunzip", "zip", "unzip", "chmod", "chown",
+                "cargo",
+                "rustc",
+                "rustfmt",
+                "clippy",
+                "npm",
+                "node",
+                "yarn",
+                "pnpm",
+                "python",
+                "python3",
+                "pip",
+                "pip3",
+                "pytest",
+                "black",
+                "flake8",
+                "mypy",
+                "go",
+                "go fmt",
+                "go vet",
+                "gofmt",
+                "javac",
+                "java",
+                "mvn",
+                "gradle",
+                "gcc",
+                "g++",
+                "make",
+                "cmake",
+                "dotnet",
+                "nuget",
+                "git",
+                "docker",
+                "kubectl",
+                "helm",
+                "terraform",
+                "ansible",
+                "vault",
+                "consul",
+                "aws",
+                "az",
+                "gcloud",
+                "kubectl",
+                "oc",
+                "istioctl",
+                "jq",
+                "yq",
+                "curl",
+                "wget",
+                "cat",
+                "ls",
+                "find",
+                "grep",
+                "sed",
+                "awk",
+                "sort",
+                "uniq",
+                "wc",
+                "head",
+                "tail",
+                "diff",
+                "patch",
+                "tar",
+                "gzip",
+                "gunzip",
+                "zip",
+                "unzip",
+                "chmod",
+                "chown",
             ]
             .into_iter()
             .map(str::to_string)
@@ -439,8 +503,12 @@ impl LocalCommandRuntime {
         // Block shell programs entirely in autonomous mode unless approved
         let shell_programs = ["bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"];
         let program_name = cmd.program_name().to_lowercase();
-        
-        if shell_programs.iter().any(|&shell| program_name.contains(shell)) && !self.policy.autonomous_shell_approved {
+
+        if shell_programs
+            .iter()
+            .any(|&shell| program_name.contains(shell))
+            && !self.policy.autonomous_shell_approved
+        {
             bail!(
                 "P0-C5: Shell program '{}' not allowed in autonomous mode without explicit approval",
                 cmd.program
@@ -618,7 +686,7 @@ impl DockerSandboxRuntime {
             network_mode: "none".to_string(), // Secure default
             cpus: Some("1.0".to_string()),
             memory: Some("512m".to_string()),
-            timeout_ms: 300000, // 5 minutes
+            timeout_ms: 300000,               // 5 minutes
             mount_mode: MountMode::ReadWrite, // Default to read-write for compatibility
         }
     }
@@ -630,23 +698,33 @@ impl DockerSandboxRuntime {
     }
 
     /// Add a volume mount with explicit mount mode
-    pub fn with_volume(mut self, host_path: impl Into<String>, container_path: impl Into<String>) -> Self {
-        self.volumes.push(format!("{}:{}", host_path.into(), container_path.into()));
+    pub fn with_volume(
+        mut self,
+        host_path: impl Into<String>,
+        container_path: impl Into<String>,
+    ) -> Self {
+        self.volumes
+            .push(format!("{}:{}", host_path.into(), container_path.into()));
         self
     }
 
     /// P1-Issue6: Add a volume mount with explicit mount mode
     pub fn with_volume_mode(
-        mut self, 
-        host_path: impl Into<String>, 
-        container_path: impl Into<String>, 
-        mode: crate::harness::evidence::SandboxMountMode
+        mut self,
+        host_path: impl Into<String>,
+        container_path: impl Into<String>,
+        mode: crate::harness::evidence::SandboxMountMode,
     ) -> Self {
         let mode_suffix = match mode {
             crate::harness::evidence::SandboxMountMode::ReadOnly => ":ro",
             crate::harness::evidence::SandboxMountMode::ReadWrite => ":rw",
         };
-        self.volumes.push(format!("{}:{}{}", host_path.into(), container_path.into(), mode_suffix));
+        self.volumes.push(format!(
+            "{}:{}{}",
+            host_path.into(),
+            container_path.into(),
+            mode_suffix
+        ));
         self
     }
 
@@ -717,12 +795,12 @@ impl DockerSandboxRuntime {
 
         // Parse Docker info to verify critical components
         let info = String::from_utf8_lossy(&output.stdout);
-        
+
         // Check for essential Docker components
         if !info.contains("Server Version:") {
             anyhow::bail!("Docker daemon info incomplete - missing server version");
         }
-        
+
         if !info.contains("Containers:") {
             anyhow::bail!("Docker daemon info incomplete - missing container information");
         }
@@ -754,7 +832,13 @@ impl DockerSandboxRuntime {
 
         // Test container creation capability
         let test_output = Command::new("docker")
-            .args(&["run", "--rm", "--name", "prometheos-test-cap", "hello-world"])
+            .args(&[
+                "run",
+                "--rm",
+                "--name",
+                "prometheos-test-cap",
+                "hello-world",
+            ])
             .output()
             .await;
 
@@ -773,7 +857,15 @@ impl DockerSandboxRuntime {
 
         // Test resource limits capability
         let limits_output = Command::new("docker")
-            .args(&["run", "--rm", "--cpus", "0.5", "--memory", "128m", "hello-world"])
+            .args(&[
+                "run",
+                "--rm",
+                "--cpus",
+                "0.5",
+                "--memory",
+                "128m",
+                "hello-world",
+            ])
             .output()
             .await;
 
@@ -811,7 +903,13 @@ impl DockerSandboxRuntime {
 
         // Test security options capability
         let security_output = Command::new("docker")
-            .args(&["run", "--rm", "--security-opt", "no-new-privileges:true", "hello-world"])
+            .args(&[
+                "run",
+                "--rm",
+                "--security-opt",
+                "no-new-privileges:true",
+                "hello-world",
+            ])
             .output()
             .await;
 
@@ -832,10 +930,13 @@ impl DockerSandboxRuntime {
     }
 
     /// P0-Issue1: Create sandbox evidence for autonomous mode safety verification
-    pub fn create_sandbox_evidence(&self, container_id: Option<String>) -> crate::harness::evidence::SandboxEvidence {
+    pub fn create_sandbox_evidence(
+        &self,
+        container_id: Option<String>,
+    ) -> crate::harness::evidence::SandboxEvidence {
         crate::harness::evidence::SandboxEvidence {
             runtime_kind: crate::harness::sandbox::SandboxRuntimeKind::Docker,
-            isolated_process: true, // Docker provides process isolation
+            isolated_process: true,    // Docker provides process isolation
             isolated_filesystem: true, // Docker provides filesystem isolation
             network_disabled: self.network_mode == "none",
             cpu_limited: self.cpus.is_some(),
@@ -843,12 +944,12 @@ impl DockerSandboxRuntime {
             container_id,
             mount_mode: crate::harness::evidence::SandboxMountMode::ReadWrite, // Default to read-write for patch application
             resource_limits_applied: self.cpus.is_some() || self.memory.is_some(),
-            no_new_privileges: true, // Always set in Docker runtime
+            no_new_privileges: true,    // Always set in Docker runtime
             capabilities_dropped: true, // Always drop ALL capabilities
-            seccomp_enabled: true, // P0-Audit-005: Seccomp now enabled
-            pids_limit: Some(64), // P0-Audit-005: PIDs limit applied
-            non_root_user: true, // P0-Audit-005: Non-root user enforced
-            tmpfs_protected: true, // P0-Audit-005: /tmp protected with noexec
+            seccomp_enabled: true,      // P0-Audit-005: Seccomp now enabled
+            pids_limit: Some(64),       // P0-Audit-005: PIDs limit applied
+            non_root_user: true,        // P0-Audit-005: Non-root user enforced
+            tmpfs_protected: true,      // P0-Audit-005: /tmp protected with noexec
         }
     }
 
@@ -887,7 +988,12 @@ impl DockerSandboxRuntime {
             crate::harness::sandbox::MountMode::ReadWrite => ":rw",
         };
         args.push("--volume".to_string());
-        args.push(format!("{}:{}{}", repo_root.display(), self.workdir, mount_mode));
+        args.push(format!(
+            "{}:{}{}",
+            repo_root.display(),
+            self.workdir,
+            mount_mode
+        ));
 
         // Add additional volumes
         for volume in &self.volumes {
@@ -906,19 +1012,19 @@ impl DockerSandboxRuntime {
         args.push("no-new-privileges:true".to_string());
         args.push("--cap-drop".to_string());
         args.push("ALL".to_string());
-        
+
         // Additional hardening measures
         args.push("--pids-limit".to_string());
         args.push("64".to_string()); // Limit process count
-        
+
         // Add tmpfs for /tmp
         args.push("--tmpfs".to_string());
         args.push("/tmp:noexec,nosuid,size=100m".to_string());
-        
+
         // Use non-root user
         args.push("--user".to_string());
         args.push("nobody".to_string());
-        
+
         // Add seccomp profile if available
         args.push("--security-opt".to_string());
         args.push("seccomp=runtime/default".to_string());
@@ -979,7 +1085,12 @@ impl CommandRuntime for DockerSandboxRuntime {
             .kill_on_drop(true)
             .spawn()?;
 
-        let out = match timeout(Duration::from_millis(self.timeout_ms), child.wait_with_output()).await {
+        let out = match timeout(
+            Duration::from_millis(self.timeout_ms),
+            child.wait_with_output(),
+        )
+        .await
+        {
             Ok(o) => o?,
             Err(_) => {
                 return Ok(CommandResult {
@@ -1005,7 +1116,7 @@ impl CommandRuntime for DockerSandboxRuntime {
 
         // P0-Issue1: Extract container ID from stderr for evidence tracking
         let container_id = self.extract_container_id(&stderr);
-        
+
         // P0-Issue1: Log sandbox evidence for autonomous mode verification
         let sandbox_evidence = self.create_sandbox_evidence(container_id);
         tracing::info!(
@@ -1017,7 +1128,8 @@ impl CommandRuntime for DockerSandboxRuntime {
         );
 
         Ok(CommandResult {
-            command: format!("docker run {} {} {}",
+            command: format!(
+                "docker run {} {} {}",
                 self.image,
                 cmd.program,
                 cmd.args.join(" ")
@@ -1038,10 +1150,12 @@ pub struct SandboxRuntimeFactory;
 
 impl SandboxRuntimeFactory {
     /// P0-Issue2: Create sandbox runtime based on enhanced policy
-    pub async fn create_with_policy(policy: &SandboxPolicy) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
+    pub async fn create_with_policy(
+        policy: &SandboxPolicy,
+    ) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
         // Check if Docker is available and preferred
         let docker_available = DockerSandboxRuntime::is_docker_available().await;
-        
+
         if policy.require_docker && !docker_available {
             tracing::error!("Docker required by policy but not available");
             anyhow::bail!(
@@ -1063,7 +1177,8 @@ impl SandboxRuntimeFactory {
                     anyhow::bail!(
                         "Docker daemon verification failed: {}. \
                         Autonomous mode requires a fully functional Docker daemon. \
-                        Please check Docker installation and permissions.", e
+                        Please check Docker installation and permissions.",
+                        e
                     );
                 }
             }
@@ -1072,13 +1187,19 @@ impl SandboxRuntimeFactory {
             match DockerSandboxRuntime::verify_docker_capabilities().await {
                 Ok(capabilities) => {
                     if !capabilities.can_create_containers {
-                        anyhow::bail!("Docker lacks container creation capability required for autonomous mode");
+                        anyhow::bail!(
+                            "Docker lacks container creation capability required for autonomous mode"
+                        );
                     }
                     if !capabilities.can_set_resource_limits {
-                        tracing::warn!("Docker cannot set resource limits - autonomous mode may be less secure");
+                        tracing::warn!(
+                            "Docker cannot set resource limits - autonomous mode may be less secure"
+                        );
                     }
                     if !capabilities.can_set_network_policies {
-                        anyhow::bail!("Docker cannot enforce network policies required for autonomous mode");
+                        anyhow::bail!(
+                            "Docker cannot enforce network policies required for autonomous mode"
+                        );
                     }
                     tracing::info!("Docker capabilities verified: {:?}", capabilities);
                 }
@@ -1088,15 +1209,22 @@ impl SandboxRuntimeFactory {
                 }
             }
         }
-        
+
         if (policy.prefer_docker || policy.require_docker) && docker_available {
-            let image = policy.docker_image.clone().unwrap_or_else(|| "rust:latest".to_string());
+            let image = policy
+                .docker_image
+                .clone()
+                .unwrap_or_else(|| "rust:latest".to_string());
             tracing::info!("P0-Issue2: Using Docker sandbox with image: {}", image);
-            tracing::info!("P0-Issue2: Network policy: {:?}, Mount mode: {:?}", policy.network, policy.mount_mode);
-            
+            tracing::info!(
+                "P0-Issue2: Network policy: {:?}, Mount mode: {:?}",
+                policy.network,
+                policy.mount_mode
+            );
+
             // Create Docker runtime with policy configuration
             let mut docker_runtime = DockerSandboxRuntime::new(image);
-            
+
             // Apply policy settings
             docker_runtime.set_network_policy(policy.network.clone());
             docker_runtime.set_mount_mode(policy.mount_mode.clone());
@@ -1106,7 +1234,7 @@ impl SandboxRuntimeFactory {
             if let Some(ref memory_limit) = policy.memory_limit {
                 docker_runtime.set_memory_limit(memory_limit.clone());
             }
-            
+
             Ok(std::sync::Arc::new(docker_runtime))
         } else if policy.prefer_docker && !docker_available {
             if policy.fallback_to_local {
@@ -1114,7 +1242,9 @@ impl SandboxRuntimeFactory {
                 Ok(std::sync::Arc::new(LocalCommandRuntime::new()))
             } else {
                 tracing::error!("P0-Issue2: Docker not available and fallback disabled");
-                anyhow::bail!("Docker runtime not available and fallback to local runtime is disabled by policy");
+                anyhow::bail!(
+                    "Docker runtime not available and fallback to local runtime is disabled by policy"
+                );
             }
         } else {
             // Local runtime preferred or Docker not preferred
@@ -1128,7 +1258,10 @@ impl SandboxRuntimeFactory {
     /// Priority:
     /// 1. Docker (if available and requested)
     /// 2. LocalCommandRuntime (fallback)
-    pub async fn create(prefer_docker: bool, image: Option<String>) -> std::sync::Arc<dyn SandboxRuntime + Send + Sync> {
+    pub async fn create(
+        prefer_docker: bool,
+        image: Option<String>,
+    ) -> std::sync::Arc<dyn SandboxRuntime + Send + Sync> {
         let policy = SandboxPolicy {
             prefer_docker,
             require_docker: false,
@@ -1139,7 +1272,7 @@ impl SandboxRuntimeFactory {
             memory_limit: None,
             docker_image: image,
         };
-        
+
         Self::create_with_policy(&policy).await.unwrap_or_else(|e| {
             tracing::error!("Failed to create sandbox runtime: {}", e);
             std::sync::Arc::new(LocalCommandRuntime::new()) // Fallback to local runtime
@@ -1147,7 +1280,9 @@ impl SandboxRuntimeFactory {
     }
 
     /// Create a Docker sandbox if available, otherwise fail
-    pub async fn create_docker(image: impl Into<String>) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
+    pub async fn create_docker(
+        image: impl Into<String>,
+    ) -> Result<std::sync::Arc<dyn SandboxRuntime + Send + Sync>> {
         if DockerSandboxRuntime::is_docker_available().await {
             Ok(std::sync::Arc::new(DockerSandboxRuntime::new(image)))
         } else {

@@ -3,15 +3,15 @@
 //! V1.6-P0-004: Make checkpoint failure semantics explicit and tested
 //! V1.6-P0-005: Enforce no side effects in ReviewOnly mode
 
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 use prometheos_lite::harness::{
-    mode_policy::HarnessMode,
-    git_checkpoint::GitCheckpointManager,
-    execution_loop::{HarnessExecutionRequest, HarnessLimits, ValidationFailurePolicy},
-    file_control::{FileSet, FilePolicy},
     edit_protocol::{EditOperation, SearchReplaceEdit},
+    execution_loop::{HarnessExecutionRequest, HarnessLimits, ValidationFailurePolicy},
+    file_control::{FilePolicy, FileSet},
+    git_checkpoint::GitCheckpointManager,
+    mode_policy::HarnessMode,
     patch_applier::dry_run_patch,
 };
 
@@ -87,7 +87,11 @@ async fn test_checkpoint_fails_for_non_git_repo() {
     let result = manager.create_checkpoint("test-context").await;
     assert!(result.is_err(), "Checkpoint should fail for non-git repo");
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Not a git repository"), "Error should mention not a git repo: {}", err_msg);
+    assert!(
+        err_msg.contains("Not a git repository"),
+        "Error should mention not a git repo: {}",
+        err_msg
+    );
 }
 
 /// P0-004: Test that checkpoint creation fails for dirty repo in strict mode
@@ -139,7 +143,9 @@ async fn test_review_only_no_side_effects() {
         provider_context: None,
         progress_callback: None,
         validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
-        sandbox_policy: Some(prometheos_lite::harness::sandbox::SandboxPolicy::from_mode(HarnessMode::ReviewOnly)),
+        sandbox_policy: Some(prometheos_lite::harness::sandbox::SandboxPolicy::from_mode(
+            HarnessMode::ReviewOnly,
+        )),
     };
 
     // Verify mode is ReviewOnly
@@ -149,7 +155,10 @@ async fn test_review_only_no_side_effects() {
             // Verify by checking the file hash is unchanged
             let main_file = repo_root.join("src").join("main.rs");
             let current_hash = compute_file_hash(&main_file);
-            assert_eq!(original_hash, current_hash, "File should be unchanged in ReviewOnly mode");
+            assert_eq!(
+                original_hash, current_hash,
+                "File should be unchanged in ReviewOnly mode"
+            );
         }
         _ => panic!("Expected ReviewOnly mode"),
     }
@@ -193,18 +202,26 @@ async fn test_dry_run_no_file_modification() {
     // Verify file is unchanged
     let main_file = repo_root.join("src").join("main.rs");
     let current_hash = compute_file_hash(&main_file);
-    assert_eq!(original_hash, current_hash,
+    assert_eq!(
+        original_hash, current_hash,
         "Dry run should NOT modify files. Hash changed from {} to {}",
-        original_hash, current_hash);
+        original_hash, current_hash
+    );
 
     // Verify dry run result shows what would change
     let patch_result = result.expect("Dry run should succeed");
     // NOTE: dry_run returns applied=false by design (patch was not actually applied)
     assert!(!patch_result.applied, "Dry run should report applied=false");
     assert!(patch_result.dry_run, "Dry run should have dry_run=true");
-    assert!(patch_result.failures.is_empty(), "Dry run should have no failures");
+    assert!(
+        patch_result.failures.is_empty(),
+        "Dry run should have no failures"
+    );
     // The changed_files shows what WOULD change if applied
-    assert!(!patch_result.changed_files.is_empty(), "Dry run should report what files would change");
+    assert!(
+        !patch_result.changed_files.is_empty(),
+        "Dry run should report what files would change"
+    );
 }
 
 /// P0-004 + P0-005: Test that failed checkpoint blocks patch application
@@ -222,7 +239,10 @@ async fn test_failed_checkpoint_blocks_application() {
 
     // Verify checkpoint would fail
     let checkpoint_result = manager.create_checkpoint("test").await;
-    assert!(checkpoint_result.is_err(), "Checkpoint should fail for non-git repo");
+    assert!(
+        checkpoint_result.is_err(),
+        "Checkpoint should fail for non-git repo"
+    );
 
     // In a real execution loop, this failure would block patch application
     // when rollback_policy is CheckpointBeforeSideEffect

@@ -83,7 +83,11 @@ fn test_time_point_with_files() {
     };
 
     assert_eq!(point.file_states.len(), 1);
-    assert!(point.file_states.contains_key(&PathBuf::from("src/main.rs")));
+    assert!(
+        point
+            .file_states
+            .contains_key(&PathBuf::from("src/main.rs"))
+    );
 }
 
 // ============================================================================

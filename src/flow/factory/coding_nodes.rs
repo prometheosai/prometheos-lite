@@ -7,10 +7,8 @@
 use crate::flow::SharedState;
 use crate::flow::node::{Node, NodeConfig};
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use tracing;
 
 /// Language configuration for code analysis
 #[derive(Debug, Clone, Copy)]
@@ -545,7 +543,7 @@ impl Node for SymbolResolutionNode {
         }))
     }
 
-    fn post(&self, _state: &mut SharedState, output: serde_json::Value) -> String {
+    fn post(&self, _state: &mut SharedState, _output: serde_json::Value) -> String {
         "continue".to_string()
     }
 

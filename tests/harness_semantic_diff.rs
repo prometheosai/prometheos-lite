@@ -22,11 +22,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::semantic_diff::{
-    analyze_semantic_diff, format_semantic_diff_report, has_breaking_changes,
-    requires_approval, requires_security_review, ApiChange, ApiChangeType, AuthChange,
-    AuthChangeType, ConfigChange, ConfigChangeType, ConfigEnvironment, DatabaseChange,
-    DatabaseChangeType, DependencyChange, DependencyChangeType, FileChange, FileChangeType,
-    RiskAssessment, RiskLevel, SemanticCategory, SemanticDiff, SemanticSummary,
+    ApiChange, ApiChangeType, AuthChange, AuthChangeType, ConfigChange, ConfigChangeType,
+    ConfigEnvironment, DatabaseChange, DatabaseChangeType, DependencyChange, DependencyChangeType,
+    FileChange, FileChangeType, RiskAssessment, RiskLevel, SemanticCategory, SemanticDiff,
+    SemanticSummary, analyze_semantic_diff, format_semantic_diff_report, has_breaking_changes,
+    requires_approval, requires_security_review,
 };
 
 // ============================================================================
@@ -85,7 +85,10 @@ fn test_api_change_creation() {
 
     assert_eq!(change.file, PathBuf::from("src/lib.rs"));
     assert_eq!(change.line, Some(42));
-    assert!(matches!(change.change_type, ApiChangeType::FunctionModified));
+    assert!(matches!(
+        change.change_type,
+        ApiChangeType::FunctionModified
+    ));
     // Note: function_name field doesn't exist in actual ApiChange struct
 }
 
@@ -95,19 +98,46 @@ fn test_api_change_creation() {
 
 #[test]
 fn test_api_change_type_variants() {
-    assert!(matches!(ApiChangeType::FunctionAdded, ApiChangeType::FunctionAdded));
-    assert!(matches!(ApiChangeType::FunctionRemoved, ApiChangeType::FunctionRemoved));
-    assert!(matches!(ApiChangeType::FunctionModified, ApiChangeType::FunctionModified));
-    assert!(matches!(ApiChangeType::FunctionAdded, ApiChangeType::FunctionAdded));
-    assert!(matches!(ApiChangeType::FunctionRemoved, ApiChangeType::FunctionRemoved));
-    assert!(matches!(ApiChangeType::FunctionModified, ApiChangeType::FunctionModified));
+    assert!(matches!(
+        ApiChangeType::FunctionAdded,
+        ApiChangeType::FunctionAdded
+    ));
+    assert!(matches!(
+        ApiChangeType::FunctionRemoved,
+        ApiChangeType::FunctionRemoved
+    ));
+    assert!(matches!(
+        ApiChangeType::FunctionModified,
+        ApiChangeType::FunctionModified
+    ));
+    assert!(matches!(
+        ApiChangeType::FunctionAdded,
+        ApiChangeType::FunctionAdded
+    ));
+    assert!(matches!(
+        ApiChangeType::FunctionRemoved,
+        ApiChangeType::FunctionRemoved
+    ));
+    assert!(matches!(
+        ApiChangeType::FunctionModified,
+        ApiChangeType::FunctionModified
+    ));
 }
 
 #[test]
 fn test_api_change_type_display() {
-    assert_eq!(format!("{:?}", ApiChangeType::FunctionAdded), "FunctionAdded");
-    assert_eq!(format!("{:?}", ApiChangeType::FunctionRemoved), "FunctionRemoved");
-    assert_eq!(format!("{:?}", ApiChangeType::FunctionModified), "FunctionModified");
+    assert_eq!(
+        format!("{:?}", ApiChangeType::FunctionAdded),
+        "FunctionAdded"
+    );
+    assert_eq!(
+        format!("{:?}", ApiChangeType::FunctionRemoved),
+        "FunctionRemoved"
+    );
+    assert_eq!(
+        format!("{:?}", ApiChangeType::FunctionModified),
+        "FunctionModified"
+    );
 }
 
 // ============================================================================
@@ -125,7 +155,10 @@ fn test_auth_change_creation() {
     };
 
     assert_eq!(change.file, PathBuf::from("src/auth.rs"));
-    assert!(matches!(change.change_type, AuthChangeType::AuthenticationAdded));
+    assert!(matches!(
+        change.change_type,
+        AuthChangeType::AuthenticationAdded
+    ));
     assert_eq!(change.description, "Added JWT auth");
 }
 
@@ -135,9 +168,18 @@ fn test_auth_change_creation() {
 
 #[test]
 fn test_auth_change_type_variants() {
-    assert!(matches!(AuthChangeType::AuthenticationAdded, AuthChangeType::AuthenticationAdded));
-    assert!(matches!(AuthChangeType::AuthenticationRemoved, AuthChangeType::AuthenticationRemoved));
-    assert!(matches!(AuthChangeType::AuthenticationModified, AuthChangeType::AuthenticationModified));
+    assert!(matches!(
+        AuthChangeType::AuthenticationAdded,
+        AuthChangeType::AuthenticationAdded
+    ));
+    assert!(matches!(
+        AuthChangeType::AuthenticationRemoved,
+        AuthChangeType::AuthenticationRemoved
+    ));
+    assert!(matches!(
+        AuthChangeType::AuthenticationModified,
+        AuthChangeType::AuthenticationModified
+    ));
 }
 
 // ============================================================================
@@ -156,7 +198,10 @@ fn test_database_change_creation() {
     };
 
     assert_eq!(change.file, PathBuf::from("migrations/001.sql"));
-    assert!(matches!(change.change_type, DatabaseChangeType::SchemaAdded));
+    assert!(matches!(
+        change.change_type,
+        DatabaseChangeType::SchemaAdded
+    ));
     assert_eq!(change.description, "Added users table");
 }
 
@@ -166,9 +211,18 @@ fn test_database_change_creation() {
 
 #[test]
 fn test_database_change_type_variants() {
-    assert!(matches!(DatabaseChangeType::SchemaAdded, DatabaseChangeType::SchemaAdded));
-    assert!(matches!(DatabaseChangeType::SchemaRemoved, DatabaseChangeType::SchemaRemoved));
-    assert!(matches!(DatabaseChangeType::SchemaModified, DatabaseChangeType::SchemaModified));
+    assert!(matches!(
+        DatabaseChangeType::SchemaAdded,
+        DatabaseChangeType::SchemaAdded
+    ));
+    assert!(matches!(
+        DatabaseChangeType::SchemaRemoved,
+        DatabaseChangeType::SchemaRemoved
+    ));
+    assert!(matches!(
+        DatabaseChangeType::SchemaModified,
+        DatabaseChangeType::SchemaModified
+    ));
 }
 
 // ============================================================================
@@ -198,9 +252,18 @@ fn test_dependency_change_creation() {
 
 #[test]
 fn test_dependency_change_type_variants() {
-    assert!(matches!(DependencyChangeType::Added, DependencyChangeType::Added));
-    assert!(matches!(DependencyChangeType::Removed, DependencyChangeType::Removed));
-    assert!(matches!(DependencyChangeType::Upgraded, DependencyChangeType::Upgraded));
+    assert!(matches!(
+        DependencyChangeType::Added,
+        DependencyChangeType::Added
+    ));
+    assert!(matches!(
+        DependencyChangeType::Removed,
+        DependencyChangeType::Removed
+    ));
+    assert!(matches!(
+        DependencyChangeType::Upgraded,
+        DependencyChangeType::Upgraded
+    ));
 }
 
 // ============================================================================
@@ -232,8 +295,14 @@ fn test_config_change_creation() {
 #[test]
 fn test_config_change_type_variants() {
     assert!(matches!(ConfigChangeType::Added, ConfigChangeType::Added));
-    assert!(matches!(ConfigChangeType::Removed, ConfigChangeType::Removed));
-    assert!(matches!(ConfigChangeType::Modified, ConfigChangeType::Modified));
+    assert!(matches!(
+        ConfigChangeType::Removed,
+        ConfigChangeType::Removed
+    ));
+    assert!(matches!(
+        ConfigChangeType::Modified,
+        ConfigChangeType::Modified
+    ));
 }
 
 // ============================================================================
@@ -242,8 +311,14 @@ fn test_config_change_type_variants() {
 
 #[test]
 fn test_config_environment_variants() {
-    assert!(matches!(ConfigEnvironment::Development, ConfigEnvironment::Development));
-    assert!(matches!(ConfigEnvironment::Production, ConfigEnvironment::Production));
+    assert!(matches!(
+        ConfigEnvironment::Development,
+        ConfigEnvironment::Development
+    ));
+    assert!(matches!(
+        ConfigEnvironment::Production,
+        ConfigEnvironment::Production
+    ));
     assert!(matches!(ConfigEnvironment::Test, ConfigEnvironment::Test));
 }
 
@@ -265,7 +340,10 @@ fn test_file_change_creation() {
     assert!(matches!(change.change_type, FileChangeType::Modified));
     assert_eq!(change.semantic_category, SemanticCategory::SourceCode);
     assert_eq!(change.lines_removed, 5);
-    assert!(matches!(change.semantic_category, SemanticCategory::SourceCode));
+    assert!(matches!(
+        change.semantic_category,
+        SemanticCategory::SourceCode
+    ));
 }
 // FileChangeType Tests
 // ============================================================================
@@ -283,10 +361,19 @@ fn test_file_change_type_variants() {
 
 #[test]
 fn test_semantic_category_variants() {
-    assert!(matches!(SemanticCategory::SourceCode, SemanticCategory::SourceCode));
+    assert!(matches!(
+        SemanticCategory::SourceCode,
+        SemanticCategory::SourceCode
+    ));
     assert!(matches!(SemanticCategory::Test, SemanticCategory::Test));
-    assert!(matches!(SemanticCategory::Configuration, SemanticCategory::Configuration));
-    assert!(matches!(SemanticCategory::Documentation, SemanticCategory::Documentation));
+    assert!(matches!(
+        SemanticCategory::Configuration,
+        SemanticCategory::Configuration
+    ));
+    assert!(matches!(
+        SemanticCategory::Documentation,
+        SemanticCategory::Documentation
+    ));
     assert!(matches!(SemanticCategory::Build, SemanticCategory::Build));
 }
 

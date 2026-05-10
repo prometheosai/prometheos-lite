@@ -7,7 +7,7 @@ use crate::harness::{
     review::{ReviewIssue, ReviewSeverity},
     risk::{RiskAssessment, RiskLevel},
     semantic_diff::SemanticDiff,
-    validation::{ValidationCategory, ValidationResult},
+    validation::ValidationResult,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

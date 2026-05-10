@@ -14,8 +14,6 @@ use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::work::{
     ArtifactMapper, PhaseController, WorkContext, WorkContextService,
-    domain::WorkDomainProfile,
-    playbook::WorkContextPlaybook,
     types::{ApprovalPolicy, AutonomyLevel, FlowPerformanceRecord, WorkPhase, WorkStatus},
 };
 

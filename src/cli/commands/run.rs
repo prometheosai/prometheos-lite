@@ -1,6 +1,5 @@
 //! Run command handler (deprecated)
 
-use anyhow::Context;
 use clap::Parser;
 
 use prometheos_lite::{config::AppConfig, llm::LlmClient, logger::Logger};
@@ -29,7 +28,7 @@ impl RunCommand {
         let config = AppConfig::load()?;
         logger.info(&format!("Loaded config for provider: {}", config.provider));
 
-        let llm = LlmClient::from_config(&config)?;
+        let _llm = LlmClient::from_config(&config)?;
 
         // Use the deprecated orchestrator
         #[cfg(feature = "legacy")]

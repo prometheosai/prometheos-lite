@@ -40,7 +40,7 @@ impl WorkContextService {
         goal: String,
     ) -> Result<WorkContext> {
         let id = Uuid::new_v4().to_string();
-        let mut context = WorkContext::new(id, user_id, title, domain, goal);
+        let context = WorkContext::new(id, user_id, title, domain, goal);
 
         // Persist to database
         let saved = WorkContextOperations::create_work_context(&*self.db, &context)?;

@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use prometheos_lite::harness::confidence::ConfidenceScore;
 use prometheos_lite::harness::edit_protocol::EditOperation;
-use prometheos_lite::harness::risk::{RiskAssessment, RiskLevel};
 use prometheos_lite::harness::review::ReviewIssue;
+use prometheos_lite::harness::risk::{RiskAssessment, RiskLevel};
 use prometheos_lite::harness::selection::{
     PatchCandidate, ScoredCandidate, SelectionCriteria, SelectionEngine,
 };
@@ -80,7 +80,10 @@ fn test_patch_candidate_with_metadata() {
     };
 
     assert_eq!(candidate.metadata.len(), 2);
-    assert_eq!(candidate.metadata.get("author"), Some(&"ai-model".to_string()));
+    assert_eq!(
+        candidate.metadata.get("author"),
+        Some(&"ai-model".to_string())
+    );
 }
 
 // ============================================================================

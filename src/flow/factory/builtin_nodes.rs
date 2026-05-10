@@ -2,14 +2,11 @@
 
 use crate::flow::SharedState;
 use crate::flow::node::{Node, NodeConfig};
-use crate::tools::PathGuard;
 use anyhow::{Context, Result};
-use async_trait::async_trait;
-use serde_json::json;
 use std::sync::Arc;
 
 // Import guardrail database operations
-use crate::db::repository::{InterruptOperations, OutboxOperations};
+use crate::db::repository::OutboxOperations;
 
 use crate::context::{ContextBuilder, ContextInputs};
 use crate::flow::{MemoryService, MemoryType, ModelRouter, ToolRuntime};

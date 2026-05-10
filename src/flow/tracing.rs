@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::flow::{NodeId, SharedState};
+use crate::flow::NodeId;
 
 pub mod storage;
 

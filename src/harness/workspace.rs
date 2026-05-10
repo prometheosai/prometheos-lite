@@ -56,12 +56,8 @@ impl WorkspaceHandle {
         file_set: &FileSet,
         policy: &FilePolicy,
     ) -> Result<(Self, PatchResult)> {
-        let (temp_workspace, patch_result) = TempWorkspace::create_temp_copy(
-            original_root,
-            edits,
-            file_set,
-            policy,
-        ).await?;
+        let (temp_workspace, patch_result) =
+            TempWorkspace::create_temp_copy(original_root, edits, file_set, policy).await?;
 
         let handle = Self {
             root: temp_workspace.root.clone(),
@@ -81,7 +77,7 @@ impl WorkspaceHandle {
         original_root: &Path,
         edits: &[EditOperation],
         file_set: &FileSet,
-        policy: &FilePolicy,
+        _policy: &FilePolicy,
     ) -> Result<(Self, PatchResult)> {
         // Generate unique worktree name
         let worktree_name = format!(
@@ -90,15 +86,17 @@ impl WorkspaceHandle {
             chrono::Utc::now().timestamp_millis()
         );
 
-        let worktree_path = original_root.parent()
+        let worktree_path = original_root
+            .parent()
             .unwrap_or(original_root)
             .join(&worktree_name);
 
         // Create git worktree
         let create_result = Command::new("git")
             .args([
-                "worktree", "add",
-                "-d",  // Detached HEAD (no branch needed for validation)
+                "worktree",
+                "add",
+                "-d", // Detached HEAD (no branch needed for validation)
                 worktree_path.to_str().unwrap_or("prometheos-worktree"),
             ])
             .current_dir(original_root)
@@ -255,7 +253,9 @@ impl WorkspaceSelector {
                 if matches!(mode, crate::harness::mode_policy::HarnessMode::ReviewOnly) {
                     WorkspaceStrategy::InPlace
                 } else {
-                    tracing::warn!("InPlace strategy only allowed in ReviewOnly mode, using TempCopy");
+                    tracing::warn!(
+                        "InPlace strategy only allowed in ReviewOnly mode, using TempCopy"
+                    );
                     WorkspaceStrategy::TempCopy
                 }
             }

@@ -43,16 +43,18 @@ impl ServeCommand {
 
         // Create memory service with OpenRouter embedding
         let memory_service = runtime_builder.build_memory_service()?;
-        
+
         // Create AppState
         let app_state = std::sync::Arc::new(
             prometheos_lite::api::AppState::new(
                 db_path,
                 std::sync::Arc::new(runtime),
-                std::sync::Arc::new(prometheos_lite::flow::memory::embedding::LocalEmbeddingProvider::new(
-                    "http://127.0.0.1:1234".to_string(),
-                    runtime_builder.config().embedding_dimension,
-                )),
+                std::sync::Arc::new(
+                    prometheos_lite::flow::memory::embedding::LocalEmbeddingProvider::new(
+                        "http://127.0.0.1:1234".to_string(),
+                        runtime_builder.config().embedding_dimension,
+                    ),
+                ),
                 memory_service,
             )
             .map_err(|e| anyhow::anyhow!("Failed to create AppState: {}", e))?,

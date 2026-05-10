@@ -405,7 +405,7 @@ fn detect_php(root: &Path, profile: &mut EnvironmentProfile) -> Result<()> {
 
 fn detect_ruby(root: &Path, profile: &mut EnvironmentProfile) -> Result<()> {
     let has_gemfile = root.join("Gemfile").exists();
-    let has_gemspec = root.join("*.gemspec").exists();
+    let _has_gemspec = root.join("*.gemspec").exists();
 
     if has_gemfile {
         profile.languages.push("ruby".into());

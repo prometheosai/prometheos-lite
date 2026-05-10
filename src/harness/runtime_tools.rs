@@ -672,17 +672,21 @@ impl RuntimeToolRegistry {
     pub fn propose_temporary_tool(&mut self, tool: TemporaryTool) -> Result<String> {
         // Validate the tool
         self.validate_temporary_tool(&tool)?;
-        
+
         // Generate request ID
         let request_id = format!("req_{}", chrono::Utc::now().timestamp_nanos());
-        
+
         let mut pending_tool = tool;
         pending_tool.approval_status = ApprovalStatus::Pending;
         let tool_id = pending_tool.id.clone();
-        
-        tracing::info!("Temporary tool proposed: {} by {}", pending_tool.name, pending_tool.proposed_by);
+
+        tracing::info!(
+            "Temporary tool proposed: {} by {}",
+            pending_tool.name,
+            pending_tool.proposed_by
+        );
         self.temporary_tools.insert(tool_id, pending_tool);
-        
+
         Ok(request_id)
     }
 
@@ -708,9 +712,14 @@ impl RuntimeToolRegistry {
         }
 
         tool.approval_status = ApprovalStatus::Approved;
-        tracing::info!("Temporary tool {} approved by {} with reason: {}", tool_id, approver_id, reason);
+        tracing::info!(
+            "Temporary tool {} approved by {} with reason: {}",
+            tool_id,
+            approver_id,
+            reason
+        );
         tracing::info!("Applied {} conditions", conditions.len());
-        
+
         Ok(())
     }
 
@@ -736,7 +745,10 @@ impl RuntimeToolRegistry {
         }
 
         if approval_token.is_none() {
-            bail!("Temporary tool '{}' execution requires an approval token", tool_id);
+            bail!(
+                "Temporary tool '{}' execution requires an approval token",
+                tool_id
+            );
         }
 
         if let Some(expires_at) = temporary_tool.expires_at {
@@ -748,14 +760,21 @@ impl RuntimeToolRegistry {
 
         if let Some(max_uses) = temporary_tool.max_uses {
             if temporary_tool.usage_count >= max_uses {
-                bail!("Temporary tool '{}' exceeded its maximum usage count", tool_id);
+                bail!(
+                    "Temporary tool '{}' exceeded its maximum usage count",
+                    tool_id
+                );
             }
         }
 
         temporary_tool.usage_count += 1;
         let script_content = temporary_tool.script_content.clone();
         let script_type = temporary_tool.script_type;
-        let resource_limits = temporary_tool.security_analysis.sandbox_requirements.resource_limits.clone();
+        let resource_limits = temporary_tool
+            .security_analysis
+            .sandbox_requirements
+            .resource_limits
+            .clone();
         let execution_id = format!("exec_{}", chrono::Utc::now().timestamp_nanos());
         let start_time = std::time::Instant::now();
 
@@ -764,9 +783,12 @@ impl RuntimeToolRegistry {
             ScriptType::Python => "py",
             ScriptType::PowerShell => "ps1",
             ScriptType::JavaScript => "js",
-            ScriptType::Rust => bail!("Temporary Rust tools require an explicit compiled runtime tool registration"),
+            ScriptType::Rust => {
+                bail!("Temporary Rust tools require an explicit compiled runtime tool registration")
+            }
         };
-        let script_path = std::env::temp_dir().join(format!("prometheos_{}_tool.{}", execution_id, extension));
+        let script_path =
+            std::env::temp_dir().join(format!("prometheos_{}_tool.{}", execution_id, extension));
         std::fs::write(&script_path, script_content)?;
 
         let mut command = match script_type {
@@ -822,7 +844,12 @@ impl RuntimeToolRegistry {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ),
             Ok(Err(err)) => (false, None, String::new(), err.to_string()),
-            Err(_) => (false, None, String::new(), format!("Temporary tool timed out after {}ms", timeout_ms)),
+            Err(_) => (
+                false,
+                None,
+                String::new(),
+                format!("Temporary tool timed out after {}ms", timeout_ms),
+            ),
         };
         let result = TemporaryToolResult {
             tool_id: tool_id.to_string(),
@@ -843,9 +870,9 @@ impl RuntimeToolRegistry {
             security_events: vec![],
             approval_verified: approval_token.is_some(),
         };
-        
+
         tracing::info!("Temporary tool {} executed successfully", tool_id);
-        
+
         Ok(result)
     }
 
@@ -855,66 +882,84 @@ impl RuntimeToolRegistry {
         if tool.script_content.is_empty() {
             bail!("Script content cannot be empty");
         }
-        
+
         // Check for suspicious commands
         let suspicious_commands = [
-            "rm -rf /", "sudo rm", "chmod 777", "wget", "curl", "nc ",
-            "netcat", "ssh", "scp", "rsync", "dd if=", ":(){ :|:& };:",
+            "rm -rf /",
+            "sudo rm",
+            "chmod 777",
+            "wget",
+            "curl",
+            "nc ",
+            "netcat",
+            "ssh",
+            "scp",
+            "rsync",
+            "dd if=",
+            ":(){ :|:& };:",
         ];
-        
+
         for suspicious in &suspicious_commands {
             if tool.script_content.contains(suspicious) {
                 bail!("Script contains suspicious command: {}", suspicious);
             }
         }
-        
+
         // Check security analysis
         if tool.security_analysis.risk_level == RiskLevel::Critical {
             bail!("Critical risk tools require additional approval");
         }
-        
+
         // Check permissions
-        if tool.execution_permissions.can_access_network && 
-           !tool.security_analysis.sandbox_requirements.network_isolation {
+        if tool.execution_permissions.can_access_network
+            && !tool
+                .security_analysis
+                .sandbox_requirements
+                .network_isolation
+        {
             bail!("Network access requires network isolation");
         }
-        
+
         Ok(())
     }
 
     /// P1-Issue4: Analyze script security
-    pub fn analyze_script_security(&self, script: &str, script_type: ScriptType) -> SecurityAnalysis {
+    pub fn analyze_script_security(
+        &self,
+        script: &str,
+        _script_type: ScriptType,
+    ) -> SecurityAnalysis {
         let mut security_flags = Vec::new();
         let mut risk_level = RiskLevel::Low;
-        
+
         // Check for file system access
         if script.contains("read") || script.contains("open") || script.contains("cat") {
             security_flags.push(SecurityFlag::ReadsFileSystem);
             risk_level = RiskLevel::Medium;
         }
-        
+
         if script.contains("write") || script.contains("echo >") || script.contains("touch") {
             security_flags.push(SecurityFlag::WritesFileSystem);
             risk_level = RiskLevel::Medium;
         }
-        
+
         // Check for network access
         if script.contains("curl") || script.contains("wget") || script.contains("http") {
             security_flags.push(SecurityFlag::NetworkAccess);
             risk_level = RiskLevel::High;
         }
-        
+
         // Check for system commands
         if script.contains("exec") || script.contains("system") || script.contains("subprocess") {
             security_flags.push(SecurityFlag::SystemCommands);
             risk_level = RiskLevel::High;
         }
-        
+
         // Check for environment access
         if script.contains("env") || script.contains("export") || script.contains("$") {
             security_flags.push(SecurityFlag::EnvironmentAccess);
         }
-        
+
         // Estimate resource requirements
         let resource_requirements = ResourceRequirements {
             estimated_memory_mb: 64,
@@ -926,7 +971,7 @@ impl RuntimeToolRegistry {
                 None
             },
         };
-        
+
         // Determine sandbox requirements
         let sandbox_requirements = SandboxRequirements {
             requires_isolation: risk_level != RiskLevel::Low,
@@ -939,39 +984,41 @@ impl RuntimeToolRegistry {
                 max_network_bytes: 1024 * 1024, // 1MB
                 max_processes: 5,
             },
-            allowed_paths: vec![
-                PathBuf::from("/tmp"),
-                PathBuf::from("/var/tmp"),
-            ],
+            allowed_paths: vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")],
             blocked_paths: vec![
                 PathBuf::from("/etc"),
                 PathBuf::from("/root"),
                 PathBuf::from("/home"),
             ],
         };
-        
+
         // Generate recommendations
         let mut recommendations = Vec::new();
-        
+
         if risk_level == RiskLevel::High {
-            recommendations.push("Consider breaking down into smaller, safer operations".to_string());
+            recommendations
+                .push("Consider breaking down into smaller, safer operations".to_string());
         }
-        
+
         if security_flags.contains(&SecurityFlag::NetworkAccess) {
             recommendations.push("Limit network access to specific domains".to_string());
         }
-        
+
         if security_flags.contains(&SecurityFlag::WritesFileSystem) {
-            recommendations.push("Restrict file write permissions to specific directories".to_string());
+            recommendations
+                .push("Restrict file write permissions to specific directories".to_string());
         }
-        
+
         let security_flags_count = security_flags.len();
         SecurityAnalysis {
             risk_level,
             security_flags,
             resource_requirements,
             sandbox_requirements,
-            analysis_summary: format!("Script analysis complete with {} security flags", security_flags_count),
+            analysis_summary: format!(
+                "Script analysis complete with {} security flags",
+                security_flags_count
+            ),
             recommendations,
         }
     }
@@ -979,8 +1026,8 @@ impl RuntimeToolRegistry {
     /// P1-Issue4: Get temporary tool usage statistics
     pub fn get_temporary_tool_stats(&self) -> HashMap<String, TemporaryToolStats> {
         let mut stats = HashMap::new();
-        
-        for (tool_name, tool) in &self.tools {
+
+        for (tool_name, _tool) in &self.tools {
             let tool_stats = TemporaryToolStats {
                 total_proposed: 0,
                 total_approved: 0,
@@ -992,7 +1039,7 @@ impl RuntimeToolRegistry {
             };
             stats.insert(tool_name.clone(), tool_stats);
         }
-        
+
         stats
     }
 }
@@ -1019,7 +1066,7 @@ impl TemporaryTool {
         proposed_by: String,
     ) -> Self {
         let id = format!("temp_{}", chrono::Utc::now().timestamp_nanos());
-        
+
         Self {
             id,
             name,
@@ -1036,7 +1083,7 @@ impl TemporaryTool {
             max_uses: Some(10), // Default limit
         }
     }
-    
+
     /// Check if the tool is currently valid for execution
     pub fn is_valid_for_execution(&self) -> bool {
         match self.approval_status {
@@ -1051,7 +1098,7 @@ impl TemporaryTool {
             _ => false,
         }
     }
-    
+
     /// Check if usage limit has been reached
     pub fn has_reached_usage_limit(&self) -> bool {
         if let Some(max_uses) = self.max_uses {
@@ -1060,7 +1107,7 @@ impl TemporaryTool {
             false
         }
     }
-    
+
     /// Increment usage count
     pub fn increment_usage(&mut self) {
         self.usage_count += 1;
@@ -1161,7 +1208,11 @@ impl RuntimeToolRegistry {
                     return None;
                 }
 
-                let output = Command::new(parts[0]).args(&parts[1..]).output().await.ok()?;
+                let output = Command::new(parts[0])
+                    .args(&parts[1..])
+                    .output()
+                    .await
+                    .ok()?;
                 if output.status.success() {
                     return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
                 }
@@ -1171,7 +1222,10 @@ impl RuntimeToolRegistry {
     }
 
     /// P1-009: Run health checks for all tools referenced in a ValidationPlan
-    pub async fn health_check_plan(&self, plan: &crate::harness::validation::ValidationPlan) -> Vec<(String, bool)> {
+    pub async fn health_check_plan(
+        &self,
+        plan: &crate::harness::validation::ValidationPlan,
+    ) -> Vec<(String, bool)> {
         let mut results = Vec::new();
 
         // Check tools by ID

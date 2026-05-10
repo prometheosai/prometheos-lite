@@ -125,7 +125,7 @@ impl OpenRouterEmbeddingProvider {
             "cohere/embed-english-v3.0".to_string(),
             "cohere/embed-multilingual-v3.0".to_string(),
         ];
-        
+
         Self {
             client: Client::new(),
             api_key,
@@ -134,7 +134,7 @@ impl OpenRouterEmbeddingProvider {
             dimension,
         }
     }
-    
+
     /// Try the next model in the fallback list
     fn try_next_model(&mut self) -> bool {
         if self.current_model_index + 1 < self.models.len() {
@@ -144,7 +144,7 @@ impl OpenRouterEmbeddingProvider {
             false
         }
     }
-    
+
     /// Reset to the first model (for retrying)
     fn reset_model(&mut self) {
         self.current_model_index = 0;
@@ -156,25 +156,28 @@ impl EmbeddingProvider for OpenRouterEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let mut provider = self.clone();
         provider.reset_model();
-        
+
         loop {
             let current_model = &provider.models[provider.current_model_index];
-            
+
             match provider.embed_with_model(text, current_model).await {
                 Ok(embedding) => return Ok(embedding),
                 Err(e) => {
                     tracing::warn!("Failed to embed with model {}: {}", current_model, e);
-                    
+
                     if !provider.try_next_model() {
                         anyhow::bail!("All embedding models failed. Last error: {}", e);
                     }
-                    
-                    tracing::info!("Falling back to next model: {}", provider.models[provider.current_model_index]);
+
+                    tracing::info!(
+                        "Falling back to next model: {}",
+                        provider.models[provider.current_model_index]
+                    );
                 }
             }
         }
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
@@ -186,7 +189,7 @@ impl OpenRouterEmbeddingProvider {
             "model": model,
             "input": text
         });
-        
+
         let response = self
             .client
             .post("https://openrouter.ai/api/v1/embeddings")
@@ -196,7 +199,9 @@ impl OpenRouterEmbeddingProvider {
             .json(&json_body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send embedding request to OpenRouter: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to send embedding request to OpenRouter: {}", e)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -228,7 +233,9 @@ impl OpenRouterEmbeddingProvider {
             .iter()
             .map(|v| {
                 v.as_f64()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid embedding value in OpenRouter response"))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Invalid embedding value in OpenRouter response")
+                    })
                     .map(|f| f as f32)
             })
             .collect::<Result<Vec<f32>>>()?;

@@ -9,7 +9,7 @@
 //! - git_diff: Get git diff output
 
 use crate::flow::Tool;
-use crate::tools::{PathGuard, ToolContext, ToolMetadata};
+use crate::tools::PathGuard;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;

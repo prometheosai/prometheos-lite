@@ -1,7 +1,6 @@
 //! Advanced Flow Types - branching, looping, batch, and parallel execution
 
 use anyhow::Result;
-use async_trait::async_trait;
 use futures::future::join_all;
 
 use crate::flow::{Action, Flow, Node, NodeConfig, SharedState};

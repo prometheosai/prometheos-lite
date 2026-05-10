@@ -3,8 +3,7 @@
 //! This module provides memory summarization to compress clusters of memories
 //! into single summarized memories, reducing token usage while preserving information.
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
 
 use crate::flow::ModelRouter;
 use crate::flow::memory::types::{Memory, MemoryKind};

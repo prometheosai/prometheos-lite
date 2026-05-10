@@ -1,9 +1,7 @@
 use crate::harness::{
-    edit_protocol::EditOperation,
-    patch_applier::{PatchFailure, PatchResult},
+    patch_applier::PatchFailure,
     validation::{CommandResult, ValidationCategory, ValidationResult},
 };
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 

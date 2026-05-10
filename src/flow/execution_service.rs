@@ -17,7 +17,7 @@ use crate::flow::execution::{ContinuationEngine, Flow, RunDb};
 use crate::flow::factory::{DefaultNodeFactory, NodeFactory};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
 use crate::flow::output::{Evaluation, FinalOutput};
-use crate::flow::tracing::{RunId, SharedTracer, TraceEvent, Tracer};
+use crate::flow::tracing::{SharedTracer, TraceEvent};
 use crate::flow::{RuntimeContext, SharedState};
 use crate::intent::{DefaultFlowSelector, FlowSelector, Intent, IntentClassifier};
 
@@ -480,7 +480,7 @@ impl FlowExecutionService {
         // 13. Persist run to database if RunDb is available
         if let Some(ref run_db) = self.run_db {
             if let Ok(db) = run_db.lock() {
-                use crate::flow::execution::{FlowRun, RunStatus};
+                use crate::flow::execution::FlowRun;
                 let mut flow_run = FlowRun::new(flow_name.clone());
                 flow_run.id = run_id.clone();
                 match result {
@@ -659,7 +659,7 @@ impl FlowExecutionService {
         // Persist run to database if RunDb is available
         if let Some(ref run_db) = self.run_db {
             if let Ok(db) = run_db.lock() {
-                use crate::flow::execution::{FlowRun, RunStatus};
+                use crate::flow::execution::FlowRun;
                 let mut flow_run = FlowRun::new(flow_name.clone());
                 flow_run.id = run_id.clone();
                 match result {

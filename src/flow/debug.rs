@@ -51,7 +51,7 @@ impl DebugHooks {
 }
 
 impl FlowLifecycleHooks for DebugHooks {
-    fn on_node_start(&self, node_id: &NodeId, state: &SharedState, input: &Input) {
+    fn on_node_start(&self, node_id: &NodeId, _state: &SharedState, _input: &Input) {
         let mut session = self.session.lock().unwrap();
         if session.should_pause(node_id) {
             session.paused = true;
@@ -71,7 +71,7 @@ impl FlowLifecycleHooks for DebugHooks {
         });
     }
 
-    fn on_transition(&self, from: &NodeId, action: &Action, to: &NodeId) {
+    fn on_transition(&self, _from: &NodeId, action: &Action, _to: &NodeId) {
         let mut session = self.session.lock().unwrap();
         if let Some(last_snapshot) = session.snapshots.last_mut() {
             last_snapshot.action = Some(action.clone());

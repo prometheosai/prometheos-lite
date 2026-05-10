@@ -10,10 +10,10 @@
 //! - Decision factor tracking
 
 use prometheos_lite::harness::completion::{
-    CompletionDecision, CompletionEvidence, PatchEvidence, ValidationEvidence, ReviewEvidence,
-    RiskEvidence, VerificationEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence,
+    CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
+    ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence, VerificationEvidence,
 };
-use prometheos_lite::harness::confidence::{ConfidenceScore, ConfidenceFactor, FactorImpact};
+use prometheos_lite::harness::confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact};
 use prometheos_lite::harness::verification::VerificationStrength;
 
 // ============================================================================
@@ -286,7 +286,10 @@ fn test_verification_evidence_full() {
         verification_summary: "All verification passed".to_string(),
     };
 
-    assert!(matches!(evidence.verification_level, VerificationStrength::Tests));
+    assert!(matches!(
+        evidence.verification_level,
+        VerificationStrength::Tests
+    ));
     assert!(evidence.test_count > 0);
 }
 
@@ -355,10 +358,22 @@ fn test_process_evidence_complete() {
 
 #[test]
 fn test_completion_decision_variants() {
-    assert!(matches!(CompletionDecision::Complete, CompletionDecision::Complete));
-    assert!(matches!(CompletionDecision::Blocked("test".to_string()), CompletionDecision::Blocked(_)));
-    assert!(matches!(CompletionDecision::NeedsRepair("test".to_string()), CompletionDecision::NeedsRepair(_)));
-    assert!(matches!(CompletionDecision::NeedsApproval("test".to_string()), CompletionDecision::NeedsApproval(_)));
+    assert!(matches!(
+        CompletionDecision::Complete,
+        CompletionDecision::Complete
+    ));
+    assert!(matches!(
+        CompletionDecision::Blocked("test".to_string()),
+        CompletionDecision::Blocked(_)
+    ));
+    assert!(matches!(
+        CompletionDecision::NeedsRepair("test".to_string()),
+        CompletionDecision::NeedsRepair(_)
+    ));
+    assert!(matches!(
+        CompletionDecision::NeedsApproval("test".to_string()),
+        CompletionDecision::NeedsApproval(_)
+    ));
 }
 
 // ============================================================================

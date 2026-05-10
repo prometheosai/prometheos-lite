@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::RwLock;
 
@@ -402,7 +402,7 @@ impl KnowledgeCacheManager {
         let caches = self.caches.read().await;
         let mut total_cleaned = 0;
 
-        for (task_id, cache) in caches.iter() {
+        for (_task_id, cache) in caches.iter() {
             let keys = cache.keys(CacheScope::Task).await;
             let now = cache.now();
 

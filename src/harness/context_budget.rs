@@ -4,7 +4,7 @@
 //! that the context provided to LLMs stays within reasonable limits while
 //! maintaining the most relevant information across different sections.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -145,72 +145,96 @@ impl ContextBudget {
     /// Create a new context budget with default settings
     pub fn new(total_budget: usize) -> Self {
         let mut sections = HashMap::new();
-        
+
         // Default section budgets
-        sections.insert(ContextSection::Files, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.4) as usize, // 40% for files
-            min_tokens: (total_budget as f32 * 0.2) as usize,  // 20% minimum
-            priority: 100, // Highest priority
-            can_truncate: true,
-            can_omit: false,
-        });
-        
-        sections.insert(ContextSection::Symbols, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.2) as usize, // 20% for symbols
-            min_tokens: (total_budget as f32 * 0.1) as usize,  // 10% minimum
-            priority: 90,
-            can_truncate: true,
-            can_omit: false,
-        });
-        
-        sections.insert(ContextSection::Dependencies, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.15) as usize, // 15% for dependencies
-            min_tokens: (total_budget as f32 * 0.05) as usize, // 5% minimum
-            priority: 70,
-            can_truncate: true,
-            can_omit: true,
-        });
-        
-        sections.insert(ContextSection::Tests, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.1) as usize, // 10% for tests
-            min_tokens: 0, // Optional
-            priority: 60,
-            can_truncate: true,
-            can_omit: true,
-        });
-        
-        sections.insert(ContextSection::Documentation, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.1) as usize, // 10% for documentation
-            min_tokens: 0, // Optional
-            priority: 50,
-            can_truncate: true,
-            can_omit: true,
-        });
-        
-        sections.insert(ContextSection::BuildConfig, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.05) as usize, // 5% for build config
-            min_tokens: 0, // Optional
-            priority: 40,
-            can_truncate: true,
-            can_omit: true,
-        });
-        
-        sections.insert(ContextSection::Errors, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.05) as usize, // 5% for errors
-            min_tokens: 0, // Optional
-            priority: 80, // High priority for debugging
-            can_truncate: true,
-            can_omit: true,
-        });
-        
-        sections.insert(ContextSection::Imports, SectionBudget {
-            max_tokens: (total_budget as f32 * 0.05) as usize, // 5% for imports
-            min_tokens: 0, // Optional
-            priority: 30,
-            can_truncate: true,
-            can_omit: true,
-        });
-        
+        sections.insert(
+            ContextSection::Files,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.4) as usize, // 40% for files
+                min_tokens: (total_budget as f32 * 0.2) as usize, // 20% minimum
+                priority: 100,                                    // Highest priority
+                can_truncate: true,
+                can_omit: false,
+            },
+        );
+
+        sections.insert(
+            ContextSection::Symbols,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.2) as usize, // 20% for symbols
+                min_tokens: (total_budget as f32 * 0.1) as usize, // 10% minimum
+                priority: 90,
+                can_truncate: true,
+                can_omit: false,
+            },
+        );
+
+        sections.insert(
+            ContextSection::Dependencies,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.15) as usize, // 15% for dependencies
+                min_tokens: (total_budget as f32 * 0.05) as usize, // 5% minimum
+                priority: 70,
+                can_truncate: true,
+                can_omit: true,
+            },
+        );
+
+        sections.insert(
+            ContextSection::Tests,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.1) as usize, // 10% for tests
+                min_tokens: 0,                                    // Optional
+                priority: 60,
+                can_truncate: true,
+                can_omit: true,
+            },
+        );
+
+        sections.insert(
+            ContextSection::Documentation,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.1) as usize, // 10% for documentation
+                min_tokens: 0,                                    // Optional
+                priority: 50,
+                can_truncate: true,
+                can_omit: true,
+            },
+        );
+
+        sections.insert(
+            ContextSection::BuildConfig,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.05) as usize, // 5% for build config
+                min_tokens: 0,                                     // Optional
+                priority: 40,
+                can_truncate: true,
+                can_omit: true,
+            },
+        );
+
+        sections.insert(
+            ContextSection::Errors,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.05) as usize, // 5% for errors
+                min_tokens: 0,                                     // Optional
+                priority: 80,                                      // High priority for debugging
+                can_truncate: true,
+                can_omit: true,
+            },
+        );
+
+        sections.insert(
+            ContextSection::Imports,
+            SectionBudget {
+                max_tokens: (total_budget as f32 * 0.05) as usize, // 5% for imports
+                min_tokens: 0,                                     // Optional
+                priority: 30,
+                can_truncate: true,
+                can_omit: true,
+            },
+        );
+
         Self {
             total_budget,
             sections,
@@ -218,14 +242,14 @@ impl ContextBudget {
             policy: BudgetPolicy::Adaptive,
         }
     }
-    
+
     /// Create a context budget with custom policy
     pub fn with_policy(total_budget: usize, policy: BudgetPolicy) -> Self {
         let mut budget = Self::new(total_budget);
         budget.policy = policy;
         budget
     }
-    
+
     /// Enforce budget on provided context sections
     pub fn enforce_budget(
         &mut self,
@@ -236,44 +260,49 @@ impl ContextBudget {
         let mut section_usage = HashMap::new();
         let mut violations = Vec::new();
         let mut recommendations = Vec::new();
-        
+
         // Sort sections by priority (highest first)
-        let mut sorted_sections: Vec<_> = context_sections.into_iter()
-            .collect();
+        let mut sorted_sections: Vec<_> = context_sections.into_iter().collect();
         sorted_sections.sort_by(|a, b| {
             let priority_a = self.sections.get(&a.0).map(|s| s.priority).unwrap_or(0);
             let priority_b = self.sections.get(&b.0).map(|s| s.priority).unwrap_or(0);
             priority_b.cmp(&priority_a) // Reverse order (highest priority first)
         });
-        
+
         let mut remaining_budget = self.total_budget;
-        
+
         for (section, content) in sorted_sections {
-            let section_budget = self.sections.get(&section).cloned()
-                .unwrap_or_else(|| SectionBudget {
-                    max_tokens: remaining_budget,
-                    min_tokens: 0,
-                    priority: 50,
-                    can_truncate: true,
-                    can_omit: true,
-                });
-            
+            let section_budget =
+                self.sections
+                    .get(&section)
+                    .cloned()
+                    .unwrap_or_else(|| SectionBudget {
+                        max_tokens: remaining_budget,
+                        min_tokens: 0,
+                        priority: 50,
+                        can_truncate: true,
+                        can_omit: true,
+                    });
+
             // Calculate content tokens (rough estimation)
             let content_tokens = self.estimate_tokens(&content);
-            
-            let (processed_content, tokens_used, usage) = if content_tokens > section_budget.max_tokens {
+
+            let (processed_content, tokens_used, usage) = if content_tokens
+                > section_budget.max_tokens
+            {
                 // Need to truncate or omit
                 if section_budget.can_truncate {
-                    let truncated_content = self.truncate_content(&content, section_budget.max_tokens);
+                    let truncated_content =
+                        self.truncate_content(&content, section_budget.max_tokens);
                     let truncated_tokens = self.estimate_tokens(&truncated_content);
-                    
-                    let mut usage = SectionUsage {
+
+                    let usage = SectionUsage {
                         tokens_used: truncated_tokens,
                         items_included: vec![format!("truncated_{}", section as u8)],
                         items_excluded: vec![format!("excluded_{}", section as u8)],
                         truncated: true,
                     };
-                    
+
                     // Check for violations
                     if truncated_tokens < section_budget.min_tokens && !section_budget.can_omit {
                         violations.push(BudgetViolation {
@@ -286,7 +315,7 @@ impl ContextBudget {
                             ),
                         });
                     }
-                    
+
                     if truncated_tokens > section_budget.max_tokens {
                         violations.push(BudgetViolation {
                             section,
@@ -298,7 +327,7 @@ impl ContextBudget {
                             ),
                         });
                     }
-                    
+
                     (truncated_content, truncated_tokens, usage)
                 } else if section_budget.can_omit {
                     // Omit the entire section
@@ -308,7 +337,7 @@ impl ContextBudget {
                         items_excluded: vec![format!("omitted_{}", section as u8)],
                         truncated: false,
                     };
-                    
+
                     if section_budget.min_tokens > 0 {
                         violations.push(BudgetViolation {
                             section,
@@ -320,7 +349,7 @@ impl ContextBudget {
                             ),
                         });
                     }
-                    
+
                     (String::new(), 0, usage)
                 } else {
                     // Cannot truncate or omit, include as-is
@@ -333,14 +362,14 @@ impl ContextBudget {
                             section
                         ),
                     });
-                    
+
                     let usage = SectionUsage {
                         tokens_used: content_tokens,
                         items_included: vec![format!("full_{}", section as u8)],
                         items_excluded: vec![],
                         truncated: false,
                     };
-                    
+
                     (content, content_tokens, usage)
                 }
             } else {
@@ -351,15 +380,15 @@ impl ContextBudget {
                     items_excluded: vec![],
                     truncated: false,
                 };
-                
+
                 (content, content_tokens, usage)
             };
-            
+
             // Update usage tracking
             section_usage.insert(section, usage);
             total_tokens_used += tokens_used;
             remaining_budget = remaining_budget.saturating_sub(tokens_used);
-            
+
             // Add to final context
             if !processed_content.is_empty() {
                 if !final_context.is_empty() {
@@ -368,7 +397,7 @@ impl ContextBudget {
                 final_context.push_str(&processed_content);
             }
         }
-        
+
         // Check total budget violations
         if total_tokens_used > self.total_budget {
             violations.push(BudgetViolation {
@@ -381,13 +410,13 @@ impl ContextBudget {
                 ),
             });
         }
-        
+
         // Generate recommendations
         recommendations = self.generate_recommendations(&section_usage, &violations);
-        
+
         // Update current usage
         self.current_usage = section_usage.clone();
-        
+
         Ok(BudgetEnforcementResult {
             final_context,
             total_tokens_used,
@@ -396,24 +425,24 @@ impl ContextBudget {
             recommendations,
         })
     }
-    
+
     /// Estimate token count for content (rough approximation)
     fn estimate_tokens(&self, content: &str) -> usize {
         // Rough estimation: ~4 characters per token for code
         (content.len() / 4) + 1
     }
-    
+
     /// Truncate content to fit within token budget
     fn truncate_content(&self, content: &str, max_tokens: usize) -> String {
         let target_chars = max_tokens * 4; // Rough conversion back to characters
-        
+
         if content.len() <= target_chars {
             return content.to_string();
         }
-        
+
         // Try to truncate at logical boundaries
         let truncated = &content[..target_chars];
-        
+
         // Find the last complete line
         if let Some(last_newline) = truncated.rfind('\n') {
             truncated[..last_newline].to_string()
@@ -421,7 +450,7 @@ impl ContextBudget {
             truncated.to_string()
         }
     }
-    
+
     /// Generate budget optimization recommendations
     fn generate_recommendations(
         &self,
@@ -429,11 +458,11 @@ impl ContextBudget {
         violations: &[BudgetViolation],
     ) -> Vec<BudgetRecommendation> {
         let mut recommendations = Vec::new();
-        
+
         // Analyze usage patterns
         for (section, usage) in section_usage {
             let section_budget = self.sections.get(section);
-            
+
             if let Some(budget) = section_budget {
                 // Check if section is underutilized
                 if usage.tokens_used < budget.min_tokens && budget.can_omit {
@@ -447,22 +476,19 @@ impl ContextBudget {
                         token_impact: -(budget.min_tokens as isize - usage.tokens_used as isize),
                     });
                 }
-                
+
                 // Check if section is consistently truncated
                 if usage.truncated {
                     recommendations.push(BudgetRecommendation {
                         recommendation_type: RecommendationType::IncreaseBudget,
                         section: *section,
-                        description: format!(
-                            "Section {:?} is frequently truncated",
-                            section
-                        ),
+                        description: format!("Section {:?} is frequently truncated", section),
                         token_impact: budget.max_tokens as isize - usage.tokens_used as isize,
                     });
                 }
             }
         }
-        
+
         // Check for specific violations
         for violation in violations {
             match violation.violation_type {
@@ -478,65 +504,67 @@ impl ContextBudget {
                     recommendations.push(BudgetRecommendation {
                         recommendation_type: RecommendationType::ReprioritizeContent,
                         section: violation.section,
-                        description: "Critical content was truncated, consider reprioritization".to_string(),
+                        description: "Critical content was truncated, consider reprioritization"
+                            .to_string(),
                         token_impact: 0,
                     });
                 }
                 _ => {}
             }
         }
-        
+
         recommendations
     }
-    
+
     /// Get current budget usage statistics
     pub fn get_usage_stats(&self) -> HashMap<ContextSection, f32> {
         let mut stats = HashMap::new();
-        
+
         for (section, usage) in &self.current_usage {
             let section_budget = self.sections.get(section);
-            
+
             if let Some(budget) = section_budget {
                 let usage_percentage = if budget.max_tokens > 0 {
                     (usage.tokens_used as f32 / budget.max_tokens as f32) * 100.0
                 } else {
                     0.0
                 };
-                
+
                 stats.insert(*section, usage_percentage);
             }
         }
-        
+
         stats
     }
-    
+
     /// Adjust section budgets based on usage patterns
     pub fn adjust_budgets(&mut self, usage_history: &[HashMap<ContextSection, SectionUsage>]) {
         if usage_history.is_empty() {
             return;
         }
-        
+
         // Calculate average usage for each section
         let mut avg_usage = HashMap::new();
-        
+
         for usage in usage_history {
             for (section, section_usage) in usage {
                 let entry = avg_usage.entry(*section).or_insert(0);
                 *entry += section_usage.tokens_used;
             }
         }
-        
+
         // Calculate averages
         for (_, total) in avg_usage.iter_mut() {
             *total /= usage_history.len();
         }
-        
+
         // Adjust budgets based on average usage
         for (section, avg_tokens) in avg_usage {
             if let Some(budget) = self.sections.get_mut(&section) {
                 // Increase budget if consistently over limit
                 if avg_tokens > budget.max_tokens {
-                    budget.max_tokens = ((avg_tokens as f32 * 1.2) as usize).min(budget.max_tokens * 2);
+                    budget.max_tokens =
+                        ((avg_tokens as f32 * 1.2) as usize).min(budget.max_tokens * 2);
                 }
                 // Decrease budget if consistently under limit
                 else if avg_tokens < budget.min_tokens && budget.can_omit {
@@ -545,28 +573,28 @@ impl ContextBudget {
             }
         }
     }
-    
+
     /// Validate budget configuration
     pub fn validate_configuration(&self) -> Result<Vec<String>> {
         let mut issues = Vec::new();
-        
+
         // Check if total budget is reasonable
         if self.total_budget < 1000 {
             issues.push("Total budget is very small (< 1000 tokens)".to_string());
         }
-        
+
         if self.total_budget > 100000 {
             issues.push("Total budget is very large (> 100k tokens)".to_string());
         }
-        
+
         // Check section budgets
         let mut total_max_tokens = 0;
         let mut total_min_tokens = 0;
-        
+
         for (section, budget) in &self.sections {
             total_max_tokens += budget.max_tokens;
             total_min_tokens += budget.min_tokens;
-            
+
             // Validate individual section budgets
             if budget.max_tokens < budget.min_tokens {
                 issues.push(format!(
@@ -574,7 +602,7 @@ impl ContextBudget {
                     section, budget.max_tokens, budget.min_tokens
                 ));
             }
-            
+
             if budget.max_tokens == 0 && !budget.can_omit {
                 issues.push(format!(
                     "Section {:?} has zero budget but cannot be omitted",
@@ -582,7 +610,7 @@ impl ContextBudget {
                 ));
             }
         }
-        
+
         // Check if section budgets exceed total budget
         if total_max_tokens > self.total_budget {
             issues.push(format!(
@@ -590,7 +618,7 @@ impl ContextBudget {
                 total_max_tokens, self.total_budget
             ));
         }
-        
+
         // Check if minimum requirements exceed total budget
         if total_min_tokens > self.total_budget {
             issues.push(format!(
@@ -598,7 +626,7 @@ impl ContextBudget {
                 total_min_tokens, self.total_budget
             ));
         }
-        
+
         Ok(issues)
     }
 }

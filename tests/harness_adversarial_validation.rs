@@ -91,23 +91,56 @@ fn test_edge_case_test_creation() {
 fn test_edge_case_type_variants() {
     assert!(matches!(EdgeCaseType::EmptyInput, EdgeCaseType::EmptyInput));
     assert!(matches!(EdgeCaseType::NullInput, EdgeCaseType::NullInput));
-    assert!(matches!(EdgeCaseType::MaximumValue, EdgeCaseType::MaximumValue));
-    assert!(matches!(EdgeCaseType::MinimumValue, EdgeCaseType::MinimumValue));
-    assert!(matches!(EdgeCaseType::BoundaryValue, EdgeCaseType::BoundaryValue));
-    assert!(matches!(EdgeCaseType::InvalidFormat, EdgeCaseType::InvalidFormat));
-    assert!(matches!(EdgeCaseType::UnicodeEdge, EdgeCaseType::UnicodeEdge));
-    assert!(matches!(EdgeCaseType::IntegerOverflow, EdgeCaseType::IntegerOverflow));
-    assert!(matches!(EdgeCaseType::DivisionByZero, EdgeCaseType::DivisionByZero));
-    assert!(matches!(EdgeCaseType::DeepRecursion, EdgeCaseType::DeepRecursion));
-    assert!(matches!(EdgeCaseType::RaceCondition, EdgeCaseType::RaceCondition));
-    assert!(matches!(EdgeCaseType::ResourceExhaustion, EdgeCaseType::ResourceExhaustion));
+    assert!(matches!(
+        EdgeCaseType::MaximumValue,
+        EdgeCaseType::MaximumValue
+    ));
+    assert!(matches!(
+        EdgeCaseType::MinimumValue,
+        EdgeCaseType::MinimumValue
+    ));
+    assert!(matches!(
+        EdgeCaseType::BoundaryValue,
+        EdgeCaseType::BoundaryValue
+    ));
+    assert!(matches!(
+        EdgeCaseType::InvalidFormat,
+        EdgeCaseType::InvalidFormat
+    ));
+    assert!(matches!(
+        EdgeCaseType::UnicodeEdge,
+        EdgeCaseType::UnicodeEdge
+    ));
+    assert!(matches!(
+        EdgeCaseType::IntegerOverflow,
+        EdgeCaseType::IntegerOverflow
+    ));
+    assert!(matches!(
+        EdgeCaseType::DivisionByZero,
+        EdgeCaseType::DivisionByZero
+    ));
+    assert!(matches!(
+        EdgeCaseType::DeepRecursion,
+        EdgeCaseType::DeepRecursion
+    ));
+    assert!(matches!(
+        EdgeCaseType::RaceCondition,
+        EdgeCaseType::RaceCondition
+    ));
+    assert!(matches!(
+        EdgeCaseType::ResourceExhaustion,
+        EdgeCaseType::ResourceExhaustion
+    ));
 }
 
 #[test]
 fn test_edge_case_type_display() {
     assert_eq!(format!("{:?}", EdgeCaseType::EmptyInput), "EmptyInput");
     assert_eq!(format!("{:?}", EdgeCaseType::NullInput), "NullInput");
-    assert_eq!(format!("{:?}", EdgeCaseType::IntegerOverflow), "IntegerOverflow");
+    assert_eq!(
+        format!("{:?}", EdgeCaseType::IntegerOverflow),
+        "IntegerOverflow"
+    );
 }
 
 // ============================================================================
@@ -149,8 +182,14 @@ fn test_expected_behavior_variants() {
         ExpectedBehavior::Panic("test".to_string()),
         ExpectedBehavior::Panic(_)
     ));
-    assert!(matches!(ExpectedBehavior::Timeout, ExpectedBehavior::Timeout));
-    assert!(matches!(ExpectedBehavior::NoCrash, ExpectedBehavior::NoCrash));
+    assert!(matches!(
+        ExpectedBehavior::Timeout,
+        ExpectedBehavior::Timeout
+    ));
+    assert!(matches!(
+        ExpectedBehavior::NoCrash,
+        ExpectedBehavior::NoCrash
+    ));
 }
 
 // ============================================================================
@@ -216,7 +255,10 @@ fn test_value_generator_string_pattern() {
         constraints: vec![Constraint::AsciiOnly],
     };
 
-    assert!(matches!(r#gen.gen_type, GeneratorType::StringPattern { .. }));
+    assert!(matches!(
+        r#gen.gen_type,
+        GeneratorType::StringPattern { .. }
+    ));
     assert_eq!(r#gen.constraints.len(), 1);
 }
 
@@ -241,7 +283,11 @@ fn test_generator_type_variants() {
         GeneratorType::IntegerRange { .. }
     ));
     assert!(matches!(
-        GeneratorType::StringPattern { pattern: "".to_string(), min_len: 0, max_len: 10 },
+        GeneratorType::StringPattern {
+            pattern: "".to_string(),
+            min_len: 0,
+            max_len: 10
+        },
         GeneratorType::StringPattern { .. }
     ));
     assert!(matches!(
@@ -317,12 +363,25 @@ fn test_load_pattern_constant() {
 
 #[test]
 fn test_load_pattern_ramp_up() {
-    let pattern = LoadPattern::RampUp { start_rps: 100, end_rps: 1000 };
-    assert!(matches!(pattern, LoadPattern::RampUp { start_rps: 100, end_rps: 1000 }));
+    let pattern = LoadPattern::RampUp {
+        start_rps: 100,
+        end_rps: 1000,
+    };
+    assert!(matches!(
+        pattern,
+        LoadPattern::RampUp {
+            start_rps: 100,
+            end_rps: 1000
+        }
+    ));
 }
 
 #[test]
 fn test_load_pattern_spike() {
-    let pattern = LoadPattern::Spike { base_rps: 100, spike_rps: 10000, spike_duration_secs: 10 };
+    let pattern = LoadPattern::Spike {
+        base_rps: 100,
+        spike_rps: 10000,
+        spike_duration_secs: 10,
+    };
     assert!(matches!(pattern, LoadPattern::Spike { .. }));
 }

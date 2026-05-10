@@ -304,7 +304,7 @@ impl FileImpactScore {
     fn calculate_test_file_impact(
         file_path: &std::path::Path,
         repo_context: &crate::harness::repo_intelligence::RepoContext,
-        rust_analyzer: Option<&crate::harness::repo_intelligence::RustAnalyzerData>,
+        _rust_analyzer: Option<&crate::harness::repo_intelligence::RustAnalyzerData>,
     ) -> Result<TestFileImpact> {
         let file_content = std::fs::read_to_string(file_path)
             .context(format!("Failed to read file: {}", file_path.display()))?;
@@ -389,8 +389,8 @@ impl FileImpactScore {
     /// Calculate API surface impact
     fn calculate_api_surface_impact(
         file_path: &std::path::Path,
-        repo_context: &crate::harness::repo_intelligence::RepoContext,
-        rust_analyzer: Option<&crate::harness::repo_intelligence::RustAnalyzerData>,
+        _repo_context: &crate::harness::repo_intelligence::RepoContext,
+        _rust_analyzer: Option<&crate::harness::repo_intelligence::RustAnalyzerData>,
     ) -> Result<ApiSurfaceImpact> {
         let file_content = std::fs::read_to_string(file_path)
             .context(format!("Failed to read file: {}", file_path.display()))?;
@@ -592,7 +592,7 @@ impl FileImpactScore {
         repo_context: &crate::harness::repo_intelligence::RepoContext,
     ) -> bool {
         // Simplified circular import detection
-        let file_str = file_path.to_string_lossy();
+        let _file_str = file_path.to_string_lossy();
 
         // Check if this file is both imported and exports to the same modules
         for relationship in &repo_context.relationships {
@@ -611,7 +611,7 @@ impl FileImpactScore {
         file_path: &std::path::Path,
         repo_context: &crate::harness::repo_intelligence::RepoContext,
     ) -> bool {
-        let file_str = file_path.to_string_lossy();
+        let _file_str = file_path.to_string_lossy();
 
         // Check if any test file imports this file
         for ranked_file in &repo_context.ranked_files {

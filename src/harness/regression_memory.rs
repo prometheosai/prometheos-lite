@@ -1,11 +1,9 @@
 //! Regression Memory - Issue #26
 //! Learn from failures to prevent recurring issues
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FailurePattern {
@@ -229,7 +227,7 @@ impl RegressionMemory {
         solution_approach: &str,
         success: bool,
     ) -> LearningResult {
-        let now = chrono::Utc::now();
+        let _now = chrono::Utc::now();
 
         if let Some(pattern) = self.patterns.get_mut(pattern_id) {
             if success {

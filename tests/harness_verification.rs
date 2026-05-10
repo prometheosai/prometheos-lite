@@ -10,7 +10,7 @@
 //! - Level mapping from commands
 
 use prometheos_lite::harness::verification::{
-    VerificationAssessment, VerificationLevel, VerificationStrength, VerificationAssessor,
+    VerificationAssessment, VerificationAssessor, VerificationLevel, VerificationStrength,
 };
 
 // ============================================================================
@@ -19,13 +19,34 @@ use prometheos_lite::harness::verification::{
 
 #[test]
 fn test_verification_strength_variants() {
-    assert!(matches!(VerificationStrength::None, VerificationStrength::None));
-    assert!(matches!(VerificationStrength::FormatOnly, VerificationStrength::FormatOnly));
-    assert!(matches!(VerificationStrength::StaticOnly, VerificationStrength::StaticOnly));
-    assert!(matches!(VerificationStrength::LintOnly, VerificationStrength::LintOnly));
-    assert!(matches!(VerificationStrength::Tests, VerificationStrength::Tests));
-    assert!(matches!(VerificationStrength::Reproduction, VerificationStrength::Reproduction));
-    assert!(matches!(VerificationStrength::Full, VerificationStrength::Full));
+    assert!(matches!(
+        VerificationStrength::None,
+        VerificationStrength::None
+    ));
+    assert!(matches!(
+        VerificationStrength::FormatOnly,
+        VerificationStrength::FormatOnly
+    ));
+    assert!(matches!(
+        VerificationStrength::StaticOnly,
+        VerificationStrength::StaticOnly
+    ));
+    assert!(matches!(
+        VerificationStrength::LintOnly,
+        VerificationStrength::LintOnly
+    ));
+    assert!(matches!(
+        VerificationStrength::Tests,
+        VerificationStrength::Tests
+    ));
+    assert!(matches!(
+        VerificationStrength::Reproduction,
+        VerificationStrength::Reproduction
+    ));
+    assert!(matches!(
+        VerificationStrength::Full,
+        VerificationStrength::Full
+    ));
 }
 
 #[test]
@@ -40,10 +61,22 @@ fn test_verification_strength_ordering() {
 
 #[test]
 fn test_verification_strength_description() {
-    assert_eq!(VerificationStrength::None.description(), "No verification performed");
-    assert_eq!(VerificationStrength::FormatOnly.description(), "Code formatting verified only");
-    assert_eq!(VerificationStrength::Tests.description(), "Unit tests passed");
-    assert_eq!(VerificationStrength::Full.description(), "Full verification including integration tests and coverage");
+    assert_eq!(
+        VerificationStrength::None.description(),
+        "No verification performed"
+    );
+    assert_eq!(
+        VerificationStrength::FormatOnly.description(),
+        "Code formatting verified only"
+    );
+    assert_eq!(
+        VerificationStrength::Tests.description(),
+        "Unit tests passed"
+    );
+    assert_eq!(
+        VerificationStrength::Full.description(),
+        "Full verification including integration tests and coverage"
+    );
 }
 
 #[test]
@@ -74,13 +107,34 @@ fn test_verification_strength_is_sufficient_for() {
 
 #[test]
 fn test_verification_level_variants() {
-    assert!(matches!(VerificationLevel::FormatCheck, VerificationLevel::FormatCheck));
-    assert!(matches!(VerificationLevel::StaticCheck, VerificationLevel::StaticCheck));
-    assert!(matches!(VerificationLevel::LintCheck, VerificationLevel::LintCheck));
-    assert!(matches!(VerificationLevel::UnitTests, VerificationLevel::UnitTests));
-    assert!(matches!(VerificationLevel::IntegrationTests, VerificationLevel::IntegrationTests));
-    assert!(matches!(VerificationLevel::CoverageCheck, VerificationLevel::CoverageCheck));
-    assert!(matches!(VerificationLevel::ReproductionTest, VerificationLevel::ReproductionTest));
+    assert!(matches!(
+        VerificationLevel::FormatCheck,
+        VerificationLevel::FormatCheck
+    ));
+    assert!(matches!(
+        VerificationLevel::StaticCheck,
+        VerificationLevel::StaticCheck
+    ));
+    assert!(matches!(
+        VerificationLevel::LintCheck,
+        VerificationLevel::LintCheck
+    ));
+    assert!(matches!(
+        VerificationLevel::UnitTests,
+        VerificationLevel::UnitTests
+    ));
+    assert!(matches!(
+        VerificationLevel::IntegrationTests,
+        VerificationLevel::IntegrationTests
+    ));
+    assert!(matches!(
+        VerificationLevel::CoverageCheck,
+        VerificationLevel::CoverageCheck
+    ));
+    assert!(matches!(
+        VerificationLevel::ReproductionTest,
+        VerificationLevel::ReproductionTest
+    ));
 }
 
 #[test]
@@ -92,9 +146,18 @@ fn test_verification_level_name() {
 
 #[test]
 fn test_verification_level_description() {
-    assert_eq!(VerificationLevel::FormatCheck.description(), "Code formatting and style compliance");
-    assert_eq!(VerificationLevel::UnitTests.description(), "Isolated component testing");
-    assert_eq!(VerificationLevel::ReproductionTest.description(), "Verification that specific issue is fixed");
+    assert_eq!(
+        VerificationLevel::FormatCheck.description(),
+        "Code formatting and style compliance"
+    );
+    assert_eq!(
+        VerificationLevel::UnitTests.description(),
+        "Isolated component testing"
+    );
+    assert_eq!(
+        VerificationLevel::ReproductionTest.description(),
+        "Verification that specific issue is fixed"
+    );
 }
 
 // ============================================================================

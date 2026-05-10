@@ -80,18 +80,16 @@ fn test_acceptance_criterion_variants() {
 #[test]
 fn test_compiled_acceptance_criteria_creation() {
     let compiled = CompiledAcceptanceCriteria {
-        criteria: vec![
-            AcceptanceCriterion {
-                id: "test-001".to_string(),
-                description: "Unit tests pass".to_string(),
-                verification_method: VerificationMethod::TestCommand("cargo test".to_string()),
-                status: CriterionStatus::Pending,
-                priority: CriterionPriority::Critical,
-                detected_tests: vec!["cargo test".to_string()],
-                detected_checks: vec![],
-                confidence: 0.9,
-            }
-        ],
+        criteria: vec![AcceptanceCriterion {
+            id: "test-001".to_string(),
+            description: "Unit tests pass".to_string(),
+            verification_method: VerificationMethod::TestCommand("cargo test".to_string()),
+            status: CriterionStatus::Pending,
+            priority: CriterionPriority::Critical,
+            detected_tests: vec!["cargo test".to_string()],
+            detected_checks: vec![],
+            confidence: 0.9,
+        }],
         test_commands: vec!["cargo test".to_string()],
         static_checks: vec![],
         lint_commands: vec![],
@@ -129,7 +127,7 @@ fn test_compiled_acceptance_criteria_multiple_commands() {
                 detected_tests: vec![],
                 detected_checks: vec!["cargo clippy".to_string()],
                 confidence: 0.7,
-            }
+            },
         ],
         test_commands: vec!["cargo test".to_string()],
         static_checks: vec![],
@@ -212,7 +210,10 @@ fn test_criterion_status_variants() {
     assert!(matches!(CriterionStatus::Pending, CriterionStatus::Pending));
     assert!(matches!(CriterionStatus::Passed, CriterionStatus::Passed));
     assert!(matches!(CriterionStatus::Failed, CriterionStatus::Failed));
-    assert!(matches!(CriterionStatus::NotApplicable, CriterionStatus::NotApplicable));
+    assert!(matches!(
+        CriterionStatus::NotApplicable,
+        CriterionStatus::NotApplicable
+    ));
     assert!(matches!(CriterionStatus::Blocked, CriterionStatus::Blocked));
 }
 
@@ -229,9 +230,15 @@ fn test_criterion_status_display() {
 
 #[test]
 fn test_criterion_priority_variants() {
-    assert!(matches!(CriterionPriority::Critical, CriterionPriority::Critical));
+    assert!(matches!(
+        CriterionPriority::Critical,
+        CriterionPriority::Critical
+    ));
     assert!(matches!(CriterionPriority::High, CriterionPriority::High));
-    assert!(matches!(CriterionPriority::Medium, CriterionPriority::Medium));
+    assert!(matches!(
+        CriterionPriority::Medium,
+        CriterionPriority::Medium
+    ));
     assert!(matches!(CriterionPriority::Low, CriterionPriority::Low));
 }
 
@@ -251,7 +258,7 @@ fn test_criterion_priority_ordering() {
 fn test_compile_acceptance_criteria_basic() {
     let task_description = vec!["Fix bug in main.rs and ensure all tests pass".to_string()];
     let compiled = compile_acceptance_criteria(&task_description);
-    
+
     // Should not be empty after compilation
     assert!(!compiled.is_empty());
 }
@@ -260,7 +267,7 @@ fn test_compile_acceptance_criteria_basic() {
 fn test_compile_acceptance_criteria_empty() {
     let task_description: Vec<String> = vec![];
     let compiled = compile_acceptance_criteria(&task_description);
-    
+
     // Should handle empty task gracefully
     assert!(compiled.is_empty());
 }
@@ -331,7 +338,7 @@ fn test_get_verification_summary() {
             detected_tests: vec![],
             detected_checks: vec!["cargo clippy".to_string()],
             confidence: 0.0,
-        }
+        },
     ];
 
     let summary = get_verification_summary(&criteria);

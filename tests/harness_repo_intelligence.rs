@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::repo_intelligence::{
-    build_repo_context, parse_dependency_graph, CodeSymbol, DependencyGraph,
-    DependencySpec, EdgeKind, PackageManagerType, RankedFile, RepoCache,
-    RepoContext, RepoMap, SymbolEdge, SymbolKind, Visibility,
+    CodeSymbol, DependencyGraph, DependencySpec, EdgeKind, PackageManagerType, RankedFile,
+    RepoCache, RepoContext, RepoMap, SymbolEdge, SymbolKind, Visibility, build_repo_context,
+    parse_dependency_graph,
 };
 
 // ============================================================================
@@ -98,7 +98,7 @@ fn test_symbol_edge_creation() {
 fn test_parse_dependency_graph_from_cargo_toml() {
     // Use the sample_repo fixture which has a Cargo.toml
     let fixture_path = PathBuf::from("tests/fixtures/sample_repo");
-    
+
     let graph = parse_dependency_graph(&fixture_path);
 
     // The sample repo has an empty Cargo.toml
@@ -293,5 +293,3 @@ fn test_repop_map_alias() {
         repo_map: RepoMap::empty(),
     };
 }
-
-

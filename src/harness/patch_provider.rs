@@ -14,8 +14,7 @@ use crate::harness::{
     edit_protocol::{CreateFileEdit, EditOperation, SearchReplaceEdit, WholeFileEdit},
     failure::{FailureDetails, FailureKind},
     repo_intelligence::RepoMap,
-    review::{ReviewIssue, ReviewReport},
-    validation::ValidationResult,
+    review::ReviewIssue,
 };
 
 /// Context available to patch providers for generating or repairing edits
@@ -306,14 +305,14 @@ fn expand_context_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOper
 }
 
 /// Make search pattern more specific by expanding context
-/// 
+///
 /// Reads the target file, finds all matches of the search pattern,
 /// and expands the search block with surrounding context to make it unique.
 pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
     use std::collections::HashMap;
-    
+
     let mut repaired = Vec::new();
-    
+
     for edit in edits {
         match edit {
             EditOperation::SearchReplace(sr) => {
@@ -326,57 +325,57 @@ pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditO
                         continue;
                     }
                 };
-                
+
                 // Find all occurrences of the search pattern
                 let matches: Vec<usize> = content
                     .match_indices(&sr.search)
                     .map(|(idx, _)| idx)
                     .collect();
-                
+
                 if matches.len() <= 1 {
                     // Already unique or not found - keep original
                     repaired.push(edit.clone());
                     continue;
                 }
-                
+
                 // Multiple matches - need to expand context
                 let lines: Vec<&str> = content.lines().collect();
-                
+
                 // Find which lines contain each match
                 let mut match_lines = Vec::new();
                 let mut current_pos = 0;
                 for (line_idx, line) in lines.iter().enumerate() {
                     let line_start = current_pos;
                     let line_end = current_pos + line.len();
-                    
+
                     for &match_pos in &matches {
                         if match_pos >= line_start && match_pos < line_end {
                             match_lines.push(line_idx);
                         }
                     }
-                    
+
                     current_pos = line_end + 1; // +1 for newline
                 }
-                
+
                 // Try to narrow by expanding context lines
                 let context_lines = sr.context_lines.unwrap_or(0) as usize;
                 let max_context = 10; // Maximum lines to expand
-                
+
                 let mut narrowed = None;
                 for expand in 1..=max_context {
                     let new_context = context_lines + expand;
-                    
+
                     // Build expanded search for each match location
                     let mut unique_expansions = Vec::new();
-                    
+
                     for &line_idx in &match_lines {
                         let start_line = line_idx.saturating_sub(new_context);
                         let end_line = (line_idx + new_context + 1).min(lines.len());
-                        
+
                         let expanded_search = lines[start_line..end_line].join("\n");
                         unique_expansions.push(expanded_search);
                     }
-                    
+
                     // Check if all expansions are unique
                     let mut seen = HashMap::new();
                     let all_unique = unique_expansions.iter().all(|e| {
@@ -384,15 +383,15 @@ pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditO
                         *count += 1;
                         *count == 1
                     });
-                    
+
                     if all_unique {
                         // Use the first match's expansion (most common case)
                         let first_match_line = match_lines[0];
                         let start_line = first_match_line.saturating_sub(new_context);
                         let end_line = (first_match_line + new_context + 1).min(lines.len());
-                        
+
                         let expanded_search = lines[start_line..end_line].join("\n");
-                        
+
                         // Build corresponding replace with same context
                         let expanded_replace = if sr.replace.contains('\n') {
                             // Multi-line replace - preserve context around it
@@ -401,13 +400,14 @@ pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditO
                             } else {
                                 String::new()
                             };
-                            
+
                             let context_after = if first_match_line + 1 < end_line {
-                                "\n".to_string() + &lines[(first_match_line + 1)..end_line].join("\n")
+                                "\n".to_string()
+                                    + &lines[(first_match_line + 1)..end_line].join("\n")
                             } else {
                                 String::new()
                             };
-                            
+
                             context_before + &sr.replace + &context_after
                         } else {
                             // Single line replace - wrap with context
@@ -416,16 +416,17 @@ pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditO
                             } else {
                                 String::new()
                             };
-                            
+
                             let context_after = if first_match_line + 1 < end_line {
-                                "\n".to_string() + &lines[(first_match_line + 1)..end_line].join("\n")
+                                "\n".to_string()
+                                    + &lines[(first_match_line + 1)..end_line].join("\n")
                             } else {
                                 String::new()
                             };
-                            
+
                             context_before + &sr.replace + &context_after
                         };
-                        
+
                         narrowed = Some(EditOperation::SearchReplace(SearchReplaceEdit {
                             file: sr.file.clone(),
                             search: expanded_search,
@@ -436,7 +437,7 @@ pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditO
                         break;
                     }
                 }
-                
+
                 match narrowed {
                     Some(n) => {
                         tracing::info!(
@@ -462,7 +463,7 @@ pub fn narrow_search_repair(edits: &[EditOperation]) -> anyhow::Result<Vec<EditO
             }
         }
     }
-    
+
     Ok(repaired)
 }
 
@@ -654,11 +655,11 @@ impl ProviderRegistry {
     #[cfg(test)]
     pub fn for_testing() -> anyhow::Result<Self> {
         let mut aggregate = AggregatePatchProvider::new();
-        
+
         // Add static provider for deterministic tests
         aggregate.add_provider(Box::new(StaticPatchProvider::new("testing-static")));
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
-        
+
         Ok(Self { aggregate })
     }
 
@@ -668,13 +669,13 @@ impl ProviderRegistry {
     /// Uses safe providers that cannot generate side effects.
     pub fn for_review_only() -> anyhow::Result<Self> {
         let mut aggregate = AggregatePatchProvider::new();
-        
+
         // Review-only: only analysis providers, no generation
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
-        
+
         // Template provider only for recognized patterns
         aggregate.add_provider(Box::new(TemplatePatchProvider::new()));
-        
+
         Ok(Self { aggregate })
     }
 
@@ -683,11 +684,14 @@ impl ProviderRegistry {
     /// Assisted mode requires a real generator (LLM/script/codemod) with user oversight.
     pub fn for_assisted(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
         let mut aggregate = AggregatePatchProvider::new();
-        
+
         // Require real generator for assisted mode
         if !config.base_url.is_empty() && !config.model.is_empty() {
             let client = crate::llm::LlmClient::new(&config.base_url, &config.model)?;
-            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, config.model.clone())));
+            aggregate.add_provider(Box::new(LlmPatchProvider::new(
+                client,
+                config.model.clone(),
+            )));
         } else if let Ok(script_path) = std::env::var("PROMETHEOS_SCRIPT_PROVIDER") {
             let path = PathBuf::from(script_path);
             if path.exists() {
@@ -698,15 +702,15 @@ impl ProviderRegistry {
         } else {
             bail!("Assisted mode requires LLM configuration or script provider");
         }
-        
+
         // Add heuristic provider as repair fallback
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
-        
+
         // Validate we have a real generator
         if !aggregate.capabilities().can_generate {
             bail!("Assisted mode requires at least one provider with can_generate=true");
         }
-        
+
         Ok(Self { aggregate })
     }
 
@@ -715,24 +719,27 @@ impl ProviderRegistry {
     /// Autonomous mode requires the most restrictive and reliable providers.
     pub fn for_autonomous(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
         let mut aggregate = AggregatePatchProvider::new();
-        
+
         // Autonomous mode: require LLM provider for highest reliability
         if !config.base_url.is_empty() && !config.model.is_empty() {
             let client = crate::llm::LlmClient::new(&config.base_url, &config.model)?;
-            aggregate.add_provider(Box::new(LlmPatchProvider::new(client, config.model.clone())));
+            aggregate.add_provider(Box::new(LlmPatchProvider::new(
+                client,
+                config.model.clone(),
+            )));
         } else {
             bail!("Autonomous mode requires LLM configuration");
         }
-        
+
         // Add heuristic provider as repair fallback only
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
-        
+
         // Validate strict requirements for autonomous mode
         let caps = aggregate.capabilities();
         if !caps.can_generate {
             bail!("Autonomous mode requires a provider with can_generate=true");
         }
-        
+
         Ok(Self { aggregate })
     }
 
@@ -740,7 +747,9 @@ impl ProviderRegistry {
     ///
     /// This method is deprecated and will be removed in V1.7.
     /// Use for_testing(), for_review_only(), for_assisted(), or for_autonomous() instead.
-    #[deprecated(note = "Use mode-specific constructors: for_testing(), for_review_only(), for_assisted(), or for_autonomous()")]
+    #[deprecated(
+        note = "Use mode-specific constructors: for_testing(), for_review_only(), for_assisted(), or for_autonomous()"
+    )]
     pub fn new() -> anyhow::Result<Self> {
         anyhow::bail!(
             "ProviderRegistry::new() is deprecated. \
@@ -777,23 +786,16 @@ impl ProviderRegistry {
     ///
     /// This method determines the appropriate mode based on configuration
     /// and creates a provider registry with the correct safety constraints.
-    pub fn from_config_with_mode(config: &crate::config::AppConfig, mode: crate::harness::mode_policy::HarnessMode) -> anyhow::Result<Self> {
+    pub fn from_config_with_mode(
+        config: &crate::config::AppConfig,
+        mode: crate::harness::mode_policy::HarnessMode,
+    ) -> anyhow::Result<Self> {
         match mode {
-            crate::harness::mode_policy::HarnessMode::Autonomous => {
-                Self::for_autonomous(config)
-            }
-            crate::harness::mode_policy::HarnessMode::Assisted => {
-                Self::for_assisted(config)
-            }
-            crate::harness::mode_policy::HarnessMode::ReviewOnly => {
-                Self::for_review_only()
-            }
-            crate::harness::mode_policy::HarnessMode::Review => {
-                Self::for_review_only()
-            }
-            crate::harness::mode_policy::HarnessMode::Benchmark => {
-                Self::for_review_only()
-            }
+            crate::harness::mode_policy::HarnessMode::Autonomous => Self::for_autonomous(config),
+            crate::harness::mode_policy::HarnessMode::Assisted => Self::for_assisted(config),
+            crate::harness::mode_policy::HarnessMode::ReviewOnly => Self::for_review_only(),
+            crate::harness::mode_policy::HarnessMode::Review => Self::for_review_only(),
+            crate::harness::mode_policy::HarnessMode::Benchmark => Self::for_review_only(),
         }
     }
 
@@ -806,10 +808,13 @@ impl ProviderRegistry {
         // Check if we have a valid LLM configuration
         if config.provider.is_empty() || config.model.is_empty() {
             // P1-Issue7: Provide actionable error messages for missing provider config
-            let provider_var = std::env::var("PROMETHEOS_PROVIDER").unwrap_or_else(|_| "not set".to_string());
-            let model_var = std::env::var("PROMETHEOS_MODEL").unwrap_or_else(|_| "not set".to_string());
-            let base_url_var = std::env::var("PROMETHEOS_BASE_URL").unwrap_or_else(|_| "not set".to_string());
-            
+            let provider_var =
+                std::env::var("PROMETHEOS_PROVIDER").unwrap_or_else(|_| "not set".to_string());
+            let model_var =
+                std::env::var("PROMETHEOS_MODEL").unwrap_or_else(|_| "not set".to_string());
+            let base_url_var =
+                std::env::var("PROMETHEOS_BASE_URL").unwrap_or_else(|_| "not set".to_string());
+
             bail!(
                 "No LLM provider configured. This is required for patch generation.\n\n
                 Current configuration:\n
@@ -987,7 +992,11 @@ impl PatchProvider for StaticPatchProvider {
             can_generate: true,
             can_repair: false,
             max_candidates: 1,
-            supported_operations: vec!["search_replace".into(), "whole_file".into(), "create_file".into()],
+            supported_operations: vec![
+                "search_replace".into(),
+                "whole_file".into(),
+                "create_file".into(),
+            ],
             typical_latency_ms: 0,
         }
     }
@@ -1047,7 +1056,10 @@ impl ScriptPatchProvider {
     }
 
     /// V1.6-P0-004: Set sandbox runtime for script execution
-    pub fn with_runtime(mut self, runtime: std::sync::Arc<dyn crate::harness::sandbox::CommandRuntime + Send + Sync>) -> Self {
+    pub fn with_runtime(
+        mut self,
+        runtime: std::sync::Arc<dyn crate::harness::sandbox::CommandRuntime + Send + Sync>,
+    ) -> Self {
         self.runtime = Some(runtime);
         self
     }
@@ -1068,7 +1080,7 @@ impl ScriptPatchProvider {
     fn validate_script_path(&self) -> anyhow::Result<()> {
         // Check if script path is within repository or allowlisted directory
         let script_path = &self.script_path;
-        
+
         // Allow scripts in common tool directories
         let allowed_dirs = vec![
             "tools/",
@@ -1076,23 +1088,24 @@ impl ScriptPatchProvider {
             ".prometheos/scripts/",
             "node_modules/.bin/",
         ];
-        
+
         let script_str = script_path.to_string_lossy();
         let is_allowed = allowed_dirs.iter().any(|dir| script_str.contains(dir));
-        
+
         if !is_allowed {
             anyhow::bail!(
                 "Script path '{}' is not in an allowed directory. \
                 Allowed directories: {:?}. \
                 This prevents execution of arbitrary scripts.",
-                script_path.display(), allowed_dirs
+                script_path.display(),
+                allowed_dirs
             );
         }
-        
+
         if !script_path.exists() {
             anyhow::bail!("Script path does not exist: {}", script_path.display());
         }
-        
+
         Ok(())
     }
 
@@ -1139,7 +1152,11 @@ impl ScriptPatchProvider {
                             for operation in operations_array {
                                 if let Some(op_type) = operation.get("type") {
                                     if let Some(op_str) = op_type.as_str() {
-                                        if !self.output_schema.allowed_operations.contains(&op_str.to_string()) {
+                                        if !self
+                                            .output_schema
+                                            .allowed_operations
+                                            .contains(&op_str.to_string())
+                                        {
                                             anyhow::bail!(
                                                 "Operation '{}' not allowed. Allowed: {:?}",
                                                 op_str,
@@ -1167,29 +1184,33 @@ impl PatchProvider for ScriptPatchProvider {
 
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
         let start = std::time::Instant::now();
-        
+
         // V1.6-P0-004: Validate script path before execution
         self.validate_script_path()?;
-        
+
         // Build script command
         let script_command = format!(
             "{} generate --task {} --repo .",
             self.script_path.display(),
             request.context.task
         );
-        
+
         // V1.6-P0-004: Execute through sandboxed runtime
         let output = if let Some(ref runtime) = self.runtime {
             // Use sandboxed runtime
-            runtime.run_command(
-                &std::path::Path::new("."),
-                &script_command,
-                30000, // 30 second timeout
-            ).await?
+            runtime
+                .run_command(
+                    &std::path::Path::new("."),
+                    &script_command,
+                    30000, // 30 second timeout
+                )
+                .await?
         } else {
             // Fallback to local execution with warning
-            tracing::warn!("V1.6-P0-004: Script provider using local runtime - sandboxing disabled");
-            
+            tracing::warn!(
+                "V1.6-P0-004: Script provider using local runtime - sandboxing disabled"
+            );
+
             let local_output = tokio::process::Command::new(&self.script_path)
                 .arg("generate")
                 .arg("--task")
@@ -1198,7 +1219,7 @@ impl PatchProvider for ScriptPatchProvider {
                 .arg(".")
                 .output()
                 .await?;
-            
+
             crate::harness::validation::CommandResult {
                 command: script_command,
                 exit_code: local_output.status.code(),
@@ -1225,7 +1246,7 @@ impl PatchProvider for ScriptPatchProvider {
         // Parse script output (JSON format expected)
         let script_output: serde_json::Value = serde_json::from_str(&output.stdout)
             .map_err(|e| anyhow::anyhow!("Invalid JSON output from script: {}", e))?;
-        
+
         let candidates = parse_script_candidates(script_output, "script")?;
 
         Ok(GenerateResponse {
@@ -1237,10 +1258,10 @@ impl PatchProvider for ScriptPatchProvider {
 
     async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
         let start = std::time::Instant::now();
-        
+
         // V1.6-P0-004: Validate script path before execution
         self.validate_script_path()?;
-        
+
         // Build script command
         let script_command = format!(
             "{} repair --failure {:?} --message {}",
@@ -1248,19 +1269,23 @@ impl PatchProvider for ScriptPatchProvider {
             request.failure.kind,
             request.failure.message
         );
-        
+
         // V1.6-P0-004: Execute through sandboxed runtime
         let output = if let Some(ref runtime) = self.runtime {
             // Use sandboxed runtime
-            runtime.run_command(
-                &std::path::Path::new("."),
-                &script_command,
-                30000, // 30 second timeout
-            ).await?
+            runtime
+                .run_command(
+                    &std::path::Path::new("."),
+                    &script_command,
+                    30000, // 30 second timeout
+                )
+                .await?
         } else {
             // Fallback to local execution with warning
-            tracing::warn!("V1.6-P0-004: Script provider repair using local runtime - sandboxing disabled");
-            
+            tracing::warn!(
+                "V1.6-P0-004: Script provider repair using local runtime - sandboxing disabled"
+            );
+
             let local_output = tokio::process::Command::new(&self.script_path)
                 .arg("repair")
                 .arg("--failure")
@@ -1269,7 +1294,7 @@ impl PatchProvider for ScriptPatchProvider {
                 .arg(&request.failure.message)
                 .output()
                 .await?;
-            
+
             crate::harness::validation::CommandResult {
                 command: script_command,
                 exit_code: local_output.status.code(),
@@ -1285,7 +1310,7 @@ impl PatchProvider for ScriptPatchProvider {
         let repaired = if output.exit_code == Some(0) {
             // V1.6-P0-004: Validate output against schema
             self.validate_output(&output.stdout)?;
-            
+
             // Parse repaired edits from script output
             let script_output: serde_json::Value = serde_json::from_str(&output.stdout)
                 .map_err(|e| anyhow::anyhow!("Invalid JSON output from script repair: {}", e))?;
@@ -1305,10 +1330,11 @@ impl PatchProvider for ScriptPatchProvider {
     }
 
     fn can_handle(&self, kind: FailureKind) -> bool {
-        matches!(kind, 
-            FailureKind::PatchApplyFailure | 
-            FailureKind::PatchParseFailure | 
-            FailureKind::SyntaxError
+        matches!(
+            kind,
+            FailureKind::PatchApplyFailure
+                | FailureKind::PatchParseFailure
+                | FailureKind::SyntaxError
         )
     }
 
@@ -1339,21 +1365,27 @@ struct Template {
 impl TemplatePatchProvider {
     pub fn new() -> Self {
         let mut templates = HashMap::new();
-        
-        // Add common templates
-        templates.insert("add_import".into(), Template {
-            name: "add_import".into(),
-            pattern: "use {import};".into(),
-            replacements: HashMap::new(),
-            confidence: 85,
-        });
 
-        templates.insert("fix_missing_semicolon".into(), Template {
-            name: "fix_missing_semicolon".into(),
-            pattern: "{line};".into(),
-            replacements: HashMap::new(),
-            confidence: 90,
-        });
+        // Add common templates
+        templates.insert(
+            "add_import".into(),
+            Template {
+                name: "add_import".into(),
+                pattern: "use {import};".into(),
+                replacements: HashMap::new(),
+                confidence: 85,
+            },
+        );
+
+        templates.insert(
+            "fix_missing_semicolon".into(),
+            Template {
+                name: "fix_missing_semicolon".into(),
+                pattern: "{line};".into(),
+                replacements: HashMap::new(),
+                confidence: 90,
+            },
+        );
 
         templates.insert("add_error_handling".into(), Template {
             name: "add_error_handling".into(),
@@ -1383,7 +1415,7 @@ impl PatchProvider for TemplatePatchProvider {
 
         // Analyze task to find matching templates
         let task_lower = request.context.task.to_lowercase();
-        
+
         for template in self.templates.values() {
             if task_lower.contains(&template.name.to_lowercase().replace('_', " ")) {
                 // Apply template with context
@@ -1404,7 +1436,10 @@ impl PatchProvider for TemplatePatchProvider {
         Ok(GenerateResponse {
             candidates,
             generation_time_ms: start.elapsed().as_millis() as u64,
-            provider_notes: Some(format!("Generated {} template candidates", candidates_count)),
+            provider_notes: Some(format!(
+                "Generated {} template candidates",
+                candidates_count
+            )),
         })
     }
 
@@ -1436,7 +1471,10 @@ impl PatchProvider for TemplatePatchProvider {
     }
 
     fn can_handle(&self, kind: FailureKind) -> bool {
-        matches!(kind, FailureKind::SyntaxError | FailureKind::PatchParseFailure)
+        matches!(
+            kind,
+            FailureKind::SyntaxError | FailureKind::PatchParseFailure
+        )
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -1562,7 +1600,9 @@ impl LlmPatchProvider {
         }
         #[cfg(not(test))]
         {
-            tracing::warn!("P0: Markdown fallback disabled in production builds. Use LlmPatchProvider::with_fallback_mode() for compatibility.");
+            tracing::warn!(
+                "P0: Markdown fallback disabled in production builds. Use LlmPatchProvider::with_fallback_mode() for compatibility."
+            );
             Vec::new()
         }
     }
@@ -1658,18 +1698,18 @@ impl LlmPatchProvider {
         while i < lines.len() {
             // Look for code block start with optional language marker
             if lines[i].contains("```") {
-                let block_marker = lines[i];
-                
+                let _block_marker = lines[i];
+
                 // Check if next line is FILE: marker indicating whole-file content
                 if i + 1 < lines.len() && lines[i + 1].starts_with("FILE:") {
                     let file_line = lines[i + 1];
                     let file_path = file_line.strip_prefix("FILE:").unwrap_or("").trim();
-                    
+
                     if !file_path.is_empty() {
                         // Collect all content until closing ```
                         let mut content = String::new();
                         i += 2;
-                        
+
                         while i < lines.len() && !lines[i].contains("```") {
                             if !content.is_empty() {
                                 content.push('\n');
@@ -1677,7 +1717,7 @@ impl LlmPatchProvider {
                             content.push_str(lines[i]);
                             i += 1;
                         }
-                        
+
                         if !content.is_empty() {
                             edits.push(EditOperation::WholeFile(WholeFileEdit {
                                 file: std::path::PathBuf::from(file_path),
@@ -1687,16 +1727,16 @@ impl LlmPatchProvider {
                         continue;
                     }
                 }
-                
+
                 // Also check for WHOLE_FILE: marker
                 if i + 1 < lines.len() && lines[i + 1].starts_with("WHOLE_FILE:") {
                     let file_line = lines[i + 1];
                     let file_path = file_line.strip_prefix("WHOLE_FILE:").unwrap_or("").trim();
-                    
+
                     if !file_path.is_empty() {
                         let mut content = String::new();
                         i += 2;
-                        
+
                         while i < lines.len() && !lines[i].contains("```") {
                             if !content.is_empty() {
                                 content.push('\n');
@@ -1704,7 +1744,7 @@ impl LlmPatchProvider {
                             content.push_str(lines[i]);
                             i += 1;
                         }
-                        
+
                         if !content.is_empty() {
                             edits.push(EditOperation::WholeFile(WholeFileEdit {
                                 file: std::path::PathBuf::from(file_path),
@@ -1727,13 +1767,13 @@ impl LlmPatchProvider {
                     .or_else(|| lines[i].strip_prefix("CREATE:"))
                     .unwrap_or("")
                     .trim();
-                
+
                 if !file_path.is_empty() && i + 1 < lines.len() {
                     // Check if next line starts a code block
                     if lines[i + 1].contains("```") {
                         let mut content = String::new();
                         i += 2;
-                        
+
                         while i < lines.len() && !lines[i].contains("```") {
                             if !content.is_empty() {
                                 content.push('\n');
@@ -1741,7 +1781,7 @@ impl LlmPatchProvider {
                             content.push_str(lines[i]);
                             i += 1;
                         }
-                        
+
                         if !content.is_empty() {
                             edits.push(EditOperation::CreateFile(CreateFileEdit {
                                 file: std::path::PathBuf::from(file_path),
@@ -1759,7 +1799,7 @@ impl LlmPatchProvider {
     }
 
     /// Parse JSON schema response for edits
-    /// 
+    ///
     /// JSON Schema format:
     /// {
     ///   "edits": [
@@ -1788,7 +1828,7 @@ impl LlmPatchProvider {
     fn parse_json_schema_response(response: &str) -> Option<serde_json::Value> {
         // Try to extract JSON from code blocks or raw JSON
         let trimmed = response.trim();
-        
+
         // Check if wrapped in code block
         if trimmed.starts_with("```json") || trimmed.starts_with("```") {
             // Extract content between code fences
@@ -1799,7 +1839,7 @@ impl LlmPatchProvider {
                 return serde_json::from_str(json_content).ok();
             }
         }
-        
+
         // Try parsing as raw JSON
         serde_json::from_str(trimmed).ok()
     }
@@ -1808,7 +1848,7 @@ impl LlmPatchProvider {
     fn json_to_edit_operation(json: &serde_json::Value) -> Option<EditOperation> {
         let edit_type = json.get("type")?.as_str()?;
         let file = std::path::PathBuf::from(json.get("file")?.as_str()?);
-        
+
         match edit_type {
             "search_replace" => {
                 let search = json.get("search")?.as_str()?.to_string();
@@ -1817,16 +1857,20 @@ impl LlmPatchProvider {
                     file,
                     search,
                     replace,
-                    replace_all: json.get("replace_all").and_then(|v| v.as_bool()).or(Some(false)),
-                    context_lines: json.get("context_lines").and_then(|v| v.as_u64()).map(|v| v as u16).or(Some(3)),
+                    replace_all: json
+                        .get("replace_all")
+                        .and_then(|v| v.as_bool())
+                        .or(Some(false)),
+                    context_lines: json
+                        .get("context_lines")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u16)
+                        .or(Some(3)),
                 }))
             }
             "whole_file" => {
                 let content = json.get("content")?.as_str()?.to_string();
-                Some(EditOperation::WholeFile(WholeFileEdit {
-                    file,
-                    content,
-                }))
+                Some(EditOperation::WholeFile(WholeFileEdit { file, content }))
             }
             "create_file" => {
                 let content = json.get("content")?.as_str()?.to_string();
@@ -1837,9 +1881,9 @@ impl LlmPatchProvider {
                     executable,
                 }))
             }
-            "delete_file" => {
-                Some(EditOperation::DeleteFile(crate::harness::edit_protocol::DeleteFileEdit { file }))
-            }
+            "delete_file" => Some(EditOperation::DeleteFile(
+                crate::harness::edit_protocol::DeleteFileEdit { file },
+            )),
             _ => None,
         }
     }
@@ -1927,7 +1971,7 @@ impl PatchProvider for LlmPatchProvider {
         }
     }
 
-    fn can_handle(&self, kind: FailureKind) -> bool {
+    fn can_handle(&self, _kind: FailureKind) -> bool {
         // LLM can handle any failure type
         true
     }
@@ -1950,28 +1994,35 @@ impl PatchProvider for LlmPatchProvider {
 // Helper functions for new providers
 
 /// Parse script output into provider candidates
-fn parse_script_candidates(output: serde_json::Value, source: &str) -> anyhow::Result<Vec<ProviderCandidate>> {
+fn parse_script_candidates(
+    output: serde_json::Value,
+    source: &str,
+) -> anyhow::Result<Vec<ProviderCandidate>> {
     let mut candidates = Vec::new();
-    
+
     if let Some(candidates_array) = output.get("candidates").and_then(|v| v.as_array()) {
         for candidate_json in candidates_array {
-            let edits = if let Some(edits_array) = candidate_json.get("edits").and_then(|v| v.as_array()) {
-                parse_script_edits_from_array(edits_array)?
-            } else {
-                vec![]
-            };
-            
+            let edits =
+                if let Some(edits_array) = candidate_json.get("edits").and_then(|v| v.as_array()) {
+                    parse_script_edits_from_array(edits_array)?
+                } else {
+                    vec![]
+                };
+
             candidates.push(ProviderCandidate {
                 edits,
                 source: source.to_string(),
-                strategy: candidate_json.get("strategy")
+                strategy: candidate_json
+                    .get("strategy")
                     .and_then(|v| v.as_str())
                     .unwrap_or("script")
                     .to_string(),
-                confidence: candidate_json.get("confidence")
+                confidence: candidate_json
+                    .get("confidence")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(80) as u8,
-                reasoning: candidate_json.get("reasoning")
+                reasoning: candidate_json
+                    .get("reasoning")
                     .and_then(|v| v.as_str())
                     .unwrap_or("Generated by script")
                     .to_string(),
@@ -1979,7 +2030,7 @@ fn parse_script_candidates(output: serde_json::Value, source: &str) -> anyhow::R
             });
         }
     }
-    
+
     Ok(candidates)
 }
 
@@ -1993,55 +2044,68 @@ fn parse_script_edits(output: serde_json::Value) -> anyhow::Result<Vec<EditOpera
 }
 
 /// Parse edits from JSON array
-fn parse_script_edits_from_array(edits_array: &[serde_json::Value]) -> anyhow::Result<Vec<EditOperation>> {
+fn parse_script_edits_from_array(
+    edits_array: &[serde_json::Value],
+) -> anyhow::Result<Vec<EditOperation>> {
     let mut edits = Vec::new();
-    
+
     for edit_json in edits_array {
-        let edit_type = edit_json.get("type")
+        let edit_type = edit_json
+            .get("type")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing edit type"))?;
-        
+
         match edit_type {
             "search_replace" => {
-                let file = edit_json.get("file")
+                let file = edit_json
+                    .get("file")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
-                let search = edit_json.get("search")
+                let search = edit_json
+                    .get("search")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing search pattern"))?;
-                let replace = edit_json.get("replace")
+                let replace = edit_json
+                    .get("replace")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing replace pattern"))?;
-                
+
                 edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
                     file: PathBuf::from(file),
                     search: search.to_string(),
                     replace: replace.to_string(),
                     replace_all: edit_json.get("replace_all").and_then(|v| v.as_bool()),
-                    context_lines: edit_json.get("context_lines").and_then(|v| v.as_u64()).map(|v| v as u16),
+                    context_lines: edit_json
+                        .get("context_lines")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u16),
                 }));
             }
             "whole_file" => {
-                let file = edit_json.get("file")
+                let file = edit_json
+                    .get("file")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
-                let content = edit_json.get("content")
+                let content = edit_json
+                    .get("content")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing file content"))?;
-                
+
                 edits.push(EditOperation::WholeFile(WholeFileEdit {
                     file: PathBuf::from(file),
                     content: content.to_string(),
                 }));
             }
             "create_file" => {
-                let file = edit_json.get("file")
+                let file = edit_json
+                    .get("file")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
-                let content = edit_json.get("content")
+                let content = edit_json
+                    .get("content")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                
+
                 edits.push(EditOperation::CreateFile(CreateFileEdit {
                     file: PathBuf::from(file),
                     content: content.to_string(),
@@ -2053,21 +2117,26 @@ fn parse_script_edits_from_array(edits_array: &[serde_json::Value]) -> anyhow::R
             }
         }
     }
-    
+
     Ok(edits)
 }
 
 /// Apply template to generate edits
-fn apply_template(template: &Template, context: &PatchProviderContext) -> Option<Vec<EditOperation>> {
+fn apply_template(
+    template: &Template,
+    context: &PatchProviderContext,
+) -> Option<Vec<EditOperation>> {
     let mut edits = Vec::new();
-    
+
     match template.name.as_str() {
         "add_import" => {
             // Extract import from task description
             let task_lower = context.task.to_lowercase();
             if let Some(start) = task_lower.find("import ") {
                 let remaining = &task_lower[start..];
-                if let Some(end) = remaining.find(|c: char| c.is_whitespace() && !c.is_alphanumeric()) {
+                if let Some(end) =
+                    remaining.find(|c: char| c.is_whitespace() && !c.is_alphanumeric())
+                {
                     let import = &remaining[7..end];
                     edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
                         file: PathBuf::from("src/main.rs"), // Default assumption
@@ -2097,40 +2166,39 @@ fn apply_template(template: &Template, context: &PatchProviderContext) -> Option
         }
         _ => {}
     }
-    
-    if edits.is_empty() {
-        None
-    } else {
-        Some(edits)
-    }
+
+    if edits.is_empty() { None } else { Some(edits) }
 }
 
 /// Apply semicolon fix to edits
 fn apply_semicolon_fix(edits: &[EditOperation]) -> Vec<EditOperation> {
     let mut fixed = Vec::new();
-    
+
     for edit in edits {
         match edit {
             EditOperation::SearchReplace(sr) => {
                 let mut new_sr = sr.clone();
-                
+
                 // Add semicolon if missing and it looks like a statement
-                if !sr.replace.trim_end().ends_with(';') && 
-                   (sr.replace.contains("let ") || sr.replace.contains("fn ") || sr.replace.contains("return ")) {
+                if !sr.replace.trim_end().ends_with(';')
+                    && (sr.replace.contains("let ")
+                        || sr.replace.contains("fn ")
+                        || sr.replace.contains("return "))
+                {
                     new_sr.replace.push(';');
                 }
-                
+
                 fixed.push(EditOperation::SearchReplace(new_sr));
             }
             _ => fixed.push(edit.clone()),
         }
     }
-    
+
     fixed
 }
 
 /// Deterministic safe patch provider that generates predictable patches
-/// 
+///
 /// This provider uses deterministic algorithms to generate safe patches
 /// without relying on external services or random generation.
 pub struct DeterministicPatchProvider {
@@ -2143,7 +2211,7 @@ impl DeterministicPatchProvider {
     pub fn new(seed: u64) -> Self {
         Self { seed }
     }
-    
+
     /// Create a deterministic patch provider with default seed
     pub fn new_default() -> Self {
         Self { seed: 42 }
@@ -2159,12 +2227,12 @@ impl PatchProvider for DeterministicPatchProvider {
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
         let start = std::time::Instant::now();
         let mut candidates = Vec::new();
-        
+
         // Generate deterministic candidates based on task analysis
         if let Some(candidate) = self.generate_safe_candidate(&request.context) {
             candidates.push(candidate);
         }
-        
+
         Ok(GenerateResponse {
             candidates,
             generation_time_ms: start.elapsed().as_millis() as u64,
@@ -2174,18 +2242,28 @@ impl PatchProvider for DeterministicPatchProvider {
 
     async fn repair(&self, request: RepairRequest) -> anyhow::Result<RepairResponse> {
         let start = std::time::Instant::now();
-        
+
         // Apply deterministic repair strategies
         let repaired_edits = match request.repair_strategy {
-            RepairStrategy::FixSyntaxError => self.deterministic_syntax_repair(&request.failed_edits, &request.failure),
-            RepairStrategy::ExpandContextWindow => self.deterministic_expand_context(&request.failed_edits),
-            RepairStrategy::NarrowSearchPattern => self.deterministic_narrow_search(&request.failed_edits),
-            RepairStrategy::AddMissingImport => self.deterministic_add_import(&request.failed_edits, &request.context),
+            RepairStrategy::FixSyntaxError => {
+                self.deterministic_syntax_repair(&request.failed_edits, &request.failure)
+            }
+            RepairStrategy::ExpandContextWindow => {
+                self.deterministic_expand_context(&request.failed_edits)
+            }
+            RepairStrategy::NarrowSearchPattern => {
+                self.deterministic_narrow_search(&request.failed_edits)
+            }
+            RepairStrategy::AddMissingImport => {
+                self.deterministic_add_import(&request.failed_edits, &request.context)
+            }
             _ => Ok(request.failed_edits.clone()),
         };
-        
-        let repair_applied = repaired_edits.as_ref().map_or(false, |edits| edits != &request.failed_edits);
-        
+
+        let repair_applied = repaired_edits
+            .as_ref()
+            .map_or(false, |edits| edits != &request.failed_edits);
+
         Ok(RepairResponse {
             repaired_edits: repaired_edits.unwrap_or(request.failed_edits),
             repair_applied,
@@ -2224,7 +2302,7 @@ impl DeterministicPatchProvider {
     /// Generate a safe candidate based on deterministic analysis
     fn generate_safe_candidate(&self, context: &PatchProviderContext) -> Option<ProviderCandidate> {
         let task_lower = context.task.to_lowercase();
-        
+
         // Use deterministic pattern matching to generate safe edits
         let edits = if task_lower.contains("import") {
             self.generate_import_edit(&task_lower)
@@ -2235,7 +2313,7 @@ impl DeterministicPatchProvider {
         } else {
             Vec::new()
         };
-        
+
         if edits.is_empty() {
             None
         } else {
@@ -2249,15 +2327,17 @@ impl DeterministicPatchProvider {
             })
         }
     }
-    
+
     /// Generate import edits deterministically
     fn generate_import_edit(&self, task: &str) -> Vec<EditOperation> {
         let mut edits = Vec::new();
-        
+
         // Look for import patterns in the task
         if let Some(import_start) = task.find("import ") {
             let remaining = &task[import_start + 7..];
-            if let Some(import_end) = remaining.find(|c: char| c.is_whitespace() && !c.is_alphanumeric()) {
+            if let Some(import_end) =
+                remaining.find(|c: char| c.is_whitespace() && !c.is_alphanumeric())
+            {
                 let import_name = &remaining[..import_end];
                 edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
                     file: PathBuf::from("src/main.rs"),
@@ -2268,14 +2348,14 @@ impl DeterministicPatchProvider {
                 }));
             }
         }
-        
+
         edits
     }
-    
+
     /// Generate function edits deterministically
     fn generate_function_edit(&self, task: &str) -> Vec<EditOperation> {
         let mut edits = Vec::new();
-        
+
         // Simple function template
         let function_name = if let Some(fn_start) = task.find("fn ") {
             let remaining = &task[fn_start + 3..];
@@ -2287,7 +2367,7 @@ impl DeterministicPatchProvider {
         } else {
             "new_function"
         };
-        
+
         edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
             file: PathBuf::from("src/main.rs"),
             search: "".to_string(),
@@ -2298,14 +2378,14 @@ impl DeterministicPatchProvider {
             replace_all: None,
             context_lines: Some(0),
         }));
-        
+
         edits
     }
-    
+
     /// Generate fix edits deterministically
     fn generate_fix_edit(&self, task: &str) -> Vec<EditOperation> {
         let mut edits = Vec::new();
-        
+
         // Common fix patterns
         if task.contains("semicolon") {
             edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
@@ -2316,7 +2396,7 @@ impl DeterministicPatchProvider {
                 context_lines: Some(1),
             }));
         }
-        
+
         if task.contains("missing") && task.contains("import") {
             edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
                 file: PathBuf::from("src/main.rs"),
@@ -2326,25 +2406,30 @@ impl DeterministicPatchProvider {
                 context_lines: Some(0),
             }));
         }
-        
+
         edits
     }
-    
+
     /// Deterministic syntax repair
-    fn deterministic_syntax_repair(&self, edits: &[EditOperation], _failure: &FailureDetails) -> anyhow::Result<Vec<EditOperation>> {
+    fn deterministic_syntax_repair(
+        &self,
+        edits: &[EditOperation],
+        _failure: &FailureDetails,
+    ) -> anyhow::Result<Vec<EditOperation>> {
         let mut repaired = Vec::new();
-        
+
         for edit in edits {
             match edit {
                 EditOperation::SearchReplace(sr) => {
                     let mut new_sr = sr.clone();
-                    
+
                     // Add missing semicolons for statements
-                    if !sr.replace.trim_end().ends_with(';') && 
-                       (sr.replace.contains("let ") || sr.replace.contains("return ")) {
+                    if !sr.replace.trim_end().ends_with(';')
+                        && (sr.replace.contains("let ") || sr.replace.contains("return "))
+                    {
                         new_sr.replace.push(';');
                     }
-                    
+
                     // Fix common syntax issues
                     if sr.replace.contains("{{") {
                         new_sr.replace = sr.replace.replace("{{", "{");
@@ -2352,20 +2437,23 @@ impl DeterministicPatchProvider {
                     if sr.replace.contains("}}") {
                         new_sr.replace = sr.replace.replace("}}", "}");
                     }
-                    
+
                     repaired.push(EditOperation::SearchReplace(new_sr));
                 }
                 _ => repaired.push(edit.clone()),
             }
         }
-        
+
         Ok(repaired)
     }
-    
+
     /// Deterministic context expansion
-    fn deterministic_expand_context(&self, edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+    fn deterministic_expand_context(
+        &self,
+        edits: &[EditOperation],
+    ) -> anyhow::Result<Vec<EditOperation>> {
         let mut expanded = Vec::new();
-        
+
         for edit in edits {
             match edit {
                 EditOperation::SearchReplace(sr) => {
@@ -2377,14 +2465,17 @@ impl DeterministicPatchProvider {
                 _ => expanded.push(edit.clone()),
             }
         }
-        
+
         Ok(expanded)
     }
-    
+
     /// Deterministic search narrowing
-    fn deterministic_narrow_search(&self, edits: &[EditOperation]) -> anyhow::Result<Vec<EditOperation>> {
+    fn deterministic_narrow_search(
+        &self,
+        edits: &[EditOperation],
+    ) -> anyhow::Result<Vec<EditOperation>> {
         let mut narrowed = Vec::new();
-        
+
         for edit in edits {
             match edit {
                 EditOperation::SearchReplace(sr) => {
@@ -2400,31 +2491,38 @@ impl DeterministicPatchProvider {
                 _ => narrowed.push(edit.clone()),
             }
         }
-        
+
         Ok(narrowed)
     }
-    
+
     /// Deterministic import addition
-    fn deterministic_add_import(&self, edits: &[EditOperation], _context: &PatchProviderContext) -> anyhow::Result<Vec<EditOperation>> {
+    fn deterministic_add_import(
+        &self,
+        edits: &[EditOperation],
+        _context: &PatchProviderContext,
+    ) -> anyhow::Result<Vec<EditOperation>> {
         let mut with_imports = edits.to_vec();
-        
+
         // Add common imports that might be missing
         let common_imports = vec![
             "use std::collections::HashMap;",
             "use std::error::Error;",
             "use anyhow::Result;",
         ];
-        
+
         for import in common_imports {
-            with_imports.insert(0, EditOperation::SearchReplace(SearchReplaceEdit {
-                file: PathBuf::from("src/main.rs"),
-                search: "".to_string(),
-                replace: format!("{}\n", import),
-                replace_all: None,
-                context_lines: Some(0),
-            }));
+            with_imports.insert(
+                0,
+                EditOperation::SearchReplace(SearchReplaceEdit {
+                    file: PathBuf::from("src/main.rs"),
+                    search: "".to_string(),
+                    replace: format!("{}\n", import),
+                    replace_all: None,
+                    context_lines: Some(0),
+                }),
+            );
         }
-        
+
         Ok(with_imports)
     }
 }

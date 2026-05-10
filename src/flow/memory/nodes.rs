@@ -121,7 +121,7 @@ impl Node for MemoryExtractorNode {
     }
 
     fn post(&self, _state: &mut SharedState, output: Output) -> Action {
-        if let Some(count) = output["extracted_count"].as_u64() {
+        if let Some(_count) = output["extracted_count"].as_u64() {
             // Could emit event about extraction
         }
         "continue".to_string()

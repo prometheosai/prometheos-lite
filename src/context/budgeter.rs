@@ -122,7 +122,7 @@ impl ContextBudgeter {
         }
 
         // Calculate remaining budget for non-System items
-        let remaining_tokens = available_tokens - system_tokens;
+        let _remaining_tokens = available_tokens - system_tokens;
 
         // Sort non-System items by priority (lower = higher priority)
         let mut sorted_items: Vec<_> = other_items;

@@ -3,7 +3,7 @@
 //! This module provides a job queue system for managing asynchronous task execution
 //! with priority, retry logic, and status tracking.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;

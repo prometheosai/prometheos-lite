@@ -1,8 +1,8 @@
+use crate::harness::risk::RiskAssessment;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use crate::harness::risk::RiskAssessment;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SemanticDiff {
@@ -232,7 +232,6 @@ pub enum RiskLevel {
     Critical,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SemanticSummary {
     pub total_files_changed: usize,
@@ -410,7 +409,7 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    fn infer_auth_change_type(&self, diff: &str, pattern: &str) -> AuthChangeType {
+    fn infer_auth_change_type(&self, _diff: &str, pattern: &str) -> AuthChangeType {
         match pattern {
             p if p.contains("auth") => AuthChangeType::Authentication,
             p if p.contains("authoriz") => AuthChangeType::Authorization,
@@ -434,7 +433,7 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    fn infer_db_change_type(&self, diff: &str, pattern: &str) -> DatabaseChangeType {
+    fn infer_db_change_type(&self, _diff: &str, pattern: &str) -> DatabaseChangeType {
         match pattern {
             p if p.contains("create") => DatabaseChangeType::TableCreated,
             p if p.contains("drop") => DatabaseChangeType::TableDropped,
@@ -444,7 +443,7 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    fn infer_config_change_type(&self, diff: &str, pattern: &str) -> ConfigChangeType {
+    fn infer_config_change_type(&self, _diff: &str, pattern: &str) -> ConfigChangeType {
         match pattern {
             p if p.contains("add") => ConfigChangeType::Added,
             p if p.contains("remove") => ConfigChangeType::Removed,
@@ -454,7 +453,7 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    fn infer_config_environment(&self, diff: &str, pattern: &str) -> ConfigEnvironment {
+    fn infer_config_environment(&self, _diff: &str, pattern: &str) -> ConfigEnvironment {
         match pattern {
             p if p.contains("prod") => ConfigEnvironment::Production,
             p if p.contains("production") => ConfigEnvironment::Production,
@@ -464,7 +463,7 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    fn infer_dep_change_type(&self, diff: &str, pattern: &str) -> DependencyChangeType {
+    fn infer_dep_change_type(&self, _diff: &str, pattern: &str) -> DependencyChangeType {
         match pattern {
             p if p.contains("add") => DependencyChangeType::Added,
             p if p.contains("remove") => DependencyChangeType::Removed,
@@ -488,14 +487,16 @@ impl SemanticDiffAnalyzer {
     }
 
     fn categorize_file(&self, file: &Path) -> SemanticCategory {
-        let path_str = file.to_string_lossy().to_lowercase();
+        let _path_str = file.to_string_lossy().to_lowercase();
         let extension = file.extension().and_then(|s| s.to_str()).unwrap_or("");
 
         match extension {
             "rs" | "py" | "js" | "ts" | "go" | "java" => SemanticCategory::SourceCode,
             "toml" | "yaml" | "json" | "xml" | "ini" | "cfg" => SemanticCategory::Configuration,
             "md" | "rst" | "txt" | "adoc" => SemanticCategory::Documentation,
-            "dockerfile" | "Dockerfile" | "docker-compose" | "containerfile" => SemanticCategory::Build,
+            "dockerfile" | "Dockerfile" | "docker-compose" | "containerfile" => {
+                SemanticCategory::Build
+            }
             "sql" | "migration" | "seed" => SemanticCategory::Migration,
             _ => SemanticCategory::Unknown,
         }
@@ -509,7 +510,7 @@ impl SemanticDiffAnalyzer {
         diff.contains(&format!("- {}", name)) || diff.contains(&format!("pub use {}", name))
     }
 
-    fn is_breaking_change(&self, diff: &str, name: &str) -> bool {
+    fn is_breaking_change(&self, diff: &str, _name: &str) -> bool {
         // Check for breaking change indicators
         let breaking_patterns = [
             "pub fn ",
@@ -519,25 +520,35 @@ impl SemanticDiffAnalyzer {
             "#[deprecated(",
         ];
 
-        breaking_patterns.iter().any(|pattern| {
-            diff.contains(pattern)
-        })
+        breaking_patterns
+            .iter()
+            .any(|pattern| diff.contains(pattern))
     }
 
-    fn requires_migration(&self, diff: &str, pattern: &str) -> bool {
+    fn requires_migration(&self, _diff: &str, pattern: &str) -> bool {
         pattern.contains("migration") || pattern.contains("create") || pattern.contains("drop")
     }
 
-    fn assess_auth_risk(&self, diff: &str, pattern: &str) -> RiskLevel {
+    fn assess_auth_risk(&self, _diff: &str, pattern: &str) -> RiskLevel {
         match pattern {
-            p if p.contains("secret") || p.contains("hash") || p.contains("bcrypt") || p.contains("argon2") || p.contains("pbkdf2") || p.contains("scrypt") => RiskLevel::High,
-            p if p.contains("jwt") || p.contains("oauth") || p.contains("session") => RiskLevel::Medium,
+            p if p.contains("secret")
+                || p.contains("hash")
+                || p.contains("bcrypt")
+                || p.contains("argon2")
+                || p.contains("pbkdf2")
+                || p.contains("scrypt") =>
+            {
+                RiskLevel::High
+            }
+            p if p.contains("jwt") || p.contains("oauth") || p.contains("session") => {
+                RiskLevel::Medium
+            }
             p if p.contains("credential") => RiskLevel::High,
             _ => RiskLevel::Low,
         }
     }
 
-    fn assess_dep_risk(&self, diff: &str, pattern: &str) -> RiskLevel {
+    fn assess_dep_risk(&self, _diff: &str, pattern: &str) -> RiskLevel {
         match pattern {
             p if p.contains("major") => RiskLevel::High,
             p if p.contains("minor") => RiskLevel::Medium,
@@ -570,7 +581,6 @@ impl SemanticDiffAnalyzer {
         self.analyze_file_changes(diff, files)
     }
 
-    
     pub fn analyze(&self, diff: &str, changed_files: &[PathBuf]) -> SemanticDiff {
         let api_changes = self.detect_api_changes(diff, changed_files);
         let auth_changes = self.detect_auth_changes(diff, changed_files);
@@ -596,10 +606,18 @@ impl SemanticDiffAnalyzer {
         );
 
         // P1-Issue9: Calculate precision metrics
-        let precision_metrics = self.calculate_precision_metrics(diff, file_changes.clone(), &api_changes, &auth_changes, &database_changes, &dependency_changes, &config_changes);
-        
+        let precision_metrics = self.calculate_precision_metrics(
+            diff,
+            file_changes.clone(),
+            &api_changes,
+            &auth_changes,
+            &database_changes,
+            &dependency_changes,
+            &config_changes,
+        );
+
         let changed_files = file_changes.clone();
-        
+
         SemanticDiff {
             api_changes,
             auth_changes,
@@ -616,7 +634,7 @@ impl SemanticDiffAnalyzer {
 
     fn detect_api_changes(&self, diff: &str, files: &[PathBuf]) -> Vec<ApiChange> {
         let mut changes = vec![];
-        let diff_lower = diff.to_lowercase();
+        let _diff_lower = diff.to_lowercase();
 
         for file in files {
             let is_source = file
@@ -771,7 +789,8 @@ impl SemanticDiffAnalyzer {
                 .any(|p| p.is_match(&file.to_string_lossy()) || p.is_match(&diff_lower));
 
             if is_config {
-                let environment = self.infer_config_environment(&diff, file.to_string_lossy().as_ref());
+                let environment =
+                    self.infer_config_environment(&diff, file.to_string_lossy().as_ref());
 
                 // Detect key-value changes
                 let key_pattern = Regex::new(r"(?i)([a-z_][a-z0-9_]*)\s*=\s*([^\n]+)").unwrap();
@@ -909,16 +928,6 @@ impl SemanticDiffAnalyzer {
         changes
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
     fn assess_risk(
         &self,
         api: &[ApiChange],
@@ -971,7 +980,7 @@ impl SemanticDiffAnalyzer {
             .max()
             .unwrap_or(&RiskLevel::None);
 
-        let requires_review = matches!(
+        let _requires_review = matches!(
             overall_risk,
             RiskLevel::Medium | RiskLevel::High | RiskLevel::Critical
         );
@@ -997,21 +1006,24 @@ impl SemanticDiffAnalyzer {
             reasons.push(format!("Configuration changes with {:?} risk", config_risk));
         }
 
-        let risk_reasons: Vec<crate::harness::risk::RiskReason> = reasons.into_iter().map(|s| crate::harness::risk::RiskReason {
-            category: crate::harness::risk::RiskCategory::ApiBreaking,
-            description: s,
-            severity: crate::harness::risk::RiskSeverity::Medium,
-            mitigation: None,
-        }).collect();
+        let risk_reasons: Vec<crate::harness::risk::RiskReason> = reasons
+            .into_iter()
+            .map(|s| crate::harness::risk::RiskReason {
+                category: crate::harness::risk::RiskCategory::ApiBreaking,
+                description: s,
+                severity: crate::harness::risk::RiskSeverity::Medium,
+                mitigation: None,
+            })
+            .collect();
 
         RiskAssessment {
             level: match overall_risk {
-            RiskLevel::None => crate::harness::risk::RiskLevel::None,
-            RiskLevel::Low => crate::harness::risk::RiskLevel::Low,
-            RiskLevel::Medium => crate::harness::risk::RiskLevel::Medium,
-            RiskLevel::High => crate::harness::risk::RiskLevel::High,
-            RiskLevel::Critical => crate::harness::risk::RiskLevel::Critical,
-        },
+                RiskLevel::None => crate::harness::risk::RiskLevel::None,
+                RiskLevel::Low => crate::harness::risk::RiskLevel::Low,
+                RiskLevel::Medium => crate::harness::risk::RiskLevel::Medium,
+                RiskLevel::High => crate::harness::risk::RiskLevel::High,
+                RiskLevel::Critical => crate::harness::risk::RiskLevel::Critical,
+            },
             reasons: risk_reasons,
             requires_approval,
             can_override: false,
@@ -1020,7 +1032,6 @@ impl SemanticDiffAnalyzer {
         }
     }
 
-    
     fn generate_summary(
         &self,
         api: &[ApiChange],
@@ -1243,7 +1254,8 @@ pub fn format_semantic_diff_report(diff: &SemanticDiff) -> String {
 }
 
 pub fn has_breaking_changes(diff: &SemanticDiff) -> bool {
-    diff.summary.breaking_changes > 0 || diff.risk_assessment.level >= crate::harness::risk::RiskLevel::High
+    diff.summary.breaking_changes > 0
+        || diff.risk_assessment.level >= crate::harness::risk::RiskLevel::High
 }
 
 // P1-Issue9: Enhanced precision calculation methods
@@ -1260,20 +1272,41 @@ impl SemanticDiffAnalyzer {
         config_changes: &[ConfigChange],
     ) -> DiffPrecisionMetrics {
         let total_candidates = self.count_total_candidates(diff);
-        let true_positives = self.count_true_positives(diff, api_changes, auth_changes, database_changes, dependency_changes, config_changes);
-        let false_positives = self.count_false_positives(diff, api_changes, auth_changes, database_changes, dependency_changes, config_changes);
+        let true_positives = self.count_true_positives(
+            diff,
+            api_changes,
+            auth_changes,
+            database_changes,
+            dependency_changes,
+            config_changes,
+        );
+        let false_positives = self.count_false_positives(
+            diff,
+            api_changes,
+            auth_changes,
+            database_changes,
+            dependency_changes,
+            config_changes,
+        );
         let false_negatives = self.count_false_negatives(diff, &files);
-        
+
         let line_precision = self.calculate_line_precision(diff);
-        let semantic_precision = self.calculate_semantic_precision(diff, api_changes, auth_changes, database_changes, dependency_changes, config_changes);
+        let semantic_precision = self.calculate_semantic_precision(
+            diff,
+            api_changes,
+            auth_changes,
+            database_changes,
+            dependency_changes,
+            config_changes,
+        );
         let context_precision = self.calculate_context_precision(diff);
-        
+
         let overall_precision = if total_candidates > 0 {
             ((true_positives as f32 / total_candidates as f32) * 100.0) as u8
         } else {
             0
         };
-        
+
         DiffPrecisionMetrics {
             overall_precision,
             line_precision,
@@ -1285,11 +1318,11 @@ impl SemanticDiffAnalyzer {
             total_candidates,
         }
     }
-    
+
     /// Count total number of change candidates in the diff
     fn count_total_candidates(&self, diff: &str) -> usize {
         let mut count = 0;
-        
+
         // Count all potential change patterns
         for pattern in &self.api_patterns {
             count += pattern.find_iter(diff).count();
@@ -1306,10 +1339,10 @@ impl SemanticDiffAnalyzer {
         for pattern in &self.config_patterns {
             count += pattern.find_iter(diff).count();
         }
-        
+
         count
     }
-    
+
     /// Count true positives (correctly identified changes)
     fn count_true_positives(
         &self,
@@ -1321,21 +1354,21 @@ impl SemanticDiffAnalyzer {
         config_changes: &[ConfigChange],
     ) -> usize {
         let mut count = 0;
-        
+
         // Count changes that are confirmed by multiple patterns
         count += self.validate_api_changes(diff, api_changes);
         count += self.validate_auth_changes(diff, auth_changes);
         count += self.validate_database_changes(diff, database_changes);
         count += self.validate_dependency_changes(diff, dependency_changes);
         count += self.validate_config_changes(diff, config_changes);
-        
+
         count
     }
-    
+
     /// Count false positives (incorrectly identified changes)
     fn count_false_positives(
         &self,
-        diff: &str,
+        _diff: &str,
         api_changes: &[ApiChange],
         auth_changes: &[AuthChange],
         database_changes: &[DatabaseChange],
@@ -1343,136 +1376,195 @@ impl SemanticDiffAnalyzer {
         config_changes: &[ConfigChange],
     ) -> usize {
         let mut count = 0;
-        
+
         // Count changes that are likely false positives
-        count += api_changes.iter().filter(|c| self.is_likely_false_positive(&c.signature)).count();
-        count += auth_changes.iter().filter(|c| self.is_likely_false_positive(&c.description)).count();
-        count += database_changes.iter().filter(|c| self.is_likely_false_positive(&c.description)).count();
-        count += dependency_changes.iter().filter(|c| self.is_likely_false_positive(&c.package_name)).count();
-        count += config_changes.iter().filter(|c| self.is_likely_false_positive(&c.config_key)).count();
-        
+        count += api_changes
+            .iter()
+            .filter(|c| self.is_likely_false_positive(&c.signature))
+            .count();
+        count += auth_changes
+            .iter()
+            .filter(|c| self.is_likely_false_positive(&c.description))
+            .count();
+        count += database_changes
+            .iter()
+            .filter(|c| self.is_likely_false_positive(&c.description))
+            .count();
+        count += dependency_changes
+            .iter()
+            .filter(|c| self.is_likely_false_positive(&c.package_name))
+            .count();
+        count += config_changes
+            .iter()
+            .filter(|c| self.is_likely_false_positive(&c.config_key))
+            .count();
+
         count
     }
-    
+
     /// Count false negatives (missed changes)
-    fn count_false_negatives(&self, diff: &str, files: &[FileChange]) -> usize {
+    fn count_false_negatives(&self, diff: &str, _files: &[FileChange]) -> usize {
         let mut count = 0;
-        
+
         // Look for patterns that should have been detected but weren't
         for line in diff.lines() {
             if self.is_missed_change(line) {
                 count += 1;
             }
         }
-        
+
         count
     }
-    
+
     /// Calculate line-level precision
     fn calculate_line_precision(&self, diff: &str) -> u8 {
         let total_lines = diff.lines().count();
         if total_lines == 0 {
             return 100;
         }
-        
+
         let contextually_relevant_lines = self.count_contextually_relevant_lines(diff);
         let precision = (contextually_relevant_lines as f32 / total_lines as f32) * 100.0;
         precision as u8
     }
-    
+
     /// Calculate semantic precision
     fn calculate_semantic_precision(
         &self,
-        diff: &str,
+        _diff: &str,
         api_changes: &[ApiChange],
         auth_changes: &[AuthChange],
         database_changes: &[DatabaseChange],
         dependency_changes: &[DependencyChange],
         config_changes: &[ConfigChange],
     ) -> u8 {
-        let total_changes = api_changes.len() + auth_changes.len() + database_changes.len() + dependency_changes.len() + config_changes.len();
+        let total_changes = api_changes.len()
+            + auth_changes.len()
+            + database_changes.len()
+            + dependency_changes.len()
+            + config_changes.len();
         if total_changes == 0 {
             return 100;
         }
-        
-        let semantically_accurate = self.count_semantically_accurate_changes(api_changes, auth_changes, database_changes, dependency_changes, config_changes);
+
+        let semantically_accurate = self.count_semantically_accurate_changes(
+            api_changes,
+            auth_changes,
+            database_changes,
+            dependency_changes,
+            config_changes,
+        );
         let precision = (semantically_accurate as f32 / total_changes as f32) * 100.0;
         precision as u8
     }
-    
+
     /// Calculate context precision
     fn calculate_context_precision(&self, diff: &str) -> u8 {
-        let total_context_patterns = self.line_context_patterns.len() + self.semantic_context_patterns.len();
+        let total_context_patterns =
+            self.line_context_patterns.len() + self.semantic_context_patterns.len();
         if total_context_patterns == 0 {
             return 100;
         }
-        
+
         let matched_context = self.count_matched_context_patterns(diff);
         let precision = (matched_context as f32 / total_context_patterns as f32) * 100.0;
         precision as u8
     }
-    
+
     /// Helper methods for precision calculation
-    fn validate_api_changes(&self, diff: &str, changes: &[ApiChange]) -> usize {
-        changes.iter().filter(|c| {
-            // Validate with multiple patterns
-            self.precision_patterns.iter().any(|p| p.is_match(&c.signature)) &&
-            self.api_patterns.iter().any(|p| p.is_match(&c.signature))
-        }).count()
+    fn validate_api_changes(&self, _diff: &str, changes: &[ApiChange]) -> usize {
+        changes
+            .iter()
+            .filter(|c| {
+                // Validate with multiple patterns
+                self.precision_patterns
+                    .iter()
+                    .any(|p| p.is_match(&c.signature))
+                    && self.api_patterns.iter().any(|p| p.is_match(&c.signature))
+            })
+            .count()
     }
-    
-    fn validate_auth_changes(&self, diff: &str, changes: &[AuthChange]) -> usize {
-        changes.iter().filter(|c| {
-            self.auth_patterns.iter().any(|p| p.is_match(&c.description))
-        }).count()
+
+    fn validate_auth_changes(&self, _diff: &str, changes: &[AuthChange]) -> usize {
+        changes
+            .iter()
+            .filter(|c| {
+                self.auth_patterns
+                    .iter()
+                    .any(|p| p.is_match(&c.description))
+            })
+            .count()
     }
-    
-    fn validate_database_changes(&self, diff: &str, changes: &[DatabaseChange]) -> usize {
-        changes.iter().filter(|c| {
-            self.db_patterns.iter().any(|p| p.is_match(&c.description))
-        }).count()
+
+    fn validate_database_changes(&self, _diff: &str, changes: &[DatabaseChange]) -> usize {
+        changes
+            .iter()
+            .filter(|c| self.db_patterns.iter().any(|p| p.is_match(&c.description)))
+            .count()
     }
-    
-    fn validate_dependency_changes(&self, diff: &str, changes: &[DependencyChange]) -> usize {
-        changes.iter().filter(|c| {
-            self.dep_patterns.iter().any(|p| p.is_match(&c.package_name))
-        }).count()
+
+    fn validate_dependency_changes(&self, _diff: &str, changes: &[DependencyChange]) -> usize {
+        changes
+            .iter()
+            .filter(|c| {
+                self.dep_patterns
+                    .iter()
+                    .any(|p| p.is_match(&c.package_name))
+            })
+            .count()
     }
-    
-    fn validate_config_changes(&self, diff: &str, changes: &[ConfigChange]) -> usize {
-        changes.iter().filter(|c| {
-            self.config_patterns.iter().any(|p| p.is_match(&c.config_key))
-        }).count()
+
+    fn validate_config_changes(&self, _diff: &str, changes: &[ConfigChange]) -> usize {
+        changes
+            .iter()
+            .filter(|c| {
+                self.config_patterns
+                    .iter()
+                    .any(|p| p.is_match(&c.config_key))
+            })
+            .count()
     }
-    
+
     fn is_likely_false_positive(&self, text: &str) -> bool {
         // Check for common false positive patterns
         let false_positive_patterns = [
-            "test", "example", "demo", "sample", "mock", "stub",
-            "TODO", "FIXME", "XXX", "NOTE", "HACK",
+            "test", "example", "demo", "sample", "mock", "stub", "TODO", "FIXME", "XXX", "NOTE",
+            "HACK",
         ];
-        
-        false_positive_patterns.iter().any(|pattern| text.to_lowercase().contains(pattern))
+
+        false_positive_patterns
+            .iter()
+            .any(|pattern| text.to_lowercase().contains(pattern))
     }
-    
+
     fn is_missed_change(&self, line: &str) -> bool {
         // Look for patterns that should have been detected
         let missed_patterns = [
-            "pub fn ", "pub struct ", "pub enum ", "pub trait ",
-            "impl ", "use ", "mod ",
+            "pub fn ",
+            "pub struct ",
+            "pub enum ",
+            "pub trait ",
+            "impl ",
+            "use ",
+            "mod ",
         ];
-        
-        missed_patterns.iter().any(|pattern| line.contains(pattern)) &&
-        !self.line_context_patterns.iter().any(|p| p.is_match(line))
+
+        missed_patterns.iter().any(|pattern| line.contains(pattern))
+            && !self.line_context_patterns.iter().any(|p| p.is_match(line))
     }
-    
+
     fn count_contextually_relevant_lines(&self, diff: &str) -> usize {
-        diff.lines().filter(|line| {
-            self.line_context_patterns.iter().any(|p| p.is_match(line)) ||
-            self.semantic_context_patterns.iter().any(|p| p.is_match(line))
-        }).count()
+        diff.lines()
+            .filter(|line| {
+                self.line_context_patterns.iter().any(|p| p.is_match(line))
+                    || self
+                        .semantic_context_patterns
+                        .iter()
+                        .any(|p| p.is_match(line))
+            })
+            .count()
     }
-    
+
     fn count_semantically_accurate_changes(
         &self,
         api_changes: &[ApiChange],
@@ -1482,28 +1574,42 @@ impl SemanticDiffAnalyzer {
         config_changes: &[ConfigChange],
     ) -> usize {
         let mut count = 0;
-        
+
         // Count changes with high semantic accuracy
         count += api_changes.iter().filter(|c| c.breaking).count(); // Breaking changes are usually accurate
-        count += auth_changes.iter().filter(|c| c.risk_level >= RiskLevel::Medium).count();
-        count += database_changes.iter().filter(|c| c.migration_required).count();
-        count += dependency_changes.iter().filter(|c| c.risk_level >= RiskLevel::Medium).count();
-        count += config_changes.iter().filter(|c| c.environment != crate::harness::semantic_diff::ConfigEnvironment::Development).count();
-        
+        count += auth_changes
+            .iter()
+            .filter(|c| c.risk_level >= RiskLevel::Medium)
+            .count();
+        count += database_changes
+            .iter()
+            .filter(|c| c.migration_required)
+            .count();
+        count += dependency_changes
+            .iter()
+            .filter(|c| c.risk_level >= RiskLevel::Medium)
+            .count();
+        count += config_changes
+            .iter()
+            .filter(|c| {
+                c.environment != crate::harness::semantic_diff::ConfigEnvironment::Development
+            })
+            .count();
+
         count
     }
-    
+
     fn count_matched_context_patterns(&self, diff: &str) -> usize {
         let mut count = 0;
-        
+
         for pattern in &self.line_context_patterns {
             count += pattern.find_iter(diff).count();
         }
-        
+
         for pattern in &self.semantic_context_patterns {
             count += pattern.find_iter(diff).count();
         }
-        
+
         count
     }
 }

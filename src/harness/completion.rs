@@ -1,16 +1,10 @@
 use crate::harness::{
-    confidence::ConfidenceScore,
-    evidence::SandboxEvidence,
-    mode_policy::HarnessMode,
-    review::ReviewReport,
-    risk::{RiskAssessment, RiskLevel},
-    semantic_diff::SemanticDiff,
-    validation::{CommandResult, ValidationResult},
-    verification::VerificationStrength,
+    confidence::ConfidenceScore, evidence::SandboxEvidence, mode_policy::HarnessMode,
+    review::ReviewReport, risk::RiskAssessment, semantic_diff::SemanticDiff,
+    validation::ValidationResult, verification::VerificationStrength,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompletionEvidence {
@@ -723,7 +717,7 @@ impl CompletionEvaluator {
         let mut decision_factors = vec![];
 
         // Check evidence completeness
-        let completeness = self.calculate_completeness(evidence);
+        let _completeness = self.calculate_completeness(evidence);
 
         // Decision logic based on mode
         let decision = match mode {
@@ -881,7 +875,7 @@ impl CompletionEvaluator {
     fn evaluate_benchmark(
         &self,
         evidence: &CompletionEvidence,
-        factors: &mut Vec<String>,
+        _factors: &mut Vec<String>,
     ) -> CompletionDecision {
         // Benchmark mode is for testing harness itself - less strict
         if !evidence.patch_evidence.patch_created {

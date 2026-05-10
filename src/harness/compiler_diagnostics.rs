@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// P0-HARNESS-010: Structured compiler diagnostic for intelligent repair
@@ -59,7 +58,7 @@ pub struct RustDiagnosticParser;
 impl DiagnosticParser for RustDiagnosticParser {
     fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
         let mut diagnostics = Vec::new();
-        
+
         for line in output.lines() {
             if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(diag) = parse_rust_diagnostic(&json_value, working_dir) {
@@ -67,47 +66,53 @@ impl DiagnosticParser for RustDiagnosticParser {
                 }
             }
         }
-        
+
         Ok(diagnostics)
     }
 }
 
 /// P0-HARNESS-010: Parse individual Rust diagnostic from JSON
-fn parse_rust_diagnostic(value: &serde_json::Value, working_dir: &PathBuf) -> Option<CompilerDiagnostic> {
+fn parse_rust_diagnostic(
+    value: &serde_json::Value,
+    working_dir: &PathBuf,
+) -> Option<CompilerDiagnostic> {
     let message = value.get("message")?.as_str()?.to_string();
     let level = value.get("level")?.as_str()?;
-    
+
     let severity = match level {
         "error" => DiagnosticSeverity::Error,
         "warning" => DiagnosticSeverity::Warning,
         "note" => DiagnosticSeverity::Note,
         _ => DiagnosticSeverity::Info,
     };
-    
-    let code = value.get("code").and_then(|v| v.as_str().map(|s| s.to_string()));
-    
+
+    let code = value
+        .get("code")
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+
     let spans = value.get("spans")?.as_array()?;
     let primary_span = spans.first()?;
-    
+
     let line = primary_span.get("line_start")?.as_u64()? as usize;
     let column = primary_span.get("column_start")?.as_u64()? as usize;
-    
+
     let file_path = primary_span.get("file_name")?.as_str()?;
     let file = if file_path.starts_with("src/") {
         working_dir.join(file_path)
     } else {
         PathBuf::from(file_path)
     };
-    
-    let suggested = value.get("children")
+
+    let suggested = value
+        .get("children")
         .and_then(|children| children.as_array())
         .and_then(|arr| arr.first())
         .and_then(|child| child.get("rendered"))
         .and_then(|rendered| rendered.as_str())
         .map(|s| s.to_string());
-    
+
     let category = categorize_rust_diagnostic(&message, &code);
-    
+
     Some(CompilerDiagnostic {
         file,
         line,
@@ -123,8 +128,9 @@ fn parse_rust_diagnostic(value: &serde_json::Value, working_dir: &PathBuf) -> Op
 /// P0-HARNESS-010: Categorize Rust diagnostic for targeted repair
 fn categorize_rust_diagnostic(message: &str, code: &Option<String>) -> DiagnosticCategory {
     let msg_lower = message.to_lowercase();
-    
-    if msg_lower.contains("borrow") || msg_lower.contains("move") || msg_lower.contains("ownership") {
+
+    if msg_lower.contains("borrow") || msg_lower.contains("move") || msg_lower.contains("ownership")
+    {
         DiagnosticCategory::Borrowing
     } else if msg_lower.contains("lifetime") {
         DiagnosticCategory::Lifetime
@@ -157,13 +163,13 @@ pub struct TypeScriptDiagnosticParser;
 impl DiagnosticParser for TypeScriptDiagnosticParser {
     fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
         let mut diagnostics = Vec::new();
-        
+
         for line in output.lines() {
             if let Some(diag) = parse_typescript_diagnostic(line, working_dir) {
                 diagnostics.push(diag);
             }
         }
-        
+
         Ok(diagnostics)
     }
 }
@@ -171,8 +177,10 @@ impl DiagnosticParser for TypeScriptDiagnosticParser {
 /// P0-HARNESS-010: Parse individual TypeScript diagnostic
 fn parse_typescript_diagnostic(line: &str, working_dir: &PathBuf) -> Option<CompilerDiagnostic> {
     // TypeScript error format: file(line,column): error TS1234: message
-    let ts_regex = regex::Regex::new(r"^(.+)\((\d+),(\d+)\):\s+(error|warning|info)\s+TS(\d+):\s+(.+)$").ok()?;
-    
+    let ts_regex =
+        regex::Regex::new(r"^(.+)\((\d+),(\d+)\):\s+(error|warning|info)\s+TS(\d+):\s+(.+)$")
+            .ok()?;
+
     if let Some(caps) = ts_regex.captures(line) {
         let file = working_dir.join(&caps[1]);
         let line_num = caps[2].parse().ok()?;
@@ -185,9 +193,9 @@ fn parse_typescript_diagnostic(line: &str, working_dir: &PathBuf) -> Option<Comp
         };
         let code = Some(format!("TS{}", &caps[5]));
         let message = caps[6].to_string();
-        
+
         let category = categorize_typescript_diagnostic(&message);
-        
+
         Some(CompilerDiagnostic {
             file,
             line: line_num,
@@ -206,7 +214,7 @@ fn parse_typescript_diagnostic(line: &str, working_dir: &PathBuf) -> Option<Comp
 /// P0-HARNESS-010: Categorize TypeScript diagnostic
 fn categorize_typescript_diagnostic(message: &str) -> DiagnosticCategory {
     let msg_lower = message.to_lowercase();
-    
+
     if msg_lower.contains("type") {
         DiagnosticCategory::Type
     } else if msg_lower.contains("import") || msg_lower.contains("module") {
@@ -224,13 +232,13 @@ pub struct PythonDiagnosticParser;
 impl DiagnosticParser for PythonDiagnosticParser {
     fn parse(&self, output: &str, working_dir: &PathBuf) -> Result<Vec<CompilerDiagnostic>> {
         let mut diagnostics = Vec::new();
-        
+
         for line in output.lines() {
             if let Some(diag) = parse_python_diagnostic(line, working_dir) {
                 diagnostics.push(diag);
             }
         }
-        
+
         Ok(diagnostics)
     }
 }
@@ -239,7 +247,7 @@ impl DiagnosticParser for PythonDiagnosticParser {
 fn parse_python_diagnostic(line: &str, working_dir: &PathBuf) -> Option<CompilerDiagnostic> {
     // Python error format: file.py:line: error message
     let py_regex = regex::Regex::new(r"^(.+):(\d+):\s+(error|warning|info):\s+(.+)$").ok()?;
-    
+
     if let Some(caps) = py_regex.captures(line) {
         let file = working_dir.join(&caps[1]);
         let line_num = caps[2].parse().ok()?;
@@ -250,9 +258,9 @@ fn parse_python_diagnostic(line: &str, working_dir: &PathBuf) -> Option<Compiler
             _ => DiagnosticSeverity::Note,
         };
         let message = caps[4].to_string();
-        
+
         let category = categorize_python_diagnostic(&message);
-        
+
         Some(CompilerDiagnostic {
             file,
             line: line_num,
@@ -271,7 +279,7 @@ fn parse_python_diagnostic(line: &str, working_dir: &PathBuf) -> Option<Compiler
 /// P0-HARNESS-010: Categorize Python diagnostic
 fn categorize_python_diagnostic(message: &str) -> DiagnosticCategory {
     let msg_lower = message.to_lowercase();
-    
+
     if msg_lower.contains("import") || msg_lower.contains("module") {
         DiagnosticCategory::Import
     } else if msg_lower.contains("unused") {
@@ -297,7 +305,8 @@ impl DiagnosticParserFactory {
             Box::new(RustDiagnosticParser)
         } else if command.contains("tsc") || command.contains("typescript") {
             Box::new(TypeScriptDiagnosticParser)
-        } else if command.contains("pytest") || command.contains("mypy") || command.contains("ruff") {
+        } else if command.contains("pytest") || command.contains("mypy") || command.contains("ruff")
+        {
             Box::new(PythonDiagnosticParser)
         } else {
             Box::new(GenericDiagnosticParser)
@@ -313,19 +322,19 @@ impl DiagnosticParser for GenericDiagnosticParser {
         // Simple line-based parsing for unknown tools
         let mut diagnostics = Vec::new();
         let mut line_num = 1;
-        
+
         for line in output.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            
+
             // Try to extract severity from common patterns
             let (severity, message) = if let Some((sev, msg)) = extract_severity_and_message(line) {
                 (sev, msg.to_string())
             } else {
                 (DiagnosticSeverity::Info, line.to_string())
             };
-            
+
             diagnostics.push(CompilerDiagnostic {
                 file: PathBuf::from("unknown"), // Would need context for real file path
                 line: line_num,
@@ -336,10 +345,10 @@ impl DiagnosticParser for GenericDiagnosticParser {
                 severity,
                 category: DiagnosticCategory::Syntax,
             });
-            
+
             line_num += 1;
         }
-        
+
         Ok(diagnostics)
     }
 }
@@ -352,7 +361,7 @@ fn extract_severity_and_message(line: &str) -> Option<(DiagnosticSeverity, &str)
         ("info:", DiagnosticSeverity::Info),
         ("note:", DiagnosticSeverity::Note),
     ];
-    
+
     for (pattern, severity) in &patterns {
         if let Some(pos) = line.find(pattern) {
             let msg_start = pos + pattern.len();
@@ -360,7 +369,7 @@ fn extract_severity_and_message(line: &str) -> Option<(DiagnosticSeverity, &str)
             return Some((severity.clone(), message));
         }
     }
-    
+
     None
 }
 
@@ -412,36 +421,32 @@ pub fn generate_repair_strategy(diagnostic: &CompilerDiagnostic) -> RepairStrate
     let (strategy, confidence) = match (&diagnostic.category, &diagnostic.message.to_lowercase()) {
         (DiagnosticCategory::Borrowing, msg) if msg.contains("borrowed") => {
             (RepairStrategyType::RestructureOwnership, 0.8)
-        },
+        }
         (DiagnosticCategory::Borrowing, msg) if msg.contains("move") => {
             (RepairStrategyType::RestructureOwnership, 0.8)
-        },
-        (DiagnosticCategory::Lifetime, _) => {
-            (RepairStrategyType::RestructureOwnership, 0.7)
-        },
+        }
+        (DiagnosticCategory::Lifetime, _) => (RepairStrategyType::RestructureOwnership, 0.7),
         (DiagnosticCategory::Trait, msg) if msg.contains("missing") => {
             (RepairStrategyType::ImplementTrait, 0.9)
-        },
+        }
         (DiagnosticCategory::Import, msg) if msg.contains("not found") => {
             (RepairStrategyType::AddImport, 0.9)
-        },
+        }
         (DiagnosticCategory::Unused, msg) if msg.contains("unused") => {
             (RepairStrategyType::RemoveUnused, 0.8)
-        },
-        (DiagnosticCategory::Type, msg) if msg.contains("mismatch") || msg.contains("cannot find type") => {
+        }
+        (DiagnosticCategory::Type, msg)
+            if msg.contains("mismatch") || msg.contains("cannot find type") =>
+        {
             (RepairStrategyType::FixType, 0.7)
-        },
-        (DiagnosticCategory::Format, _) => {
-            (RepairStrategyType::ApplyFormatting, 0.6)
-        },
+        }
+        (DiagnosticCategory::Format, _) => (RepairStrategyType::ApplyFormatting, 0.6),
         (DiagnosticCategory::Clippy, msg) if msg.contains("must") => {
             (RepairStrategyType::ReplaceWithSuggestion, 0.8)
-        },
-        _ => {
-            (RepairStrategyType::ReorderCode, 0.5)
-        },
+        }
+        _ => (RepairStrategyType::ReorderCode, 0.5),
     };
-    
+
     RepairStrategy {
         category: diagnostic.category.clone(),
         strategy,
@@ -452,16 +457,16 @@ pub fn generate_repair_strategy(diagnostic: &CompilerDiagnostic) -> RepairStrate
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_rust_diagnostic_parsing() {
         let parser = RustDiagnosticParser {};
         let working_dir = std::path::PathBuf::from("/workspace");
         let output = r#"{"message":"cannot find type `NonExistentType` in this scope","code":"E0412","level":"error","spans":[{"file_name":"src/main.rs","line_start":10,"column_start":20,"line_end":10,"column_end":35}]}"#;
-        
+
         let diagnostics = parser.parse(output, &working_dir).unwrap();
         assert_eq!(diagnostics.len(), 1);
-        
+
         let diag = &diagnostics[0];
         assert_eq!(diag.file, working_dir.join("src/main.rs"));
         assert_eq!(diag.line, 10);
@@ -470,7 +475,7 @@ mod tests {
         assert_eq!(diag.severity, DiagnosticSeverity::Error);
         assert_eq!(diag.category, DiagnosticCategory::Type);
     }
-    
+
     #[test]
     fn test_repair_strategy_generation() {
         let diagnostic = CompilerDiagnostic {
@@ -483,7 +488,7 @@ mod tests {
             severity: DiagnosticSeverity::Error,
             category: DiagnosticCategory::Type,
         };
-        
+
         let strategy = generate_repair_strategy(&diagnostic);
         assert_eq!(strategy.category, DiagnosticCategory::Type);
         assert_eq!(strategy.strategy, RepairStrategyType::FixType);

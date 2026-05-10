@@ -114,7 +114,10 @@ fn test_artifact_metadata_creation() {
 
     assert_eq!(metadata.work_context_id, "work-123");
     assert_eq!(metadata.tags.len(), 2);
-    assert_eq!(metadata.custom_fields.get("author"), Some(&"ai".to_string()));
+    assert_eq!(
+        metadata.custom_fields.get("author"),
+        Some(&"ai".to_string())
+    );
 }
 
 // ============================================================================
@@ -154,7 +157,9 @@ fn test_artifact_workflow() {
         id: "patch-001".to_string(),
         kind: ArtifactKind::Patch,
         path: Some(PathBuf::from("output/patch.diff")),
-        content: Some("--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-fn main() {}".to_string()),
+        content: Some(
+            "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-fn main() {}".to_string(),
+        ),
         compressed_content: None,
         compression: CompressionType::None,
         metadata,

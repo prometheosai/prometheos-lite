@@ -2,9 +2,7 @@ use crate::harness::{
     edit_protocol::{
         EditOperation, ParsedDiff, apply_unified_diff, parse_unified_diff, validate_edit_operations,
     },
-    file_control::{
-        FilePolicy, FileSet, assert_delete_allowed, assert_rename_allowed, resolve_repo_path,
-    },
+    file_control::{FilePolicy, FileSet, resolve_repo_path},
 };
 use anyhow::{Context, Result, bail};
 use chrono;
@@ -13,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    io::Write,
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -318,7 +315,7 @@ async fn apply_edit_to_transaction(
     edit: &EditOperation,
     policy: &FilePolicy,
     transaction: &mut Transaction,
-    edit_index: usize,
+    _edit_index: usize,
 ) -> std::result::Result<(), PatchFailure> {
     match edit {
         EditOperation::SearchReplace(x) => {
@@ -587,10 +584,10 @@ async fn apply_edit_to_transaction(
     Ok(())
 }
 
-async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
+async fn commit_transaction(transaction: &Transaction, _policy: &FilePolicy) -> Result<()> {
     let changes: Vec<_> = transaction.pending_changes.iter().collect();
 
-    for (path, new_content) in changes.iter().rev() {
+    for (path, _new_content) in changes.iter().rev() {
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)

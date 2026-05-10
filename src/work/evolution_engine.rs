@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::db::Db;
 use crate::db::repository::PlaybookOperations;
-use crate::work::playbook::{PatternRecord, PatternType, WorkContextPlaybook};
+use crate::work::playbook::{PatternRecord, PatternType};
 use crate::work::types::{FlowPerformanceRecord, WorkContext};
 
 /// EvaluationResult - result of evaluating a WorkContext

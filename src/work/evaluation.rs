@@ -3,9 +3,8 @@
 //! This module provides multi-dimensional evaluation including structural validation,
 //! semantic evaluation, and penalization rules for poor performance.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::flow::ModelRouter;
 

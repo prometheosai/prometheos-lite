@@ -13,8 +13,8 @@
 //! - PathMatch for matching paths to tasks
 
 use prometheos_lite::harness::golden_paths::{
-    GoldenPath, PathCategory, PathComplexity, PathMatch, PathStep, StepType, ToolInvocation,
-    ValidationRule, RuleType, StepValidation,
+    GoldenPath, PathCategory, PathComplexity, PathMatch, PathStep, RuleType, StepType,
+    StepValidation, ToolInvocation, ValidationRule,
 };
 
 // ============================================================================
@@ -48,13 +48,28 @@ fn test_golden_path_creation() {
 #[test]
 fn test_path_category_variants() {
     assert!(matches!(PathCategory::BugFix, PathCategory::BugFix));
-    assert!(matches!(PathCategory::FeatureImplementation, PathCategory::FeatureImplementation));
-    assert!(matches!(PathCategory::Refactoring, PathCategory::Refactoring));
+    assert!(matches!(
+        PathCategory::FeatureImplementation,
+        PathCategory::FeatureImplementation
+    ));
+    assert!(matches!(
+        PathCategory::Refactoring,
+        PathCategory::Refactoring
+    ));
     assert!(matches!(PathCategory::Testing, PathCategory::Testing));
-    assert!(matches!(PathCategory::Documentation, PathCategory::Documentation));
-    assert!(matches!(PathCategory::Configuration, PathCategory::Configuration));
+    assert!(matches!(
+        PathCategory::Documentation,
+        PathCategory::Documentation
+    ));
+    assert!(matches!(
+        PathCategory::Configuration,
+        PathCategory::Configuration
+    ));
     assert!(matches!(PathCategory::Migration, PathCategory::Migration));
-    assert!(matches!(PathCategory::Optimization, PathCategory::Optimization));
+    assert!(matches!(
+        PathCategory::Optimization,
+        PathCategory::Optimization
+    ));
 }
 
 // ============================================================================
@@ -175,11 +190,20 @@ fn test_validation_rule_creation() {
 #[test]
 fn test_rule_type_variants() {
     assert!(matches!(RuleType::FileMustExist, RuleType::FileMustExist));
-    assert!(matches!(RuleType::FileMustNotExist, RuleType::FileMustNotExist));
+    assert!(matches!(
+        RuleType::FileMustNotExist,
+        RuleType::FileMustNotExist
+    ));
     assert!(matches!(RuleType::TestMustPass, RuleType::TestMustPass));
     assert!(matches!(RuleType::LintMustPass, RuleType::LintMustPass));
-    assert!(matches!(RuleType::BuildMustSucceed, RuleType::BuildMustSucceed));
-    assert!(matches!(RuleType::CoverageMinimum, RuleType::CoverageMinimum));
+    assert!(matches!(
+        RuleType::BuildMustSucceed,
+        RuleType::BuildMustSucceed
+    ));
+    assert!(matches!(
+        RuleType::CoverageMinimum,
+        RuleType::CoverageMinimum
+    ));
 }
 
 // ============================================================================
@@ -264,13 +288,11 @@ fn test_complete_golden_path() {
                 optional: false,
             },
         ],
-        validation_rules: vec![
-            ValidationRule {
-                rule_type: RuleType::TestMustPass,
-                condition: "tests".to_string(),
-                error_message: "Tests must pass".to_string(),
-            },
-        ],
+        validation_rules: vec![ValidationRule {
+            rule_type: RuleType::TestMustPass,
+            condition: "tests".to_string(),
+            error_message: "Tests must pass".to_string(),
+        }],
         estimated_duration_ms: 600000,
         required_context: vec!["requirements".to_string()],
         success_criteria: vec!["tests_pass".to_string(), "review_complete".to_string()],

@@ -4,8 +4,8 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchmarkSuite {
@@ -302,7 +302,7 @@ impl BenchmarkRunner {
         let std_dev = variance.sqrt();
 
         // Remove outliers
-        let filtered: Vec<_> = values
+        let _filtered: Vec<_> = values
             .iter()
             .filter(|&&v| (v - mean).abs() <= std_dev * self.config.outlier_threshold)
             .cloned()
@@ -429,7 +429,7 @@ impl BenchmarkRunner {
     pub fn check_anti_overfitting(
         &self,
         suite_id: &str,
-        num_runs: u32,
+        _num_runs: u32,
     ) -> Result<AntiOverfittingReport> {
         let mut test_runs: Vec<TestRun> = Vec::new();
         let mut flaky_tests = Vec::new();

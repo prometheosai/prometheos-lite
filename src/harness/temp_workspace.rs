@@ -6,7 +6,6 @@ use crate::harness::{
     patch_applier::{PatchResult, apply_patch_temp_only},
 };
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use walkdir::WalkDir;
@@ -23,10 +22,10 @@ pub struct TempWorkspaceLimits {
 impl Default for TempWorkspaceLimits {
     fn default() -> Self {
         Self {
-            max_files: 1000,           // Maximum 1000 files
-            max_size_mb: 100,          // Maximum 100MB total
-            max_subdirectories: 50,    // Maximum 50 subdirectories
-            max_file_size_mb: 10,      // Maximum 10MB per file
+            max_files: 1000,        // Maximum 1000 files
+            max_size_mb: 100,       // Maximum 100MB total
+            max_subdirectories: 50, // Maximum 50 subdirectories
+            max_file_size_mb: 10,   // Maximum 10MB per file
         }
     }
 }
@@ -48,7 +47,14 @@ impl TempWorkspace {
         file_set: &FileSet,
         policy: &FilePolicy,
     ) -> Result<(Self, PatchResult)> {
-        Self::create_temp_copy_with_limits(original_root, edits, file_set, policy, TempWorkspaceLimits::default()).await
+        Self::create_temp_copy_with_limits(
+            original_root,
+            edits,
+            file_set,
+            policy,
+            TempWorkspaceLimits::default(),
+        )
+        .await
     }
 
     /// P0-C4: Create a new temp workspace with explicit resource/file limits
@@ -56,7 +62,7 @@ impl TempWorkspace {
         original_root: &Path,
         edits: &[EditOperation],
         file_set: &FileSet,
-        policy: &FilePolicy,
+        _policy: &FilePolicy,
         limits: TempWorkspaceLimits,
     ) -> Result<(Self, PatchResult)> {
         let temp_dir = std::env::temp_dir();
@@ -165,9 +171,10 @@ impl TempWorkspace {
             // Create parent directories if needed
             if let Some(parent) = target_path.parent() {
                 if !parent.exists() {
-                    fs::create_dir_all(parent).await
+                    fs::create_dir_all(parent)
+                        .await
                         .context("Failed to create parent directory in temp workspace")?;
-                    
+
                     subdirectories_created += 1;
                     if subdirectories_created > limits.max_subdirectories {
                         bail!(
@@ -179,10 +186,11 @@ impl TempWorkspace {
             }
 
             // Copy file with size check
-            let file_size = fs::metadata(file_path).await
+            let file_size = fs::metadata(file_path)
+                .await
                 .context("Failed to get file metadata")?
                 .len();
-            
+
             let file_size_mb = file_size / (1024 * 1024);
             total_size_mb += file_size_mb;
 
@@ -203,8 +211,12 @@ impl TempWorkspace {
                 );
             }
 
-            fs::copy(file_path, &target_path).await
-                .with_context(|| format!("Failed to copy file {} to temp workspace", file_path.display()))?;
+            fs::copy(file_path, &target_path).await.with_context(|| {
+                format!(
+                    "Failed to copy file {} to temp workspace",
+                    file_path.display()
+                )
+            })?;
 
             files_copied += 1;
         }
@@ -229,7 +241,8 @@ impl TempWorkspace {
         file_set: &FileSet,
     ) -> Result<()> {
         // Canonicalize original_root for consistent path handling
-        let canonical_original = original_root.canonicalize()
+        let canonical_original = original_root
+            .canonicalize()
             .context("Failed to canonicalize original root")?;
 
         // Copy editable files
@@ -245,32 +258,59 @@ impl TempWorkspace {
             if !src.exists() {
                 anyhow::bail!(
                     "Required file does not exist: {:?} (normalized from {:?})",
-                    src, file
+                    src,
+                    file
                 );
             }
 
             // Create parent directories
             if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).await
+                fs::create_dir_all(parent)
+                    .await
                     .context(format!("Failed to create parent directories for {:?}", dst))?;
             }
 
             // P0-FIX: Fail loudly on copy errors for required files
-            fs::copy(&src, &dst).await
+            fs::copy(&src, &dst)
+                .await
                 .context(format!("Failed to copy file from {:?} to {:?}", src, dst))?;
         }
 
         // Copy important config files
         let config_files = [
-            "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json",
-            "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
-            "pyproject.toml", "requirements.txt", "requirements-dev.txt", "setup.py", "setup.cfg",
-            "go.mod", "go.sum", "go.work", "go.work.sum",
-            "pom.xml", "build.gradle", "gradle.properties", "settings.gradle",
-            "tsconfig.json", "jsconfig.json", ".babelrc", ".eslintrc", ".prettierrc",
-            ".gitignore", ".dockerignore", "Dockerfile",
-            "Makefile", "justfile", "Justfile",
-            ".cargo/config.toml", ".cargo/config",
+            "Cargo.toml",
+            "Cargo.lock",
+            "package.json",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "bun.lockb",
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "setup.py",
+            "setup.cfg",
+            "go.mod",
+            "go.sum",
+            "go.work",
+            "go.work.sum",
+            "pom.xml",
+            "build.gradle",
+            "gradle.properties",
+            "settings.gradle",
+            "tsconfig.json",
+            "jsconfig.json",
+            ".babelrc",
+            ".eslintrc",
+            ".prettierrc",
+            ".gitignore",
+            ".dockerignore",
+            "Dockerfile",
+            "Makefile",
+            "justfile",
+            "Justfile",
+            ".cargo/config.toml",
+            ".cargo/config",
         ];
 
         for config in &config_files {
@@ -286,16 +326,40 @@ impl TempWorkspace {
 
         // Copy test directories and fixtures
         let important_dirs = [
-            "tests", "test", "__tests__", "spec", "specs",
-            "fixtures", "fixture", "testdata", "test_data", "data",
-            "examples", "example", "demo", "demos",
-            "benches", "benchmarks", "bench",
-            "migrations", "migration", "alembic",
-            "scripts", "script", "bin",
-            "static", "assets", "public", "resources",
-            "templates", "template",
-            "proto", "protobuf", "protos",
-            "thrift", "idl",
+            "tests",
+            "test",
+            "__tests__",
+            "spec",
+            "specs",
+            "fixtures",
+            "fixture",
+            "testdata",
+            "test_data",
+            "data",
+            "examples",
+            "example",
+            "demo",
+            "demos",
+            "benches",
+            "benchmarks",
+            "bench",
+            "migrations",
+            "migration",
+            "alembic",
+            "scripts",
+            "script",
+            "bin",
+            "static",
+            "assets",
+            "public",
+            "resources",
+            "templates",
+            "template",
+            "proto",
+            "protobuf",
+            "protos",
+            "thrift",
+            "idl",
         ];
 
         for dir_name in &important_dirs {
@@ -307,7 +371,9 @@ impl TempWorkspace {
         }
 
         // Copy Cargo workspace members if this is a Rust project
-        Self::copy_workspace_members(original_root, temp_root).await.ok();
+        Self::copy_workspace_members(original_root, temp_root)
+            .await
+            .ok();
 
         Ok(())
     }
@@ -382,7 +448,8 @@ fn normalize_to_relative(base: &Path, path: &Path) -> Result<PathBuf> {
         path.canonicalize()
             .context(format!("Failed to canonicalize path: {:?}", path))?
     } else {
-        base.join(path).canonicalize()
+        base.join(path)
+            .canonicalize()
             .context(format!("Failed to canonicalize relative path: {:?}", path))?
     };
 
@@ -390,12 +457,14 @@ fn normalize_to_relative(base: &Path, path: &Path) -> Result<PathBuf> {
     if !canonical_path.starts_with(base) {
         anyhow::bail!(
             "Path {:?} is outside base directory {:?}",
-            canonical_path, base
+            canonical_path,
+            base
         );
     }
 
     // Strip the base prefix to get relative path
-    Ok(canonical_path.strip_prefix(base)
+    Ok(canonical_path
+        .strip_prefix(base)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|_| PathBuf::from(".")))
 }
@@ -425,7 +494,7 @@ impl ValidationTarget {
 /// Create appropriate validation target based on execution state
 pub async fn create_validation_target(
     repo_root: &Path,
-    should_apply: bool,
+    _should_apply: bool,
     patch_was_applied: bool,
     edits: &[EditOperation],
     file_set: &FileSet,
@@ -436,12 +505,8 @@ pub async fn create_validation_target(
         Ok(ValidationTarget::RealRepo(repo_root.to_path_buf()))
     } else if !edits.is_empty() {
         // Patch wasn't applied but edits exist - create temp workspace
-        let (workspace, _result) = TempWorkspace::create_temp_copy(
-            repo_root,
-            edits,
-            file_set,
-            policy,
-        ).await?;
+        let (workspace, _result) =
+            TempWorkspace::create_temp_copy(repo_root, edits, file_set, policy).await?;
         Ok(ValidationTarget::TempWorkspace(workspace))
     } else {
         // No edits to validate

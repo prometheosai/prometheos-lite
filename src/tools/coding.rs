@@ -4,7 +4,6 @@
 //! that are aware of repository structure and can perform structured operations.
 
 use crate::flow::Tool;
-use crate::tools::{ToolContext, ToolMetadata};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 

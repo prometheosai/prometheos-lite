@@ -4,8 +4,7 @@ use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 
-use super::domain::{LifecycleTemplate, WorkDomainProfile};
-use super::types::ApprovalPolicy;
+use super::domain::WorkDomainProfile;
 
 /// TemplateLoader - loads domain profiles from YAML files
 pub struct TemplateLoader {

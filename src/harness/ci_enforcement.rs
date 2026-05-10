@@ -1,5 +1,5 @@
 //! P1-5.2: Strict Anti-Placeholder CI Enforcement
-//! 
+//!
 //! This module provides comprehensive CI enforcement to prevent placeholder code,
 //! TODO comments, and other anti-patterns from being merged into production.
 
@@ -169,7 +169,8 @@ impl AntiPlaceholderCI {
             pattern: r"//\s*TODO\b|//\s*todo\b".to_string(),
             severity: Severity::Medium,
             description: "TODO comment found".to_string(),
-            suggestion: "Replace TODO with actual implementation or create a proper issue".to_string(),
+            suggestion: "Replace TODO with actual implementation or create a proper issue"
+                .to_string(),
         });
 
         // Placeholder variables
@@ -265,8 +266,10 @@ impl AntiPlaceholderCI {
             .into_iter()
             .filter_entry(|e| !self.should_exclude_entry(e))
         {
-            let entry = entry.with_context(|| format!("Failed to read directory entry in {}", repo_path.display()))?;
-            
+            let entry = entry.with_context(|| {
+                format!("Failed to read directory entry in {}", repo_path.display())
+            })?;
+
             if entry.file_type().is_file() && self.is_source_file(entry.path()) {
                 files_checked += 1;
                 if let Ok(file_violations) = self.check_file(entry.path()) {
@@ -280,7 +283,9 @@ impl AntiPlaceholderCI {
 
         let mut violations_by_severity = HashMap::new();
         for violation in &violations {
-            *violations_by_severity.entry(violation.severity).or_insert(0) += 1;
+            *violations_by_severity
+                .entry(violation.severity)
+                .or_insert(0) += 1;
         }
 
         Ok(CIEnforcementResult {
@@ -351,8 +356,11 @@ impl AntiPlaceholderCI {
     fn get_context_lines(&self, lines: &[&str], line_num: usize, context: usize) -> Vec<String> {
         let start = line_num.saturating_sub(context);
         let end = (line_num + context + 1).min(lines.len());
-        
-        lines[start..end].iter().map(|&line| line.to_string()).collect()
+
+        lines[start..end]
+            .iter()
+            .map(|&line| line.to_string())
+            .collect()
     }
 
     /// Check if an entry should be excluded
@@ -372,7 +380,10 @@ impl AntiPlaceholderCI {
     /// Check if a file is a source file that should be checked
     fn is_source_file(&self, path: &Path) -> bool {
         if let Some(ext) = path.extension() {
-            matches!(ext.to_str(), Some("rs") | Some("js") | Some("ts") | Some("py") | Some("go") | Some("java"))
+            matches!(
+                ext.to_str(),
+                Some("rs") | Some("js") | Some("ts") | Some("py") | Some("go") | Some("java")
+            )
         } else {
             false
         }
@@ -384,19 +395,19 @@ impl AntiPlaceholderCI {
             // Simple glob matching
             let pattern_parts: Vec<&str> = pattern.split('*').collect();
             let mut current_pos = 0;
-            
+
             for part in pattern_parts {
                 if part.is_empty() {
                     continue;
                 }
-                
+
                 if let Some(pos) = path[current_pos..].find(part) {
                     current_pos += pos + part.len();
                 } else {
                     return false;
                 }
             }
-            
+
             true
         } else {
             path.contains(pattern)
@@ -409,15 +420,18 @@ impl AntiPlaceholderCI {
             violations.is_empty()
         } else {
             // Count violations by type
-            let todo_count = violations.iter()
+            let todo_count = violations
+                .iter()
                 .filter(|v| v.pattern_name.contains("todo"))
                 .count();
-            
-            let placeholder_count = violations.iter()
+
+            let placeholder_count = violations
+                .iter()
                 .filter(|v| v.pattern_name.contains("placeholder"))
                 .count();
 
-            let critical_count = violations.iter()
+            let critical_count = violations
+                .iter()
                 .filter(|v| v.severity == Severity::Critical)
                 .count();
 
@@ -442,24 +456,30 @@ impl AntiPlaceholderCI {
     /// Generate a detailed report
     pub fn generate_report(&self, result: &CIEnforcementResult) -> String {
         let mut report = String::new();
-        
+
         report.push_str("# Anti-Placeholder CI Enforcement Report\n\n");
-        
+
         report.push_str(&format!(
             "**Status**: {}\n\n",
             if result.passed { "PASSED" } else { "FAILED" }
         ));
-        
+
         report.push_str(&format!("**Files Checked**: {}\n", result.files_checked));
-        report.push_str(&format!("**Total Violations**: {}\n", result.total_violations));
-        report.push_str(&format!("**Execution Time**: {}ms\n\n", result.execution_time_ms));
+        report.push_str(&format!(
+            "**Total Violations**: {}\n",
+            result.total_violations
+        ));
+        report.push_str(&format!(
+            "**Execution Time**: {}ms\n\n",
+            result.execution_time_ms
+        ));
 
         // Violations by severity
         if !result.violations_by_severity.is_empty() {
             report.push_str("## Violations by Severity\n\n");
             let mut severities: Vec<_> = result.violations_by_severity.keys().collect();
             severities.sort_by(|a, b| b.cmp(a)); // Sort in descending order
-            
+
             for severity in severities {
                 let count = result.violations_by_severity[severity];
                 let marker = match severity {
@@ -481,24 +501,28 @@ impl AntiPlaceholderCI {
         // Detailed violations
         if !result.violations.is_empty() {
             report.push_str("## Detailed Violations\n\n");
-            
+
             let mut grouped_violations: HashMap<String, Vec<_>> = HashMap::new();
             for violation in &result.violations {
-                grouped_violations.entry(violation.pattern_name.clone())
+                grouped_violations
+                    .entry(violation.pattern_name.clone())
                     .or_insert_with(Vec::new)
                     .push(violation);
             }
 
             for (pattern_name, pattern_violations) in grouped_violations {
                 report.push_str(&format!("### {}\n\n", pattern_name));
-                
+
                 for violation in pattern_violations {
                     report.push_str(&format!("**File**: `{}`\n", violation.file_path.display()));
                     report.push_str(&format!("**Line**: {}\n", violation.line_number));
-                    report.push_str(&format!("**Severity**: {}\n", self.severity_to_string(violation.severity)));
+                    report.push_str(&format!(
+                        "**Severity**: {}\n",
+                        self.severity_to_string(violation.severity)
+                    ));
                     report.push_str(&format!("**Description**: {}\n", violation.description));
                     report.push_str(&format!("**Suggestion**: {}\n", violation.suggestion));
-                    
+
                     report.push_str("**Code**:\n```rust\n");
                     for context_line in &violation.context_lines {
                         report.push_str(context_line);
@@ -527,7 +551,7 @@ impl AntiPlaceholderCI {
         // Validate the regex pattern
         Regex::new(&pattern.pattern)
             .with_context(|| format!("Invalid regex pattern: {}", pattern.pattern))?;
-        
+
         self.config.custom_patterns.push(pattern);
         Ok(())
     }
@@ -538,5 +562,3 @@ impl AntiPlaceholderCI {
         self.initialize_patterns()
     }
 }
-
-

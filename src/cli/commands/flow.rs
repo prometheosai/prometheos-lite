@@ -290,7 +290,7 @@ impl ResumeCommand {
 
         // Initialize RunDb and ContinuationEngine
         let db_path = PathBuf::from(".prometheos/runs.db");
-        let run_db = RunDb::new(db_path.clone())?;
+        let _run_db = RunDb::new(db_path.clone())?;
         logger.info(&format!("RunDb initialized at: {}", db_path.display()));
 
         let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
@@ -380,9 +380,7 @@ impl ResumeCommand {
         logger: &Logger,
     ) -> anyhow::Result<()> {
         use prometheos_lite::flow::loader::{FlowLoader, JsonLoader, YamlLoader};
-        use prometheos_lite::flow::{
-            DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState,
-        };
+        use prometheos_lite::flow::{DefaultNodeFactory, FlowBuilder, NodeFactory};
 
         // Load the flow file based on extension
         let flow_file = if let Some(ext) = flow_path.extension() {

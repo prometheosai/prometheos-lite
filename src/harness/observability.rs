@@ -1,10 +1,9 @@
 //! Observability Layer - Issue #15
 //! Metrics, tracing, and monitoring for harness operations
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarnessMetrics {
@@ -301,48 +300,48 @@ mod tests {
 }
 
 /// OpenTelemetry integration for distributed tracing
-/// 
+///
 /// This module provides full OpenTelemetry support with:
 /// - Trace ID generation
 /// - OTLP/Jaeger export configuration
 /// - Span creation and management
 /// - Integration with harness execution flow
-/// 
+///
 /// Environment variables:
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP collector endpoint
 /// - `OTEL_SERVICE_NAME`: Service name for traces (default: "prometheos-harness")
 /// - `OTEL_EXPORTER_JAEGER_ENDPOINT`: Jaeger collector endpoint
 /// - `OTEL_TRACES_SAMPLER`: Sampler configuration (default: "parentbased_always_on")
 pub mod otel {
-    use opentelemetry::trace::{Tracer, TracerProvider};
-    use opentelemetry_sdk::trace::{TracerProvider as SdkTracerProvider, Config as TraceConfig};
-    use opentelemetry_sdk::Resource;
     use opentelemetry::KeyValue;
+    use opentelemetry::trace::Tracer;
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::trace::{Config as TraceConfig, TracerProvider as SdkTracerProvider};
     use std::env;
     use std::sync::OnceLock;
-    use tracing::{debug, error, info, warn, info_span};
-    
+    use tracing::{debug, error, info, info_span};
+
     /// Result type for OTEL operations
     pub type Result<T> = std::result::Result<T, OtelError>;
-    
+
     /// Error type for OTEL operations
     #[derive(Debug)]
     pub struct OtelError(String);
-    
+
     impl std::fmt::Display for OtelError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.0)
         }
     }
-    
+
     impl std::error::Error for OtelError {}
-    
+
     impl From<String> for OtelError {
         fn from(s: String) -> Self {
             OtelError(s)
         }
     }
-    
+
     impl From<&str> for OtelError {
         fn from(s: &str) -> Self {
             OtelError(s.to_string())
@@ -352,7 +351,7 @@ pub mod otel {
     static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
     /// Initialize OpenTelemetry with OTLP or Jaeger export
-    /// 
+    ///
     /// This should be called once at application startup.
     /// Returns true if tracing was successfully initialized.
     pub fn init_tracing() -> bool {
@@ -361,8 +360,8 @@ pub mod otel {
             return true;
         }
 
-        let service_name = env::var("OTEL_SERVICE_NAME")
-            .unwrap_or_else(|_| "prometheos-harness".to_string());
+        let service_name =
+            env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "prometheos-harness".to_string());
 
         let resource = Resource::new(vec![
             KeyValue::new("service.name", service_name.clone()),
@@ -393,10 +392,7 @@ pub mod otel {
         }
     }
 
-    fn init_otlp_provider(
-        resource: Resource,
-        endpoint: &str,
-    ) -> Result<SdkTracerProvider> {
+    fn init_otlp_provider(resource: Resource, endpoint: &str) -> Result<SdkTracerProvider> {
         use opentelemetry_otlp::WithExportConfig;
 
         let exporter = opentelemetry_otlp::new_exporter()
@@ -414,17 +410,14 @@ pub mod otel {
         Ok(provider)
     }
 
-    fn init_jaeger_provider(
-        resource: Resource,
-        endpoint: &str,
-    ) -> Result<SdkTracerProvider> {
+    fn init_jaeger_provider(resource: Resource, endpoint: &str) -> Result<SdkTracerProvider> {
         // Jaeger exporter is available via opentelemetry-jaeger crate
         // For now, we'll use the OTLP protocol which Jaeger supports
         init_otlp_provider(resource, endpoint)
     }
 
     /// Generate a new trace ID
-    /// 
+    ///
     /// This creates a UUID v4 formatted trace ID for distributed tracing.
     pub fn generate_trace_id() -> String {
         uuid::Uuid::new_v4().to_string()
@@ -433,27 +426,27 @@ pub mod otel {
     /// Get the current trace ID if tracing is active
     pub fn current_trace_id() -> Option<String> {
         // Try to get trace ID from current span context
-        use opentelemetry::trace::TraceContextExt;
+
         use tracing::Span;
-        
+
         // Check if we have an active tracing span
         if let Some(current) = Span::current().id() {
             // If tracing is active, generate a trace ID based on span context
             // In full OTEL integration, this would extract from OTEL context
             return Some(format!("{:?}", current));
         }
-        
+
         // If OTEL is initialized, try to get from OTEL context
         if TRACER_PROVIDER.get().is_some() {
             // With OTEL provider present, use a UUID-based trace ID
             return Some(generate_trace_id());
         }
-        
+
         None
     }
 
     /// Create a new span for a harness operation
-    /// 
+    ///
     /// This creates a span with the given name and attributes using the tracing crate.
     /// When OTEL is initialized, tracing spans are automatically exported as OTEL spans.
     pub fn start_span(name: &str, trace_id: &str) -> HarnessSpan {
@@ -465,7 +458,7 @@ pub mod otel {
             harness.trace_id = trace_id,
             harness.operation = name,
         );
-        
+
         HarnessSpan {
             name: name.to_string(),
             trace_id: trace_id.to_string(),
@@ -500,10 +493,7 @@ pub mod otel {
         pub fn set_error(&self, message: &str) {
             // Use tracing event with span context
             let _enter = self._span.enter();
-            error!(
-                error = message,
-                "Harness span error"
-            );
+            error!(error = message, "Harness span error");
         }
 
         /// Get the elapsed time since span creation
@@ -515,21 +505,18 @@ pub mod otel {
     impl Drop for HarnessSpan {
         fn drop(&mut self) {
             let duration_ms = self.elapsed_ms();
-            
+
             // Log span completion with span context
             let _enter = self._span.enter();
-            debug!(
-                duration_ms = duration_ms,
-                "Harness span closed"
-            );
+            debug!(duration_ms = duration_ms, "Harness span closed");
         }
     }
 
     /// Shutdown the OpenTelemetry provider
-    /// 
+    ///
     /// This should be called before application exit to ensure all spans are flushed.
     pub fn shutdown() {
-        if let Some(provider) = TRACER_PROVIDER.get() {
+        if let Some(_provider) = TRACER_PROVIDER.get() {
             // For opentelemetry 0.23, shutdown is handled via global shutdown
             opentelemetry::global::shutdown_tracer_provider();
             info!("OpenTelemetry provider shut down");
@@ -544,12 +531,12 @@ pub mod otel {
         fn test_generate_trace_id() {
             let id1 = generate_trace_id();
             let id2 = generate_trace_id();
-            
+
             // Should be valid UUIDs
             assert!(!id1.is_empty());
             assert!(!id2.is_empty());
             assert_ne!(id1, id2); // Should be unique
-            
+
             // Should be parseable as UUID
             assert!(uuid::Uuid::parse_str(&id1).is_ok());
         }

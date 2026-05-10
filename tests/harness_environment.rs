@@ -12,8 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::environment::{
-    fingerprint_environment, CiConfig, ContainerConfig, EnvironmentProfile,
-    ServiceDependency,
+    CiConfig, ContainerConfig, EnvironmentProfile, ServiceDependency, fingerprint_environment,
 };
 
 // ============================================================================
@@ -112,7 +111,7 @@ fn test_container_config_creation() {
 async fn test_fingerprint_rust_project() {
     // Use the sample_repo fixture which is a Rust project
     let fixture_path = PathBuf::from("tests/fixtures/sample_repo");
-    
+
     let profile = fingerprint_environment(&fixture_path).await.unwrap();
 
     assert!(profile.languages.contains(&"rust".to_string()));
@@ -131,7 +130,7 @@ async fn test_fingerprint_nodejs_project() {
     // Create a temporary Node.js project
     let temp_dir = std::env::temp_dir().join("test_nodejs_project");
     std::fs::create_dir_all(&temp_dir).ok();
-    
+
     // Create package.json
     let package_json = r#"{
         "name": "test-project",
@@ -144,7 +143,7 @@ async fn test_fingerprint_nodejs_project() {
         }
     }"#;
     std::fs::write(temp_dir.join("package.json"), package_json).unwrap();
-    
+
     let profile = fingerprint_environment(&temp_dir).await.unwrap();
 
     assert!(profile.languages.contains(&"javascript".to_string()));
@@ -160,14 +159,18 @@ async fn test_fingerprint_typescript_project() {
     // Create a temporary TypeScript project
     let temp_dir = std::env::temp_dir().join("test_ts_project");
     std::fs::create_dir_all(&temp_dir).ok();
-    
+
     std::fs::write(temp_dir.join("package.json"), "{}").unwrap();
     std::fs::write(temp_dir.join("tsconfig.json"), "{}").unwrap();
-    
+
     let profile = fingerprint_environment(&temp_dir).await.unwrap();
 
     assert!(profile.languages.contains(&"typescript".to_string()));
-    assert!(profile.type_check_commands.contains(&"tsc --noEmit".to_string()));
+    assert!(
+        profile
+            .type_check_commands
+            .contains(&"tsc --noEmit".to_string())
+    );
 
     // Cleanup
     std::fs::remove_dir_all(&temp_dir).ok();
@@ -182,13 +185,17 @@ async fn test_fingerprint_python_project() {
     // Create a temporary Python project
     let temp_dir = std::env::temp_dir().join("test_python_project");
     std::fs::create_dir_all(&temp_dir).ok();
-    
+
     std::fs::write(temp_dir.join("requirements.txt"), "requests\npytest").unwrap();
-    
+
     let profile = fingerprint_environment(&temp_dir).await.unwrap();
 
     assert!(profile.languages.contains(&"python".to_string()));
-    assert!(profile.detected_files.contains(&"requirements.txt".to_string()));
+    assert!(
+        profile
+            .detected_files
+            .contains(&"requirements.txt".to_string())
+    );
 
     // Cleanup
     std::fs::remove_dir_all(&temp_dir).ok();
@@ -203,10 +210,10 @@ async fn test_fingerprint_docker_project() {
     // Create a temporary project with Docker
     let temp_dir = std::env::temp_dir().join("test_docker_project");
     std::fs::create_dir_all(&temp_dir).ok();
-    
+
     std::fs::write(temp_dir.join("Dockerfile"), "FROM rust:latest").unwrap();
     std::fs::write(temp_dir.join("docker-compose.yml"), "version: '3'").unwrap();
-    
+
     let profile = fingerprint_environment(&temp_dir).await.unwrap();
 
     if let Some(container) = profile.container_config {
@@ -227,7 +234,7 @@ async fn test_fingerprint_unknown_project() {
     // Create a temporary empty project
     let temp_dir = std::env::temp_dir().join("test_unknown_project");
     std::fs::create_dir_all(&temp_dir).ok();
-    
+
     let profile = fingerprint_environment(&temp_dir).await.unwrap();
 
     assert!(profile.languages.contains(&"unknown".to_string()));

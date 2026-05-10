@@ -1,10 +1,7 @@
 use crate::harness::environment::EnvironmentProfile;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcceptanceCriterion {

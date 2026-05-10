@@ -1,6 +1,6 @@
 //! Budget guard for enforcing resource limits during flow execution
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 

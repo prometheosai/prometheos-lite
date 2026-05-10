@@ -81,8 +81,14 @@ fn test_tool_type_variants() {
     assert!(matches!(ToolType::Compiler, ToolType::Compiler));
     assert!(matches!(ToolType::TestRunner, ToolType::TestRunner));
     assert!(matches!(ToolType::StaticAnalyzer, ToolType::StaticAnalyzer));
-    assert!(matches!(ToolType::SecurityScanner, ToolType::SecurityScanner));
-    assert!(matches!(ToolType::DocumentationGenerator, ToolType::DocumentationGenerator));
+    assert!(matches!(
+        ToolType::SecurityScanner,
+        ToolType::SecurityScanner
+    ));
+    assert!(matches!(
+        ToolType::DocumentationGenerator,
+        ToolType::DocumentationGenerator
+    ));
     assert!(matches!(ToolType::Custom, ToolType::Custom));
 }
 
@@ -156,17 +162,15 @@ fn test_tool_result_with_issues() {
         stdout: String::new(),
         stderr: "warnings found".to_string(),
         duration_ms: 3000,
-        issues: vec![
-            ToolIssue {
-                severity: IssueSeverity::Warning,
-                file: Some(PathBuf::from("src/main.rs")),
-                line: Some(42),
-                column: Some(10),
-                message: "unused variable".to_string(),
-                code: Some("unused_variables".to_string()),
-                fix_suggestion: Some("prefix with _".to_string()),
-            },
-        ],
+        issues: vec![ToolIssue {
+            severity: IssueSeverity::Warning,
+            file: Some(PathBuf::from("src/main.rs")),
+            line: Some(42),
+            column: Some(10),
+            message: "unused variable".to_string(),
+            code: Some("unused_variables".to_string()),
+            fix_suggestion: Some("prefix with _".to_string()),
+        }],
     };
 
     assert!(!result.success);

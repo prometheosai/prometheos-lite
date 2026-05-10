@@ -19,7 +19,11 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    pub fn new(field: impl Into<String>, message: impl Into<String>, code: impl Into<String>) -> Self {
+    pub fn new(
+        field: impl Into<String>,
+        message: impl Into<String>,
+        code: impl Into<String>,
+    ) -> Self {
         Self {
             field: field.into(),
             message: message.into(),
@@ -191,7 +195,7 @@ pub fn validate_edit_file_path(path: &str) -> Result<String, ValidationError> {
 /// Sanitize user input to prevent injection attacks
 pub fn sanitize_input(input: &str) -> String {
     input
-        .replace('\0', "")  // Remove null bytes
+        .replace('\0', "") // Remove null bytes
         .replace('\x1b', "") // Remove escape sequences
         .trim()
         .to_string()
@@ -237,7 +241,7 @@ impl Default for ApiLimits {
         Self {
             max_concurrent_harness_runs: 5,
             max_edits_per_request: 100,
-            max_file_size_bytes: 10 * 1024 * 1024, // 10MB
+            max_file_size_bytes: 10 * 1024 * 1024,    // 10MB
             max_request_size_bytes: 50 * 1024 * 1024, // 50MB
         }
     }
@@ -248,7 +252,10 @@ impl ApiLimits {
         if count > self.max_edits_per_request {
             return Err(ValidationError::new(
                 "edits",
-                format!("Cannot exceed {} edits per request", self.max_edits_per_request),
+                format!(
+                    "Cannot exceed {} edits per request",
+                    self.max_edits_per_request
+                ),
                 "EDITS_LIMIT_EXCEEDED",
             ));
         }

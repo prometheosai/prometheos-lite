@@ -1,12 +1,9 @@
-use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
-use tree_sitter_rust;
+use tree_sitter::Parser;
 use tree_sitter_python;
-use tree_sitter_javascript;
-use tree_sitter_typescript;
+use tree_sitter_rust;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewIssue {
@@ -858,7 +855,8 @@ impl ReviewEngine {
     fn parse_rust_ast(&self, context: &ReviewContext) -> Option<AstNode> {
         // Real AST parsing using tree-sitter-rust
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into())
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
             .ok()?;
 
         let tree = parser.parse(&context.file_content, None)?;
@@ -878,12 +876,13 @@ impl ReviewEngine {
             match node.kind() {
                 "function_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                        let name = name_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Function,
                             name: Some(name),
@@ -895,12 +894,13 @@ impl ReviewEngine {
                 }
                 "struct_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                        let name = name_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Struct,
                             name: Some(name),
@@ -912,12 +912,13 @@ impl ReviewEngine {
                 }
                 "enum_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                        let name = name_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Enum,
                             name: Some(name),
@@ -929,12 +930,13 @@ impl ReviewEngine {
                 }
                 "trait_item" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                        let name = name_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Trait,
                             name: Some(name),
@@ -946,12 +948,13 @@ impl ReviewEngine {
                 }
                 "impl_item" => {
                     if let Some(type_node) = node.child_by_field_name("type") {
-                        let type_name = type_node.utf8_text(&context.file_content.as_bytes())
+                        let type_name = type_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Impl,
                             name: Some(type_name),
@@ -971,7 +974,8 @@ impl ReviewEngine {
     fn parse_python_ast(&self, context: &ReviewContext) -> Option<AstNode> {
         // Real AST parsing using tree-sitter-python
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_python::LANGUAGE.into())
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
             .ok()?;
 
         let tree = parser.parse(&context.file_content, None)?;
@@ -991,12 +995,13 @@ impl ReviewEngine {
             match node.kind() {
                 "function_definition" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                        let name = name_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Function,
                             name: Some(name),
@@ -1008,12 +1013,13 @@ impl ReviewEngine {
                 }
                 "class_definition" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
-                        let name = name_node.utf8_text(&context.file_content.as_bytes())
+                        let name = name_node
+                            .utf8_text(&context.file_content.as_bytes())
                             .unwrap_or("unknown")
                             .to_string();
                         let line_start = node.start_position().row + 1;
                         let line_end = node.end_position().row + 1;
-                        
+
                         root.children.push(AstNode {
                             kind: AstNodeKind::Class,
                             name: Some(name),
@@ -1282,7 +1288,7 @@ impl ReviewEngine {
         diff: &str,
         repo_context: &crate::harness::repo_intelligence::RepoContext,
     ) -> Vec<ReviewIssue> {
-        use crate::harness::repo_intelligence::{CodeSymbol, SymbolKind};
+        use crate::harness::repo_intelligence::SymbolKind;
 
         let mut issues = Vec::new();
 
@@ -1294,7 +1300,10 @@ impl ReviewEngine {
         // Look for public API changes
         for symbol in &repo_context.symbols {
             // Check for public function signature changes
-            if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method | SymbolKind::Trait) {
+            if matches!(
+                symbol.kind,
+                SymbolKind::Function | SymbolKind::Method | SymbolKind::Trait
+            ) {
                 // Check if the symbol is in a modified file (mentioned in diff)
                 let file_path_str = symbol.file.to_string_lossy().to_string();
                 if diff.contains(&file_path_str) {
@@ -1332,7 +1341,7 @@ impl ReviewEngine {
                                 line_count
                             ),
                             suggestion: Some(
-                                "Consider breaking this into smaller functions".to_string()
+                                "Consider breaking this into smaller functions".to_string(),
                             ),
                             rule_id: "AST002".to_string(),
                         });
@@ -1352,7 +1361,11 @@ impl ReviewEngine {
     }
 
     /// P1-007: Check if a symbol represents a public API change
-    fn is_public_api_change(&self, symbol: &crate::harness::repo_intelligence::CodeSymbol, diff: &str) -> bool {
+    fn is_public_api_change(
+        &self,
+        symbol: &crate::harness::repo_intelligence::CodeSymbol,
+        diff: &str,
+    ) -> bool {
         // Simple heuristic: if the symbol name appears in the diff
         // and the symbol is a public-facing type (Function, Method, Trait, etc.)
         diff.contains(&symbol.name)
@@ -1431,8 +1444,13 @@ pub fn generate_review_report(files: &[(PathBuf, String)]) -> ReviewReport {
     let passed = critical_count == 0 && high_count <= 3;
 
     // P1-Issue7: Calculate quality metrics for all files
-    let total_content: String = files.iter().map(|(_, content)| content.as_str()).collect::<Vec<_>>().join("\n");
-    let (quality_score, quality_metrics) = engine.calculate_quality_metrics(&all_issues, &total_content);
+    let total_content: String = files
+        .iter()
+        .map(|(_, content)| content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (quality_score, quality_metrics) =
+        engine.calculate_quality_metrics(&all_issues, &total_content);
 
     ReviewReport {
         issues: all_issues,
@@ -1539,24 +1557,32 @@ pub fn get_issues_by_severity(
 // P1-Issue7: Quality-based review evidence implementation
 impl ReviewEngine {
     /// Calculate quality score and metrics from review issues
-    pub fn calculate_quality_metrics(&self, issues: &[ReviewIssue], content: &str) -> (ReviewQualityScore, ReviewQualityMetrics) {
+    pub fn calculate_quality_metrics(
+        &self,
+        issues: &[ReviewIssue],
+        content: &str,
+    ) -> (ReviewQualityScore, ReviewQualityMetrics) {
         let metrics = self.calculate_detailed_metrics(issues, content);
         let score = self.calculate_quality_score(&metrics, issues);
-        
+
         (score, metrics)
     }
-    
+
     /// Calculate detailed quality metrics
-    fn calculate_detailed_metrics(&self, issues: &[ReviewIssue], content: &str) -> ReviewQualityMetrics {
+    fn calculate_detailed_metrics(
+        &self,
+        issues: &[ReviewIssue],
+        content: &str,
+    ) -> ReviewQualityMetrics {
         let lines_reviewed = content.lines().count();
         let functions_reviewed = self.count_functions(content);
-        
+
         let complexity_metrics = self.calculate_complexity_metrics(content);
         let test_metrics = self.calculate_test_metrics(content, functions_reviewed);
         let security_metrics = self.calculate_security_metrics(issues);
         let performance_metrics = self.calculate_performance_metrics(issues);
         let maintainability_metrics = self.calculate_maintainability_metrics(content, issues);
-        
+
         ReviewQualityMetrics {
             lines_reviewed,
             functions_reviewed,
@@ -1567,27 +1593,35 @@ impl ReviewEngine {
             maintainability_metrics,
         }
     }
-    
+
     /// Calculate overall quality score
-    fn calculate_quality_score(&self, metrics: &ReviewQualityMetrics, issues: &[ReviewIssue]) -> ReviewQualityScore {
+    fn calculate_quality_score(
+        &self,
+        metrics: &ReviewQualityMetrics,
+        issues: &[ReviewIssue],
+    ) -> ReviewQualityScore {
         let security_score = self.calculate_security_quality_score(&metrics.security_metrics);
-        let code_quality_score = self.calculate_code_quality_score(&metrics.complexity_metrics, &metrics.maintainability_metrics);
-        let maintainability_score = self.calculate_maintainability_quality_score(&metrics.maintainability_metrics);
+        let code_quality_score = self.calculate_code_quality_score(
+            &metrics.complexity_metrics,
+            &metrics.maintainability_metrics,
+        );
+        let maintainability_score =
+            self.calculate_maintainability_quality_score(&metrics.maintainability_metrics);
         let documentation_score = self.calculate_documentation_quality_score(issues);
-        let performance_score = self.calculate_performance_quality_score(&metrics.performance_metrics);
-        
+        let performance_score =
+            self.calculate_performance_quality_score(&metrics.performance_metrics);
+
         // Calculate overall score as weighted average
-        let overall_score = (
-            security_score as u32 * 30 +
-            code_quality_score as u32 * 25 +
-            maintainability_score as u32 * 20 +
-            documentation_score as u32 * 15 +
-            performance_score as u32 * 10
-        ) / 100;
-        
+        let overall_score = (security_score as u32 * 30
+            + code_quality_score as u32 * 25
+            + maintainability_score as u32 * 20
+            + documentation_score as u32 * 15
+            + performance_score as u32 * 10)
+            / 100;
+
         let grade = self.score_to_grade(overall_score as u8);
         let confidence = self.calculate_confidence_score(metrics, issues);
-        
+
         ReviewQualityScore {
             overall_score: overall_score as u8,
             security_score,
@@ -1599,58 +1633,70 @@ impl ReviewEngine {
             confidence,
         }
     }
-    
+
     /// Calculate security quality score
     fn calculate_security_quality_score(&self, metrics: &SecurityMetrics) -> u8 {
         if metrics.critical_security_issues > 0 {
             return 0;
         }
-        
-        let base_score = 100u8.saturating_sub(
-            (metrics.security_issues * 10) as u8
-        ).saturating_sub(
-            (metrics.vulnerabilities * 5) as u8
-        );
-        
+
+        let base_score = 100u8
+            .saturating_sub((metrics.security_issues * 10) as u8)
+            .saturating_sub((metrics.vulnerabilities * 5) as u8);
+
         // Apply security adherence bonus
         base_score.saturating_add(metrics.security_adherence / 4)
     }
-    
+
     /// Calculate code quality score based on complexity
-    fn calculate_code_quality_score(&self, complexity: &ComplexityMetrics, maintainability: &MaintainabilityMetrics) -> u8 {
-        let complexity_penalty = (complexity.very_complex_functions * 15).saturating_add(complexity.complex_functions * 5) as u8;
-        
+    fn calculate_code_quality_score(
+        &self,
+        complexity: &ComplexityMetrics,
+        maintainability: &MaintainabilityMetrics,
+    ) -> u8 {
+        let complexity_penalty = (complexity.very_complex_functions * 15)
+            .saturating_add(complexity.complex_functions * 5)
+            as u8;
+
         let length_penalty = (maintainability.long_functions * 3) as u8;
-        
-        100u8.saturating_sub(complexity_penalty).saturating_sub(length_penalty)
+
+        100u8
+            .saturating_sub(complexity_penalty)
+            .saturating_sub(length_penalty)
     }
-    
+
     /// Calculate maintainability quality score
     fn calculate_maintainability_quality_score(&self, metrics: &MaintainabilityMetrics) -> u8 {
         let duplication_penalty = (metrics.duplication_percentage * 20.0) as u8;
         let readability_bonus = metrics.readability_score;
-        
-        100u8.saturating_sub(duplication_penalty).saturating_add(readability_bonus / 4)
+
+        100u8
+            .saturating_sub(duplication_penalty)
+            .saturating_add(readability_bonus / 4)
     }
-    
+
     /// Calculate documentation quality score
     fn calculate_documentation_quality_score(&self, issues: &[ReviewIssue]) -> u8 {
-        let doc_issues = issues.iter()
+        let doc_issues = issues
+            .iter()
             .filter(|i| i.issue_type == ReviewIssueType::Documentation)
             .count();
-        
+
         100u8.saturating_sub((doc_issues * 5) as u8)
     }
-    
+
     /// Calculate performance quality score
     fn calculate_performance_quality_score(&self, metrics: &PerformanceMetrics) -> u8 {
-        let performance_penalty = (metrics.performance_issues * 8).saturating_add(metrics.bottlenecks * 12) as u8;
-        
+        let performance_penalty =
+            (metrics.performance_issues * 8).saturating_add(metrics.bottlenecks * 12) as u8;
+
         let efficiency_bonus = (metrics.memory_efficiency + metrics.cpu_efficiency) / 8u8;
-        
-        100u8.saturating_sub(performance_penalty).saturating_add(efficiency_bonus)
+
+        100u8
+            .saturating_sub(performance_penalty)
+            .saturating_add(efficiency_bonus)
     }
-    
+
     /// Convert numeric score to grade
     fn score_to_grade(&self, score: u8) -> QualityGrade {
         match score {
@@ -1661,72 +1707,100 @@ impl ReviewEngine {
             _ => QualityGrade::F,
         }
     }
-    
+
     /// Calculate confidence in quality assessment
-    fn calculate_confidence_score(&self, metrics: &ReviewQualityMetrics, issues: &[ReviewIssue]) -> u8 {
+    fn calculate_confidence_score(
+        &self,
+        metrics: &ReviewQualityMetrics,
+        issues: &[ReviewIssue],
+    ) -> u8 {
         let base_confidence = 50u8;
-        
+
         // Increase confidence based on lines reviewed
-        let lines_bonus = if metrics.lines_reviewed > 1000 { 20 } else { (metrics.lines_reviewed / 50) as u8 };
-        
+        let lines_bonus = if metrics.lines_reviewed > 1000 {
+            20
+        } else {
+            (metrics.lines_reviewed / 50) as u8
+        };
+
         // Increase confidence based on AST analysis
         let ast_bonus = 15u8;
-        
+
         // Decrease confidence based on uncertainty
-        let uncertainty_penalty = if issues.iter().any(|i| i.severity == ReviewSeverity::Info) { 10 } else { 0 };
-        
-        base_confidence.saturating_add(lines_bonus).saturating_add(ast_bonus).saturating_sub(uncertainty_penalty)
+        let uncertainty_penalty = if issues.iter().any(|i| i.severity == ReviewSeverity::Info) {
+            10
+        } else {
+            0
+        };
+
+        base_confidence
+            .saturating_add(lines_bonus)
+            .saturating_add(ast_bonus)
+            .saturating_sub(uncertainty_penalty)
     }
-    
+
     /// Count functions in content
     fn count_functions(&self, content: &str) -> usize {
         let mut count = 0;
         for line in content.lines() {
-            if line.trim().starts_with("fn ") || line.trim().starts_with("pub fn ") || 
-               line.trim().starts_with("async fn ") || line.trim().starts_with("pub async fn ") {
+            if line.trim().starts_with("fn ")
+                || line.trim().starts_with("pub fn ")
+                || line.trim().starts_with("async fn ")
+                || line.trim().starts_with("pub async fn ")
+            {
                 count += 1;
             }
         }
         count
     }
-    
+
     /// Calculate complexity metrics
     fn calculate_complexity_metrics(&self, content: &str) -> ComplexityMetrics {
         let mut complexities = Vec::new();
         let mut current_complexity = 1;
-        
+
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             // Increase complexity for control structures
-            if trimmed.starts_with("if ") || trimmed.starts_with("else if ") ||
-               trimmed.starts_with("while ") || trimmed.starts_with("for ") ||
-               trimmed.starts_with("match ") || trimmed.contains("&&") || trimmed.contains("||") {
+            if trimmed.starts_with("if ")
+                || trimmed.starts_with("else if ")
+                || trimmed.starts_with("while ")
+                || trimmed.starts_with("for ")
+                || trimmed.starts_with("match ")
+                || trimmed.contains("&&")
+                || trimmed.contains("||")
+            {
                 current_complexity += 1;
             }
-            
+
             // Reset complexity at function boundaries
-            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") ||
-               trimmed.starts_with("async fn ") || trimmed.starts_with("pub async fn ") {
+            if trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub async fn ")
+            {
                 if current_complexity > 1 {
                     complexities.push(current_complexity);
                 }
                 current_complexity = 1;
             }
         }
-        
+
         // Add the last function if it exists
         if current_complexity > 1 {
             complexities.push(current_complexity);
         }
-        
-        let avg_complexity = if complexities.is_empty() { 1.0 } else { 
-            complexities.iter().sum::<usize>() as f32 / complexities.len() as f32 
+
+        let avg_complexity = if complexities.is_empty() {
+            1.0
+        } else {
+            complexities.iter().sum::<usize>() as f32 / complexities.len() as f32
         };
         let max_complexity = complexities.iter().max().copied().unwrap_or(1);
         let complex_functions = complexities.iter().filter(|&&c| c > 10).count();
         let very_complex_functions = complexities.iter().filter(|&&c| c > 20).count();
-        
+
         ComplexityMetrics {
             avg_complexity,
             max_complexity,
@@ -1734,21 +1808,28 @@ impl ReviewEngine {
             very_complex_functions,
         }
     }
-    
+
     /// Calculate test metrics
-    fn calculate_test_metrics(&self, content: &str, production_functions: usize) -> TestCoverageMetrics {
-        let test_functions = content.lines()
-            .filter(|line| line.trim().starts_with("#[test]") || line.trim().starts_with("#[tokio::test]"))
+    fn calculate_test_metrics(
+        &self,
+        content: &str,
+        production_functions: usize,
+    ) -> TestCoverageMetrics {
+        let test_functions = content
+            .lines()
+            .filter(|line| {
+                line.trim().starts_with("#[test]") || line.trim().starts_with("#[tokio::test]")
+            })
             .count();
-        
+
         let test_ratio = if production_functions > 0 {
             test_functions as f32 / production_functions as f32
         } else {
             0.0
         };
-        
+
         let coverage_percentage = (test_ratio * 100.0).min(100.0);
-        
+
         TestCoverageMetrics {
             coverage_percentage,
             test_functions,
@@ -1756,24 +1837,32 @@ impl ReviewEngine {
             test_ratio,
         }
     }
-    
+
     /// Calculate security metrics
     fn calculate_security_metrics(&self, issues: &[ReviewIssue]) -> SecurityMetrics {
-        let security_issues = issues.iter()
+        let security_issues = issues
+            .iter()
             .filter(|i| i.issue_type == ReviewIssueType::Security)
             .count();
-        
-        let critical_security_issues = issues.iter()
-            .filter(|i| i.issue_type == ReviewIssueType::Security && i.severity == ReviewSeverity::Critical)
+
+        let critical_security_issues = issues
+            .iter()
+            .filter(|i| {
+                i.issue_type == ReviewIssueType::Security && i.severity == ReviewSeverity::Critical
+            })
             .count();
-        
-        let vulnerabilities = issues.iter()
-            .filter(|i| i.issue_type == ReviewIssueType::Security && 
-                   (i.severity == ReviewSeverity::High || i.severity == ReviewSeverity::Critical))
+
+        let vulnerabilities = issues
+            .iter()
+            .filter(|i| {
+                i.issue_type == ReviewIssueType::Security
+                    && (i.severity == ReviewSeverity::High
+                        || i.severity == ReviewSeverity::Critical)
+            })
             .count();
-        
+
         let security_adherence = 100u8.saturating_sub((security_issues * 10) as u8);
-        
+
         SecurityMetrics {
             security_issues,
             critical_security_issues,
@@ -1781,42 +1870,54 @@ impl ReviewEngine {
             security_adherence,
         }
     }
-    
+
     /// Calculate performance metrics
     fn calculate_performance_metrics(&self, issues: &[ReviewIssue]) -> PerformanceMetrics {
-        let performance_issues = issues.iter()
+        let performance_issues = issues
+            .iter()
             .filter(|i| i.issue_type == ReviewIssueType::Performance)
             .count();
-        
-        let bottlenecks = issues.iter()
-            .filter(|i| i.issue_type == ReviewIssueType::Performance && 
-                   (i.severity == ReviewSeverity::High || i.severity == ReviewSeverity::Critical))
+
+        let bottlenecks = issues
+            .iter()
+            .filter(|i| {
+                i.issue_type == ReviewIssueType::Performance
+                    && (i.severity == ReviewSeverity::High
+                        || i.severity == ReviewSeverity::Critical)
+            })
             .count();
-        
+
         PerformanceMetrics {
             performance_issues,
             bottlenecks,
             memory_efficiency: 80, // Default estimate
-            cpu_efficiency: 80,     // Default estimate
+            cpu_efficiency: 80,    // Default estimate
         }
     }
-    
+
     /// Calculate maintainability metrics
-    fn calculate_maintainability_metrics(&self, content: &str, issues: &[ReviewIssue]) -> MaintainabilityMetrics {
-        let maintainability_issues = issues.iter()
+    fn calculate_maintainability_metrics(
+        &self,
+        content: &str,
+        issues: &[ReviewIssue],
+    ) -> MaintainabilityMetrics {
+        let maintainability_issues = issues
+            .iter()
             .filter(|i| i.issue_type == ReviewIssueType::Maintainability)
             .count();
-        
+
         let lines: Vec<&str> = content.lines().collect();
-        let avg_function_length = if lines.is_empty() { 0.0 } else { lines.len() as f32 / self.count_functions(content) as f32 };
+        let avg_function_length = if lines.is_empty() {
+            0.0
+        } else {
+            lines.len() as f32 / self.count_functions(content) as f32
+        };
         let max_function_length = lines.len();
-        
-        let long_functions = lines.iter()
-            .filter(|&&line| line.len() > 50)
-            .count();
-        
+
+        let long_functions = lines.iter().filter(|&&line| line.len() > 50).count();
+
         let readability_score = 100u8.saturating_sub((maintainability_issues * 8) as u8);
-        
+
         MaintainabilityMetrics {
             duplication_percentage: 5.0, // Default estimate
             avg_function_length,

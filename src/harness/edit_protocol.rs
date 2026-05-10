@@ -1,4 +1,6 @@
-use crate::harness::file_control::{FilePolicy, FileSet, assert_edit_allowed, resolve_repo_path, validate_repo_relative_path};
+use crate::harness::file_control::{
+    FilePolicy, FileSet, assert_edit_allowed, resolve_repo_path, validate_repo_relative_path,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -570,7 +572,10 @@ fn is_path_denied_for_create(rel_path: &Path, policy: &FilePolicy) -> Result<boo
     }
 
     // Also check if the path tries to escape the repo (should already be caught by validate_repo_relative_path)
-    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if rel_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         // Path contains ".." - this should have been rejected by validate_repo_relative_path
         return Ok(true);
     }
@@ -632,7 +637,7 @@ pub fn merge_edits(edits: Vec<EditOperation>) -> Vec<EditOperation> {
 
     let mut merged = Vec::new();
 
-    for (file, file_edits) in by_file {
+    for (_file, file_edits) in by_file {
         if file_edits.len() == 1 {
             merged.push(file_edits.into_iter().next().unwrap());
         } else {
@@ -669,7 +674,10 @@ impl EditOperation {
             }
             EditOperation::UnifiedDiff(ud) => {
                 // Count added lines in unified diff format
-                ud.diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count()
+                ud.diff
+                    .lines()
+                    .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+                    .count()
             }
             EditOperation::WholeFile(wf) => wf.content.lines().count(),
             EditOperation::CreateFile(cf) => cf.content.lines().count(),
@@ -688,7 +696,10 @@ impl EditOperation {
             }
             EditOperation::UnifiedDiff(ud) => {
                 // Count removed lines in unified diff format
-                ud.diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count()
+                ud.diff
+                    .lines()
+                    .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+                    .count()
             }
             EditOperation::WholeFile(_) => 0, // Whole file doesn't track removals
             EditOperation::CreateFile(_) => 0,

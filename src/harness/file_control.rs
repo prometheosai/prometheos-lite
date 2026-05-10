@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{self, Read},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -670,13 +670,19 @@ pub fn validate_repo_relative_path(path: &Path) -> Result<PathBuf> {
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 // These shouldn't appear in relative paths, but reject if they do
-                bail!("Invalid path component in relative path: {}", path.display());
+                bail!(
+                    "Invalid path component in relative path: {}",
+                    path.display()
+                );
             }
         }
     }
 
     if cleaned.as_os_str().is_empty() {
-        bail!("Path resolves to empty after normalization: {}", path.display());
+        bail!(
+            "Path resolves to empty after normalization: {}",
+            path.display()
+        );
     }
 
     Ok(cleaned)
@@ -706,7 +712,10 @@ pub fn resolve_repo_path(root: &Path, rel_path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-#[deprecated(since = "1.6.0", note = "Use validate_repo_relative_path and resolve_repo_path instead")]
+#[deprecated(
+    since = "1.6.0",
+    note = "Use validate_repo_relative_path and resolve_repo_path instead"
+)]
 pub(crate) fn normalize_path(root: &Path, path: &Path) -> Result<PathBuf> {
     // Legacy behavior preserved for backward compatibility during transition
     // This will be removed in v2.0

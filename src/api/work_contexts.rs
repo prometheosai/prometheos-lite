@@ -11,12 +11,10 @@ use std::sync::Arc;
 
 use crate::api::state::AppState;
 use crate::harness::{
-    mode_policy::HarnessMode, HarnessWorkContextService, edit_protocol::EditOperation, parse_edit_response,
+    HarnessWorkContextService, edit_protocol::EditOperation, mode_policy::HarnessMode,
+    parse_edit_response,
 };
-use crate::work::{
-    WorkContextService,
-    types::{WorkContext, WorkDomain, WorkStatus},
-};
+use crate::work::types::{WorkDomain, WorkStatus};
 
 /// Request to create a new WorkContext
 #[derive(Debug, Deserialize)]

@@ -12,10 +12,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use prometheos_lite::harness::patch_applier::{
-    FileSnapshot, PatchFailure, PatchResult,
-};
 use prometheos_lite::harness::edit_protocol::{EditOperation, SearchReplaceEdit};
+use prometheos_lite::harness::patch_applier::{FileSnapshot, PatchFailure, PatchResult};
 
 // ============================================================================
 // PatchResult Tests
@@ -108,7 +106,10 @@ fn test_patch_failure_creation() {
     assert_eq!(failure.file, PathBuf::from("src/lib.rs"));
     assert_eq!(failure.operation, "create_file");
     assert_eq!(failure.reason, "file already exists");
-    assert_eq!(failure.nearby_context, Some("use overwrite option".to_string()));
+    assert_eq!(
+        failure.nearby_context,
+        Some("use overwrite option".to_string())
+    );
 }
 
 #[test]

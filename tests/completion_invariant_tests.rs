@@ -9,8 +9,8 @@ use anyhow::Result;
 use chrono::Utc;
 use prometheos_lite::harness::{
     completion::{
-        CompletionDecision, CompletionEvidence, PatchEvidence, ValidationEvidence, ReviewEvidence,
-        RiskEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence, VerificationEvidence,
+        CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
+        ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence, VerificationEvidence,
     },
     confidence::ConfidenceScore,
     mode_policy::HarnessMode,
@@ -25,14 +25,14 @@ use serde_json::json;
 async fn test_validation_gated_selection_no_fallback() {
     use prometheos_lite::harness::{
         attempt_pool::{AttemptPool, AttemptRecord},
-        selection::PatchCandidate,
-        validation::ValidationResult,
         confidence::ConfidenceScore,
         edit_protocol::EditOperation,
+        selection::PatchCandidate,
+        validation::ValidationResult,
     };
-    
+
     let pool = AttemptPool::new(3);
-    
+
     // Create candidates with different confidence levels
     let high_confidence_candidate = PatchCandidate {
         id: "high_conf".to_string(),
@@ -55,7 +55,7 @@ async fn test_validation_gated_selection_no_fallback() {
         lines_added: 1,
         lines_removed: 0,
     };
-    
+
     let low_confidence_candidate = PatchCandidate {
         id: "low_conf".to_string(),
         edits: vec![EditOperation::CreateFile {
@@ -77,7 +77,7 @@ async fn test_validation_gated_selection_no_fallback() {
         lines_added: 1,
         lines_removed: 0,
     };
-    
+
     // Create attempt records where high confidence fails validation, low confidence passes
     let mut records = vec![
         AttemptRecord {
@@ -119,12 +119,19 @@ async fn test_validation_gated_selection_no_fallback() {
             passed: true,
         },
     ];
-    
+
     // Test 1: Verify validation-gated selection works
     let selected = pool.select_best(&records);
-    assert!(selected.is_some(), "Should select low confidence candidate that passed validation");
-    assert_eq!(selected.unwrap().attempt_id, "attempt_2", "Should select the passing candidate");
-    
+    assert!(
+        selected.is_some(),
+        "Should select low confidence candidate that passed validation"
+    );
+    assert_eq!(
+        selected.unwrap().attempt_id,
+        "attempt_2",
+        "Should select the passing candidate"
+    );
+
     // Test 2: Verify no fallback when all fail validation
     records[1].validation_result = Some(ValidationResult {
         passed: false, // Now both fail validation
@@ -136,14 +143,20 @@ async fn test_validation_gated_selection_no_fallback() {
         details: vec![],
     });
     records[1].passed = false;
-    
+
     let selected = pool.select_best(&records);
-    assert!(selected.is_none(), "Should not select any candidate when all fail validation");
-    
+    assert!(
+        selected.is_none(),
+        "Should not select any candidate when all fail validation"
+    );
+
     // Test 3: Prove validation-gated selection behavior
     let proof = pool.prove_validation_gated_selection(&records);
-    assert!(proof, "Should prove validation-gated selection works correctly");
-    
+    assert!(
+        proof,
+        "Should prove validation-gated selection works correctly"
+    );
+
     println!("✅ V1.6-P0-002: Validation-gated selection test passed");
 }
 
@@ -242,8 +255,15 @@ async fn test_complete_rejected_zero_validation_commands() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Zero validation commands test passed");
 }
 
@@ -342,8 +362,15 @@ async fn test_complete_rejected_missing_rollback() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Missing rollback test passed");
 }
 
@@ -442,8 +469,15 @@ async fn test_complete_rejected_missing_patch_hashes() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Missing patch hashes test passed");
 }
 
@@ -542,8 +576,15 @@ async fn test_complete_rejected_mismatched_patch_hashes() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Mismatched patch hashes test passed");
 }
 
@@ -642,8 +683,15 @@ async fn test_complete_rejected_missing_review() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Missing review test passed");
 }
 
@@ -742,8 +790,15 @@ async fn test_complete_rejected_critical_issue() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Critical issue test passed");
 }
 
@@ -842,8 +897,15 @@ async fn test_complete_rejected_risk_approval_required() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Risk approval required test passed");
 }
 
@@ -942,8 +1004,15 @@ async fn test_complete_rejected_low_confidence() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Low confidence test passed");
 }
 
@@ -1042,8 +1111,15 @@ async fn test_complete_rejected_missing_docker_evidence() {
         decision_factors: vec![],
     };
 
-    let decision = prometheos_lite::harness::completion::evaluate_completion(&evidence, HarnessMode::Autonomous).unwrap();
-    assert!(!matches!(decision, prometheos_lite::harness::completion::CompletionDecision::Complete));
+    let decision = prometheos_lite::harness::completion::evaluate_completion(
+        &evidence,
+        HarnessMode::Autonomous,
+    )
+    .unwrap();
+    assert!(!matches!(
+        decision,
+        prometheos_lite::harness::completion::CompletionDecision::Complete
+    ));
     println!("✅ V1.6-P0-005: Missing Docker evidence test passed");
 }
 
@@ -1154,10 +1230,16 @@ async fn test_complete_rejected_without_patch_hash() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected without patch hash");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected without patch hash"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("patch hash")), "Should mention missing patch hash");
+    assert!(
+        errors.iter().any(|e| e.contains("patch hash")),
+        "Should mention missing patch hash"
+    );
 }
 
 /// Test case 2: Complete rejected without rollback
@@ -1267,10 +1349,16 @@ async fn test_complete_rejected_without_rollback() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected without rollback");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected without rollback"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("rollback")), "Should mention missing rollback");
+    assert!(
+        errors.iter().any(|e| e.contains("rollback")),
+        "Should mention missing rollback"
+    );
 }
 
 /// Test case 3: Complete rejected with zero validation commands
@@ -1380,11 +1468,18 @@ async fn test_complete_rejected_with_zero_validation_commands() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected with zero validation commands");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected with zero validation commands"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("zero commands") || e.contains("no validation commands")), 
-           "Should mention zero validation commands");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("zero commands") || e.contains("no validation commands")),
+        "Should mention zero validation commands"
+    );
 }
 
 /// Test case 4: Complete rejected with critical review issues
@@ -1494,10 +1589,16 @@ async fn test_complete_rejected_with_critical_review_issues() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected with critical review issues");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected with critical review issues"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("critical issues")), "Should mention critical issues");
+    assert!(
+        errors.iter().any(|e| e.contains("critical issues")),
+        "Should mention critical issues"
+    );
 }
 
 /// Test case 5: Complete rejected when risk requires approval
@@ -1607,10 +1708,16 @@ async fn test_complete_rejected_when_risk_requires_approval() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected when risk requires approval");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected when risk requires approval"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("requires approval")), "Should mention approval requirement");
+    assert!(
+        errors.iter().any(|e| e.contains("requires approval")),
+        "Should mention approval requirement"
+    );
 }
 
 /// Test case 6: Complete rejected when Docker evidence missing in autonomous mode
@@ -1720,10 +1827,18 @@ async fn test_complete_rejected_without_docker_evidence_autonomous() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected without Docker evidence in autonomous mode");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected without Docker evidence in autonomous mode"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("Docker") || e.contains("sandbox")), "Should mention Docker/sandbox evidence");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("Docker") || e.contains("sandbox")),
+        "Should mention Docker/sandbox evidence"
+    );
 }
 
 /// Test case 7: Complete accepted with all requirements met
@@ -1841,8 +1956,11 @@ async fn test_complete_accepted_with_all_requirements_met() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_ok(), "Complete decision should be accepted with all requirements met");
+
+    assert!(
+        result.is_ok(),
+        "Complete decision should be accepted with all requirements met"
+    );
 }
 
 /// Test case 8: Patch identity verification failure
@@ -1960,10 +2078,18 @@ async fn test_patch_identity_verification_failure() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected with patch identity verification failure");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected with patch identity verification failure"
+    );
     let errors = result.unwrap_err();
-    assert!(errors.iter().any(|e| e.contains("identity") || e.contains("hash")), "Should mention patch identity/hash");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("identity") || e.contains("hash")),
+        "Should mention patch identity/hash"
+    );
 }
 
 /// Test case 9: Evidence completeness requirements
@@ -2007,15 +2133,15 @@ async fn test_evidence_completeness_requirements() {
             security_issues: 0,
             breaking_change_issues: 0,
             review_passed: true,
-            files_reviewed: 0, // No files reviewed
-            lines_analyzed: 0, // No lines analyzed
+            files_reviewed: 0,            // No files reviewed
+            lines_analyzed: 0,            // No lines analyzed
             security_patterns_checked: 0, // No security patterns checked
             api_breaking_changes_detected: 0,
             dependency_changes_analyzed: 0,
             test_coverage_analyzed: false,
             performance_impact_assessed: false,
             documentation_updated: false,
-            review_depth_score: 0.0, // Zero review depth
+            review_depth_score: 0.0,           // Zero review depth
             review_quality_indicators: vec![], // No quality indicators
         },
         risk_evidence: RiskEvidence {
@@ -2073,14 +2199,30 @@ async fn test_evidence_completeness_requirements() {
 
     let decision = CompletionDecision::Complete;
     let result = decision.validate(&evidence);
-    
-    assert!(result.is_err(), "Complete decision should be rejected with incomplete evidence");
+
+    assert!(
+        result.is_err(),
+        "Complete decision should be rejected with incomplete evidence"
+    );
     let errors = result.unwrap_err();
-    
+
     // Should mention multiple completeness issues
-    assert!(errors.iter().any(|e| e.contains("completeness")), "Should mention completeness requirements");
-    assert!(errors.iter().any(|e| e.contains("review") || e.contains("depth")), "Should mention review quality");
-    assert!(errors.iter().any(|e| e.contains("risk") || e.contains("unknown")), "Should mention risk assessment");
+    assert!(
+        errors.iter().any(|e| e.contains("completeness")),
+        "Should mention completeness requirements"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("review") || e.contains("depth")),
+        "Should mention review quality"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("risk") || e.contains("unknown")),
+        "Should mention risk assessment"
+    );
 }
 
 /// Test case 10: Non-complete decisions always pass validation
@@ -2197,7 +2339,10 @@ async fn test_non_complete_decisions_always_pass() {
 
     for decision in decisions {
         let result = decision.validate(&evidence);
-        assert!(result.is_ok(), "Non-complete decision '{:?}' should always pass validation", decision);
+        assert!(
+            result.is_ok(),
+            "Non-complete decision '{:?}' should always pass validation",
+            decision
+        );
     }
 }
-

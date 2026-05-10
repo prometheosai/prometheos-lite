@@ -6,13 +6,9 @@ use rusqlite::Connection;
 use super::artifacts::ArtifactOperations;
 use super::conversations::ConversationOperations;
 use super::flow_runs::FlowRunOperations;
-use super::interrupts::InterruptOperations;
 use super::messages::MessageOperations;
-use super::outbox::OutboxOperations;
 use super::projects::ProjectOperations;
-use super::snapshots::FlowSnapshotOperations;
 use super::trait_def::Repository;
-use super::trust_policies::TrustPolicyOperations;
 
 /// Database connection wrapper
 pub struct Db {

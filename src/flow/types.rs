@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::budget::{BudgetGuard, BudgetUsage, ExecutionBudget};
+use super::budget::{BudgetGuard, ExecutionBudget};
 use std::sync::{Arc, Mutex};
 
 /// Node identifier - unique string for each node in a flow

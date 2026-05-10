@@ -1,13 +1,12 @@
 //! OpenTelemetry integration for trace export
 
 use anyhow::Result;
+use opentelemetry::KeyValue;
 use opentelemetry::trace::{
     Span as SpanTrait, SpanKind, Status, Tracer as OtelTracer, TracerProvider as OtelTracerProvider,
 };
-use opentelemetry::{Key, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
+use opentelemetry_sdk::trace::{self as sdktrace};
 
 use super::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 

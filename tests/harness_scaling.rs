@@ -190,7 +190,10 @@ fn test_attempt_priority_variants() {
     assert!(matches!(AttemptPriority::Low, AttemptPriority::Low));
     assert!(matches!(AttemptPriority::Normal, AttemptPriority::Normal));
     assert!(matches!(AttemptPriority::High, AttemptPriority::High));
-    assert!(matches!(AttemptPriority::Critical, AttemptPriority::Critical));
+    assert!(matches!(
+        AttemptPriority::Critical,
+        AttemptPriority::Critical
+    ));
 }
 
 #[test]

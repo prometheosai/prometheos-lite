@@ -25,7 +25,6 @@ pub mod testing;
 pub mod tracing;
 pub mod types;
 
-pub use adapter::*;
 pub use budget::*;
 pub use debug::*;
 pub use execution::*;

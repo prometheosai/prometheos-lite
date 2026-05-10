@@ -1,7 +1,6 @@
 //! Memory service for high-level memory operations
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use super::db::MemoryDb;
 use super::embedding::EmbeddingProvider;
 use super::scoring::{prune_combined, rank_memories};
 use super::summarizer::MemorySummarizer;
-use super::types::{ContextBundle, Memory, MemoryKind, MemoryType, MemoryWriteTask};
+use super::types::{Memory, MemoryKind, MemoryType, MemoryWriteTask};
 use super::vector::{BruteForceBackend, VectorSearchBackend};
 
 /// Memory service for high-level memory operations

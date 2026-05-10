@@ -7,7 +7,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 use crate::config::StrictMode as StrictModeConfig;
 

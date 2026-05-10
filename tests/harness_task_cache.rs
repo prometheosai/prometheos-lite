@@ -92,7 +92,7 @@ use std::time::{Duration, Instant};
 //         scope: CacheScope::Task,
 //         access_count: 0,
 //     };
-// 
+//
 //     assert!(old_entry.is_expired());
 // }
 
@@ -106,7 +106,7 @@ use std::time::{Duration, Instant};
 //         scope: CacheScope::Task,
 //         access_count: 0,
 //     };
-// 
+//
 //     assert!(!fresh_entry.is_expired());
 // }
 
@@ -159,7 +159,7 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_set_and_get() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     cache.set("key1", "value1");
 //     assert_eq!(cache.get("key1"), Some("value1".to_string()));
 // }
@@ -167,14 +167,14 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_get_nonexistent() {
 //     let cache = KnowledgeCache::default();
-// 
+//
 //     assert_eq!(cache.get("nonexistent"), None);
 // }
 
 // #[test]
 // fn test_cache_remove() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     cache.set("key1", "value1");
 //     assert!(cache.remove("key1"));
 //     assert_eq!(cache.get("key1"), None);
@@ -183,14 +183,14 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_remove_nonexistent() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     assert!(!cache.remove("nonexistent"));
 // }
 
 // #[test]
 // fn test_cache_update_existing() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     cache.set("key1", "value1");
 //     cache.set("key1", "value2");
 //     assert_eq!(cache.get("key1"), Some("value2".to_string()));
@@ -199,11 +199,11 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_clear() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     cache.set("key1", "value1");
 //     cache.set("key2", "value2");
 //     cache.clear();
-// 
+//
 //     assert!(cache.is_empty());
 //     assert_eq!(cache.get("key1"), None);
 //     assert_eq!(cache.get("key2"), None);
@@ -216,7 +216,7 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_set_with_ttl() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     cache.set_with_ttl("key1", "value1", Duration::from_secs(3600));
 //     assert_eq!(cache.get("key1"), Some("value1".to_string()));
 // }
@@ -224,13 +224,13 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_expired_entry_removed() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     // Set with very short TTL
 //     cache.set_with_ttl("key1", "value1", Duration::from_millis(1));
-// 
+//
 //     // Wait for expiration
 //     std::thread::sleep(Duration::from_millis(10));
-// 
+//
 //     // Should be expired and removed
 //     assert_eq!(cache.get("key1"), None);
 // }
@@ -242,7 +242,7 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_size() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     assert_eq!(cache.size(), 0);
 //     cache.set("key1", "value1");
 //     assert_eq!(cache.size(), 1);
@@ -253,7 +253,7 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_is_empty() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     assert!(cache.is_empty());
 //     cache.set("key1", "value1");
 //     assert!(!cache.is_empty());
@@ -262,16 +262,16 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_hit_and_miss_stats() {
 //     let mut cache = KnowledgeCache::default();
-// 
+//
 //     cache.set("key1", "value1");
-// 
+//
 //     // Hits
 //     let _ = cache.get("key1");
 //     let _ = cache.get("key1");
-// 
+//
 //     // Miss
 //     let _ = cache.get("nonexistent");
-// 
+//
 //     let stats = cache.stats();
 //     assert_eq!(stats.hits, 2);
 //     assert_eq!(stats.misses, 1);
@@ -285,7 +285,7 @@ use std::time::{Duration, Instant};
 // fn test_cache_scope_task_isolation() {
 //     let task_cache1 = KnowledgeCache::with_scope(CacheScope::Task, 100);
 //     let task_cache2 = KnowledgeCache::with_scope(CacheScope::Task, 100);
-// 
+//
 //     // Caches with Task scope should be independent
 //     // This is more of a conceptual test - actual isolation depends on implementation
 //     assert_eq!(task_cache1.scope(), CacheScope::Task);
@@ -297,7 +297,7 @@ use std::time::{Duration, Instant};
 //     let task = KnowledgeCache::with_scope(CacheScope::Task, 100);
 //     let session = KnowledgeCache::with_scope(CacheScope::Session, 200);
 //     let global = KnowledgeCache::with_scope(CacheScope::Global, 500);
-// 
+//
 //     assert_eq!(task.scope(), CacheScope::Task);
 //     assert_eq!(session.scope(), CacheScope::Session);
 //     assert_eq!(global.scope(), CacheScope::Global);
@@ -310,12 +310,12 @@ use std::time::{Duration, Instant};
 // #[test]
 // fn test_cache_capacity_limit() {
 //     let mut cache = KnowledgeCache::with_policy(CachePolicy::LRU, 3);
-// 
+//
 //     cache.set("key1", "value1");
 //     cache.set("key2", "value2");
 //     cache.set("key3", "value3");
 //     cache.set("key4", "value4"); // Should evict key1 with LRU
-// 
+//
 //     assert_eq!(cache.size(), 3);
 //     // key1 should be evicted
 //     assert_eq!(cache.get("key1"), None);

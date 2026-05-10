@@ -1,6 +1,4 @@
 use crate::harness::{
-    acceptance::AcceptanceCriterion,
-    artifacts::HarnessArtifact,
     completion::CompletionDecision,
     edit_protocol::EditOperation,
     evidence_persistence::{EvidencePersistenceManager, FileEvidenceSink},
@@ -10,12 +8,10 @@ use crate::harness::{
     },
     mode_policy::HarnessMode,
 };
-use crate::{
-    work::{
-        artifact::{Artifact, ArtifactKind},
-        service::WorkContextService,
-        types::{WorkPhase, WorkStatus},
-    },
+use crate::work::{
+    artifact::{Artifact, ArtifactKind},
+    service::WorkContextService,
+    types::{WorkPhase, WorkStatus},
 };
 use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::Arc};
@@ -57,7 +53,10 @@ pub fn extract_task_hints(task: &str, requirements: &[String]) -> (Vec<PathBuf>,
         let symbol = &cap[1];
         // Filter out common words
         if symbol.len() > 3
-            && !matches!(symbol, "the" | "and" | "for" | "with" | "from" | "into" | "this" | "that")
+            && !matches!(
+                symbol,
+                "the" | "and" | "for" | "with" | "from" | "into" | "this" | "that"
+            )
         {
             let symbol_str = symbol.to_string();
             if !symbols.contains(&symbol_str) {
@@ -102,8 +101,7 @@ impl HarnessWorkContextService {
             .with_context(|| format!("WorkContext not found: {context_id}"))?;
 
         // P0-FIX: Extract mentioned files and symbols from task
-        let (mentioned_files, mentioned_symbols) =
-            extract_task_hints(&ctx.goal, &ctx.requirements);
+        let (mentioned_files, mentioned_symbols) = extract_task_hints(&ctx.goal, &ctx.requirements);
 
         tracing::info!(
             "P0: Extracted {} files and {} symbols from task",
@@ -112,7 +110,7 @@ impl HarnessWorkContextService {
         );
 
         // P0-FIX: Build request with config provider auto-resolution and mode-aware sandbox policy
-        let mut req = HarnessExecutionRequest {
+        let req = HarnessExecutionRequest {
             work_context_id: ctx.id.clone(),
             repo_root: repo_root.clone(),
             task: ctx.goal.clone(),
@@ -134,7 +132,7 @@ impl HarnessWorkContextService {
             // P0-HARNESS-007: Set sandbox policy based on mode for proper isolation
             sandbox_policy: Some(crate::harness::sandbox::SandboxPolicy::from_mode(mode)),
         };
-        
+
         // P0-B5: Make provider resolution errors explicit instead of swallowed
         let req = req.with_config_provider().map_err(|e| {
             tracing::error!("P0-B5: Provider resolution failed: {}", e);
@@ -145,13 +143,17 @@ impl HarnessWorkContextService {
         if req.patch_provider.is_some() {
             tracing::info!("P0: Patch provider successfully resolved from config");
         } else if proposed_edits.is_empty() {
-            tracing::warn!("P0: No patch provider resolved and no edits supplied - execution will block");
+            tracing::warn!(
+                "P0: No patch provider resolved and no edits supplied - execution will block"
+            );
 
             // P0-FIX: Block early with clear error message
             self.work_context_service
                 .set_blocked_reason(&mut ctx, "No patch provider configured. Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables.".into())?;
             self.work_context_service.update_context(&ctx)?;
-            return Err(anyhow::anyhow!("No patch provider configured and no edits supplied. Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables."));
+            return Err(anyhow::anyhow!(
+                "No patch provider configured and no edits supplied. Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables."
+            ));
         }
 
         self.work_context_service
@@ -159,19 +161,23 @@ impl HarnessWorkContextService {
 
         let result = execute_harness_task(req).await?;
         ctx.metadata = serde_json::json!({"harness":serde_json::to_value(&result)?});
-        
+
         // P0-HARNESS-009: Persist EvidenceLog with explicit persistence contract
         let evidence_dir = std::env::current_dir()?.join("evidence");
-        let persistence_manager = EvidencePersistenceManager::new(
-            Box::new(FileEvidenceSink::new(evidence_dir))
-        );
-        
+        let persistence_manager =
+            EvidencePersistenceManager::new(Box::new(FileEvidenceSink::new(evidence_dir)));
+
         // Persist evidence log with verification that side effects are recorded
-        persistence_manager.persist_evidence_log(&ctx.id, &result.evidence_log).await?;
-        
-        tracing::info!("P0-HARNESS-009: EvidenceLog persisted with {} entries for work context {}", 
-                   result.evidence_log.entries.len(), ctx.id);
-        
+        persistence_manager
+            .persist_evidence_log(&ctx.id, &result.evidence_log)
+            .await?;
+
+        tracing::info!(
+            "P0-HARNESS-009: EvidenceLog persisted with {} entries for work context {}",
+            result.evidence_log.entries.len(),
+            ctx.id
+        );
+
         // Persist other harness artifacts
         for h in &result.artifacts {
             let context_id = ctx.id.clone();

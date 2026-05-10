@@ -5,7 +5,6 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Project - a container for conversations
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,15 +1,11 @@
 use crate::harness::{
-    edit_protocol::EditOperation,
     environment::EnvironmentProfile,
     file_control::FilePolicy,
     repo_intelligence::{CodeSymbol, RepoContext},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReproductionRequest {
@@ -639,7 +635,7 @@ fn generate_generic_regression_test(_file: &Path, req: &ReproductionRequest) -> 
 
 async fn analyze_failure_signature(
     req: &ReproductionRequest,
-    repo: &RepoContext,
+    _repo: &RepoContext,
 ) -> Result<Vec<ReproductionDiagnostic>> {
     let mut diagnostics = vec![];
 

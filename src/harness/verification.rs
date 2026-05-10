@@ -1,5 +1,4 @@
 use crate::harness::validation::ValidationResult;
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

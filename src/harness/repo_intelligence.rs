@@ -5,10 +5,9 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, SystemTime},
 };
-use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
+use tree_sitter::{Node, Parser};
 use tree_sitter_rust;
 use tree_sitter_typescript;
 
@@ -565,7 +564,7 @@ impl RustAnalyzerData {
     /// Build module graph by analyzing mod statements and file structure
     async fn build_module_graph(
         repo_path: &Path,
-        cargo_metadata: &CargoMetadata,
+        _cargo_metadata: &CargoMetadata,
     ) -> Result<ModuleGraph> {
         let mut modules = HashMap::new();
         let mut imports = HashMap::new();
@@ -696,8 +695,8 @@ impl RustAnalyzerData {
             .ok_or_else(|| anyhow::anyhow!("Failed to parse Rust file: {}", file_path.display()))?;
 
         let mut submodules = Vec::new();
-        let mut visibility = Visibility::Private;
-        let mut documentation = None;
+        let visibility = Visibility::Private;
+        let documentation = None;
 
         // Walk the AST to extract module information
         let mut cursor = tree.walk();
@@ -752,8 +751,6 @@ impl RustAnalyzerData {
         module_name: &str,
         relative_path: &Path,
     ) -> Result<Option<ModuleInfo>> {
-        use regex::Regex;
-
         // Basic visibility detection
         let visibility = if content.contains("pub mod")
             || content.contains("pub struct")
@@ -887,7 +884,7 @@ impl RustAnalyzerData {
 
     /// Extract public API surface from module graph
     async fn extract_public_api(
-        repo_path: &Path,
+        _repo_path: &Path,
         module_graph: &ModuleGraph,
     ) -> Result<PublicApiSurface> {
         let mut public_functions = Vec::new();
@@ -898,7 +895,7 @@ impl RustAnalyzerData {
         let mut reexports = Vec::new();
 
         // Analyze each module for public API items
-        for (module_path, module_info) in &module_graph.modules {
+        for (_module_path, module_info) in &module_graph.modules {
             if let Some(file_path) = &module_info.file_path {
                 let content = fs::read_to_string(file_path)
                     .context(format!("Failed to read file: {}", file_path.display()))?;
@@ -1256,7 +1253,7 @@ impl RustAnalyzerData {
         let mut test_files = Vec::new();
         let mut bench_files = Vec::new();
         let mut example_files = Vec::new();
-        let mut doc_files = Vec::new();
+        let doc_files = Vec::new();
         let mut build_scripts = Vec::new();
 
         // Categorize all files based on cargo targets
@@ -1406,7 +1403,7 @@ impl RustAnalyzerData {
         cargo_metadata: &CargoMetadata,
     ) -> Result<DependencyImpact> {
         let mut critical_dependencies = Vec::new();
-        let mut transitive_deps = HashMap::new();
+        let transitive_deps = HashMap::new();
         let mut feature_impact = HashMap::new();
 
         // Analyze each dependency
@@ -2649,7 +2646,7 @@ fn parse_cargo_toml(path: &Path) -> DependencyGraph {
 }
 
 /// Parse a single Cargo dependency specification
-fn parse_cargo_dependency(name: &str, spec: &toml::Value) -> DependencySpec {
+fn parse_cargo_dependency(_name: &str, spec: &toml::Value) -> DependencySpec {
     let mut dep = DependencySpec {
         optional: false,
         ..Default::default()
@@ -3023,7 +3020,7 @@ impl DependencyGraph {
         // Collect all dependency relationships
         let all_deps: Vec<_> = self.dependencies.iter().map(|(k, _)| k.clone()).collect();
 
-        for (dependent, spec) in &self.dependencies {
+        for (dependent, _spec) in &self.dependencies {
             // Add to reverse map
             reverse
                 .entry(dependent.clone())
@@ -3098,7 +3095,7 @@ impl RepoCache {
     pub fn load(root: &Path) -> Option<Self> {
         let cache_path = root.join(CACHE_FILENAME);
         let content = fs::read_to_string(&cache_path).ok()?;
-        let mut cache: RepoCache = serde_json::from_str(&content).ok()?;
+        let cache: RepoCache = serde_json::from_str(&content).ok()?;
 
         // Check version compatibility
         if cache.version != CACHE_VERSION {
@@ -3498,7 +3495,7 @@ pub async fn build_repo_context_with_cache(
 
     // Save cache if enabled
     if use_cache {
-        if let Some(mut c) = cache {
+        if let Some(c) = cache {
             c.save()?;
         } else {
             // Create new cache from what we built
@@ -3793,7 +3790,7 @@ impl RepoMapQualityBenchmarkSuite {
             .await?;
 
         // Calculate overall score as weighted average
-        let overall_score = (coverage.file_coverage * 0.25
+        let _overall_score = (coverage.file_coverage * 0.25
             + coverage.symbol_coverage * 0.20
             + performance.processing_rate * 0.15
             + accuracy.symbol_name_accuracy * 0.20
@@ -3844,7 +3841,7 @@ impl RepoMapQualityBenchmarkSuite {
         repo_map: &RepoMap,
         _repo_path: &Path,
     ) -> Result<PerformanceMetrics> {
-        let start_time = std::time::Instant::now();
+        let _start_time = std::time::Instant::now();
 
         // Simulate generation time (in real implementation, this would be measured)
         let generation_time_ms = 150; // Typical generation time
@@ -3904,7 +3901,7 @@ impl RepoMapQualityBenchmarkSuite {
     /// Calculate consistency metrics
     async fn calculate_consistency_metrics(
         &self,
-        repo_map: &RepoMap,
+        _repo_map: &RepoMap,
         _repo_path: &Path,
     ) -> Result<ConsistencyMetrics> {
         // In a real implementation, run multiple times and compare results

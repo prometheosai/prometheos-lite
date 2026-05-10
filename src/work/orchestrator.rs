@@ -9,8 +9,7 @@ use std::sync::Arc;
 use super::evolution_engine::EvolutionEngine;
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
-use super::types::{AutonomyLevel, TestExecutionResult, WorkContext, WorkPhase, WorkStatus};
-use crate::flow::execution_service::FlowExecutionService;
+use super::types::{AutonomyLevel, TestExecutionResult, WorkContext, WorkStatus};
 use crate::intent::{Intent, IntentClassifier};
 
 /// EvolutionTrigger - when to trigger playbook evolution
@@ -737,7 +736,7 @@ impl WorkOrchestrator {
         test_result: &TestExecutionResult,
     ) -> Result<()> {
         // Store test results in a structured format
-        let artifact_data = serde_json::json!({
+        let _artifact_data = serde_json::json!({
             "context_id": context_id,
             "test_result": {
                 "success": test_result.success,

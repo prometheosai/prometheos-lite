@@ -63,7 +63,10 @@ fn test_git_checkpoint_committed() {
     };
 
     assert!(checkpoint.committed);
-    assert_eq!(checkpoint.commit_message, Some("Checkpoint commit".to_string()));
+    assert_eq!(
+        checkpoint.commit_message,
+        Some("Checkpoint commit".to_string())
+    );
     assert_eq!(checkpoint.touched_files.len(), 2);
 }
 
@@ -80,10 +83,8 @@ fn test_git_checkpoint_manager_new() {
 
 #[test]
 fn test_git_checkpoint_manager_with_prefix() {
-    let manager = GitCheckpointManager::with_prefix(
-        PathBuf::from("/tmp/repo"),
-        "custom-prefix".to_string(),
-    );
+    let manager =
+        GitCheckpointManager::with_prefix(PathBuf::from("/tmp/repo"), "custom-prefix".to_string());
     // Manager created with custom prefix
     assert!(true);
 }
@@ -137,17 +138,32 @@ fn test_checkpoint_result_failure() {
 
 #[test]
 fn test_rollback_strategy_variants() {
-    assert!(matches!(RollbackStrategy::HardReset, RollbackStrategy::HardReset));
-    assert!(matches!(RollbackStrategy::SoftReset, RollbackStrategy::SoftReset));
-    assert!(matches!(RollbackStrategy::RevertCommit, RollbackStrategy::RevertCommit));
-    assert!(matches!(RollbackStrategy::StashAndReset, RollbackStrategy::StashAndReset));
+    assert!(matches!(
+        RollbackStrategy::HardReset,
+        RollbackStrategy::HardReset
+    ));
+    assert!(matches!(
+        RollbackStrategy::SoftReset,
+        RollbackStrategy::SoftReset
+    ));
+    assert!(matches!(
+        RollbackStrategy::RevertCommit,
+        RollbackStrategy::RevertCommit
+    ));
+    assert!(matches!(
+        RollbackStrategy::StashAndReset,
+        RollbackStrategy::StashAndReset
+    ));
 }
 
 #[test]
 fn test_rollback_strategy_display() {
     assert_eq!(format!("{:?}", RollbackStrategy::HardReset), "HardReset");
     assert_eq!(format!("{:?}", RollbackStrategy::SoftReset), "SoftReset");
-    assert_eq!(format!("{:?}", RollbackStrategy::RevertCommit), "RevertCommit");
+    assert_eq!(
+        format!("{:?}", RollbackStrategy::RevertCommit),
+        "RevertCommit"
+    );
 }
 
 // ============================================================================
@@ -180,7 +196,11 @@ fn test_checkpoint_with_files() {
 
     assert_eq!(checkpoint.dirty_files.len(), 3);
     assert_eq!(checkpoint.touched_files.len(), 2);
-    assert!(checkpoint.dirty_files.contains(&PathBuf::from("src/main.rs")));
+    assert!(
+        checkpoint
+            .dirty_files
+            .contains(&PathBuf::from("src/main.rs"))
+    );
 }
 
 #[test]

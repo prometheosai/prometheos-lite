@@ -11,21 +11,21 @@
 //! - Cost estimation functions
 //! - Resource limit checking
 
+use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use chrono::Utc;
 
 use prometheos_lite::harness::execution_loop::{
-    check_resource_limits, estimate_execution_cost, ExecutionMetrics,
-    HarnessExecutionRequest, HarnessExecutionResult, HarnessLimits, HarnessProgress, ValidationFailurePolicy,
-};
-use prometheos_lite::harness::{
-    RiskAssessment, ConfidenceScore, VerificationStrength, CompletionDecision, Trajectory,
-    EvidenceLog, FailureKind, ValidationFailurePolicy as HarnessValidationFailurePolicy,
-    RiskLevel, RepoContext, RepoMap, EnvironmentProfile, FileSet, DependencyGraph,
+    ExecutionMetrics, HarnessExecutionRequest, HarnessExecutionResult, HarnessLimits,
+    HarnessProgress, ValidationFailurePolicy, check_resource_limits, estimate_execution_cost,
 };
 use prometheos_lite::harness::mode_policy::HarnessMode;
 use prometheos_lite::harness::sandbox::SandboxPolicy;
+use prometheos_lite::harness::{
+    CompletionDecision, ConfidenceScore, DependencyGraph, EnvironmentProfile, EvidenceLog,
+    FailureKind, FileSet, RepoContext, RepoMap, RiskAssessment, RiskLevel, Trajectory,
+    ValidationFailurePolicy as HarnessValidationFailurePolicy, VerificationStrength,
+};
 
 // ============================================================================
 // HarnessExecutionRequest Tests
@@ -479,7 +479,9 @@ fn test_check_resource_limits_within_bounds() {
         max_file_size_bytes: Some(1048576),
     };
 
-    let files: Vec<PathBuf> = (0..10).map(|i| PathBuf::from(format!("file{}.rs", i))).collect();
+    let files: Vec<PathBuf> = (0..10)
+        .map(|i| PathBuf::from(format!("file{}.rs", i)))
+        .collect();
     let result = check_resource_limits(&limits, &files);
 
     assert!(result.is_ok());
@@ -496,7 +498,9 @@ fn test_check_resource_limits_too_many_files() {
         max_file_size_bytes: Some(512000),
     };
 
-    let files: Vec<PathBuf> = (0..500).map(|i| PathBuf::from(format!("file{}.rs", i))).collect();
+    let files: Vec<PathBuf> = (0..500)
+        .map(|i| PathBuf::from(format!("file{}.rs", i)))
+        .collect();
     let result = check_resource_limits(&limits, &files);
 
     assert!(result.is_ok());

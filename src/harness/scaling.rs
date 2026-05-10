@@ -1,9 +1,7 @@
 //! Scaling Engine - Issue #10
 //! Multi-attempt repair scaling and resource allocation
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScalingConfig {

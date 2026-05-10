@@ -651,14 +651,18 @@ impl DiagnosticsEngine {
     pub fn new() -> Self {
         Self::with_config(DiagnosticsConfig::default())
     }
-    
+
     /// Create diagnostics engine with custom config
     pub fn with_config(config: DiagnosticsConfig) -> Self {
         Self { config }
     }
-    
+
     /// Run full diagnostics
-    pub async fn run_full_diagnostics(&self, detailed: bool, benchmark: bool) -> Result<DiagnosticResults> {
+    pub async fn run_full_diagnostics(
+        &self,
+        detailed: bool,
+        benchmark: bool,
+    ) -> Result<DiagnosticResults> {
         let mut results = DiagnosticResults {
             overall_status: HealthStatus::Unknown,
             timestamp: chrono::Utc::now(),
@@ -670,50 +674,57 @@ impl DiagnosticsEngine {
             recommendations: Vec::new(),
             error_summary: ErrorSummary::default(),
         };
-        
+
         // Run provider diagnostics
         results.providers = self.run_provider_diagnostics(detailed).await?;
-        
+
         // Run system diagnostics
         results.system = self.run_system_diagnostics().await?;
-        
+
         // Run validation diagnostics
         results.validation = self.run_validation_diagnostics().await?;
-        
+
         // Run benchmarks if requested
         if benchmark {
             results.benchmarks = Some(self.run_benchmarks().await?);
         }
-        
+
         // Generate recommendations
         results.recommendations = self.generate_recommendations(&results);
-        
+
         // Calculate overall status
         results.overall_status = self.calculate_overall_status(&results);
-        
+
         // Generate error summary
         results.error_summary = self.generate_error_summary(&results);
-        
+
         Ok(results)
     }
-    
+
     /// Run provider diagnostics
-    pub async fn run_provider_diagnostics(&self, detailed: bool) -> Result<HashMap<String, ProviderDiagnostic>> {
+    pub async fn run_provider_diagnostics(
+        &self,
+        detailed: bool,
+    ) -> Result<HashMap<String, ProviderDiagnostic>> {
         let mut providers = HashMap::new();
-        
+
         // Check configured providers
         let provider_configs = self.get_provider_configs()?;
-        
+
         for config in provider_configs {
             let diagnostic = self.diagnose_provider(&config, detailed).await?;
             providers.insert(config.name.clone(), diagnostic);
         }
-        
+
         Ok(providers)
     }
-    
+
     /// Diagnose a specific provider
-    async fn diagnose_provider(&self, config: &ProviderConfig, detailed: bool) -> Result<ProviderDiagnostic> {
+    async fn diagnose_provider(
+        &self,
+        config: &ProviderConfig,
+        detailed: bool,
+    ) -> Result<ProviderDiagnostic> {
         let mut diagnostic = ProviderDiagnostic {
             name: config.name.clone(),
             provider_type: config.provider_type.clone(),
@@ -724,49 +735,56 @@ impl DiagnosticsEngine {
             config_details: self.get_sanitized_config_details(config),
             last_successful_connection: None,
         };
-        
+
         // Test connectivity if configured
         if diagnostic.config_status == ConfigStatus::Configured {
             diagnostic.connectivity_status = self.test_provider_connectivity(config).await?;
-            
+
             if detailed && diagnostic.connectivity_status == ConnectivityStatus::Connected {
                 diagnostic.performance = self.measure_provider_performance(config).await?;
             }
         }
-        
+
         // Generate issues
         diagnostic.issues = self.generate_provider_issues(&diagnostic);
-        
+
         Ok(diagnostic)
     }
-    
+
     /// Check configuration status
     fn check_config_status(&self, config: &ProviderConfig) -> ConfigStatus {
         if config.base_url.is_empty() || config.model.is_empty() {
             ConfigStatus::NotConfigured
-        } else if config.api_key.is_none() && config.provider_type != "lmstudio" && config.provider_type != "ollama" {
+        } else if config.api_key.is_none()
+            && config.provider_type != "lmstudio"
+            && config.provider_type != "ollama"
+        {
             ConfigStatus::PartiallyConfigured
         } else {
             ConfigStatus::Configured
         }
     }
-    
+
     /// Test provider connectivity
-    async fn test_provider_connectivity(&self, config: &ProviderConfig) -> Result<ConnectivityStatus> {
+    async fn test_provider_connectivity(
+        &self,
+        config: &ProviderConfig,
+    ) -> Result<ConnectivityStatus> {
         let timeout_duration = Duration::from_millis(self.config.connectivity_timeout_ms);
-        
+
         let result = timeout(timeout_duration, async {
             // Simple connectivity test
             self.ping_provider(config).await
-        }).await;
-        
+        })
+        .await;
+
         match result {
             Ok(Ok(_)) => Ok(ConnectivityStatus::Connected),
             Ok(Err(_)) => Ok(ConnectivityStatus::Error),
             Err(_) => Ok(ConnectivityStatus::Timeout),
         }
     }
-    
+
     /// Ping provider for connectivity test
     async fn ping_provider(&self, config: &ProviderConfig) -> Result<()> {
         let client = reqwest::Client::builder()
@@ -807,13 +825,16 @@ impl DiagnosticsEngine {
             )
         }
     }
-    
+
     /// Measure provider performance
-    async fn measure_provider_performance(&self, _config: &ProviderConfig) -> Result<ProviderPerformance> {
+    async fn measure_provider_performance(
+        &self,
+        _config: &ProviderConfig,
+    ) -> Result<ProviderPerformance> {
         // Implementation would run actual performance tests
         Ok(ProviderPerformance::default())
     }
-    
+
     /// Get sanitized configuration details
     fn get_sanitized_config_details(&self, config: &ProviderConfig) -> ProviderConfigDetails {
         let api_key_status = if config.api_key.is_some() {
@@ -821,7 +842,7 @@ impl DiagnosticsEngine {
         } else {
             ApiKeyStatus::Missing
         };
-        
+
         ProviderConfigDetails {
             base_url: Some(config.base_url.clone()),
             model: Some(config.model.clone()),
@@ -831,11 +852,11 @@ impl DiagnosticsEngine {
             proxy_configured: config.proxy_url.is_some(),
         }
     }
-    
+
     /// Generate provider issues
     fn generate_provider_issues(&self, diagnostic: &ProviderDiagnostic) -> Vec<ProviderIssue> {
         let mut issues = Vec::new();
-        
+
         // Configuration issues
         match diagnostic.config_status {
             ConfigStatus::NotConfigured => {
@@ -843,9 +864,15 @@ impl DiagnosticsEngine {
                     severity: IssueSeverity::Critical,
                     category: IssueCategory::Configuration,
                     message: "Provider not configured".to_string(),
-                    description: "The provider is missing required configuration parameters".to_string(),
-                    fix_suggestion: "Configure the provider with base URL, model, and API key".to_string(),
-                    config_keys: vec!["base_url".to_string(), "model".to_string(), "api_key".to_string()],
+                    description: "The provider is missing required configuration parameters"
+                        .to_string(),
+                    fix_suggestion: "Configure the provider with base URL, model, and API key"
+                        .to_string(),
+                    config_keys: vec![
+                        "base_url".to_string(),
+                        "model".to_string(),
+                        "api_key".to_string(),
+                    ],
                     error_code: Some("PROV_NOT_CONFIGURED".to_string()),
                 });
             }
@@ -855,7 +882,8 @@ impl DiagnosticsEngine {
                     category: IssueCategory::Configuration,
                     message: "Provider partially configured".to_string(),
                     description: "The provider is missing some optional configuration".to_string(),
-                    fix_suggestion: "Add missing configuration parameters for full functionality".to_string(),
+                    fix_suggestion: "Add missing configuration parameters for full functionality"
+                        .to_string(),
                     config_keys: vec!["api_key".to_string()],
                     error_code: Some("PROV_PARTIAL_CONFIG".to_string()),
                 });
@@ -873,7 +901,7 @@ impl DiagnosticsEngine {
             }
             _ => {}
         }
-        
+
         // Connectivity issues
         match diagnostic.connectivity_status {
             ConnectivityStatus::Disconnected => {
@@ -911,29 +939,29 @@ impl DiagnosticsEngine {
             }
             _ => {}
         }
-        
+
         issues
     }
-    
+
     /// Run system diagnostics
     async fn run_system_diagnostics(&self) -> Result<SystemDiagnostic> {
         Ok(SystemDiagnostic::default())
     }
-    
+
     /// Run validation diagnostics
     async fn run_validation_diagnostics(&self) -> Result<ValidationDiagnostic> {
         Ok(ValidationDiagnostic::default())
     }
-    
+
     /// Run benchmarks
     async fn run_benchmarks(&self) -> Result<BenchmarkResults> {
         Ok(BenchmarkResults::default())
     }
-    
+
     /// Generate recommendations
     fn generate_recommendations(&self, results: &DiagnosticResults) -> Vec<Recommendation> {
         let mut recommendations = Vec::new();
-        
+
         // Provider recommendations
         for (name, provider) in &results.providers {
             if provider.config_status != ConfigStatus::Configured {
@@ -952,7 +980,7 @@ impl DiagnosticsEngine {
                     effort: EffortLevel::Low,
                 });
             }
-            
+
             if provider.connectivity_status != ConnectivityStatus::Connected {
                 recommendations.push(Recommendation {
                     priority: RecommendationPriority::High,
@@ -970,16 +998,16 @@ impl DiagnosticsEngine {
                 });
             }
         }
-        
+
         recommendations
     }
-    
+
     /// Calculate overall health status
     fn calculate_overall_status(&self, results: &DiagnosticResults) -> HealthStatus {
         let mut critical_count = 0;
         let mut error_count = 0;
         let mut warning_count = 0;
-        
+
         // Count issues by severity
         for provider in results.providers.values() {
             for issue in &provider.issues {
@@ -991,7 +1019,7 @@ impl DiagnosticsEngine {
                 }
             }
         }
-        
+
         // Determine overall status
         if critical_count > 0 {
             HealthStatus::Critical
@@ -1003,7 +1031,7 @@ impl DiagnosticsEngine {
             HealthStatus::Healthy
         }
     }
-    
+
     /// Generate error summary
     fn generate_error_summary(&self, results: &DiagnosticResults) -> ErrorSummary {
         let mut total_errors = 0;
@@ -1011,26 +1039,28 @@ impl DiagnosticsEngine {
         let mut errors_by_category = HashMap::new();
         let mut error_counts: HashMap<String, usize> = HashMap::new();
         let mut critical_errors = Vec::new();
-        
+
         for provider in results.providers.values() {
             for issue in &provider.issues {
                 if issue.severity >= IssueSeverity::Error {
                     total_errors += 1;
                     *errors_by_severity.entry(issue.severity).or_insert(0) += 1;
-                    *errors_by_category.entry(format!("{:?}", issue.category)).or_insert(0) += 1;
+                    *errors_by_category
+                        .entry(format!("{:?}", issue.category))
+                        .or_insert(0) += 1;
                     *error_counts.entry(issue.message.clone()).or_insert(0) += 1;
-                    
+
                     if issue.severity == IssueSeverity::Critical {
                         critical_errors.push(issue.message.clone());
                     }
                 }
             }
         }
-        
+
         let mut most_common_errors: Vec<(String, usize)> = error_counts.into_iter().collect();
         most_common_errors.sort_by(|a, b| b.1.cmp(&a.1));
         most_common_errors.truncate(5);
-        
+
         ErrorSummary {
             total_errors,
             errors_by_severity,
@@ -1039,13 +1069,13 @@ impl DiagnosticsEngine {
             critical_errors,
         }
     }
-    
+
     /// Get provider configurations
     fn get_provider_configs(&self) -> Result<Vec<ProviderConfig>> {
         // Implementation would read from config files and environment
         Ok(vec![])
     }
-    
+
     /// Collect environment information
     async fn collect_environment_info(&self) -> Result<EnvironmentInfo> {
         Ok(EnvironmentInfo {
@@ -1053,8 +1083,8 @@ impl DiagnosticsEngine {
             arch: std::env::consts::ARCH.to_string(),
             prometheos_version: env!("CARGO_PKG_VERSION").to_string(),
             rust_version: "1.70.0".to_string(), // Would get actual version
-            available_memory_mb: 8192, // Would get actual value
-            available_disk_gb: 100, // Would get actual value
+            available_memory_mb: 8192,          // Would get actual value
+            available_disk_gb: 100,             // Would get actual value
             network_status: NetworkStatus::Unknown, // Would check actual status
         })
     }
@@ -1191,7 +1221,7 @@ impl Default for ErrorSummary {
 /// P1-Issue8: Main diagnostics command handler
 pub async fn handle_diagnostics_command(args: DiagnosticsArgs) -> Result<()> {
     let engine = DiagnosticsEngine::new();
-    
+
     match args.command {
         DiagnosticsCommand::Provider(provider_args) => {
             handle_provider_diagnostics(provider_args, &engine).await?;
@@ -1206,7 +1236,7 @@ pub async fn handle_diagnostics_command(args: DiagnosticsArgs) -> Result<()> {
             handle_full_diagnostics(full_args, &engine).await?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -1216,18 +1246,18 @@ async fn handle_provider_diagnostics(
     engine: &DiagnosticsEngine,
 ) -> Result<()> {
     let results = engine.run_provider_diagnostics(args.detailed).await?;
-    
+
     match args.format {
         OutputFormat::Text => {
             println!("Provider Diagnostics Results:");
             println!("============================");
-            
+
             for (name, provider) in results {
                 println!("\nProvider: {}", name);
                 println!("  Type: {}", provider.provider_type);
                 println!("  Config Status: {:?}", provider.config_status);
                 println!("  Connectivity: {:?}", provider.connectivity_status);
-                
+
                 if !provider.issues.is_empty() {
                     println!("  Issues:");
                     for issue in &provider.issues {
@@ -1246,7 +1276,7 @@ async fn handle_provider_diagnostics(
             println!("{}", serde_yaml::to_string(&results)?);
         }
     }
-    
+
     Ok(())
 }
 
@@ -1256,7 +1286,7 @@ async fn handle_system_diagnostics(
     engine: &DiagnosticsEngine,
 ) -> Result<()> {
     let results = engine.run_system_diagnostics().await?;
-    
+
     match args.format {
         OutputFormat::Text => {
             println!("System Diagnostics Results:");
@@ -1273,7 +1303,7 @@ async fn handle_system_diagnostics(
             println!("{}", serde_yaml::to_string(&results)?);
         }
     }
-    
+
     Ok(())
 }
 
@@ -1283,7 +1313,7 @@ async fn handle_validation_diagnostics(
     engine: &DiagnosticsEngine,
 ) -> Result<()> {
     let results = engine.run_validation_diagnostics().await?;
-    
+
     match args.format {
         OutputFormat::Text => {
             println!("Validation Diagnostics Results:");
@@ -1291,7 +1321,10 @@ async fn handle_validation_diagnostics(
             println!("Overall Health: {:?}", results.health);
             println!("Runtime Tools: {}", results.runtime_tools.len());
             println!("Cache Enabled: {}", results.cache_status.enabled);
-            println!("Docker Available: {}", results.sandbox_status.docker_available);
+            println!(
+                "Docker Available: {}",
+                results.sandbox_status.docker_available
+            );
         }
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&results)?);
@@ -1300,7 +1333,7 @@ async fn handle_validation_diagnostics(
             println!("{}", serde_yaml::to_string(&results)?);
         }
     }
-    
+
     Ok(())
 }
 
@@ -1309,35 +1342,40 @@ async fn handle_full_diagnostics(
     args: FullDiagnosticsArgs,
     engine: &DiagnosticsEngine,
 ) -> Result<()> {
-    let results = engine.run_full_diagnostics(args.detailed, args.benchmark).await?;
-    
+    let results = engine
+        .run_full_diagnostics(args.detailed, args.benchmark)
+        .await?;
+
     match args.format {
         OutputFormat::Text => {
             println!("Full Diagnostics Results:");
             println!("========================");
             println!("Overall Status: {:?}", results.overall_status);
             println!("Timestamp: {}", results.timestamp);
-            
+
             println!("\nEnvironment:");
             println!("  OS: {}", results.environment.os);
             println!("  Architecture: {}", results.environment.arch);
-            println!("  PrometheOS Version: {}", results.environment.prometheos_version);
-            
+            println!(
+                "  PrometheOS Version: {}",
+                results.environment.prometheos_version
+            );
+
             println!("\nProviders ({}):", results.providers.len());
             for (name, provider) in &results.providers {
                 println!("  {}: {:?}", name, provider.config_status);
             }
-            
+
             println!("\nSystem Health: {:?}", results.system.health);
             println!("Validation Health: {:?}", results.validation.health);
-            
+
             if !results.recommendations.is_empty() {
                 println!("\nRecommendations:");
                 for rec in &results.recommendations {
                     println!("  [{:?}] {}", rec.priority, rec.title);
                 }
             }
-            
+
             if results.error_summary.total_errors > 0 {
                 println!("\nError Summary:");
                 println!("  Total Errors: {}", results.error_summary.total_errors);
@@ -1353,6 +1391,6 @@ async fn handle_full_diagnostics(
             println!("{}", serde_yaml::to_string(&results)?);
         }
     }
-    
+
     Ok(())
 }

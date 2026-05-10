@@ -82,14 +82,7 @@ fn test_trajectory_record_step_with_tools() {
         error_details: None,
     }];
 
-    trajectory.record_step_with_tools(
-        "search",
-        2000,
-        tool_calls,
-        tool_results,
-        vec![],
-        Some(150),
-    );
+    trajectory.record_step_with_tools("search", 2000, tool_calls, tool_results, vec![], Some(150));
 
     assert_eq!(trajectory.steps.len(), 1);
     assert_eq!(trajectory.steps[0].tool_calls.len(), 1);
@@ -161,7 +154,10 @@ fn test_tool_call_record_creation() {
 
     assert_eq!(record.tool, "cargo");
     assert_eq!(record.input_summary, "run tests");
-    assert_eq!(record.full_input, Some("cargo test --package mycrate".to_string()));
+    assert_eq!(
+        record.full_input,
+        Some("cargo test --package mycrate".to_string())
+    );
 }
 
 // ============================================================================
@@ -194,7 +190,10 @@ fn test_tool_result_record_failure() {
     };
 
     assert!(!record.success);
-    assert_eq!(record.error_details, Some("assertion failed at line 42".to_string()));
+    assert_eq!(
+        record.error_details,
+        Some("assertion failed at line 42".to_string())
+    );
 }
 
 // ============================================================================
@@ -358,14 +357,7 @@ fn test_trajectory_with_tool_interactions() {
         },
     ];
 
-    trajectory.record_step_with_tools(
-        "edit",
-        3000,
-        tool_calls,
-        tool_results,
-        vec![],
-        Some(500),
-    );
+    trajectory.record_step_with_tools("edit", 3000, tool_calls, tool_results, vec![], Some(500));
 
     assert_eq!(trajectory.steps[0].tool_calls.len(), 2);
     assert_eq!(trajectory.steps[0].tool_results.len(), 2);

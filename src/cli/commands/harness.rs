@@ -99,24 +99,27 @@ enum HarnessSubcommand {
 impl HarnessCommand {
     pub async fn execute(self) -> Result<()> {
         match self.command {
-            HarnessSubcommand::Run { task, mode, repo, format } => {
-                execute_run(task, mode, repo, format).await
-            }
-            HarnessSubcommand::Inspect { execution_id, evidence } => {
-                execute_inspect(execution_id, evidence).await
-            }
-            HarnessSubcommand::DryRun { task, repo } => {
-                execute_dry_run(task, repo).await
-            }
-            HarnessSubcommand::Apply { execution_id, assist, force } => {
-                execute_apply(execution_id, assist, force).await
-            }
-            HarnessSubcommand::Rollback { execution_id, force } => {
-                execute_rollback(execution_id, force).await
-            }
-            HarnessSubcommand::Status => {
-                execute_status().await
-            }
+            HarnessSubcommand::Run {
+                task,
+                mode,
+                repo,
+                format,
+            } => execute_run(task, mode, repo, format).await,
+            HarnessSubcommand::Inspect {
+                execution_id,
+                evidence,
+            } => execute_inspect(execution_id, evidence).await,
+            HarnessSubcommand::DryRun { task, repo } => execute_dry_run(task, repo).await,
+            HarnessSubcommand::Apply {
+                execution_id,
+                assist,
+                force,
+            } => execute_apply(execution_id, assist, force).await,
+            HarnessSubcommand::Rollback {
+                execution_id,
+                force,
+            } => execute_rollback(execution_id, force).await,
+            HarnessSubcommand::Status => execute_status().await,
         }
     }
 }
@@ -145,7 +148,8 @@ async fn execute_run(
         patch_provider: None,
         provider_context: None,
         progress_callback: None,
-        validation_failure_policy: prometheos_lite::harness::ValidationFailurePolicy::RollbackAutomatically,
+        validation_failure_policy:
+            prometheos_lite::harness::ValidationFailurePolicy::RollbackAutomatically,
         sandbox_policy: Some(prometheos_lite::harness::SandboxPolicy::from_mode(mode)),
     }
     .with_config_provider()?;
@@ -171,11 +175,7 @@ async fn execute_dry_run(task: String, repo: Option<PathBuf>) -> Result<()> {
 }
 
 /// P2-014: Execute harness apply command
-async fn execute_apply(
-    execution_id: String,
-    assist: bool,
-    force: bool,
-) -> Result<()> {
+async fn execute_apply(execution_id: String, assist: bool, force: bool) -> Result<()> {
     let _ = (assist, force);
     bail!(
         "Harness apply requires a persisted execution store and rollback metadata; execution '{}' is not available in the standalone CLI context",
@@ -205,17 +205,22 @@ async fn execute_status() -> Result<()> {
     println!("  prometheos harness dry-run \"<task>\" - Dry-run without applying");
     println!("  prometheos harness apply --execution-id <id>  - Apply patches");
     println!("  prometheos harness rollback --execution-id <id> - Rollback changes");
-    
+
     Ok(())
 }
 
 fn parse_harness_mode(mode: &str) -> Result<prometheos_lite::harness::mode_policy::HarnessMode> {
     match mode.to_lowercase().replace('_', "-").as_str() {
-        "review" | "review-only" | "dry-run" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::ReviewOnly),
+        "review" | "review-only" | "dry-run" => {
+            Ok(prometheos_lite::harness::mode_policy::HarnessMode::ReviewOnly)
+        }
         "assisted" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::Assisted),
         "auto" | "autonomous" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::Autonomous),
         "benchmark" => Ok(prometheos_lite::harness::mode_policy::HarnessMode::Benchmark),
-        other => bail!("Invalid harness mode '{}'. Expected review-only, assisted, autonomous, or benchmark", other),
+        other => bail!(
+            "Invalid harness mode '{}'. Expected review-only, assisted, autonomous, or benchmark",
+            other
+        ),
     }
 }
 
@@ -237,10 +242,11 @@ fn print_execution_result(
             println!("Failures: {}", result.failures.len());
             println!("Evidence entries: {}", result.evidence_log.entries.len());
         }
-        other => bail!("Unsupported output format '{}'. Expected text or json", other),
+        other => bail!(
+            "Unsupported output format '{}'. Expected text or json",
+            other
+        ),
     }
 
     Ok(())
 }
-
-

@@ -9,13 +9,8 @@
 //! - Evidence trace
 
 use crate::harness::{
-    edit_protocol::EditOperation,
-    evidence::{EvidenceEntry, EvidenceEntryKind, EvidenceLog},
-    execution_loop::HarnessExecutionResult,
-    failure::FailureKind,
-    review::ReviewIssue,
-    risk::{RiskAssessment, RiskLevel},
-    validation::ValidationResult,
+    evidence::EvidenceEntry, execution_loop::HarnessExecutionResult, failure::FailureKind,
+    risk::RiskLevel,
 };
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +117,9 @@ pub fn generate_patch_report(result: &HarnessExecutionResult) -> PatchReport {
 
     // Collect changed files
     let changed_files = if let Some(ref patch) = result.patch_result {
-        patch.changed_files.iter()
+        patch
+            .changed_files
+            .iter()
             .map(|path| FileChange {
                 path: path.display().to_string(),
                 operation: "modified".into(),
@@ -151,8 +148,16 @@ pub fn generate_patch_report(result: &HarnessExecutionResult) -> PatchReport {
         ValidationSummary {
             passed: val.passed(),
             commands_run: val.command_results.len(),
-            commands_passed: val.command_results.iter().filter(|r| r.exit_code == Some(0)).count(),
-            commands_failed: val.command_results.iter().filter(|r| r.exit_code != Some(0)).count(),
+            commands_passed: val
+                .command_results
+                .iter()
+                .filter(|r| r.exit_code == Some(0))
+                .count(),
+            commands_failed: val
+                .command_results
+                .iter()
+                .filter(|r| r.exit_code != Some(0))
+                .count(),
             duration_ms: val.duration_ms,
             cached: val.cached,
         }
@@ -172,16 +177,35 @@ pub fn generate_patch_report(result: &HarnessExecutionResult) -> PatchReport {
         level: result.risk_assessment.level.clone(),
         level_string: format!("{:?}", result.risk_assessment.level),
         requires_approval: result.risk_assessment.requires_approval,
-        reasons: result.risk_assessment.reasons.iter()
+        reasons: result
+            .risk_assessment
+            .reasons
+            .iter()
             .map(|r| r.description.clone())
             .collect(),
     };
 
     // Review summary
-    let critical = result.review_issues.iter().filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Critical)).count();
-    let high = result.review_issues.iter().filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::High)).count();
-    let medium = result.review_issues.iter().filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Medium)).count();
-    let low = result.review_issues.iter().filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Low)).count();
+    let critical = result
+        .review_issues
+        .iter()
+        .filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Critical))
+        .count();
+    let high = result
+        .review_issues
+        .iter()
+        .filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::High))
+        .count();
+    let medium = result
+        .review_issues
+        .iter()
+        .filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Medium))
+        .count();
+    let low = result
+        .review_issues
+        .iter()
+        .filter(|i| matches!(i.severity, crate::harness::review::ReviewSeverity::Low))
+        .count();
 
     let review = ReviewSummary {
         issues_found: result.review_issues.len(),
@@ -208,7 +232,14 @@ pub fn generate_patch_report(result: &HarnessExecutionResult) -> PatchReport {
     let summary = format!(
         "Patch execution {} with {} files changed, {} validation commands run ({} passed). \
          Risk level: {:?}. Review: {} critical, {} high issues.",
-        if matches!(result.completion_decision, crate::harness::completion::CompletionDecision::Complete) { "completed" } else { "blocked" },
+        if matches!(
+            result.completion_decision,
+            crate::harness::completion::CompletionDecision::Complete
+        ) {
+            "completed"
+        } else {
+            "blocked"
+        },
         diff_stats.files_changed,
         validation.commands_run,
         validation.commands_passed,
@@ -244,7 +275,10 @@ pub fn generate_markdown_report(report: &PatchReport) -> String {
     let mut md = String::new();
 
     md.push_str(&format!("# {}\n\n", report.title));
-    md.push_str(&format!("**Work Context:** `{}`\n\n", report.work_context_id));
+    md.push_str(&format!(
+        "**Work Context:** `{}`\n\n",
+        report.work_context_id
+    ));
 
     // Summary
     md.push_str("## Summary\n\n");
@@ -268,19 +302,54 @@ pub fn generate_markdown_report(report: &PatchReport) -> String {
 
     // Diff Stats
     md.push_str("## Diff Statistics\n\n");
-    md.push_str(&format!("- **Files changed:** {}\n", report.diff_stats.files_changed));
-    md.push_str(&format!("- **Insertions:** {}\n", report.diff_stats.insertions));
-    md.push_str(&format!("- **Deletions:** {}\n", report.diff_stats.deletions));
+    md.push_str(&format!(
+        "- **Files changed:** {}\n",
+        report.diff_stats.files_changed
+    ));
+    md.push_str(&format!(
+        "- **Insertions:** {}\n",
+        report.diff_stats.insertions
+    ));
+    md.push_str(&format!(
+        "- **Deletions:** {}\n",
+        report.diff_stats.deletions
+    ));
     md.push('\n');
 
     // Validation
     md.push_str("## Validation\n\n");
-    md.push_str(&format!("**Status:** {}\n\n", if report.validation.passed { "✅ PASSED" } else { "❌ FAILED" }));
-    md.push_str(&format!("- **Commands run:** {}\n", report.validation.commands_run));
-    md.push_str(&format!("- **Passed:** {}\n", report.validation.commands_passed));
-    md.push_str(&format!("- **Failed:** {}\n", report.validation.commands_failed));
-    md.push_str(&format!("- **Duration:** {}ms\n", report.validation.duration_ms));
-    md.push_str(&format!("- **Cached:** {}\n", if report.validation.cached { "Yes" } else { "No" }));
+    md.push_str(&format!(
+        "**Status:** {}\n\n",
+        if report.validation.passed {
+            "✅ PASSED"
+        } else {
+            "❌ FAILED"
+        }
+    ));
+    md.push_str(&format!(
+        "- **Commands run:** {}\n",
+        report.validation.commands_run
+    ));
+    md.push_str(&format!(
+        "- **Passed:** {}\n",
+        report.validation.commands_passed
+    ));
+    md.push_str(&format!(
+        "- **Failed:** {}\n",
+        report.validation.commands_failed
+    ));
+    md.push_str(&format!(
+        "- **Duration:** {}ms\n",
+        report.validation.duration_ms
+    ));
+    md.push_str(&format!(
+        "- **Cached:** {}\n",
+        if report.validation.cached {
+            "Yes"
+        } else {
+            "No"
+        }
+    ));
     md.push('\n');
 
     // Risk
@@ -291,8 +360,18 @@ pub fn generate_markdown_report(report: &PatchReport) -> String {
         RiskLevel::High => "🟠",
         RiskLevel::Critical => "🔴",
     };
-    md.push_str(&format!("**Level:** {} {:?}\n\n", risk_emoji, report.risk.level));
-    md.push_str(&format!("**Requires Approval:** {}\n\n", if report.risk.requires_approval { "Yes" } else { "No" }));
+    md.push_str(&format!(
+        "**Level:** {} {:?}\n\n",
+        risk_emoji, report.risk.level
+    ));
+    md.push_str(&format!(
+        "**Requires Approval:** {}\n\n",
+        if report.risk.requires_approval {
+            "Yes"
+        } else {
+            "No"
+        }
+    ));
     if !report.risk.reasons.is_empty() {
         md.push_str("**Reasons:**\n");
         for reason in &report.risk.reasons {
@@ -303,7 +382,10 @@ pub fn generate_markdown_report(report: &PatchReport) -> String {
 
     // Review
     md.push_str("## Code Review\n\n");
-    md.push_str(&format!("**Issues Found:** {}\n\n", report.review.issues_found));
+    md.push_str(&format!(
+        "**Issues Found:** {}\n\n",
+        report.review.issues_found
+    ));
     md.push_str(&format!("- 🔴 Critical: {}\n", report.review.critical));
     md.push_str(&format!("- 🟠 High: {}\n", report.review.high));
     md.push_str(&format!("- 🟡 Medium: {}\n", report.review.medium));
@@ -312,8 +394,22 @@ pub fn generate_markdown_report(report: &PatchReport) -> String {
 
     // Rollback
     md.push_str("## Rollback Status\n\n");
-    md.push_str(&format!("**Checkpoint Created:** {}\n", if report.rollback.checkpoint_created { "Yes" } else { "No" }));
-    md.push_str(&format!("**Rolled Back:** {}\n", if report.rollback.rolled_back { "Yes" } else { "No" }));
+    md.push_str(&format!(
+        "**Checkpoint Created:** {}\n",
+        if report.rollback.checkpoint_created {
+            "Yes"
+        } else {
+            "No"
+        }
+    ));
+    md.push_str(&format!(
+        "**Rolled Back:** {}\n",
+        if report.rollback.rolled_back {
+            "Yes"
+        } else {
+            "No"
+        }
+    ));
     if let Some(ref reason) = report.rollback.rollback_reason {
         md.push_str(&format!("**Reason:** {}\n", reason));
     }
@@ -325,10 +421,22 @@ pub fn generate_markdown_report(report: &PatchReport) -> String {
 
     // Metrics
     md.push_str("## Execution Metrics\n\n");
-    md.push_str(&format!("- **Total Duration:** {}ms\n", report.metrics.total_duration_ms));
-    md.push_str(&format!("- **Repo Analysis:** {}ms\n", report.metrics.repo_analysis_ms));
-    md.push_str(&format!("- **Patch Generation:** {}ms\n", report.metrics.patch_generation_ms));
-    md.push_str(&format!("- **Validation:** {}ms\n", report.metrics.validation_ms));
+    md.push_str(&format!(
+        "- **Total Duration:** {}ms\n",
+        report.metrics.total_duration_ms
+    ));
+    md.push_str(&format!(
+        "- **Repo Analysis:** {}ms\n",
+        report.metrics.repo_analysis_ms
+    ));
+    md.push_str(&format!(
+        "- **Patch Generation:** {}ms\n",
+        report.metrics.patch_generation_ms
+    ));
+    md.push_str(&format!(
+        "- **Validation:** {}ms\n",
+        report.metrics.validation_ms
+    ));
     md.push_str(&format!("- **Steps:** {}\n", report.metrics.step_count));
 
     md

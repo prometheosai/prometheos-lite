@@ -112,10 +112,12 @@ fn test_disable_unimplemented_check() {
     let result = ci.check_repository(dir.path()).unwrap();
 
     assert!(result.passed);
-    assert!(result
-        .violations
-        .iter()
-        .all(|v| v.pattern_name != "unimplemented"));
+    assert!(
+        result
+            .violations
+            .iter()
+            .all(|v| v.pattern_name != "unimplemented")
+    );
 }
 
 #[test]
@@ -134,8 +136,10 @@ fn test_disable_debug_print_check() {
     let result = ci.check_repository(dir.path()).unwrap();
 
     assert!(result.passed);
-    assert!(result
-        .violations
-        .iter()
-        .all(|v| v.pattern_name != "debug_print"));
+    assert!(
+        result
+            .violations
+            .iter()
+            .all(|v| v.pattern_name != "debug_print")
+    );
 }
