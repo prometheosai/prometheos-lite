@@ -970,11 +970,14 @@ impl ReplicationManager {
         let replica_nodes: Vec<_> = nodes.values()
             .filter(|node| matches!(node.role, NodeRole::Secondary))
             .collect();
+
+        if !replica_nodes.is_empty() {
+            ensure_remote_replication_enabled("replicate_to_replicas")?;
+        }
         
         for node in replica_nodes {
             // Replicate to replica node
             debug!("Replicating to replica node: {}", node.node_id);
-            // In a real implementation, this would send the data to the remote node
         }
         
         Ok(())
@@ -982,11 +985,18 @@ impl ReplicationManager {
     
     pub async fn replicate_to_all(&self, key: String, value: serde_json::Value, ttl_sec: Option<u64>) -> Result<()> {
         let nodes = self.cluster_nodes.read().await;
+        let target_count = nodes
+            .values()
+            .filter(|node| node.node_id != self.get_current_node_id())
+            .count();
+
+        if target_count > 0 {
+            ensure_remote_replication_enabled("replicate_to_all")?;
+        }
         
         for node in nodes.values() {
             if node.node_id != self.get_current_node_id() {
                 debug!("Replicating to node: {}", node.node_id);
-                // In a real implementation, this would send the data to the remote node
             }
         }
         
@@ -997,11 +1007,18 @@ impl ReplicationManager {
         let nodes = self.cluster_nodes.read().await;
         let required_nodes = (self.config.replication_factor / 2) + 1;
         let mut success_count = 0;
+
+        let target_count = nodes
+            .values()
+            .filter(|node| node.node_id != self.get_current_node_id())
+            .count();
+        if target_count > 0 {
+            ensure_remote_replication_enabled("replicate_quorum")?;
+        }
         
         for node in nodes.values() {
             if node.node_id != self.get_current_node_id() {
                 debug!("Replicating to node for quorum: {}", node.node_id);
-                // In a real implementation, this would send the data to the remote node
                 success_count += 1;
                 
                 if success_count >= required_nodes {
@@ -1025,10 +1042,13 @@ impl ReplicationManager {
         use rand::seq::SliceRandom;
         node_list.shuffle(&mut rand::thread_rng());
         node_list.truncate(3); // Gossip to 3 random nodes
+
+        if !node_list.is_empty() {
+            ensure_remote_replication_enabled("gossip_update")?;
+        }
         
         for node_id in node_list {
             debug!("Gossiping to node: {}", node_id);
-            // In a real implementation, this would send the data to the remote node
         }
         
         Ok(())
@@ -1036,11 +1056,17 @@ impl ReplicationManager {
     
     pub async fn replicate_delete(&self, key: &str) -> Result<()> {
         let nodes = self.cluster_nodes.read().await;
+        let target_count = nodes
+            .values()
+            .filter(|node| node.node_id != self.get_current_node_id())
+            .count();
+        if target_count > 0 {
+            ensure_remote_replication_enabled("replicate_delete")?;
+        }
         
         for node in nodes.values() {
             if node.node_id != self.get_current_node_id() {
                 debug!("Replicating delete to node: {}", node.node_id);
-                // In a real implementation, this would send the delete to the remote node
             }
         }
         
@@ -1049,11 +1075,17 @@ impl ReplicationManager {
     
     pub async fn replicate_clear(&self) -> Result<()> {
         let nodes = self.cluster_nodes.read().await;
+        let target_count = nodes
+            .values()
+            .filter(|node| node.node_id != self.get_current_node_id())
+            .count();
+        if target_count > 0 {
+            ensure_remote_replication_enabled("replicate_clear")?;
+        }
         
         for node in nodes.values() {
             if node.node_id != self.get_current_node_id() {
                 debug!("Replicating clear to node: {}", node.node_id);
-                // In a real implementation, this would send the clear to the remote node
             }
         }
         
@@ -1067,10 +1099,12 @@ impl ReplicationManager {
             .collect();
         
         let mut values = Vec::new();
+        if !replica_nodes.is_empty() {
+            ensure_remote_replication_enabled("get_replica_values")?;
+        }
         
         for node in replica_nodes {
             debug!("Getting value from replica node: {}", node.node_id);
-            // In a real implementation, this would get the value from the remote node
             // Return None when no distributed peer result is available
             values.push(None);
         }
@@ -1081,6 +1115,20 @@ impl ReplicationManager {
     fn get_current_node_id(&self) -> String {
         // This would be stored in the manager
         "current_node".to_string()
+    }
+}
+
+fn ensure_remote_replication_enabled(operation: &str) -> Result<()> {
+    let enabled = std::env::var("PROMETHEOS_ENABLE_REMOTE_REPLICATION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if enabled {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Remote replication operation '{}' requested but PROMETHEOS_ENABLE_REMOTE_REPLICATION is not enabled",
+            operation
+        ))
     }
 }
 
