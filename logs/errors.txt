@@ -1,132 +1,10 @@
+    Blocking waiting for file lock on build directory
     Checking prometheos-lite v0.1.0 (E:\Projects\PrometheOS-Lite)
-error: 6 positional arguments in format string, but there are 5 arguments
-   --> src\harness\reproduction.rs:507:25
+error: cannot find macro `bail` in this scope
+   --> src\harness\attempt_pool.rs:323:13
     |
-507 |         r#"// Test for: {}
-    |                         ^^
-508 | // Failure: {}
-    |             ^^
-509 | // Symbol: {} in {:?}
-    |            ^^    ^^^^
-...
-513 |     println!("Testing {}", "{}");
-    |                       ^^    ^^
-...
-516 |         req.task,
-    |         --------
-517 |         req.failure_description,
-    |         -----------------------
-518 |         symbol.name,
-    |         -----------
-519 |         symbol.file_path,
-    |         ----------------
-520 |         symbol.name
-    |         -----------
-
-error[E0432]: unresolved import `crate::harness::repo_intelligence::SymbolInfo`
- --> src\harness\reproduction.rs:4:38
-  |
-4 |     repo_intelligence::{RepoContext, SymbolInfo},
-  |                                      ^^^^^^^^^^ no `SymbolInfo` in `harness::repo_intelligence`
-
-error[E0432]: unresolved import `completion::CompletionEvaluation`
-  --> src\harness\mod.rs:42:104
-   |
-42 | ...letion, CompletionEvaluator, CompletionEvaluation, PatchEvidence, ValidationEvidence, ReviewEvidence, RiskEvidence, VerificationE...
-   |                                 ^^^^^^^^^^^^^^^^^^^^ no `CompletionEvaluation` in `harness::completion`
-   |
-help: a similar name exists in the module
-   |
-42 - pub use completion::{CompletionDecision, CompletionEvidence, evaluate_completion, CompletionEvaluator, CompletionEvaluation, PatchEvidence, ValidationEvidence, ReviewEvidence, RiskEvidence, VerificationEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence, format_completion_decision, create_evidence_from_components};
-42 + pub use completion::{CompletionDecision, CompletionEvidence, evaluate_completion, CompletionEvaluator, CompletionEvaluator, PatchEvidence, ValidationEvidence, ReviewEvidence, RiskEvidence, VerificationEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence, format_completion_decision, create_evidence_from_components};
-   |
-
-error[E0433]: cannot find module or crate `lazy_static` in this scope
-   --> src\harness\validation.rs:147:1
-    |
-147 | lazy_static::lazy_static! {
-    | ^^^^^^^^^^^ use of unresolved module or unlinked crate `lazy_static`
-
-error[E0433]: cannot find module or crate `flate2` in this scope
-   --> src\harness\artifacts.rs:201:35
-    |
-201 |                 let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    |                                   ^^^^^^ use of unresolved module or unlinked crate `flate2`
-    |
-    = help: if you wanted to use a crate named `flate2`, use `cargo add flate2` to add it to your `Cargo.toml`
-
-error[E0433]: cannot find module or crate `flate2` in this scope
-   --> src\harness\artifacts.rs:201:77
-    |
-201 |                 let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    |                                                                             ^^^^^^ use of unresolved module or unlinked crate `flate2`
-    |
-    = help: if you wanted to use a crate named `flate2`, use `cargo add flate2` to add it to your `Cargo.toml`
-
-error[E0433]: cannot find module or crate `brotli` in this scope
-   --> src\harness\artifacts.rs:210:34
-    |
-210 |                 let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 11, 22);
-    |                                  ^^^^^^ use of unresolved module or unlinked crate `brotli`
-    |
-    = help: if you wanted to use a crate named `brotli`, use `cargo add brotli` to add it to your `Cargo.toml`
-
-error[E0433]: cannot find module or crate `flate2` in this scope
-   --> src\harness\artifacts.rs:224:35
-    |
-224 |                 let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
-    |                                   ^^^^^^ use of unresolved module or unlinked crate `flate2`
-    |
-    = help: if you wanted to use a crate named `flate2`, use `cargo add flate2` to add it to your `Cargo.toml`
-
-error[E0433]: cannot find module or crate `brotli` in this scope
-   --> src\harness\artifacts.rs:237:34
-    |
-237 |                 let mut reader = brotli::Decompressor::new(compressed.as_slice(), 4096);
-    |                                  ^^^^^^ use of unresolved module or unlinked crate `brotli`
-    |
-    = help: if you wanted to use a crate named `brotli`, use `cargo add brotli` to add it to your `Cargo.toml`
-
-error[E0106]: missing lifetime specifier
-   --> src\harness\repo_intelligence.rs:428:58
-    |
-428 | fn find_child_by_kind(node: &Node, kind: &str) -> Option<Node> {
-    |                             -----        ----            ^^^^ expected named lifetime parameter
-    |
-    = help: this function's return type contains a borrowed value, but the signature does not say whether it is borrowed from one of `node`'s 2 lifetimes or `kind`
-help: consider introducing a named lifetime parameter
-    |
-428 | fn find_child_by_kind<'a>(node: &'a Node<'a>, kind: &'a str) -> Option<Node<'a>> {
-    |                      ++++        ++     ++++         ++                    ++++
-
-error[E0425]: cannot find type `Path` in this scope
-   --> src\harness\edit_protocol.rs:471:26
-    |
-471 | fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
-    |                          ^^^^ not found in this scope
-    |
-help: consider importing this struct
-    |
-  1 + use std::path::Path;
-    |
-
-error[E0425]: cannot find value `database_risk` in this scope
-   --> src\harness\semantic_diff.rs:829:13
-    |
-829 |             database_risk,
-    |             ^^^^^^^^^^^^^ not found in this scope
-
-error[E0425]: cannot find value `dependency_risk` in this scope
-   --> src\harness\semantic_diff.rs:830:13
-    |
-830 |             dependency_risk,
-    |             ^^^^^^^^^^^^^^^ not found in this scope
-
-error[E0425]: cannot find value `GLOBAL_CACHE` in this scope
-   --> src\harness\validation.rs:156:53
-    |
-156 |     run_validation_with_cache(root, plan, sandbox, &GLOBAL_CACHE).await
-    |                                                     ^^^^^^^^^^^^ not found in this scope
+323 |             bail!("Git diff failed: {}", stderr);
+    |             ^^^^
 
 warning: unused imports: `WorkContextService` and `WorkContext`
   --> src\api\work_contexts.rs:17:5
@@ -368,6 +246,22 @@ warning: unused import: `std::path::Path`
 6 | use std::path::Path;
   |     ^^^^^^^^^^^^^^^
 
+warning: unused imports: `HarnessExecutionResult`, `ValidationFailurePolicy`, `ValidationTarget`, `apply_patch_temp_only`, `dry_run_patch`, `mode_policy::HarnessMode`, and `trajectory::Trajectory`
+  --> src\harness\attempt_pool.rs:9:47
+   |
+ 9 |     execution_loop::{HarnessExecutionRequest, HarnessExecutionResult, ValidationFailurePolicy},
+   |                                               ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+10 |     file_control::{FilePolicy, FileSet},
+11 |     mode_policy::HarnessMode,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+12 |     patch_applier::{PatchResult, apply_patch_temp_only, dry_run_patch},
+   |                                  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+...
+18 |     temp_workspace::{TempWorkspace, ValidationTarget},
+   |                                     ^^^^^^^^^^^^^^^^
+19 |     trajectory::Trajectory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
 warning: unused import: `Path`
  --> src\harness\benchmark.rs:7:17
   |
@@ -381,40 +275,70 @@ warning: unused import: `Duration`
   |                 ^^^^^^^^
 
 warning: unused import: `std::collections::HashMap`
-  --> src\harness\completion.rs:12:5
-   |
-12 | use std::collections::HashMap;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+ --> src\harness\completion.rs:8:5
+  |
+8 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `Context`
- --> src\harness\environment.rs:1:22
+ --> src\harness\environment.rs:1:14
   |
-1 | use anyhow::{Result, Context};
-  |                      ^^^^^^^
+1 | use anyhow::{Context, Result};
+  |              ^^^^^^^
 
 warning: unused import: `process::Command`
- --> src\harness\environment.rs:7:5
+ --> src\harness\environment.rs:3:49
   |
-7 |     process::Command,
-  |     ^^^^^^^^^^^^^^^^
+3 | use std::{collections::HashMap, fs, path::Path, process::Command};
+  |                                                 ^^^^^^^^^^^^^^^^
 
-warning: unused imports: `Duration` and `collections::HashMap`
-  --> src\harness\execution_loop.rs:24:5
+warning: unused imports: `RiskLevel`, `edit_protocol::EditOperation`, and `failure::FailureKind`
+ --> src\harness\evidence.rs:5:5
+  |
+5 |     edit_protocol::EditOperation,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+6 |     failure::FailureKind,
+  |     ^^^^^^^^^^^^^^^^^^^^
+...
+9 |     risk::{RiskAssessment, RiskLevel},
+  |                            ^^^^^^^^^
+
+warning: unused imports: `EvidenceEntryKind`, `PatchCandidate as ProviderCandidate`, `PatchProviderContext`, `RiskEstimate`, `SelectionCriteria`, `SelectionEngine`, `apply_patch`, `create_validation_target`, and `generate_completion_artifact`
+  --> src\harness\execution_loop.rs:5:9
    |
-24 |     collections::HashMap,
-   |     ^^^^^^^^^^^^^^^^^^^^
-25 |     path::PathBuf,
-26 |     time::{Duration, Instant},
+ 5 |         generate_completion_artifact,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+16 |     evidence::{EvidenceEntryKind, EvidenceLog},
+   |                ^^^^^^^^^^^^^^^^^
+...
+22 |         PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
+   |                                      ^^^^^^^^^^^
+...
+25 |         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
+   |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+26 |         PatchProvider, PatchProviderContext, RiskEstimate,
+   |                        ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+...
+33 |         PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine, SelectionPhase,
+   |                                               ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+...
+36 |     temp_workspace::{TempWorkspace, ValidationTarget, create_validation_target},
+   |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src\harness\execution_loop.rs:47:12
+   |
+47 |     time::{Duration, Instant},
    |            ^^^^^^^^
 
 warning: unused imports: `PatchResult` and `edit_protocol::EditOperation`
- --> src\harness\failure.rs:2:35
+ --> src\harness\failure.rs:2:5
   |
-2 |     patch_applier::{PatchFailure, PatchResult},
-  |                                   ^^^^^^^^^^^
-3 |     validation::{CommandResult, ValidationResult, ValidationCategory},
-4 |     edit_protocol::EditOperation,
+2 |     edit_protocol::EditOperation,
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+3 |     patch_applier::{PatchFailure, PatchResult},
+  |                                   ^^^^^^^^^^^
 
 warning: unused import: `anyhow::Result`
  --> src\harness\failure.rs:6:5
@@ -423,22 +347,22 @@ warning: unused import: `anyhow::Result`
   |     ^^^^^^^^^^^^^^
 
 warning: unused import: `self`
- --> src\harness\file_control.rs:7:10
+ --> src\harness\file_control.rs:8:10
   |
-7 |     io::{self, Read},
+8 |     io::{self, Read},
   |          ^^^^
 
 warning: unused import: `std::collections::HashSet`
- --> src\harness\git_checkpoint.rs:5:5
+ --> src\harness\git_checkpoint.rs:4:5
   |
-5 | use std::collections::HashSet;
+4 | use std::collections::HashSet;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `Context`
- --> src\harness\knowledge_cache.rs:1:22
+ --> src\harness\knowledge_cache.rs:1:14
   |
-1 | use anyhow::{Result, Context};
-  |                      ^^^^^^^
+1 | use anyhow::{Context, Result};
+  |              ^^^^^^^
 
 warning: unused import: `Instant`
  --> src\harness\knowledge_cache.rs:8:22
@@ -470,17 +394,49 @@ warning: unused import: `Duration`
 7 | use std::time::{Duration, Instant};
   |                 ^^^^^^^^
 
+warning: unused import: `TracerProvider`
+   --> src\harness\observability.rs:317:40
+    |
+317 |     use opentelemetry::trace::{Tracer, TracerProvider};
+    |                                        ^^^^^^^^^^^^^^
+
+warning: unused import: `warn`
+   --> src\harness\observability.rs:323:39
+    |
+323 |     use tracing::{debug, error, info, warn, info_span};
+    |                                       ^^^^
+
+warning: unused import: `opentelemetry::trace::TraceContextExt`
+   --> src\harness\observability.rs:436:13
+    |
+436 |         use opentelemetry::trace::TraceContextExt;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 warning: unused imports: `assert_delete_allowed` and `assert_rename_allowed`
- --> src\harness\patch_applier.rs:3:57
+ --> src\harness\patch_applier.rs:6:30
   |
-3 |     file_control::{FilePolicy, FileSet, normalize_path, assert_delete_allowed, assert_rename_allowed},
-  |                                                         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+6 |         FilePolicy, FileSet, assert_delete_allowed, assert_rename_allowed, resolve_repo_path,
+  |                              ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `io::Write`
-  --> src\harness\patch_applier.rs:11:5
+  --> src\harness\patch_applier.rs:15:5
    |
-11 |     io::Write,
+15 |     io::Write,
    |     ^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\harness\patch_provider.rs:10:5
+   |
+10 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ReviewReport` and `validation::ValidationResult`
+  --> src\harness\patch_provider.rs:17:27
+   |
+17 |     review::{ReviewIssue, ReviewReport},
+   |                           ^^^^^^^^^^^^
+18 |     validation::ValidationResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `HashMap` and `HashSet`
  --> src\harness\permissions.rs:6:24
@@ -506,44 +462,71 @@ warning: unused imports: `Duration` and `SystemTime`
 8 | use std::time::{Duration, SystemTime};
   |                 ^^^^^^^^  ^^^^^^^^^^
 
+warning: unused imports: `AggregatePatchProvider`, `AttemptOutcome`, `AttemptRecord`, `GenerateRequest`, `GenerateResponse`, `HeuristicPatchProvider`, `LlmPatchProvider`, `PatchFailure`, `ProviderCandidate`, `ProviderCapabilities`, `RepairRequest as ProviderRepairRequest`, `RepairResponse`, `RepairStrategy as ProviderRepairStrategy`, `RiskEstimate`, `RollbackHandle`, `SearchReplaceEdit`, `WholeFileEdit`, and `repo_intelligence::RepoMap`
+  --> src\harness\repair_loop.rs:2:36
+   |
+ 2 |     edit_protocol::{EditOperation, SearchReplaceEdit, WholeFileEdit},
+   |                                    ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+...
+ 8 |     patch_applier::{PatchFailure, PatchResult, RollbackHandle, apply_patch_with_rollback, dry_run_patch},
+   |                     ^^^^^^^^^^^^               ^^^^^^^^^^^^^^
+ 9 |     patch_provider::{
+10 |         AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
+   |         ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+11 |         HeuristicPatchProvider, LlmPatchProvider, PatchProvider, PatchProviderContext,
+   |         ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+12 |         ProviderCandidate, ProviderCapabilities, RepairRequest as ProviderRepairRequest,
+   |         ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 |         RepairResponse, RepairStrategy as ProviderRepairStrategy, RiskEstimate,
+   |         ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+14 |     },
+15 |     repo_intelligence::RepoMap,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Context` and `bail`
+  --> src\harness\repair_loop.rs:19:14
+   |
+19 | use anyhow::{Context, Result, bail};
+   |              ^^^^^^^          ^^^^
+
+warning: unused import: `Duration`
+  --> src\harness\repair_loop.rs:24:12
+   |
+24 |     time::{Duration, Instant},
+   |            ^^^^^^^^
+
 warning: unused import: `Context`
- --> src\harness\repo_intelligence.rs:1:22
+ --> src\harness\repo_intelligence.rs:1:14
   |
-1 | use anyhow::{Result, Context};
-  |                      ^^^^^^^
+1 | use anyhow::{Context, Result};
+  |              ^^^^^^^
 
 warning: unused import: `sync::Arc`
- --> src\harness\repo_intelligence.rs:7:5
+ --> src\harness\repo_intelligence.rs:8:5
   |
-7 |     sync::Arc,
+8 |     sync::Arc,
   |     ^^^^^^^^^
 
 warning: unused imports: `QueryCursor`, `Query`, and `Tree`
- --> src\harness\repo_intelligence.rs:9:33
-  |
-9 | use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
-  |                                 ^^^^^  ^^^^^^^^^^^  ^^^^
-
-warning: unused imports: `PatchFailure` and `SearchReplaceEdit`
- --> src\harness\repair_loop.rs:2:36
-  |
-2 |     edit_protocol::{EditOperation, SearchReplaceEdit, WholeFileEdit},
-  |                                    ^^^^^^^^^^^^^^^^^
-3 |     failure::{FailureDetails, FailureKind, FailureContext, classify_patch_failure, classify_validation_failure},
-4 |     patch_applier::{PatchResult, PatchFailure, apply_patch, dry_run_patch},
-  |                                  ^^^^^^^^^^^^
-
-warning: unused imports: `Context` and `bail`
- --> src\harness\repair_loop.rs:9:22
-  |
-9 | use anyhow::{Result, Context, bail};
-  |                      ^^^^^^^  ^^^^
-
-warning: unused import: `Duration`
-  --> src\harness\repair_loop.rs:14:12
+  --> src\harness\repo_intelligence.rs:11:33
    |
-14 |     time::{Duration, Instant},
-   |            ^^^^^^^^
+11 | use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
+   |                                 ^^^^^  ^^^^^^^^^^^  ^^^^
+
+warning: unused imports: `EvidenceEntryKind`, `EvidenceLog`, `RiskAssessment`, `edit_protocol::EditOperation`, `review::ReviewIssue`, and `validation::ValidationResult`
+  --> src\harness\report.rs:12:5
+   |
+12 |     edit_protocol::EditOperation,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 |     evidence::{EvidenceEntry, EvidenceEntryKind, EvidenceLog},
+   |                               ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+...
+16 |     review::ReviewIssue,
+   |     ^^^^^^^^^^^^^^^^^^^
+17 |     risk::{RiskAssessment, RiskLevel},
+   |            ^^^^^^^^^^^^^^
+18 |     validation::ValidationResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `edit_protocol::EditOperation`
  --> src\harness\reproduction.rs:2:5
@@ -552,10 +535,10 @@ warning: unused import: `edit_protocol::EditOperation`
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `Context` and `bail`
- --> src\harness\reproduction.rs:7:22
+ --> src\harness\reproduction.rs:7:14
   |
-7 | use anyhow::{Result, Context, bail};
-  |                      ^^^^^^^  ^^^^
+7 | use anyhow::{Context, Result, bail};
+  |              ^^^^^^^          ^^^^
 
 warning: unused imports: `HashMap` and `HashSet`
   --> src\harness\reproduction.rs:10:19
@@ -569,22 +552,28 @@ warning: unused import: `anyhow::Result`
 1 | use anyhow::Result;
   |     ^^^^^^^^^^^^^^
 
+warning: unused import: `CodeSymbol`
+    --> src\harness\review.rs:1046:49
+     |
+1046 |         use crate::harness::repo_intelligence::{CodeSymbol, SymbolKind};
+     |                                                 ^^^^^^^^^^
+
 warning: unused imports: `has_breaking_changes` and `requires_approval`
- --> src\harness\risk.rs:3:67
+ --> src\harness\risk.rs:4:55
   |
-3 |     semantic_diff::{SemanticDiff, RiskLevel as SemanticRiskLevel, requires_approval, has_breaking_changes},
-  |                                                                   ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+4 |         RiskLevel as SemanticRiskLevel, SemanticDiff, has_breaking_changes, requires_approval,
+  |                                                       ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
 
 warning: unused import: `anyhow::Result`
- --> src\harness\risk.rs:5:5
+ --> src\harness\risk.rs:7:5
   |
-5 | use anyhow::Result;
+7 | use anyhow::Result;
   |     ^^^^^^^^^^^^^^
 
 warning: unused import: `std::collections::HashMap`
- --> src\harness\risk.rs:7:5
+ --> src\harness\risk.rs:9:5
   |
-7 | use std::collections::HashMap;
+9 | use std::collections::HashMap;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `bail`
@@ -605,11 +594,23 @@ warning: unused import: `std::time::Duration`
 6 | use std::time::Duration;
   |     ^^^^^^^^^^^^^^^^^^^
 
+warning: unused import: `ValidationCategory`
+  --> src\harness\selection.rs:10:18
+   |
+10 |     validation::{ValidationCategory, ValidationResult},
+   |                  ^^^^^^^^^^^^^^^^^^
+
 warning: unused import: `HashMap`
  --> src\harness\semantic_diff.rs:3:24
   |
 3 | use std::collections::{HashMap, HashSet};
   |                        ^^^^^^^
+
+warning: unused imports: `Deserialize` and `Serialize`
+ --> src\harness\temp_workspace.rs:9:13
+  |
+9 | use serde::{Deserialize, Serialize};
+  |             ^^^^^^^^^^^  ^^^^^^^^^
 
 warning: unused import: `Path`
  --> src\harness\time_travel.rs:7:17
@@ -617,17 +618,41 @@ warning: unused import: `Path`
 7 | use std::path::{Path, PathBuf};
   |                 ^^^^
 
-warning: unused import: `PathBuf`
- --> src\harness\validation.rs:6:18
+warning: unused import: `error`
+ --> src\harness\trajectory.rs:7:22
   |
-6 |     path::{Path, PathBuf},
-  |                  ^^^^^^^
+7 | use tracing::{debug, error, info, warn};
+  |                      ^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\harness\trust_report.rs:16:5
+   |
+16 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src\harness\validation.rs:2:14
+  |
+2 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `crate::harness::runtime_tools::ToolType`
+  --> src\harness\validation.rs:79:13
+   |
+79 |         use crate::harness::runtime_tools::ToolType;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `anyhow::Result`
  --> src\harness\verification.rs:2:5
   |
 2 | use anyhow::Result;
   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ValidationFailurePolicy`
+ --> src\harness\work_integration.rs:6:62
+  |
+6 |             HarnessExecutionRequest, HarnessExecutionResult, ValidationFailurePolicy,
+  |                                                              ^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `Context`
  --> src\queue\mod.rs:6:14
@@ -715,1428 +740,320 @@ warning: unused import: `super::types::ApprovalPolicy`
 8 | use super::types::ApprovalPolicy;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0599]: the method `entry` exists for struct `HashMap<MetricType, Vec<f64>>`, but its trait bounds were not satisfied
-   --> src\harness\benchmark.rs:191:39
+warning: use of deprecated function `harness::patch_applier::apply_patch`: Use apply_patch_with_rollback for real repo patches, or apply_patch_temp_only for temp workspaces
+  --> src\harness\execution_loop.rs:22:38
+   |
+22 |         PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
+   |                                      ^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `harness::patch_provider::PatchCandidate`: Use ProviderCandidate instead
+  --> src\harness\execution_loop.rs:25:53
+   |
+25 |         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
+   |                                                     ^^^^^^^^^^^^^^
+
+warning: use of deprecated type alias `harness::sandbox::LocalSandboxRuntime`: Use LocalCommandRuntime instead
+  --> src\harness\execution_loop.rs:31:14
+   |
+31 |     sandbox::LocalSandboxRuntime,
+   |              ^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated type alias `harness::sandbox::LocalSandboxRuntime`: Use LocalCommandRuntime instead
+    --> src\harness\execution_loop.rs:1250:79
+     |
+1250 |             let r = run_validation(val_root, &fresh_plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
+     |                                                                               ^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `harness::file_control::normalize_path`: Use validate_repo_relative_path and resolve_repo_path instead
+   --> src\harness\file_control.rs:169:25
     |
- 43 | pub enum MetricType {
-    | ------------------- doesn't satisfy `MetricType: Hash`
+169 |         let full_path = normalize_path(&policy.repo_root, mentioned)?;
+    |                         ^^^^^^^^^^^^^^
+
+warning: use of deprecated function `harness::file_control::normalize_path`: Use validate_repo_relative_path and resolve_repo_path instead
+   --> src\harness\file_control.rs:723:28
+    |
+723 |     let normalized = match normalize_path(Path::new("."), path) {
+    |                            ^^^^^^^^^^^^^^
+
+warning: use of deprecated type alias `harness::sandbox::LocalSandboxRuntime`: Use LocalCommandRuntime instead
+  --> src\harness\repair_loop.rs:16:15
+   |
+16 |     sandbox::{LocalSandboxRuntime, SandboxRuntime},
+   |               ^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+  --> src\harness\repair_loop.rs:16:36
+   |
+16 |     sandbox::{LocalSandboxRuntime, SandboxRuntime},
+   |                                    ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\repair_loop.rs:609:19
+    |
+609 |     sandbox: &dyn SandboxRuntime,
+    |                   ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\repair_loop.rs:184:23
+    |
+184 |         sandbox: &dyn SandboxRuntime,
+    |                       ^^^^^^^^^^^^^^
+
+warning: use of deprecated type alias `harness::sandbox::LocalSandboxRuntime`: Use LocalCommandRuntime instead
+   --> src\harness\repair_loop.rs:260:21
+    |
+260 |                     LocalSandboxRuntime::default()
+    |                     ^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\repair_loop.rs:259:78
+    |
+259 |                 let sandbox_arc: std::sync::Arc<dyn crate::harness::sandbox::SandboxRuntime + Send + Sync> = std::sync::Arc::new(
+    |                                                                              ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+ --> src\harness\validation.rs:1:30
+  |
+1 | use crate::harness::sandbox::SandboxRuntime;
+  |                              ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\validation.rs:480:22
+    |
+480 |     sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
+    |                      ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\validation.rs:488:22
+    |
+488 |     sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
+    |                      ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\validation.rs:584:22
+    |
+584 |     sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
+    |                      ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\validation.rs:663:19
+    |
+663 |     sandbox: &dyn SandboxRuntime,
+    |                   ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\validation.rs:719:19
+    |
+719 |     sandbox: &dyn SandboxRuntime,
+    |                   ^^^^^^^^^^^^^^
+
+warning: use of deprecated trait `harness::sandbox::SandboxRuntime`: Use CommandRuntime instead. This is not true sandboxing.
+   --> src\harness\validation.rs:771:22
+    |
+771 |     sandbox: Arc<dyn SandboxRuntime + Send + Sync>,
+    |                      ^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `Box<dyn CommandRuntime>: SandboxRuntime` is not satisfied
+   --> src\harness\attempt_pool.rs:219:9
+    |
+219 |         Arc::new(sandbox_runtime),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `CommandRuntime` is not implemented for `Box<dyn CommandRuntime>`
+    |
+help: the following other types implement trait `CommandRuntime`
+   --> src\harness\sandbox.rs:293:1
+    |
+293 | impl CommandRuntime for LocalCommandRuntime {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `LocalCommandRuntime`
 ...
-191 |                         metric_values.entry(metric_type).or_insert_with(Vec::new).push(value);
-    |                                       ^^^^^ method cannot be called on `HashMap<MetricType, Vec<f64>>` due to unsatisfied trait bounds
+546 | impl CommandRuntime for DockerSandboxRuntime {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `DockerSandboxRuntime`
+note: required for `Box<dyn CommandRuntime>` to implement `SandboxRuntime`
+   --> src\harness\sandbox.rs:146:34
     |
-    = note: the following trait bounds were not satisfied:
-            `MetricType: Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-    |
- 43 + #[derive(Hash)]
- 44 | pub enum MetricType {
-    |
+146 | impl<T: CommandRuntime + ?Sized> SandboxRuntime for T {}
+    |         --------------           ^^^^^^^^^^^^^^     ^
+    |         |
+    |         unsatisfied trait bound introduced here
+    = note: required for the cast from `Arc<Box<dyn CommandRuntime>>` to `Arc<(dyn SandboxRuntime + std::marker::Send + std::marker::Sync + 'static)>`
 
-error[E0599]: the method `get` exists for struct `HashMap<MetricType, Vec<f64>>`, but its trait bounds were not satisfied
-   --> src\harness\benchmark.rs:198:64
+error[E0599]: no method named `context` found for enum `std::result::Result<T, E>` in the current scope
+   --> src\harness\attempt_pool.rs:312:10
     |
- 43 | pub enum MetricType {
-    | ------------------- doesn't satisfy `MetricType: Hash`
-...
-198 |                         if let Some(durations) = metric_values.get(&MetricType::Duration) {
-    |                                                                ^^^ method cannot be called on `HashMap<MetricType, Vec<f64>>` due to unsatisfied trait bounds
-    |
-    = note: the following trait bounds were not satisfied:
-            `MetricType: Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-    |
- 43 + #[derive(Hash)]
- 44 | pub enum MetricType {
-    |
-
-error[E0277]: the trait bound `MetricType: Hash` is not satisfied
-    --> src\harness\benchmark.rs:225:25
-     |
- 225 |                 metrics.insert(metric_type, stats);
-     |                         ^^^^^^ the trait `Hash` is not implemented for `MetricType`
-     |
-note: required by a bound in `HashMap::<K, V, S, A>::insert`
-    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:854:13
-     |
- 854 |     K: Eq + Hash,
-     |             ^^^^ required by this bound in `HashMap::<K, V, S, A>::insert`
-...
-1295 |     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-     |            ------ required by a bound in this associated function
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-     |
-  43 + #[derive(Hash)]
-  44 | pub enum MetricType {
-     |
-
-error[E0277]: the trait bound `MetricType: Hash` is not satisfied
-    --> src\harness\benchmark.rs:260:17
-     |
- 260 |         metrics.insert(MetricType::Duration, duration.as_millis() as f64);
-     |                 ^^^^^^ the trait `Hash` is not implemented for `MetricType`
-     |
-note: required by a bound in `HashMap::<K, V, S, A>::insert`
-    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:854:13
-     |
- 854 |     K: Eq + Hash,
-     |             ^^^^ required by this bound in `HashMap::<K, V, S, A>::insert`
-...
-1295 |     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-     |            ------ required by a bound in this associated function
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-     |
-  43 + #[derive(Hash)]
-  44 | pub enum MetricType {
-     |
-
-error[E0599]: the method `insert` exists for struct `HashMap<MetricType, f64>`, but its trait bounds were not satisfied
-   --> src\harness\benchmark.rs:265:21
-    |
- 43 | pub enum MetricType {
-    | ------------------- doesn't satisfy `MetricType: Hash`
-...
-265 |             metrics.insert(MetricType::Memory, memory);
-    |                     ^^^^^^
-    |
-    = note: the following trait bounds were not satisfied:
-            `MetricType: Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-    |
- 43 + #[derive(Hash)]
- 44 | pub enum MetricType {
-    |
-
-error[E0599]: the method `insert` exists for struct `HashMap<MetricType, f64>`, but its trait bounds were not satisfied
-   --> src\harness\benchmark.rs:268:21
-    |
- 43 | pub enum MetricType {
-    | ------------------- doesn't satisfy `MetricType: Hash`
-...
-268 |             metrics.insert(MetricType::Throughput, throughput);
-    |                     ^^^^^^
-    |
-    = note: the following trait bounds were not satisfied:
-            `MetricType: Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-    |
- 43 + #[derive(Hash)]
- 44 | pub enum MetricType {
-    |
-
-error[E0277]: the trait bound `RiskReason: From<&str>` is not satisfied
-   --> src\harness\execution_loop.rs:321:51
-    |
-321 |                 reasons: vec!["No edits proposed".into()],
-    |                                                   ^^^^ unsatisfied trait bound
-    |
-help: the trait `From<&str>` is not implemented for `RiskReason`
-   --> src\harness\risk.rs:19:1
-    |
- 19 | pub struct RiskReason {
-    | ^^^^^^^^^^^^^^^^^^^^^
-    = note: required for `&str` to implement `Into<RiskReason>`
-
-error[E0063]: missing fields `can_override` and `override_conditions` in initializer of `risk::RiskAssessment`
-   --> src\harness\execution_loop.rs:319:30
-    |
-319 |             risk_assessment: RiskAssessment {
-    |                              ^^^^^^^^^^^^^^ missing `can_override` and `override_conditions`
-
-error[E0277]: the trait bound `ConfidenceFactor: From<&str>` is not satisfied
-   --> src\harness\execution_loop.rs:326:60
-    |
-326 |                 factors: vec!["no provider edits supplied".into()],
-    |                                                            ^^^^ unsatisfied trait bound
-    |
-help: the trait `From<&str>` is not implemented for `ConfidenceFactor`
-   --> src\harness\confidence.rs:18:1
-    |
- 18 | pub struct ConfidenceFactor {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    = note: required for `&str` to implement `Into<ConfidenceFactor>`
-
-error[E0063]: missing fields `explanation` and `recommendation` in initializer of `ConfidenceScore`
-   --> src\harness\execution_loop.rs:324:25
-    |
-324 |             confidence: ConfidenceScore {
-    |                         ^^^^^^^^^^^^^^^ missing `explanation` and `recommendation`
-
-error[E0063]: missing fields `parallel` and `timeout_ms` in initializer of `ValidationPlan`
-   --> src\harness\execution_loop.rs:393:16
-    |
-393 |     let plan = ValidationPlan {
-    |                ^^^^^^^^^^^^^^ missing `parallel` and `timeout_ms`
-
-error[E0063]: missing fields `confidence_evidence`, `decision_factors`, `evidence_completeness` and 7 other fields in initializer of `CompletionEvidence`
-   --> src\harness\execution_loop.rs:459:20
-    |
-459 |     let evidence = CompletionEvidence {
-    |                    ^^^^^^^^^^^^^^^^^^ missing `confidence_evidence`, `decision_factors`, `evidence_completeness` and 7 other fields
-
-error[E0277]: the trait bound `harness::artifacts::ArtifactKind: From<&str>` is not satisfied
-   --> src\harness\execution_loop.rs:508:28
-    |
-508 |         kind: "completion".into(),
-    |                            ^^^^ unsatisfied trait bound
-    |
-help: the trait `From<&str>` is not implemented for `harness::artifacts::ArtifactKind`
-   --> src\harness\artifacts.rs:23:1
-    |
- 23 | pub enum ArtifactKind {
-    | ^^^^^^^^^^^^^^^^^^^^^
-    = note: required for `&str` to implement `Into<harness::artifacts::ArtifactKind>`
-
-error[E0063]: missing fields `compressed_content`, `compressed_size_bytes`, `compression` and 3 other fields in initializer of `HarnessArtifact`
-   --> src\harness\execution_loop.rs:507:27
-    |
-507 |     result.artifacts.push(HarnessArtifact {
-    |                           ^^^^^^^^^^^^^^^ missing `compressed_content`, `compressed_size_bytes`, `compression` and 3 other fields
-
-error[E0382]: borrow of partially moved value: `transaction`
-   --> src\harness\patch_applier.rs:134:52
-    |
-133 |             transaction_id: Some(transaction.id),
-    |                                  -------------- value partially moved here
-134 |             content_hashes: compute_content_hashes(&transaction),
-    |                                                    ^^^^^^^^^^^^ value borrowed here after partial move
-    |
-    = note: partial move occurs because `transaction.id` has type `std::string::String`, which does not implement the `Copy` trait
-
-error[E0382]: borrow of moved value: `full_path`
-    --> src\harness\repo_intelligence.rs:137:43
-     |
- 130 |         let full_path = root.join(f);
-     |             --------- move occurs because `full_path` has type `PathBuf`, which does not implement the `Copy` trait
-...
- 133 |                 path: full_path,
-     |                       --------- value moved here
-...
- 137 |                 language: detect_language(&full_path),
-     |                                           ^^^^^^^^^^ value borrowed here after move
-     |
-     = note: borrow occurs due to deref coercion to `std::path::Path`
-note: deref defined here
-    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\path.rs:2064:5
-     |
-2064 |     type Target = Path;
-     |     ^^^^^^^^^^^
-help: consider cloning the value if the performance cost is acceptable
-     |
- 133 |                 path: full_path.clone(),
-     |                                ++++++++
-
-error[E0599]: the method `entry` exists for struct `HashMap<RepairStrategy, u32>`, but its trait bounds were not satisfied
-   --> src\harness\repair_loop.rs:154:36
-    |
- 55 | pub enum RepairStrategy {
-    | ----------------------- doesn't satisfy `RepairStrategy: Hash`
-...
-154 |             *self.strategies_tried.entry(strategy).or_insert(0) += 1;
-    |                                    ^^^^^ method cannot be called on `HashMap<RepairStrategy, u32>` due to unsatisfied trait bounds
-    |
-    = note: the following trait bounds were not satisfied:
-            `RepairStrategy: Hash`
-help: consider annotating `RepairStrategy` with `#[derive(Hash)]`
-    |
- 55 + #[derive(Hash)]
- 56 | pub enum RepairStrategy {
-    |
-
-error[E0521]: borrowed data escapes outside of function
-   --> src\harness\validation.rs:241:22
-    |
-230 |       sandbox: &dyn SandboxRuntime,
-    |       -------  - let's call the lifetime of this reference `'1`
-    |       |
-    |       `sandbox` is a reference that is only valid in the function body
-...
-241 |           let handle = tokio::spawn(async move {
-    |  ______________________^
-242 | |             if let Some(cached) = cache.get(&cache_key).await {
-243 | |                 return (cmd, cached);
+303 |       let output = Command::new("git")
+    |  __________________-
+304 | |         .args([
+305 | |             "diff",
+306 | |             "--no-index",
 ...   |
-274 | |             (cmd, cmd_result)
-275 | |         });
-    | |          ^
-    | |          |
-    | |__________`sandbox` escapes the function body here
-    |            argument requires that `'1` must outlive `'static`
+311 | |         .output()
+312 | |         .context("Failed to run git diff --no-index")?;
+    | |         -^^^^^^^ method not found in `std::result::Result<std::process::Output, std::io::Error>`
+    | |_________|
+    |
+    |
+   ::: E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.102\src\lib.rs:618:8
+    |
+618 |       fn context<C>(self, context: C) -> Result<T, Error>
+    |          ------- the method is available for `std::result::Result<std::process::Output, std::io::Error>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Context` which provides `context` is implemented but not in scope; perhaps you want to import it
+    |
+  6 + use anyhow::Context;
+    |
 
-error[E0521]: borrowed data escapes outside of function
-   --> src\harness\validation.rs:241:22
+error[E0599]: no method named `context` found for enum `std::result::Result<T, E>` in the current scope
+   --> src\harness\attempt_pool.rs:319:18
     |
-231 |       cache: &ValidationCache,
-    |       -----  - let's call the lifetime of this reference `'2`
-    |       |
-    |       `cache` is a reference that is only valid in the function body
-...
-241 |           let handle = tokio::spawn(async move {
-    |  ______________________^
-242 | |             if let Some(cached) = cache.get(&cache_key).await {
-243 | |                 return (cmd, cached);
-...   |
-274 | |             (cmd, cmd_result)
-275 | |         });
-    | |          ^
-    | |          |
-    | |__________`cache` escapes the function body here
-    |            argument requires that `'2` must outlive `'static`
+318 |               return Ok(String::from_utf8(output.stdout)
+    |  _______________________-
+319 | |                 .context("Diff output is not valid UTF-8")?);
+    | |                 -^^^^^^^ method not found in `std::result::Result<std::string::String, FromUtf8Error>`
+    | |_________________|
+    |
+    |
+   ::: E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.102\src\lib.rs:618:8
+    |
+618 |       fn context<C>(self, context: C) -> Result<T, Error>
+    |          ------- the method is available for `std::result::Result<std::string::String, FromUtf8Error>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Context` which provides `context` is implemented but not in scope; perhaps you want to import it
+    |
+  6 + use anyhow::Context;
+    |
 
-error[E0063]: missing field `progress_callback` in initializer of `HarnessExecutionRequest`
-  --> src\harness\work_integration.rs:37:19
-   |
-37 |         let req = HarnessExecutionRequest {
-   |                   ^^^^^^^^^^^^^^^^^^^^^^^ missing `progress_callback`
+error[E0599]: no method named `context` found for enum `std::result::Result<T, E>` in the current scope
+   --> src\harness\attempt_pool.rs:328:10
+    |
+327 |       Ok(String::from_utf8(output.stdout)
+    |  ________-
+328 | |         .context("Diff output is not valid UTF-8")?)
+    | |         -^^^^^^^ method not found in `std::result::Result<std::string::String, FromUtf8Error>`
+    | |_________|
+    |
+    |
+   ::: E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.102\src\lib.rs:618:8
+    |
+618 |       fn context<C>(self, context: C) -> Result<T, Error>
+    |          ------- the method is available for `std::result::Result<std::string::String, FromUtf8Error>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Context` which provides `context` is implemented but not in scope; perhaps you want to import it
+    |
+  6 + use anyhow::Context;
+    |
 
-error[E0277]: `harness::artifacts::ArtifactKind` doesn't implement `std::fmt::Display`
-  --> src\harness\work_integration.rs:63:39
-   |
-63 |                 format!("harness-{}", h.kind),
-   |                                  --   ^^^^^^ `harness::artifacts::ArtifactKind` cannot be formatted with the default formatter
-   |                                  |
-   |                                  required by this formatting parameter
-   |
-help: the trait `std::fmt::Display` is not implemented for `harness::artifacts::ArtifactKind`
-  --> src\harness\artifacts.rs:23:1
-   |
-23 | pub enum ArtifactKind {
-   | ^^^^^^^^^^^^^^^^^^^^^
-   = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+error[E0609]: no field `repo_map` on type `RepoContext`
+   --> src\harness\execution_loop.rs:526:29
+    |
+526 |         repo_map: Some(repo.repo_map.clone()),
+    |                             ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `root`, `ranked_files`, `symbols`, `relationships`, `compressed_context` ... and 3 others
 
-error[E0599]: no method named `shutdown` found for struct `opentelemetry_sdk::trace::TracerProvider` in the current scope
-   --> src\flow\opentelemetry.rs:109:22
+error[E0609]: no field `repo_map` on type `RepoContext`
+   --> src\harness\execution_loop.rs:537:27
     |
-109 |             provider.shutdown()?;
-    |                      ^^^^^^^^ method not found in `opentelemetry_sdk::trace::TracerProvider`
+537 |         repo_files = repo.repo_map.files.len(),
+    |                           ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `root`, `ranked_files`, `symbols`, `relationships`, `compressed_context` ... and 3 others
 
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
-   --> src\flow\opentelemetry.rs:118:13
-    |
-118 |             provider.force_flush()?;
-    |             ^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `Vec<Result<(), TraceError>>`
-    |
-    = help: the nightly-only, unstable trait `Try` is not implemented for `Vec<Result<(), TraceError>>`
+warning: variable does not need to be mutable
+    --> src\harness\repo_intelligence.rs:1724:21
+     |
+1724 |         if let Some(mut c) = cache {
+     |                     ----^
+     |                     |
+     |                     help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-error[E0308]: mismatched types
-   --> src\harness\acceptance.rs:186:26
+warning: variable does not need to be mutable
+   --> src\harness\trajectory.rs:373:9
     |
-186 |             description: req.clone(),
-    |                          ^^^^^^^^^^^ expected `String`, found `&str`
+373 |     let mut steps_failed: usize = 0;
+    |         ----^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+error[E0609]: no field `validation_performed` on type `&ValidationResult`
+   --> src\harness\completion.rs:626:46
     |
-help: try using a conversion method
+626 |             all_phases_completed: validation.validation_performed && review.review_performed,
+    |                                              ^^^^^^^^^^^^^^^^^^^^ unknown field
     |
-186 -             description: req.clone(),
-186 +             description: req.to_string(),
+    = note: available fields are: `passed`, `command_results`, `errors`, `duration_ms`, `cached` ... and 2 others
+
+error[E0609]: no field `review_performed` on type `&ReviewReport`
+   --> src\harness\completion.rs:626:77
     |
+626 |             all_phases_completed: validation.validation_performed && review.review_performed,
+    |                                                                             ^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `issues`, `summary`, `passed`, `critical_count`, `high_count`, `ast_analysis_enabled`
+
+error[E0609]: no field `all_validations_passed` on type `&ValidationResult`
+   --> src\harness\completion.rs:627:44
+    |
+627 |             no_critical_errors: validation.all_validations_passed && review.review_passed,
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `passed`, `command_results`, `errors`, `duration_ms`, `cached` ... and 2 others
+
+error[E0609]: no field `review_passed` on type `&ReviewReport`
+   --> src\harness\completion.rs:627:77
+    |
+627 |             no_critical_errors: validation.all_validations_passed && review.review_passed,
+    |                                                                             ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `issues`, `summary`, `passed`, `critical_count`, `high_count`, `ast_analysis_enabled`
+
+error[E0609]: no field `validation_performed` on type `&ValidationResult`
+   --> src\harness\completion.rs:655:19
+    |
+655 |     if validation.validation_performed {
+    |                   ^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `passed`, `command_results`, `errors`, `duration_ms`, `cached` ... and 2 others
+
+error[E0609]: no field `review_performed` on type `&ReviewReport`
+   --> src\harness\completion.rs:664:15
+    |
+664 |     if review.review_performed {
+    |               ^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `issues`, `summary`, `passed`, `critical_count`, `high_count`, `ast_analysis_enabled`
+
+error[E0609]: no field `assessed` on type `&risk::RiskAssessment`
+   --> src\harness\completion.rs:673:13
+    |
+673 |     if risk.assessed {
+    |             ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `level`, `reasons`, `requires_approval`, `can_override`, `override_conditions`
 
 error[E0689]: can't call method `min` on ambiguous numeric type `{float}`
-   --> src\harness\acceptance.rs:339:20
+   --> src\harness\completion.rs:689:39
     |
-339 |         confidence.min(1.0)
-    |                    ^^^
-    |
-help: you must specify a type for this binding, like `f32`
-    |
-327 |         let mut confidence: f32 = 0.5;
-    |                           +++++
+689 |         (completeness / total_weight).min(1.0)
+    |                                       ^^^
 
-error[E0277]: the trait bound `ValueGenerator: Eq` is not satisfied
-   --> src\harness\adversarial_validation.rs:68:5
-    |
- 62 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    |                                                           -- in this derive macro expansion
-...
- 68 |     pub generator: ValueGenerator,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `Eq` is not implemented for `ValueGenerator`
-   --> src\harness\adversarial_validation.rs:90:1
-    |
- 90 | pub struct ValueGenerator {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `std::cmp::AssertParamIsEq`
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:379:31
-    |
-379 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
-    |                               ^^ required by this bound in `AssertParamIsEq`
-
-error[E0277]: the trait bound `EdgeCaseType: Hash` is not satisfied
-    --> src\harness\adversarial_validation.rs:157:28
-     |
- 157 |         edge_case_patterns.insert(EdgeCaseType::EmptyInput, vec![
-     |                            ^^^^^^ the trait `Hash` is not implemented for `EdgeCaseType`
-     |
-note: required by a bound in `HashMap::<K, V, S, A>::insert`
-    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:854:13
-     |
- 854 |     K: Eq + Hash,
-     |             ^^^^ required by this bound in `HashMap::<K, V, S, A>::insert`
-...
-1295 |     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-     |            ------ required by a bound in this associated function
-help: consider annotating `EdgeCaseType` with `#[derive(Hash)]`
-     |
-  30 + #[derive(Hash)]
-  31 | pub enum EdgeCaseType {
-     |
-
-error[E0599]: the method `insert` exists for struct `HashMap<EdgeCaseType, Vec<std::string::String>>`, but its trait bounds were not satisfied
-   --> src\harness\adversarial_validation.rs:164:28
-    |
- 30 | pub enum EdgeCaseType {
-    | --------------------- doesn't satisfy `EdgeCaseType: Hash`
-...
-164 |         edge_case_patterns.insert(EdgeCaseType::MaximumValue, vec![
-    |         -------------------^^^^^^
-    |
-    = note: the following trait bounds were not satisfied:
-            `EdgeCaseType: Hash`
-help: consider annotating `EdgeCaseType` with `#[derive(Hash)]`
-    |
- 30 + #[derive(Hash)]
- 31 | pub enum EdgeCaseType {
-    |
-
-error[E0599]: the method `insert` exists for struct `HashMap<EdgeCaseType, Vec<std::string::String>>`, but its trait bounds were not satisfied
-   --> src\harness\adversarial_validation.rs:170:28
-    |
- 30 | pub enum EdgeCaseType {
-    | --------------------- doesn't satisfy `EdgeCaseType: Hash`
-...
-170 |         edge_case_patterns.insert(EdgeCaseType::MinimumValue, vec![
-    |         -------------------^^^^^^
-    |
-    = note: the following trait bounds were not satisfied:
-            `EdgeCaseType: Hash`
-help: consider annotating `EdgeCaseType` with `#[derive(Hash)]`
-    |
- 30 + #[derive(Hash)]
- 31 | pub enum EdgeCaseType {
-    |
-
-error[E0599]: the method `insert` exists for struct `HashMap<EdgeCaseType, Vec<std::string::String>>`, but its trait bounds were not satisfied
-   --> src\harness\adversarial_validation.rs:176:28
-    |
- 30 | pub enum EdgeCaseType {
-    | --------------------- doesn't satisfy `EdgeCaseType: Hash`
-...
-176 |         edge_case_patterns.insert(EdgeCaseType::UnicodeEdge, vec![
-    |         -------------------^^^^^^
-    |
-    = note: the following trait bounds were not satisfied:
-            `EdgeCaseType: Hash`
-help: consider annotating `EdgeCaseType` with `#[derive(Hash)]`
-    |
- 30 + #[derive(Hash)]
- 31 | pub enum EdgeCaseType {
-    |
-
-error[E0599]: the method `insert` exists for struct `HashMap<EdgeCaseType, Vec<std::string::String>>`, but its trait bounds were not satisfied
-   --> src\harness\adversarial_validation.rs:184:28
-    |
- 30 | pub enum EdgeCaseType {
-    | --------------------- doesn't satisfy `EdgeCaseType: Hash`
-...
-184 |         edge_case_patterns.insert(EdgeCaseType::InvalidFormat, vec![
-    |         -------------------^^^^^^
-    |
-    = note: the following trait bounds were not satisfied:
-            `EdgeCaseType: Hash`
-help: consider annotating `EdgeCaseType` with `#[derive(Hash)]`
-    |
- 30 + #[derive(Hash)]
- 31 | pub enum EdgeCaseType {
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\adversarial_validation.rs:305:31
-    |
-305 |             if symbol.kind == "function" {
-    |                -----------    ^^^^^^^^^^ expected `SymbolKind`, found `&str`
-    |                |
-    |                expected because this is `SymbolKind`
-
-error[E0308]: mismatched types
-   --> src\harness\adversarial_validation.rs:309:80
-    |
-309 |                 all_edge_cases.extend(self.generate_edge_case_tests(func_name, signature, language));
-    |                                            ------------------------            ^^^^^^^^^ expected `&str`, found `&Option<String>`
-    |                                            |
-    |                                            arguments to this method are incorrect
-    |
-    = note: expected reference `&str`
-               found reference `&std::option::Option<std::string::String>`
-note: method defined here
-   --> src\harness\adversarial_validation.rs:193:12
-    |
-193 |     pub fn generate_edge_case_tests(
-    |            ^^^^^^^^^^^^^^^^^^^^^^^^
-...
-196 |         signature: &str,
-    |         ---------------
-
-error[E0308]: mismatched types
-   --> src\harness\adversarial_validation.rs:310:79
-    |
-310 |                 all_properties.extend(self.generate_property_tests(func_name, signature, language));
-    |                                            -----------------------            ^^^^^^^^^ expected `&str`, found `&Option<String>`
-    |                                            |
-    |                                            arguments to this method are incorrect
-    |
-    = note: expected reference `&str`
-               found reference `&std::option::Option<std::string::String>`
-note: method defined here
-   --> src\harness\adversarial_validation.rs:231:12
-    |
-231 |     pub fn generate_property_tests(
-    |            ^^^^^^^^^^^^^^^^^^^^^^^
-...
-234 |         signature: &str,
-    |         ---------------
-
-error[E0609]: no field `errors` on type `&HarnessExecutionResult`
-   --> src\harness\artifacts.rs:177:92
-    |
-177 |         let log_content = format!("Execution log for run {}\nErrors: {:?}", run_id, result.errors);
-    |                                                                                            ^^^^^^ unknown field
-    |
-    = note: available fields are: `work_context_id`, `repo_context`, `environment`, `file_set`, `acceptance` ... and 16 others
-
-error[E0609]: no field `duration_ms` on type `&HarnessExecutionResult`
-   --> src\harness\artifacts.rs:188:35
-    |
-188 |             "duration_ms": result.duration_ms,
-    |                                   ^^^^^^^^^^^ unknown field
-    |
-    = note: available fields are: `work_context_id`, `repo_context`, `environment`, `file_set`, `acceptance` ... and 16 others
-
-error[E0609]: no field `total_cost` on type `&HarnessExecutionResult`
-   --> src\harness\artifacts.rs:190:34
-    |
-190 |             "total_cost": result.total_cost,
-    |                                  ^^^^^^^^^^ unknown field
-    |
-    = note: available fields are: `work_context_id`, `repo_context`, `environment`, `file_set`, `acceptance` ... and 16 others
-
-error[E0433]: cannot find module or crate `zstd` in this scope
-   --> src\harness\artifacts.rs:206:20
-    |
-206 |                 Ok(zstd::encode_all(content.as_bytes(), 3)?)
-    |                    ^^^^ use of unresolved module or unlinked crate `zstd`
-    |
-help: there is a crate or module with a similar name
-    |
-206 -                 Ok(zstd::encode_all(content.as_bytes(), 3)?)
-206 +                 Ok(std::encode_all(content.as_bytes(), 3)?)
-    |
-
-error[E0433]: cannot find module or crate `zstd` in this scope
-   --> src\harness\artifacts.rs:231:36
-    |
-231 |                 let decompressed = zstd::decode_all(compressed.as_slice())?;
-    |                                    ^^^^ use of unresolved module or unlinked crate `zstd`
-    |
-help: there is a crate or module with a similar name
-    |
-231 -                 let decompressed = zstd::decode_all(compressed.as_slice())?;
-231 +                 let decompressed = std::decode_all(compressed.as_slice())?;
-    |
-
-error[E0277]: the trait bound `MetricType: Hash` is not satisfied
-    --> src\harness\benchmark.rs:89:18
-     |
-  89 |     pub metrics: HashMap<MetricType, MetricResult>,
-     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Hash` is not implemented for `MetricType`
-     |
-help: the trait `Deserialize<'_>` is implemented for `HashMap<K, V, S>`
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\impls.rs:1509:9
-     |
-1509 | /         impl<'de, K, V $(, $typaram)*> Deserialize<'de> for $ty<K, V $(, $typaram)*>
-1510 | |         where
-1511 | |             K: Deserialize<'de> $(+ $kbound1 $(+ $kbound2)*)*,
-1512 | |             V: Deserialize<'de>,
-1513 | |             $($typaram: $bound1 $(+ $bound2)*),*
-     | |___________________________________________^
-...
-1565 | / map_impl! {
-1566 | |     #[cfg(feature = "std")]
-1567 | |     #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
-1568 | |     HashMap<K: Eq + Hash, V, S: BuildHasher + Default>,
-1569 | |     map,
-1570 | |     HashMap::with_capacity_and_hasher(size_hint::cautious::<(K, V)>(map.size_hint()), S::default()),
-1571 | | }
-     | |_- in this macro invocation
-     = note: required for `HashMap<MetricType, MetricResult>` to implement `Deserialize<'_>`
-note: required by a bound in `next_element`
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\mod.rs:1771:12
-     |
-1769 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
-     |        ------------ required by a bound in this associated function
-1770 |     where
-1771 |         T: Deserialize<'de>,
-     |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
-     = note: this error originates in the macro `map_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-     |
-  43 + #[derive(Hash)]
-  44 | pub enum MetricType {
-     |
-
-error[E0277]: the trait bound `MetricType: Hash` is not satisfied
-    --> src\harness\benchmark.rs:89:18
-     |
-  89 |     pub metrics: HashMap<MetricType, MetricResult>,
-     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Hash` is not implemented for `MetricType`
-     |
-help: the trait `Deserialize<'_>` is implemented for `HashMap<K, V, S>`
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\impls.rs:1509:9
-     |
-1509 | /         impl<'de, K, V $(, $typaram)*> Deserialize<'de> for $ty<K, V $(, $typaram)*>
-1510 | |         where
-1511 | |             K: Deserialize<'de> $(+ $kbound1 $(+ $kbound2)*)*,
-1512 | |             V: Deserialize<'de>,
-1513 | |             $($typaram: $bound1 $(+ $bound2)*),*
-     | |___________________________________________^
-...
-1565 | / map_impl! {
-1566 | |     #[cfg(feature = "std")]
-1567 | |     #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
-1568 | |     HashMap<K: Eq + Hash, V, S: BuildHasher + Default>,
-1569 | |     map,
-1570 | |     HashMap::with_capacity_and_hasher(size_hint::cautious::<(K, V)>(map.size_hint()), S::default()),
-1571 | | }
-     | |_- in this macro invocation
-     = note: required for `HashMap<MetricType, MetricResult>` to implement `Deserialize<'_>`
-note: required by a bound in `next_value`
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\mod.rs:1916:12
-     |
-1914 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
-     |        ---------- required by a bound in this associated function
-1915 |     where
-1916 |         V: Deserialize<'de>,
-     |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
-     = note: this error originates in the macro `map_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-     |
-  43 + #[derive(Hash)]
-  44 | pub enum MetricType {
-     |
-
-error[E0277]: the trait bound `MetricType: Hash` is not satisfied
-    --> src\harness\benchmark.rs:82:35
-     |
-  82 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-     |                                   ^^^^^^^^^^^ the trait `Hash` is not implemented for `MetricType`
-     |
-help: the trait `Deserialize<'_>` is implemented for `HashMap<K, V, S>`
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\impls.rs:1509:9
-     |
-1509 | /         impl<'de, K, V $(, $typaram)*> Deserialize<'de> for $ty<K, V $(, $typaram)*>
-1510 | |         where
-1511 | |             K: Deserialize<'de> $(+ $kbound1 $(+ $kbound2)*)*,
-1512 | |             V: Deserialize<'de>,
-1513 | |             $($typaram: $bound1 $(+ $bound2)*),*
-     | |___________________________________________^
-...
-1565 | / map_impl! {
-1566 | |     #[cfg(feature = "std")]
-1567 | |     #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
-1568 | |     HashMap<K: Eq + Hash, V, S: BuildHasher + Default>,
-1569 | |     map,
-1570 | |     HashMap::with_capacity_and_hasher(size_hint::cautious::<(K, V)>(map.size_hint()), S::default()),
-1571 | | }
-     | |_- in this macro invocation
-     = note: required for `HashMap<MetricType, MetricResult>` to implement `Deserialize<'_>`
-note: required by a bound in `queue::_::_serde::__private228::de::missing_field`
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:26:8
-     |
-  24 | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
-     |        ------------- required by a bound in this function
-  25 | where
-  26 |     V: Deserialize<'de>,
-     |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
-     = note: this error originates in the derive macro `Deserialize` which comes from the expansion of the macro `map_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-     |
-  43 + #[derive(Hash)]
-  44 | pub enum MetricType {
-     |
-
-error[E0369]: binary operation `==` cannot be applied to type `HashMap<MetricType, MetricResult>`
-  --> src\harness\benchmark.rs:89:5
+warning: unused import: `PatchProvider`
+  --> src\harness\execution_loop.rs:26:9
    |
-82 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-   |                                                --------- in this derive macro expansion
-...
-89 |     pub metrics: HashMap<MetricType, MetricResult>,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-note: an implementation of `Hash` might be missing for `MetricType`
-  --> src\harness\benchmark.rs:43:1
-   |
-43 | pub enum MetricType {
-   | ^^^^^^^^^^^^^^^^^^^ must implement `Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-   |
-43 + #[derive(Hash)]
-44 | pub enum MetricType {
-   |
+26 |         PatchProvider, PatchProviderContext, RiskEstimate,
+   |         ^^^^^^^^^^^^^
 
-error[E0599]: the method `get` exists for struct `HashMap<MetricType, MetricResult>`, but its trait bounds were not satisfied
-   --> src\harness\benchmark.rs:369:61
-    |
- 43 | pub enum MetricType {
-    | ------------------- doesn't satisfy `MetricType: Hash`
-...
-369 |             if let Some(baseline_metric) = baseline.metrics.get(metric_type) {
-    |                                                             ^^^ method cannot be called on `HashMap<MetricType, MetricResult>` due to unsatisfied trait bounds
-    |
-    = note: the following trait bounds were not satisfied:
-            `MetricType: Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-    |
- 43 + #[derive(Hash)]
- 44 | pub enum MetricType {
-    |
-
-error[E0599]: the method `get` exists for struct `HashMap<MetricType, MetricResult>`, but its trait bounds were not satisfied
-   --> src\harness\benchmark.rs:435:47
-    |
- 43 | pub enum MetricType {
-    | ------------------- doesn't satisfy `MetricType: Hash`
-...
-435 |                     .filter_map(|r| r.metrics.get(&metric_type).map(|m| m.mean))
-    |                                               ^^^ method cannot be called on `HashMap<MetricType, MetricResult>` due to unsatisfied trait bounds
-    |
-    = note: the following trait bounds were not satisfied:
-            `MetricType: Hash`
-help: consider annotating `MetricType` with `#[derive(Hash)]`
-    |
- 43 + #[derive(Hash)]
- 44 | pub enum MetricType {
-    |
-
-error[E0599]: no variant or associated item named `ReviewOnly` found for enum `execution_loop::HarnessMode` in the current scope
-   --> src\harness\completion.rs:177:26
-    |
-177 |             HarnessMode::ReviewOnly => self.evaluate_review_only(evidence, &mut decision_factors),
-    |                          ^^^^^^^^^^ variant or associated item not found in `execution_loop::HarnessMode`
-    |
-   ::: src\harness\execution_loop.rs:50:1
-    |
- 50 | pub enum HarnessMode {
-    | -------------------- variant or associated item `ReviewOnly` not found for this enum
-
-error[E0599]: no variant or associated item named `Assisted` found for enum `execution_loop::HarnessMode` in the current scope
-   --> src\harness\completion.rs:178:26
-    |
-178 |             HarnessMode::Assisted => self.evaluate_assisted(evidence, &mut decision_factors),
-    |                          ^^^^^^^^ variant or associated item not found in `execution_loop::HarnessMode`
-    |
-   ::: src\harness\execution_loop.rs:50:1
-    |
- 50 | pub enum HarnessMode {
-    | -------------------- variant or associated item `Assisted` not found for this enum
-
-error[E0277]: `(dyn Fn(HarnessProgress) + std::marker::Send + Sync + 'static)` doesn't implement `std::fmt::Debug`
-  --> src\harness\execution_loop.rs:46:5
-   |
-30 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-   |          ----- in this derive macro expansion
-...
-46 |     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::fmt::Debug` is not implemented for `(dyn Fn(HarnessProgress) + std::marker::Send + Sync + 'static)`
-
-error[E0277]: the trait bound `dyn Fn(HarnessProgress) + std::marker::Send + Sync: Clone` is not satisfied
-  --> src\harness\execution_loop.rs:46:5
-   |
-30 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-   |                 ----- in this derive macro expansion
-...
-46 |     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `dyn Fn(HarnessProgress) + std::marker::Send + Sync`
-   |
-   = note: required for `Box<dyn Fn(HarnessProgress) + std::marker::Send + Sync>` to implement `Clone`
-   = note: 1 redundant requirement hidden
-   = note: required for `std::option::Option<Box<dyn Fn(HarnessProgress) + std::marker::Send + Sync>>` to implement `Clone`
-help: use parentheses to call this trait object
-   |
-46 |     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>(/* HarnessProgress */),
-   |                                                                              +++++++++++++++++++++++
-
-error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<Box<dyn Fn(HarnessProgress) + std::marker::Send + Sync>>`
-  --> src\harness\execution_loop.rs:46:5
-   |
-30 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-   |                                                --------- in this derive macro expansion
-...
-46 |     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error[E0599]: no variant or associated item named `Fatal` found for enum `FailureKind` in the current scope
-   --> src\harness\failure.rs:108:26
-    |
- 14 | pub enum FailureKind {
-    | -------------------- variant or associated item `Fatal` not found for this enum
-...
-108 |             FailureKind::Fatal => FailureSeverity::Fatal,
-    |                          ^^^^^ variant or associated item not found in `FailureKind`
-
-error[E0599]: no variant or associated item named `Critical` found for enum `FailureKind` in the current scope
-   --> src\harness\failure.rs:109:26
-    |
- 14 | pub enum FailureKind {
-    | -------------------- variant or associated item `Critical` not found for this enum
-...
-109 |             FailureKind::Critical => FailureSeverity::Critical,
-    |                          ^^^^^^^^ variant or associated item not found in `FailureKind`
-
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
-   --> src\harness\file_control.rs:217:24
-    |
-217 |     let is_sensitive = is_sensitive_file(path, policy)?;
-    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `bool`
-    |
-    = help: the nightly-only, unstable trait `Try` is not implemented for `bool`
-
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
-   --> src\harness\file_control.rs:218:24
-    |
-218 |     let is_generated = is_generated_file(path, policy)?;
-    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `bool`
-    |
-    = help: the nightly-only, unstable trait `Try` is not implemented for `bool`
-
-error[E0308]: mismatched types
-   --> src\harness\file_control.rs:281:12
-    |
-281 |     if let Err(e) = builder.add(&gitignore_path) {
-    |            ^^^^^^   ---------------------------- this expression has type `std::option::Option<ignore::Error>`
-    |            |
-    |            expected `Option<Error>`, found `Result<_, _>`
-    |
-    = note: expected enum `std::option::Option<ignore::Error>`
-               found enum `Result<_, _>`
-
-error[E0308]: mismatched types
-   --> src\harness\file_control.rs:288:20
-    |
-288 |             if let Err(e) = builder.add(global) {
-    |                    ^^^^^^   ------------------- this expression has type `std::option::Option<ignore::Error>`
-    |                    |
-    |                    expected `Option<Error>`, found `Result<_, _>`
-    |
-    = note: expected enum `std::option::Option<ignore::Error>`
-               found enum `Result<_, _>`
-
-error[E0308]: mismatched types
-   --> src\harness\git_checkpoint.rs:208:9
-    |
-207 |     pub fn stage_file(&self, file: &Path) -> Result<()> {
-    |                                              ---------- expected `Result<(), anyhow::Error>` because of return type
-208 |         self.run_git(&["add", &file.to_string_lossy()])
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<(), Error>`, found `Result<String, Error>`
-    |
-    = note: expected enum `Result<(), _>`
-               found enum `Result<std::string::String, _>`
-
-error[E0308]: mismatched types
-   --> src\harness\git_checkpoint.rs:212:9
-    |
-211 |     pub fn unstage_file(&self, file: &Path) -> Result<()> {
-    |                                                ---------- expected `Result<(), anyhow::Error>` because of return type
-212 |         self.run_git(&["reset", "HEAD", &file.to_string_lossy()])
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<(), Error>`, found `Result<String, Error>`
-    |
-    = note: expected enum `Result<(), _>`
-               found enum `Result<std::string::String, _>`
-
-error[E0689]: can't call method `min` on ambiguous numeric type `{float}`
-   --> src\harness\golden_paths.rs:552:27
-    |
-552 |             score = score.min(1.0);
-    |                           ^^^
-    |
-help: you must specify a type for this binding, like `f32`
-    |
-515 |             let mut score: f32 = 0.0;
-    |                          +++++
-
-error[E0658]: use of unstable library feature `str_as_str`
-   --> src\harness\repo_intelligence.rs:216:57
-    |
-216 |     let ts_lang: tree_sitter::Language = match language.as_str() {
-    |                                                         ^^^^^^
-    |
-    = note: see issue #130366 <https://github.com/rust-lang/rust/issues/130366> for more information
-
-error[E0308]: mismatched types
-    --> src\harness\repo_intelligence.rs:296:57
-     |
- 296 |                         if let Some(child) = body.child(i) {
-     |                                                   ----- ^ expected `u32`, found `usize`
-     |                                                   |
-     |                                                   arguments to this method are incorrect
-     |
-note: method defined here
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-0.26.8\binding_rust\lib.rs:1713:12
-     |
-1713 |     pub fn child(&self, i: u32) -> Option<Self> {
-     |            ^^^^^
-help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
-     |
- 296 |                         if let Some(child) = body.child(i.try_into().unwrap()) {
-     |                                                          ++++++++++++++++++++
-
-error[E0308]: mismatched types
-    --> src\harness\repo_intelligence.rs:422:41
-     |
- 422 |         if let Some(child) = node.child(i) {
-     |                                   ----- ^ expected `u32`, found `usize`
-     |                                   |
-     |                                   arguments to this method are incorrect
-     |
-note: method defined here
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-0.26.8\binding_rust\lib.rs:1713:12
-     |
-1713 |     pub fn child(&self, i: u32) -> Option<Self> {
-     |            ^^^^^
-help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
-     |
- 422 |         if let Some(child) = node.child(i.try_into().unwrap()) {
-     |                                          ++++++++++++++++++++
-
-error[E0308]: mismatched types
-    --> src\harness\repo_intelligence.rs:430:41
-     |
- 430 |         if let Some(child) = node.child(i) {
-     |                                   ----- ^ expected `u32`, found `usize`
-     |                                   |
-     |                                   arguments to this method are incorrect
-     |
-note: method defined here
-    --> E:\Rust\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-0.26.8\binding_rust\lib.rs:1713:12
-     |
-1713 |     pub fn child(&self, i: u32) -> Option<Self> {
-     |            ^^^^^
-help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
-     |
- 430 |         if let Some(child) = node.child(i.try_into().unwrap()) {
-     |                                          ++++++++++++++++++++
-
-error[E0599]: the method `get` exists for struct `HashMap<RepairStrategy, u32>`, but its trait bounds were not satisfied
-   --> src\harness\repair_loop.rs:217:53
-    |
- 55 | pub enum RepairStrategy {
-    | ----------------------- doesn't satisfy `RepairStrategy: Hash`
-...
-217 |             let times_tried = self.strategies_tried.get(&strategy).copied().unwrap_or(0);
-    |                                                     ^^^ method cannot be called on `HashMap<RepairStrategy, u32>` due to unsatisfied trait bounds
-    |
-    = note: the following trait bounds were not satisfied:
-            `RepairStrategy: Hash`
-help: consider annotating `RepairStrategy` with `#[derive(Hash)]`
-    |
- 55 + #[derive(Hash)]
- 56 | pub enum RepairStrategy {
-    |
-
-error[E0599]: the method `get` exists for struct `HashMap<RepairStrategy, u32>`, but its trait bounds were not satisfied
-   --> src\harness\repair_loop.rs:247:49
-    |
- 55 | pub enum RepairStrategy {
-    | ----------------------- doesn't satisfy `RepairStrategy: Hash`
-...
-247 |         let times_tried = self.strategies_tried.get(&strategy).copied().unwrap_or(0);
-    |                                                 ^^^ method cannot be called on `HashMap<RepairStrategy, u32>` due to unsatisfied trait bounds
-    |
-    = note: the following trait bounds were not satisfied:
-            `RepairStrategy: Hash`
-help: consider annotating `RepairStrategy` with `#[derive(Hash)]`
-    |
- 55 + #[derive(Hash)]
- 56 | pub enum RepairStrategy {
-    |
-
-error[E0277]: the trait bound `f32: Eq` is not satisfied
-   --> src\harness\reproduction.rs:38:5
-    |
- 33 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    |                                                           -- in this derive macro expansion
-...
- 38 |     pub reproduction_confidence: f32,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Eq` is not implemented for `f32`
-    |
-    = help: the following other types implement trait `Eq`:
-              i128
-              i16
-              i32
-              i64
-              i8
-              isize
-              u128
-              u16
-            and 4 others
-note: required by a bound in `std::cmp::AssertParamIsEq`
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:379:31
-    |
-379 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
-    |                               ^^ required by this bound in `AssertParamIsEq`
-
-error[E0277]: the trait bound `f32: Eq` is not satisfied
-   --> src\harness\reproduction.rs:47:5
-    |
- 44 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    |                                                           -- in this derive macro expansion
-...
- 47 |     pub confidence: f32,
-    |     ^^^^^^^^^^^^^^^^^^^ the trait `Eq` is not implemented for `f32`
-    |
-    = help: the following other types implement trait `Eq`:
-              i128
-              i16
-              i32
-              i64
-              i8
-              isize
-              u128
-              u16
-            and 4 others
-note: required by a bound in `std::cmp::AssertParamIsEq`
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:379:31
-    |
-379 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
-    |                               ^^ required by this bound in `AssertParamIsEq`
-
-error[E0609]: no field `full_path` on type `&&CodeSymbol`
-   --> src\harness\reproduction.rs:214:63
-    |
-214 |         self.repo.symbols.iter().find(|s| s.name == name || s.full_path.contains(name))
-    |                                                               ^^^^^^^^^ unknown field
-    |
-    = note: available fields are: `name`, `kind`, `file`, `line_start`, `line_end` ... and 4 others
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:295:32
-    |
-295 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:295:27
-    |
-295 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-295 -                     file: Some(file_str.clone()),
-295 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:317:32
-    |
-317 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:317:27
-    |
-317 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-317 -                     file: Some(file_str.clone()),
-317 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:339:32
-    |
-339 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:339:27
-    |
-339 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-339 -                     file: Some(file_str.clone()),
-339 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:361:32
-    |
-361 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:361:27
-    |
-361 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-361 -                     file: Some(file_str.clone()),
-361 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:391:32
-    |
-391 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:391:27
-    |
-391 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-391 -                     file: Some(file_str.clone()),
-391 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:406:32
-    |
-406 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:406:27
-    |
-406 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-406 -                     file: Some(file_str.clone()),
-406 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:428:32
-    |
-428 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:428:27
-    |
-428 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-428 -                     file: Some(file_str.clone()),
-428 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:453:28
-    |
-453 |                 file: Some(file_str.clone()),
-    |                       ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                       |
-    |                       arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:453:23
-    |
-453 |                 file: Some(file_str.clone()),
-    |                       ^^^^^----------------^
-    |                            |
-    |                            this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-453 -                 file: Some(file_str.clone()),
-453 +                 file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:467:32
-    |
-467 |                     file: Some(file_str.clone()),
-    |                           ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                           |
-    |                           arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:467:27
-    |
-467 |                     file: Some(file_str.clone()),
-    |                           ^^^^^----------------^
-    |                                |
-    |                                this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-467 -                     file: Some(file_str.clone()),
-467 +                     file: Some(file_str.to_string()),
-    |
-
-error[E0308]: mismatched types
-   --> src\harness\review.rs:567:36
-    |
-567 |                         file: Some(file_str.clone()),
-    |                               ---- ^^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |                               |
-    |                               arguments to this enum variant are incorrect
-    |
-help: the type constructed contains `&str` due to the type of the argument passed
-   --> src\harness\review.rs:567:31
-    |
-567 |                         file: Some(file_str.clone()),
-    |                               ^^^^^----------------^
-    |                                    |
-    |                                    this argument influences the type of `Some`
-note: tuple variant defined here
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:608:5
-    |
-608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
-    |     ^^^^
-help: try using a conversion method
-    |
-567 -                         file: Some(file_str.clone()),
-567 +                         file: Some(file_str.to_string()),
-    |
-
-error[E0277]: `ReviewIssueType` doesn't implement `std::fmt::Display`
-   --> src\harness\review.rs:853:17
-    |
-849 |             output.push_str(&format!("\n{}. [{}] {:?}: {}\n", 
-    |                                                        -- required by this formatting parameter
-...
-853 |                 issue.issue_type
-    |                 ^^^^^^^^^^^^^^^^ `ReviewIssueType` cannot be formatted with the default formatter
-    |
-help: the trait `std::fmt::Display` is not implemented for `ReviewIssueType`
-   --> src\harness\review.rs:18:1
-    |
- 18 | pub enum ReviewIssueType {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^
-    = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
-
-error[E0063]: missing fields `cache_key`, `cached` and `timed_out` in initializer of `CommandResult`
-  --> src\harness\sandbox.rs:81:27
-   |
-81 |                 return Ok(CommandResult {
-   |                           ^^^^^^^^^^^^^ missing `cache_key`, `cached` and `timed_out`
-
-error[E0063]: missing fields `cache_key`, `cached` and `timed_out` in initializer of `CommandResult`
-  --> src\harness\sandbox.rs:90:12
-   |
-90 |         Ok(CommandResult {
-   |            ^^^^^^^^^^^^^ missing `cache_key`, `cached` and `timed_out`
-
-error[E0277]: the trait bound `semantic_diff::RiskLevel: std::default::Default` is not satisfied
-   --> src\harness\semantic_diff.rs:198:5
-    |
-196 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-    |                                                               ------- in this derive macro expansion
-197 | pub struct RiskAssessment {
-198 |     pub overall_risk: RiskLevel,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `std::default::Default` is not implemented for `semantic_diff::RiskLevel`
-   --> src\harness\semantic_diff.rs:188:1
-    |
-188 | pub enum RiskLevel {
-    | ^^^^^^^^^^^^^^^^^^
-
-error[E0277]: the trait bound `semantic_diff::RiskLevel: std::default::Default` is not satisfied
-   --> src\harness\semantic_diff.rs:199:5
-    |
-196 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-    |                                                               ------- in this derive macro expansion
-...
-199 |     pub api_risk: RiskLevel,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `std::default::Default` is not implemented for `semantic_diff::RiskLevel`
-   --> src\harness\semantic_diff.rs:188:1
-    |
-188 | pub enum RiskLevel {
-    | ^^^^^^^^^^^^^^^^^^
-
-error[E0277]: the trait bound `semantic_diff::RiskLevel: std::default::Default` is not satisfied
-   --> src\harness\semantic_diff.rs:200:5
-    |
-196 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-    |                                                               ------- in this derive macro expansion
-...
-200 |     pub auth_risk: RiskLevel,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `std::default::Default` is not implemented for `semantic_diff::RiskLevel`
-   --> src\harness\semantic_diff.rs:188:1
-    |
-188 | pub enum RiskLevel {
-    | ^^^^^^^^^^^^^^^^^^
-
-error[E0277]: the trait bound `semantic_diff::RiskLevel: std::default::Default` is not satisfied
-   --> src\harness\semantic_diff.rs:201:5
-    |
-196 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-    |                                                               ------- in this derive macro expansion
-...
-201 |     pub database_risk: RiskLevel,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `std::default::Default` is not implemented for `semantic_diff::RiskLevel`
-   --> src\harness\semantic_diff.rs:188:1
-    |
-188 | pub enum RiskLevel {
-    | ^^^^^^^^^^^^^^^^^^
-
-error[E0277]: the trait bound `semantic_diff::RiskLevel: std::default::Default` is not satisfied
-   --> src\harness\semantic_diff.rs:202:5
-    |
-196 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-    |                                                               ------- in this derive macro expansion
-...
-202 |     pub dependency_risk: RiskLevel,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `std::default::Default` is not implemented for `semantic_diff::RiskLevel`
-   --> src\harness\semantic_diff.rs:188:1
-    |
-188 | pub enum RiskLevel {
-    | ^^^^^^^^^^^^^^^^^^
-
-error[E0277]: the trait bound `semantic_diff::RiskLevel: std::default::Default` is not satisfied
-   --> src\harness\semantic_diff.rs:203:5
-    |
-196 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-    |                                                               ------- in this derive macro expansion
-...
-203 |     pub config_risk: RiskLevel,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
-    |
-help: the trait `std::default::Default` is not implemented for `semantic_diff::RiskLevel`
-   --> src\harness\semantic_diff.rs:188:1
-    |
-188 | pub enum RiskLevel {
-    | ^^^^^^^^^^^^^^^^^^
-
-error[E0599]: no method named `start` found for struct `regex::Captures<'h>` in the current scope
-   --> src\harness\semantic_diff.rs:501:84
-    |
-501 |                         let change_type = self.infer_config_change_type(&diff, cap.start());
-    |                                                                                    ^^^^^ method not found in `regex::Captures<'_>`
-
-error[E0308]: mismatched types
-   --> src\harness\validation.rs:386:28
-    |
-386 |         .unwrap_or_else(|| command.clone())
-    |                            ^^^^^^^^^^^^^^^ expected `String`, found `&str`
-    |
-help: try using a conversion method
-    |
-386 -         .unwrap_or_else(|| command.clone())
-386 +         .unwrap_or_else(|| command.to_string())
-    |
-
-error[E0277]: the trait bound `f32: Eq` is not satisfied
-   --> src\harness\verification.rs:59:5
-    |
- 54 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    |                                                           -- in this derive macro expansion
-...
- 59 |     pub coverage_percent: Option<f32>,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Eq` is not implemented for `f32`
-    |
-    = help: the following other types implement trait `Eq`:
-              i128
-              i16
-              i32
-              i64
-              i8
-              isize
-              u128
-              u16
-            and 4 others
-    = note: required for `std::option::Option<f32>` to implement `Eq`
-note: required by a bound in `std::cmp::AssertParamIsEq`
-   --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:379:31
-    |
-379 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
-    |                               ^^ required by this bound in `AssertParamIsEq`
+warning: unused import: `Tracer`
+   --> src\harness\observability.rs:317:32
+    |
+317 |     use opentelemetry::trace::{Tracer, TracerProvider};
+    |                                ^^^^^^
 
 warning: unused variable: `remaining_tokens`
    --> src\context\budgeter.rs:125:13
@@ -2182,206 +1099,196 @@ warning: unused variable: `count`
 124 |         if let Some(count) = output["extracted_count"].as_u64() {
     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
 
-error[E0507]: cannot move out of `*property` which is behind a shared reference
-   --> src\harness\adversarial_validation.rs:247:27
-    |
-247 |                 property: *property,
-    |                           ^^^^^^^^^ move occurs because `*property` has type `Property`, which does not implement the `Copy` trait
-    |
-help: consider cloning the value if the performance cost is acceptable
-    |
-247 -                 property: *property,
-247 +                 property: property.clone(),
-    |
+warning: unused variable: `repo`
+  --> src\harness\attempt_pool.rs:61:9
+   |
+61 |         repo: &RepoContext,
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_repo`
 
 warning: unused variable: `filtered`
-   --> src\harness\benchmark.rs:297:13
+   --> src\harness\benchmark.rs:305:13
     |
-297 |         let filtered: Vec<_> = values.iter()
+305 |         let filtered: Vec<_> = values
     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_filtered`
 
-warning: unused variable: `factors`
-   --> src\harness\completion.rs:267:65
+warning: unused variable: `num_runs`
+   --> src\harness\benchmark.rs:432:9
     |
-267 |     fn evaluate_benchmark(&self, evidence: &CompletionEvidence, factors: &mut Vec<String>) -> CompletionDecision {
-    |                                                                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_factors`
+432 |         num_runs: u32,
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_runs`
+
+warning: unused variable: `completeness`
+   --> src\harness\completion.rs:298:13
+    |
+298 |         let completeness = self.calculate_completeness(evidence);
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_completeness`
+
+warning: unused variable: `factors`
+   --> src\harness\completion.rs:423:9
+    |
+423 |         factors: &mut Vec<String>,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_factors`
 
 warning: unused variable: `file`
-   --> src\harness\edit_protocol.rs:545:10
+   --> src\harness\edit_protocol.rs:635:10
     |
-545 |     for (file, file_edits) in by_file {
+635 |     for (file, file_edits) in by_file {
     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_file`
 
 warning: value assigned to `detected_pm` is never read
-   --> src\harness\environment.rs:123:31
+   --> src\harness\environment.rs:124:31
     |
-123 |         let mut detected_pm = None;
+124 |         let mut detected_pm = None;
     |                               ^^^^
     |
     = help: maybe it is overwritten before being read?
     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `has_gemspec`
-   --> src\harness\environment.rs:381:9
+   --> src\harness\environment.rs:408:9
     |
-381 |     let has_gemspec = root.join("*.gemspec").exists();
+408 |     let has_gemspec = root.join("*.gemspec").exists();
     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_gemspec`
 
 warning: unused variable: `task_id`
-   --> src\harness\knowledge_cache.rs:388:14
+   --> src\harness\knowledge_cache.rs:405:14
     |
-388 |         for (task_id, cache) in caches.iter() {
+405 |         for (task_id, cache) in caches.iter() {
     |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
 
-warning: unused variable: `edit_index`
-   --> src\harness\patch_applier.rs:160:5
+warning: unused variable: `provider`
+   --> src\harness\observability.rs:532:21
     |
-160 |     edit_index: usize,
+532 |         if let Some(provider) = TRACER_PROVIDER.get() {
+    |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_provider`
+
+warning: unused variable: `edit_index`
+   --> src\harness\patch_applier.rs:315:5
+    |
+315 |     edit_index: usize,
     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edit_index`
 
 warning: unused variable: `policy`
-   --> src\harness\patch_applier.rs:337:56
+   --> src\harness\patch_applier.rs:554:56
     |
-337 | async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
+554 | async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
     |                                                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
 
 warning: unused variable: `new_content`
-   --> src\harness\patch_applier.rs:340:16
+   --> src\harness\patch_applier.rs:557:16
     |
-340 |     for (path, new_content) in changes.iter().rev() {
+557 |     for (path, new_content) in changes.iter().rev() {
     |                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_content`
 
-error: cannot explicitly borrow within an implicitly-borrowing pattern
-   --> src\harness\patch_applier.rs:400:21
-    |
-400 |         if let Some(ref c) = content {
-    |                     ^^^ explicit `ref` binding modifier not allowed when implicitly borrowing
-    |
-    = note: for more information, see <https://doc.rust-lang.org/reference/patterns.html#binding-modes>
-note: matching on a reference type with a non-reference pattern implicitly borrows the contents
-   --> src\harness\patch_applier.rs:400:16
-    |
-400 |         if let Some(ref c) = content {
-    |                ^^^^^^^^^^^ this non-reference pattern matches on a reference type `&_`
-help: remove the unnecessary binding modifier
-    |
-400 -         if let Some(ref c) = content {
-400 +         if let Some(c) = content {
-    |
+warning: unused variable: `block_marker`
+    --> src\harness\patch_provider.rs:1056:21
+     |
+1056 |                 let block_marker = lines[i];
+     |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_block_marker`
+
+warning: unused variable: `kind`
+    --> src\harness\patch_provider.rs:1325:26
+     |
+1325 |     fn can_handle(&self, kind: FailureKind) -> bool {
+     |                          ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
 
 warning: unused variable: `now`
-   --> src\harness\regression_memory.rs:225:13
+   --> src\harness\regression_memory.rs:232:13
     |
-225 |         let now = chrono::Utc::now();
+232 |         let now = chrono::Utc::now();
     |             ^^^ help: if this is intentional, prefix it with an underscore: `_now`
 
-error[E0382]: borrow of moved value: `file`
-    --> src\harness\repo_intelligence.rs:580:39
-     |
- 526 |     for file in files {
-     |         ---- move occurs because `file` has type `PathBuf`, which does not implement the `Copy` trait
-...
- 576 |             path: file,
-     |                   ---- value moved here
-...
- 580 |             language: detect_language(&file),
-     |                                       ^^^^^ value borrowed here after move
-     |
-     = note: borrow occurs due to deref coercion to `std::path::Path`
-note: deref defined here
-    --> E:\Rust\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\path.rs:2064:5
-     |
-2064 |     type Target = Path;
-     |     ^^^^^^^^^^^
-help: consider cloning the value if the performance cost is acceptable
-     |
- 576 |             path: file.clone(),
-     |                       ++++++++
+warning: unused variable: `failure`
+   --> src\harness\repair_loop.rs:113:9
+    |
+113 |         failure: &FailureDetails,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_failure`
 
-error[E0716]: temporary value dropped while borrowed
-   --> src\harness\repo_intelligence.rs:553:39
+warning: unused variable: `sandbox`
+   --> src\harness\repair_loop.rs:184:9
     |
-553 |                         reasons.push(&format!("symbol match: {}", sym.name));
-    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ - temporary value is freed at the end of this statement
-    |                                       |
-    |                                       creates a temporary value which is freed while still in use
-...
-557 |                             reasons.push("explicitly mentioned symbol");
-    |                             ------- borrow later used here
+184 |         sandbox: &dyn SandboxRuntime,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sandbox`
+
+warning: unused variable: `provider`
+   --> src\harness\repair_loop.rs:185:9
     |
-    = note: consider using a `let` binding to create a longer lived value
+185 |         provider: Option<&dyn PatchProvider>,
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_provider`
+
+warning: unused variable: `patch_result`
+   --> src\harness\repair_loop.rs:243:18
+    |
+243 |             let (patch_result, attempt_result) = if dry_result.failures.is_empty() {
+    |                  ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_patch_result`
+
+warning: unused variable: `name`
+   --> src\harness\repo_intelligence.rs:942:27
+    |
+942 | fn parse_cargo_dependency(name: &str, spec: &toml::Value) -> DependencySpec {
+    |                           ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `spec`
+    --> src\harness\repo_intelligence.rs:1298:25
+     |
+1298 |         for (dependent, spec) in &self.dependencies {
+     |                         ^^^^ help: if this is intentional, prefix it with an underscore: `_spec`
+
+warning: variable does not need to be mutable
+    --> src\harness\repo_intelligence.rs:1372:13
+     |
+1372 |         let mut cache: RepoCache = serde_json::from_str(&content).ok()?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
 
 warning: unused variable: `repo`
-   --> src\harness\reproduction.rs:581:63
+   --> src\harness\reproduction.rs:622:5
     |
-581 | async fn analyze_failure_signature(req: &ReproductionRequest, repo: &RepoContext) -> Result<Vec<ReproductionDiagnostic>> {
-    |                                                               ^^^^ help: if this is intentional, prefix it with an underscore: `_repo`
-
-error[E0004]: non-exhaustive patterns: `risk::RiskLevel::None` not covered
-   --> src\harness\selection.rs:181:15
-    |
-181 |         match candidate.risk.level {
-    |               ^^^^^^^^^^^^^^^^^^^^ pattern `risk::RiskLevel::None` not covered
-    |
-note: `risk::RiskLevel` defined here
-   --> src\harness\risk.rs:27:10
-    |
- 27 | pub enum RiskLevel {
-    |          ^^^^^^^^^
- 28 |     None,
-    |     ---- not covered
-    = note: the matched value is of type `risk::RiskLevel`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
-    |
-185 ~             RiskLevel::Low => 1.0,
-186 ~             risk::RiskLevel::None => todo!(),
-    |
-
-error[E0004]: non-exhaustive patterns: `risk::RiskLevel::None` not covered
-   --> src\harness\selection.rs:253:38
-    |
-253 |         let risk_level_value = match candidate.risk.level {
-    |                                      ^^^^^^^^^^^^^^^^^^^^ pattern `risk::RiskLevel::None` not covered
-    |
-note: `risk::RiskLevel` defined here
-   --> src\harness\risk.rs:27:10
-    |
- 27 | pub enum RiskLevel {
-    |          ^^^^^^^^^
- 28 |     None,
-    |     ---- not covered
-    = note: the matched value is of type `risk::RiskLevel`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
-    |
-257 ~             RiskLevel::Critical => 4,
-258 ~             risk::RiskLevel::None => todo!(),
-    |
-
-error[E0004]: non-exhaustive patterns: `risk::RiskLevel::None` not covered
-   --> src\harness\selection.rs:259:36
-    |
-259 |         let max_risk_value = match self.criteria.max_risk_level {
-    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ pattern `risk::RiskLevel::None` not covered
-    |
-note: `risk::RiskLevel` defined here
-   --> src\harness\risk.rs:27:10
-    |
- 27 | pub enum RiskLevel {
-    |          ^^^^^^^^^
- 28 |     None,
-    |     ---- not covered
-    = note: the matched value is of type `risk::RiskLevel`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
-    |
-263 ~             RiskLevel::Critical => 4,
-264 ~             risk::RiskLevel::None => todo!(),
-    |
+622 |     repo: &RepoContext,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_repo`
 
 warning: unused variable: `diff_lower`
-   --> src\harness\semantic_diff.rs:359:13
+   --> src\harness\semantic_diff.rs:371:13
     |
-359 |         let diff_lower = diff.to_lowercase();
+371 |         let diff_lower = diff.to_lowercase();
     |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_diff_lower`
+
+warning: unused variable: `policy`
+  --> src\harness\temp_workspace.rs:28:9
+   |
+28 |         policy: &FilePolicy,
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
+
+warning: unused variable: `should_apply`
+   --> src\harness\temp_workspace.rs:270:5
+    |
+270 |     should_apply: bool,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_should_apply`
+
+warning: unused variable: `sections`
+   --> src\harness\trust_report.rs:457:30
+    |
+457 |     fn calculate_trust_score(sections: &[TrustSection], stats: &TrustStatistics) -> u32 {
+    |                              ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sections`
+
+warning: unused variable: `sections`
+   --> src\harness\trust_report.rs:495:9
+    |
+495 |         sections: &[TrustSection],
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sections`
+
+warning: unused variable: `sections`
+   --> src\harness\trust_report.rs:544:33
+    |
+544 |     fn generate_recommendations(sections: &[TrustSection], stats: &TrustStatistics) -> Vec<String> {
+    |                                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sections`
+
+warning: unused variable: `policy`
+  --> src\harness\workspace.rs:84:9
+   |
+84 |         policy: &FilePolicy,
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
 
 warning: unused variable: `artifact_data`
    --> src\work\orchestrator.rs:740:13
@@ -2396,18 +1303,8 @@ warning: variable does not need to be mutable
    |             ----^^^^^^^
    |             |
    |             help: remove this `mut`
-   |
-   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-error[E0308]: mismatched types
-   --> src\harness\execution_loop.rs:511:19
-    |
-511 |         metadata: serde_json::json!({}),
-    |                   ^^^^^^^^^^^^^^^^^^^^^ expected `ArtifactMetadata`, found `Value`
-    |
-    = note: this error originates in the macro `$crate::json_internal` which comes from the expansion of the macro `serde_json::json` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-Some errors have detailed explanations: E0004, E0063, E0106, E0277, E0308, E0369, E0382, E0425, E0432...
-For more information about an error, try `rustc --explain E0004`.
-warning: `prometheos-lite` (lib) generated 116 warnings
-error: could not compile `prometheos-lite` (lib) due to 112 previous errors; 116 warnings emitted
+Some errors have detailed explanations: E0277, E0599, E0609, E0689.
+For more information about an error, try `rustc --explain E0277`.
+warning: `prometheos-lite` (lib) generated 174 warnings
+error: could not compile `prometheos-lite` (lib) due to 15 previous errors; 174 warnings emitted
