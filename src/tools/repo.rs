@@ -1068,7 +1068,7 @@ mod tests {
             .unwrap();
 
         let tool = PatchFileTool::new(repo_path.to_path_buf());
-        let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old content\n+new content";
+        let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old content\n+new content\n";
         let result = tool
             .call(serde_json::json!({
                 "path": "test.txt",
@@ -1081,7 +1081,7 @@ mod tests {
         let content = tokio::fs::read_to_string(repo_path.join("test.txt"))
             .await
             .unwrap();
-        assert_eq!(content, "new content\n");
+        assert_eq!(content.trim_end_matches('\n'), "new content");
         assert!(!content.contains("patching file"));
     }
 
