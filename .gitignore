@@ -12,6 +12,7 @@
 /target/
 /dist/
 /build/
+/.cargo-target/
 
 # Logs and temporary files
 *.log
