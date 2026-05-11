@@ -43,7 +43,21 @@ jobs:
         run: cargo build --release --all-features
 
       - name: Tests
-        run: cargo test --all-targets --all-features
+        shell: bash
+        run: |
+          set -o pipefail
+          log_file="$(mktemp)"
+          if ! cargo test --all-targets --all-features 2>&1 | tee "$log_file"; then
+            failed_tests="$(grep -E 'test .+ \\.\\.\\. FAILED$' "$log_file" || true)"
+            if [[ -n "$failed_tests" ]]; then
+              while IFS= read -r line; do
+                echo "::error title=Failed test::$line"
+              done <<< "$failed_tests"
+            else
+              tail -n 200 "$log_file" | sed 's/^/::error::/'
+            fi
+            exit 1
+          fi
 
       - name: Guardrail Tests
         run: cargo test --test guardrail_tests --test guardrail_integration_tests
