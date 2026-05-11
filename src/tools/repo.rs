@@ -609,9 +609,9 @@ impl PatchFileTool {
 
         for line in diff.lines() {
             if let Some(path) = line.strip_prefix("--- ") {
-                old_targets.push(path.trim().to_string());
+                old_targets.push(Self::parse_diff_header_path(path)?);
             } else if let Some(path) = line.strip_prefix("+++ ") {
-                new_targets.push(path.trim().to_string());
+                new_targets.push(Self::parse_diff_header_path(path)?);
             }
         }
 
@@ -641,6 +641,17 @@ impl PatchFileTool {
         }
 
         Ok(targets)
+    }
+
+    fn parse_diff_header_path(header_value: &str) -> Result<String> {
+        let candidate = header_value
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid diff header path"))?;
+        if candidate.is_empty() {
+            anyhow::bail!("Invalid empty diff header path");
+        }
+        Ok(candidate.to_string())
     }
 
     fn normalize_diff_path(path: &str) -> Result<String> {
@@ -1025,6 +1036,53 @@ mod tests {
 
         let absolute = "--- /tmp/secret.txt\n+++ /tmp/secret.txt\n@@ -1,1 +1,1 @@\n-a\n+b";
         assert!(tool.validate_diff_for_path(absolute, "secret.txt").is_err());
+    }
+
+    #[test]
+    fn test_patch_file_allows_timestamped_headers() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let diff = "--- a/test.txt\t2026-05-11 12:00:00\n+++ b/test.txt\t2026-05-11 12:01:00\n@@ -1,1 +1,1 @@\n-old\n+new";
+        assert!(tool.validate_diff_for_path(diff, "test.txt").is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(not(windows))]
+    async fn test_patch_file_system_patch_updates_file_content() {
+        let patch_available = std::process::Command::new("sh")
+            .arg("-lc")
+            .arg("command -v patch >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !patch_available {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        tokio::fs::write(repo_path.join("test.txt"), "old content\n")
+            .await
+            .unwrap();
+
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+        let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old content\n+new content";
+        let result = tool
+            .call(serde_json::json!({
+                "path": "test.txt",
+                "diff": diff
+            }))
+            .await
+            .unwrap();
+        assert!(result["success"].as_bool().unwrap());
+
+        let content = tokio::fs::read_to_string(repo_path.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "new content\n");
+        assert!(!content.contains("patching file"));
     }
 
     #[test]
