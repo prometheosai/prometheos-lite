@@ -91,7 +91,8 @@ async fn test_patch_file_rejects_invalid_diff() {
 #[tokio::test]
 async fn test_run_tests_returns_failure_correctly() {
     let repo_path = std::fs::canonicalize(PathBuf::from("tests/fixtures/sample_repo")).unwrap();
-    let tool = RunTestsTool::new().with_timeout(120_000);
+    // CI can be slow on cold Rust compilations for fixture repos; keep timeout realistic.
+    let tool = RunTestsTool::new().with_timeout(600_000);
 
     let result = tool
         .call(serde_json::json!({
@@ -148,7 +149,7 @@ mod tests {
     )
     .unwrap();
 
-    let tool = RunTestsTool::new().with_timeout(120_000);
+    let tool = RunTestsTool::new().with_timeout(600_000);
 
     // First run - should fail
     let result1 = tool

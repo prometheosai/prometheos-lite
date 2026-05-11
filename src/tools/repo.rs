@@ -532,10 +532,10 @@ impl Tool for PatchFileTool {
             }));
         }
 
-        // Validate diff format
-        if !self.validate_diff_format(diff) {
+        // Validate diff target and format against the requested path.
+        if let Err(err) = self.validate_diff_for_path(diff, path) {
             return Ok(serde_json::json!({
-                "error": "Invalid diff format",
+                "error": err.to_string(),
                 "success": false,
                 "validation": "failed"
             }));
@@ -574,21 +574,97 @@ impl Tool for PatchFileTool {
 }
 
 impl PatchFileTool {
-    fn validate_diff_format(&self, diff: &str) -> bool {
-        // Basic validation: check for diff headers
-        let lines: Vec<&str> = diff.lines().collect();
-        if lines.is_empty() {
-            return false;
+    fn validate_diff_for_path(&self, diff: &str, requested_path: &str) -> Result<()> {
+        // Basic validation: check for hunk headers.
+        if !diff.lines().any(|line| line.starts_with("@@")) {
+            anyhow::bail!("Invalid diff format: missing hunk header");
         }
 
-        // Check for diff header
-        let has_header = lines
-            .iter()
-            .any(|line| line.starts_with("---") || line.starts_with("+++"));
-        // Check for hunk headers
-        let has_hunk = lines.iter().any(|line| line.starts_with("@@"));
+        let targets = self.extract_diff_targets(diff)?;
+        if targets.len() != 1 {
+            anyhow::bail!("patch_file requires exactly one target file in diff headers");
+        }
 
-        has_header && has_hunk
+        let requested = Self::normalize_diff_path(requested_path)?;
+        let target = Self::normalize_diff_path(&targets[0])?;
+
+        if requested != target {
+            anyhow::bail!(
+                "Diff target '{}' does not match requested path '{}'",
+                targets[0],
+                requested_path
+            );
+        }
+
+        if !self.path_guard.is_safe_path(&target) {
+            anyhow::bail!("Diff target path validation failed: {}", target);
+        }
+
+        Ok(())
+    }
+
+    fn extract_diff_targets(&self, diff: &str) -> Result<Vec<String>> {
+        let mut old_targets = Vec::new();
+        let mut new_targets = Vec::new();
+
+        for line in diff.lines() {
+            if let Some(path) = line.strip_prefix("--- ") {
+                old_targets.push(path.trim().to_string());
+            } else if let Some(path) = line.strip_prefix("+++ ") {
+                new_targets.push(path.trim().to_string());
+            }
+        }
+
+        if old_targets.is_empty() || new_targets.is_empty() {
+            anyhow::bail!("Invalid diff format: missing ---/+++ headers");
+        }
+        if old_targets.len() != new_targets.len() {
+            anyhow::bail!("Invalid diff format: mismatched ---/+++ header count");
+        }
+
+        let mut targets = Vec::new();
+        for (old_path, new_path) in old_targets.iter().zip(new_targets.iter()) {
+            if old_path == "/dev/null" || new_path == "/dev/null" {
+                anyhow::bail!("Create/delete patches are not supported by patch_file");
+            }
+
+            let old_norm = Self::normalize_diff_path(old_path)?;
+            let new_norm = Self::normalize_diff_path(new_path)?;
+            if old_norm != new_norm {
+                anyhow::bail!(
+                    "Rename/multi-target patch is not supported: '{}' -> '{}'",
+                    old_path,
+                    new_path
+                );
+            }
+            targets.push(old_norm);
+        }
+
+        Ok(targets)
+    }
+
+    fn normalize_diff_path(path: &str) -> Result<String> {
+        let trimmed = path.trim();
+        let stripped = trimmed
+            .strip_prefix("a/")
+            .or_else(|| trimmed.strip_prefix("b/"))
+            .unwrap_or(trimmed);
+
+        if stripped.is_empty() {
+            anyhow::bail!("Invalid empty diff target path");
+        }
+        if stripped.starts_with('/') || stripped.starts_with('\\') {
+            anyhow::bail!("Absolute diff target paths are not allowed");
+        }
+        if stripped.contains(':') {
+            anyhow::bail!("Drive-letter or URI-like diff target paths are not allowed");
+        }
+        if stripped.split('/').any(|seg| seg == "..") || stripped.split('\\').any(|seg| seg == "..")
+        {
+            anyhow::bail!("Path traversal in diff target is not allowed");
+        }
+
+        Ok(stripped.replace('\\', "/"))
     }
 
     fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
@@ -905,11 +981,50 @@ mod tests {
         let tool = PatchFileTool::new(repo_path.to_path_buf());
 
         // Invalid diff format
-        assert!(!tool.validate_diff_format("not a diff"));
+        assert!(
+            tool.validate_diff_for_path("not a diff", "test.txt")
+                .is_err()
+        );
 
         // Valid diff format
         let valid_diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old\n+new";
-        assert!(tool.validate_diff_format(valid_diff));
+        assert!(tool.validate_diff_for_path(valid_diff, "test.txt").is_ok());
+    }
+
+    #[test]
+    fn test_patch_file_rejects_mismatched_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let diff = "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-old\n+new";
+        assert!(tool.validate_diff_for_path(diff, "test.txt").is_err());
+    }
+
+    #[test]
+    fn test_patch_file_rejects_multifile_diff() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let diff = "--- a/one.txt\n+++ b/one.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n--- a/two.txt\n+++ b/two.txt\n@@ -1,1 +1,1 @@\n-c\n+d";
+        assert!(tool.validate_diff_for_path(diff, "one.txt").is_err());
+    }
+
+    #[test]
+    fn test_patch_file_rejects_traversal_or_absolute_targets() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let traversal = "--- a/../secret.txt\n+++ b/../secret.txt\n@@ -1,1 +1,1 @@\n-a\n+b";
+        assert!(
+            tool.validate_diff_for_path(traversal, "../secret.txt")
+                .is_err()
+        );
+
+        let absolute = "--- /tmp/secret.txt\n+++ /tmp/secret.txt\n@@ -1,1 +1,1 @@\n-a\n+b";
+        assert!(tool.validate_diff_for_path(absolute, "secret.txt").is_err());
     }
 
     #[test]
