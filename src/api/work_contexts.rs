@@ -613,6 +613,12 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    struct TestState {
+        state: Arc<AppState>,
+        context_id: String,
+        _db_dir: tempfile::TempDir,
+    }
+
     #[test]
     fn test_extract_harness_view_matrix() {
         let harness = serde_json::json!({
@@ -673,7 +679,7 @@ mod tests {
         ));
     }
 
-    fn test_state() -> (Arc<AppState>, String) {
+    fn test_state() -> TestState {
         let db_dir = tempdir().expect("temp db dir");
         let db_path = db_dir
             .path()
@@ -681,7 +687,6 @@ mod tests {
             .to_str()
             .expect("db path")
             .to_string();
-        std::mem::forget(db_dir);
         let runtime = Arc::new(RuntimeContext::new());
         let embedding: Arc<dyn crate::flow::EmbeddingProvider> = Arc::new(
             LocalEmbeddingProvider::new("http://127.0.0.1:9/embeddings".to_string(), 8),
@@ -707,13 +712,17 @@ mod tests {
                 "goal".to_string(),
             )
             .expect("create context");
-        (state, context.id)
+        TestState {
+            state,
+            context_id: context.id,
+            _db_dir: db_dir,
+        }
     }
 
     #[tokio::test]
     async fn test_context_ownership_guard() {
-        let (state, context_id) = test_state();
-        let err = get_context_for_user_or_404(&state, &context_id, "user-2")
+        let test_state = test_state();
+        let err = get_context_for_user_or_404(&test_state.state, &test_state.context_id, "user-2")
             .await
             .expect_err("must reject foreign user");
         assert!(matches!(err, ApiError::Forbidden(_)));
@@ -721,11 +730,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_route_rejects_missing_or_wrong_user() {
-        let (state, context_id) = test_state();
+        let test_state = test_state();
 
         let missing = update_work_context_status(
-            State(state.clone()),
-            Path(context_id.clone()),
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
             Query(UserIdentityQuery {
                 user_id: "  ".to_string(),
             }),
@@ -738,8 +747,8 @@ mod tests {
         assert!(matches!(missing, ApiError::BadRequest(_)));
 
         let wrong = update_work_context_status(
-            State(state),
-            Path(context_id),
+            State(test_state.state),
+            Path(test_state.context_id),
             Query(UserIdentityQuery {
                 user_id: "user-2".to_string(),
             }),
@@ -754,11 +763,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_continue_route_rejects_missing_or_wrong_user() {
-        let (state, context_id) = test_state();
+        let test_state = test_state();
 
         let missing = continue_work_context(
-            State(state.clone()),
-            Path(context_id.clone()),
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
             Query(UserIdentityQuery {
                 user_id: "".to_string(),
             }),
@@ -768,8 +777,8 @@ mod tests {
         assert!(matches!(missing, ApiError::BadRequest(_)));
 
         let wrong = continue_work_context(
-            State(state),
-            Path(context_id),
+            State(test_state.state),
+            Path(test_state.context_id),
             Query(UserIdentityQuery {
                 user_id: "user-2".to_string(),
             }),
@@ -781,11 +790,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_routes_reject_missing_or_wrong_user() {
-        let (state, context_id) = test_state();
+        let test_state = test_state();
 
         let missing_run = run_until_complete(
-            State(state.clone()),
-            Path(context_id.clone()),
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
             Query(UserIdentityQuery {
                 user_id: "   ".to_string(),
             }),
@@ -801,8 +810,8 @@ mod tests {
         assert!(matches!(missing_run, ApiError::BadRequest(_)));
 
         let wrong_run = run_until_complete(
-            State(state.clone()),
-            Path(context_id.clone()),
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
             Query(UserIdentityQuery {
                 user_id: "user-2".to_string(),
             }),
@@ -818,8 +827,8 @@ mod tests {
         assert!(matches!(wrong_run, ApiError::Forbidden(_)));
 
         let missing_harness = run_harness(
-            State(state.clone()),
-            Path(context_id.clone()),
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
             Query(UserIdentityQuery {
                 user_id: "".to_string(),
             }),
@@ -835,8 +844,8 @@ mod tests {
         assert!(matches!(missing_harness, ApiError::BadRequest(_)));
 
         let wrong_harness = run_harness(
-            State(state),
-            Path(context_id),
+            State(test_state.state),
+            Path(test_state.context_id),
             Query(UserIdentityQuery {
                 user_id: "user-2".to_string(),
             }),
@@ -850,5 +859,71 @@ mod tests {
         .await
         .expect_err("foreign user must fail");
         assert!(matches!(wrong_harness, ApiError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_status_route_allows_owner() {
+        let test_state = test_state();
+        let result = update_work_context_status(
+            State(test_state.state),
+            Path(test_state.context_id),
+            Query(UserIdentityQuery {
+                user_id: "user-1".to_string(),
+            }),
+            Json(UpdateStatusRequest {
+                status: "in_progress".to_string(),
+            }),
+        )
+        .await
+        .expect("owner should be allowed");
+        assert_eq!(result.0.status, "InProgress");
+    }
+
+    #[tokio::test]
+    async fn test_run_routes_pass_ownership_for_owner() {
+        let test_state = test_state();
+        let run_result = run_until_complete(
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-1".to_string(),
+            }),
+            Json(RunContextRequest {
+                max_iterations: Some(1),
+                max_runtime_ms: Some(50),
+                max_tool_calls: Some(1),
+                max_cost: Some(0.01),
+            }),
+        )
+        .await;
+        assert!(
+            !matches!(
+                run_result,
+                Err(ApiError::BadRequest(_)) | Err(ApiError::Forbidden(_))
+            ),
+            "owner should pass ownership gate"
+        );
+
+        let harness_result = run_harness(
+            State(test_state.state),
+            Path(test_state.context_id),
+            Query(UserIdentityQuery {
+                user_id: "user-1".to_string(),
+            }),
+            Json(HarnessRunRequest {
+                repo_root: std::path::PathBuf::from("."),
+                mode: crate::harness::mode_policy::HarnessMode::Review,
+                proposed_edits: vec![],
+                edit_response: None,
+            }),
+        )
+        .await;
+        assert!(
+            !matches!(
+                harness_result,
+                Err(ApiError::BadRequest(_)) | Err(ApiError::Forbidden(_))
+            ),
+            "owner should pass ownership gate"
+        );
     }
 }
