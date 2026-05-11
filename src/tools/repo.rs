@@ -546,15 +546,22 @@ impl Tool for PatchFileTool {
             .await
             .context("Failed to read original file")?;
 
-        // Apply patch
-        let patched_content = self
-            .apply_patch(&original_content, diff)
-            .context("Failed to apply patch")?;
-
-        // Write patched content
-        tokio::fs::write(&full_path, &patched_content)
-            .await
-            .context("Failed to write patched file")?;
+        // Apply patch. When system `patch` succeeds, it modifies the file in-place.
+        // Only write content ourselves when using the simplified fallback path.
+        if self.apply_patch_with_system(diff).is_err() {
+            if self.allow_fallback {
+                let patched_content = self
+                    .apply_patch_simplified(&original_content, diff)
+                    .context("Failed to apply patch with fallback")?;
+                tokio::fs::write(&full_path, &patched_content)
+                    .await
+                    .context("Failed to write patched file")?;
+            } else {
+                anyhow::bail!(
+                    "System patch command not available and fallback is disabled for production safety"
+                );
+            }
+        }
 
         Ok(serde_json::json!({
             "path": path,
@@ -582,22 +589,6 @@ impl PatchFileTool {
         let has_hunk = lines.iter().any(|line| line.starts_with("@@"));
 
         has_header && has_hunk
-    }
-
-    fn apply_patch(&self, original: &str, diff: &str) -> Result<String> {
-        // Try to use system patch command for robust diff application
-        if let Ok(patched) = self.apply_patch_with_system(diff) {
-            return Ok(patched);
-        }
-
-        // Fallback to simplified implementation only if explicitly allowed (dev-only)
-        if self.allow_fallback {
-            self.apply_patch_simplified(original, diff)
-        } else {
-            anyhow::bail!(
-                "System patch command not available and fallback is disabled for production safety"
-            )
-        }
     }
 
     fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
