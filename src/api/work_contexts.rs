@@ -596,7 +596,22 @@ pub async fn get_trace_by_run(
 
 #[cfg(test)]
 mod tests {
-    use super::{UserIdentityQuery, extract_harness_view, required_harness_view, required_user_id};
+    use super::{
+        ApiError, HarnessRunRequest, RunContextRequest, UpdateStatusRequest, UserIdentityQuery,
+        continue_work_context, extract_harness_view, get_context_for_user_or_404,
+        required_harness_view, required_user_id, run_harness, run_until_complete,
+        update_work_context_status,
+    };
+    use crate::api::state::AppState;
+    use crate::flow::memory::db::MemoryDb;
+    use crate::flow::memory::embedding::LocalEmbeddingProvider;
+    use crate::flow::memory::service::MemoryService;
+    use crate::flow::runtime::RuntimeContext;
+    use crate::work::types::WorkDomain;
+    use axum::Json;
+    use axum::extract::{Path, Query, State};
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     fn test_extract_harness_view_matrix() {
@@ -656,5 +671,184 @@ mod tests {
             required_user_id(&bad).unwrap_err(),
             super::ApiError::BadRequest(_)
         ));
+    }
+
+    fn test_state() -> (Arc<AppState>, String) {
+        let db_dir = tempdir().expect("temp db dir");
+        let db_path = db_dir
+            .path()
+            .join("work_contexts_test.db")
+            .to_str()
+            .expect("db path")
+            .to_string();
+        std::mem::forget(db_dir);
+        let runtime = Arc::new(RuntimeContext::new());
+        let embedding: Arc<dyn crate::flow::EmbeddingProvider> = Arc::new(
+            LocalEmbeddingProvider::new("http://127.0.0.1:9/embeddings".to_string(), 8),
+        );
+        let memory_service = Arc::new(MemoryService::new(
+            MemoryDb::in_memory().expect("in-memory memory db"),
+            Box::new(LocalEmbeddingProvider::new(
+                "http://127.0.0.1:9/embeddings".to_string(),
+                8,
+            )),
+        ));
+        let state = Arc::new(
+            AppState::new(db_path, runtime, embedding, memory_service).expect("app state"),
+        );
+        let service = state
+            .create_work_context_service()
+            .expect("work context service");
+        let context = service
+            .create_context(
+                "user-1".to_string(),
+                "Owned Context".to_string(),
+                WorkDomain::Software,
+                "goal".to_string(),
+            )
+            .expect("create context");
+        (state, context.id)
+    }
+
+    #[tokio::test]
+    async fn test_context_ownership_guard() {
+        let (state, context_id) = test_state();
+        let err = get_context_for_user_or_404(&state, &context_id, "user-2")
+            .await
+            .expect_err("must reject foreign user");
+        assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_status_route_rejects_missing_or_wrong_user() {
+        let (state, context_id) = test_state();
+
+        let missing = update_work_context_status(
+            State(state.clone()),
+            Path(context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "  ".to_string(),
+            }),
+            Json(UpdateStatusRequest {
+                status: "in_progress".to_string(),
+            }),
+        )
+        .await
+        .expect_err("missing user must fail");
+        assert!(matches!(missing, ApiError::BadRequest(_)));
+
+        let wrong = update_work_context_status(
+            State(state),
+            Path(context_id),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+            Json(UpdateStatusRequest {
+                status: "in_progress".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong, ApiError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_continue_route_rejects_missing_or_wrong_user() {
+        let (state, context_id) = test_state();
+
+        let missing = continue_work_context(
+            State(state.clone()),
+            Path(context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "".to_string(),
+            }),
+        )
+        .await
+        .expect_err("missing user must fail");
+        assert!(matches!(missing, ApiError::BadRequest(_)));
+
+        let wrong = continue_work_context(
+            State(state),
+            Path(context_id),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong, ApiError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_run_routes_reject_missing_or_wrong_user() {
+        let (state, context_id) = test_state();
+
+        let missing_run = run_until_complete(
+            State(state.clone()),
+            Path(context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "   ".to_string(),
+            }),
+            Json(RunContextRequest {
+                max_iterations: None,
+                max_runtime_ms: None,
+                max_tool_calls: None,
+                max_cost: None,
+            }),
+        )
+        .await
+        .expect_err("missing user must fail");
+        assert!(matches!(missing_run, ApiError::BadRequest(_)));
+
+        let wrong_run = run_until_complete(
+            State(state.clone()),
+            Path(context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+            Json(RunContextRequest {
+                max_iterations: None,
+                max_runtime_ms: None,
+                max_tool_calls: None,
+                max_cost: None,
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_run, ApiError::Forbidden(_)));
+
+        let missing_harness = run_harness(
+            State(state.clone()),
+            Path(context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "".to_string(),
+            }),
+            Json(HarnessRunRequest {
+                repo_root: std::path::PathBuf::from("."),
+                mode: crate::harness::mode_policy::HarnessMode::Review,
+                proposed_edits: vec![],
+                edit_response: None,
+            }),
+        )
+        .await
+        .expect_err("missing user must fail");
+        assert!(matches!(missing_harness, ApiError::BadRequest(_)));
+
+        let wrong_harness = run_harness(
+            State(state),
+            Path(context_id),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+            Json(HarnessRunRequest {
+                repo_root: std::path::PathBuf::from("."),
+                mode: crate::harness::mode_policy::HarnessMode::Review,
+                proposed_edits: vec![],
+                edit_response: None,
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_harness, ApiError::Forbidden(_)));
     }
 }

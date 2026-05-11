@@ -53,6 +53,9 @@ jobs:
           cargo test --test runtime_policy_enforcement --quiet
           cargo test --test ci_enforcement_tests --quiet
 
+      - name: Patch Provider Diagnostics Tests
+        run: cargo test --test patch_provider_diagnostics_tests --quiet
+
       - name: Anti-regression check (no direct LLM calls in API)
         run: |
           # Fail if API handlers contain direct LlmClient::generate() calls

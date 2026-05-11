@@ -1,3 +1,18 @@
+## V1.6.1 Final Audit Closure - Ownership, CI Pinning, Versioning
+
+- Added explicit WorkContext ownership regression tests in `src/api/work_contexts.rs` for mutation/execution routes:
+  - `update_work_context_status`
+  - `continue_work_context`
+  - `run_until_complete`
+  - `run_harness`
+- Tests now assert:
+  - blank `user_id` -> `400 BadRequest`
+  - foreign `user_id` -> `403 Forbidden`
+- Added explicit CI step in `.github/workflows/ci.yml`:
+  - `Patch Provider Diagnostics Tests`
+  - runs `cargo test --test patch_provider_diagnostics_tests --quiet`
+- Updated crate version in `Cargo.toml` from `0.1.0` to `1.6.1` to align crate semver with current release milestone.
+
 ## V1.6.1 Strict Audit Closure - Policy and API Hardening
 
 - Removed machine-local environment contamination from committed Cargo config:
