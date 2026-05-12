@@ -1,3 +1,27 @@
+## V1.6.2 Router Hardening - WorkContext API Ownership Matrix Completion
+
+- Completed router-level integration hardening in `src/api/work_contexts.rs` by expanding API guard coverage beyond mutation routes into read/reporting surfaces.
+- Added ownership and identity enforcement tests for:
+  - `list_work_contexts`
+  - `get_work_context`
+  - `get_work_context_artifacts`
+  - `get_work_quality`
+  - `get_work_cost`
+  - `list_work_traces`
+- Added trace retrieval not-found regression test:
+  - `get_trace_by_run` now has explicit test coverage ensuring unknown run IDs return `404 NotFound`.
+- Added harness view guard matrix tests for:
+  - `get_harness_evidence`
+  - `get_harness_patches`
+  - `get_harness_validation`
+  - `get_harness_review`
+  - `get_harness_risk`
+  - `get_harness_completion`
+- Harness view tests now explicitly verify:
+  - foreign `user_id` -> `403 Forbidden`
+  - owner with absent harness view payload -> `409 Conflict`
+- Added a reusable async test helper to assert invariant behavior consistently across harness view endpoints, reducing drift risk and duplicated assertion logic.
+
 ## V1.6.1 Final Audit Closure - Ownership, CI Pinning, Versioning
 
 - Added explicit WorkContext ownership regression tests in `src/api/work_contexts.rs` for mutation/execution routes:
