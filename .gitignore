@@ -1,0 +1,41 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Rust and build outputs
+/target/
+/dist/
+/build/
+/.cargo-target/
+
+# Logs and temporary files
+logs/
+*.log
+.ci-test-output.log
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# Editor and IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# PrometheOS output
+prometheos-output/
+.prometheos/checkpoints/
+.prometheos/runs.db-wal
+.prometheos/runs.db-shm
+
+# Database files
+*.db
