@@ -1,73 +1,63 @@
 # Handoff
 
 ## Objective
-Close out strict-audit hardening for WorkContext/harness ownership controls with CI reliability and release hygiene validated end-to-end.
+Finalize and preserve a strict, evidence-based cumulative PRD-to-harness completion audit for PrometheOS Lite, with verified operational health and exact continuation context for the next operator.
 
-## Current State (2026-05-12)
+## Current State
 ### Completed
-- Verified remote CI and release status via GitHub API for `prometheosai/prometheos-lite`.
-- Identified failing CI run on `main` commit `dd4e6654bf854a3cc96085bc1ca16b314f1c9090`:
-  - Workflow: `CI`
-  - Run: `25729518268`
-  - Job: `Rust Checks`
-  - Conclusion: `failure`
-- Retrieved check annotations; actionable failure was format gate (`Process completed with exit code 1`).
-- Reproduced failure locally with `cargo fmt --all -- --check`.
-- Applied canonical formatting fix (`cargo fmt --all`) to `src/api/work_contexts.rs`.
-- Re-ran validation:
-  - `cargo fmt --all -- --check` ✅
-  - `cargo clippy --workspace --all-targets --all-features -- -D warnings` ✅
-  - `cargo test --all-targets --all-features` ✅
-  - `cargo test --locked` ✅
-- Confirmed fix was already integrated to remote `main`:
-  - `f556d281` (`Format work context tests`)
-  - `db035adb` (`Update handoff with CI audit`)
+- Confirmed repository status and in-flight files.
+- Validated and retained cumulative audit document:
+  - `docs/prd-harness-completion-audit.md`
+- Added changelog entry describing this closure cycle:
+  - `CHANGELOG.md` (`V1.6.1 PRD Harness Completion Audit - Cumulative Closure`)
+- Re-ran full quality gates locally in this session:
+  - `cargo fmt --all -- --check` (pass)
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (pass)
+  - `cargo test --all-targets --all-features` (pass)
+- Rewrote this handoff to reflect only currently verified facts.
 
-### Remote Verification Findings
-- Commit status endpoint for `dd4e6654` returned no legacy status contexts.
-- Historical check-runs for `dd4e6654` showed failed Actions check (`Rust Checks`).
-- Current `main` HEAD is `db035adb0471cb8935f947a4de5359cc29e21a2f`.
-- Current `Rust Checks` run:
-  - Run URL: `https://github.com/prometheosai/prometheos-lite/actions/runs/25741263587`
-  - Job URL: `https://github.com/prometheosai/prometheos-lite/actions/runs/25741263587/job/75591975198`
-  - Status at last poll: `in_progress` (not yet completed after ~5 minutes of polling)
-- Releases endpoint returned `[]` (no GitHub Release objects currently published).
+### Partially completed
+- Audit artifact is still untracked in git until explicitly staged/committed.
 
-### In Progress
-- Awaiting completion of current `Rust Checks` run on `db035adb`.
+### Not started
+- No branch push, PR update, or merge activity in this session.
 
 ### Blocked
-- No local blockers.
-- Final CI pass confirmation is blocked on GitHub Actions runtime completion.
+- No technical blocker identified.
+- Administrative signoff may still be required for supersession judgments in the audit report.
 
-## Active Files
-### /src/api/work_contexts.rs
-- Status: already merged to `main` in prior session
-- Change: rustfmt-only normalization to satisfy CI format check
-- Risk: low (no behavioral logic changes)
+## Active Files / Files in Flight
+### docs/prd-harness-completion-audit.md
+- Status: untracked (new file)
+- Purpose: cumulative PRD-to-harness completion matrix with evidence and verdict
+- Risk level: medium (policy/interpretation acceptance risk, not implementation risk)
 
-### /handoff.md
-- Status: rewritten in this session
-- Change: replaced stale audit notes with verified CI/release diagnostics and fix record
-- Risk: low
+### handoff.md
+- Status: modified
+- Purpose: continuity transfer document for next operator
+- Risk level: low
 
-## Commands Executed (Key)
+### CHANGELOG.md
+- Status: modified
+- Purpose: release-history traceability for audit closure work
+- Risk level: low
+
+## Verification Evidence (This Session)
 ```bash
 git status --short --branch
-git log --oneline -n 12
-Invoke-RestMethod https://api.github.com/repos/prometheosai/prometheos-lite/commits/dd4e6654.../status
-Invoke-RestMethod https://api.github.com/repos/prometheosai/prometheos-lite/commits/dd4e6654.../check-runs
-Invoke-RestMethod https://api.github.com/repos/prometheosai/prometheos-lite/actions/runs?head_sha=dd4e6654...
-Invoke-RestMethod https://api.github.com/repos/prometheosai/prometheos-lite/releases
-Invoke-RestMethod https://api.github.com/repos/prometheosai/prometheos-lite/commits/db035adb.../check-runs
+# Result: branch main tracking origin/main, local changes present
+
 cargo fmt --all -- --check
-cargo fmt --all
+# Result: pass
+
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --locked
+# Result: pass
+
 cargo test --all-targets --all-features
+# Result: pass (full suite), with 2 ignored tests in harness_spine_tests requiring env/provider setup
 ```
 
-## Next Operator Notes
-- Poll run `25741263587` to terminal state and record conclusion.
-- If CI is green, no further code action is required for this audit thread.
-- If release publication is required, create GitHub Release object for intended tag (none currently exists).
+## Notes for Next Operator
+- Treat `docs/prd-harness-completion-audit.md` as the authoritative cumulative harness completion baseline for this cycle.
+- If maintainers accept the supersession mapping, proceed with staging/commit/PR flow.
+- If supersession interpretation is challenged, update only the matrix/supersession notes in the audit doc; runtime implementation currently verifies cleanly under full local gates.

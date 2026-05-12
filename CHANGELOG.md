@@ -1,3 +1,10 @@
+## V1.6.1 PRD Harness Completion Audit - Cumulative Closure
+
+- Added a strict cumulative audit artifact at `docs/prd-harness-completion-audit.md` that maps harness/work-context requirements across PRD history to concrete implementation evidence.
+- Documented supersession handling where older interface expectations were replaced by later canonical contracts, with explicit rationale and compatibility notes.
+- Recorded an end-to-end operational health verdict for the harness path (`Complete with documented supersessions`) with local verification evidence.
+- Refreshed `handoff.md` as a continuity-grade transfer document for next-operator execution against the audit baseline.
+
 ## V1.6.2 Router Hardening - WorkContext API Ownership Matrix Completion
 
 - Completed router-level integration hardening in `src/api/work_contexts.rs` by expanding API guard coverage beyond mutation routes into read/reporting surfaces.
