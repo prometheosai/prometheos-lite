@@ -599,8 +599,11 @@ mod tests {
     use super::{
         ApiError, HarnessRunRequest, RunContextRequest, UpdateStatusRequest, UserIdentityQuery,
         continue_work_context, extract_harness_view, get_context_for_user_or_404,
-        required_harness_view, required_user_id, run_harness, run_until_complete,
-        update_work_context_status,
+        get_harness_completion, get_harness_evidence, get_harness_patches, get_harness_review,
+        get_harness_risk, get_harness_validation, get_trace_by_run, get_work_context,
+        get_work_context_artifacts, get_work_cost, get_work_quality, list_work_contexts,
+        list_work_traces, required_harness_view, required_user_id, run_harness,
+        run_until_complete, update_work_context_status,
     };
     use crate::api::state::AppState;
     use crate::flow::memory::db::MemoryDb;
@@ -726,6 +729,166 @@ mod tests {
             .await
             .expect_err("must reject foreign user");
         assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_list_and_get_routes_enforce_user_identity() {
+        let test_state = test_state();
+
+        let missing_list = list_work_contexts(
+            State(test_state.state.clone()),
+            Query(UserIdentityQuery {
+                user_id: " ".to_string(),
+            }),
+        )
+        .await
+        .expect_err("missing user must fail");
+        assert!(matches!(missing_list, ApiError::BadRequest(_)));
+
+        let owned_list = list_work_contexts(
+            State(test_state.state.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-1".to_string(),
+            }),
+        )
+        .await
+        .expect("owner can list");
+        assert!(!owned_list.0.is_empty());
+
+        let wrong_get = get_work_context(
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_get, ApiError::Forbidden(_)));
+
+        let missing_get = get_work_context(
+            State(test_state.state),
+            Path(test_state.context_id),
+            Query(UserIdentityQuery {
+                user_id: "".to_string(),
+            }),
+        )
+        .await
+        .expect_err("missing user must fail");
+        assert!(matches!(missing_get, ApiError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_artifacts_and_metrics_routes_enforce_ownership() {
+        let test_state = test_state();
+
+        let wrong_artifacts = get_work_context_artifacts(
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_artifacts, ApiError::Forbidden(_)));
+
+        let wrong_quality = get_work_quality(
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_quality, ApiError::Forbidden(_)));
+
+        let wrong_cost = get_work_cost(
+            State(test_state.state.clone()),
+            Path(test_state.context_id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_cost, ApiError::Forbidden(_)));
+
+        let wrong_traces = list_work_traces(
+            State(test_state.state),
+            Path(test_state.context_id),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(wrong_traces, ApiError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_trace_by_run_missing_run_is_not_found() {
+        let test_state = test_state();
+        let err = get_trace_by_run(
+            State(test_state.state),
+            Path((test_state.context_id, "missing-run".to_string())),
+            Query(UserIdentityQuery {
+                user_id: "user-1".to_string(),
+            }),
+        )
+        .await
+        .expect_err("missing run must return not found");
+        assert!(matches!(err, ApiError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_harness_views_enforce_ownership_and_report_conflict_when_absent() {
+        let test_state = test_state();
+        let id = test_state.context_id.clone();
+        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_evidence)
+            .await;
+        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_patches)
+            .await;
+        assert_harness_view_endpoint_guards(
+            test_state.state.clone(),
+            id.clone(),
+            get_harness_validation,
+        )
+        .await;
+        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_review)
+            .await;
+        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_risk)
+            .await;
+        assert_harness_view_endpoint_guards(test_state.state, id, get_harness_completion).await;
+    }
+
+    async fn assert_harness_view_endpoint_guards<F, Fut>(state: Arc<AppState>, id: String, endpoint: F)
+    where
+        F: Fn(State<Arc<AppState>>, Path<String>, Query<UserIdentityQuery>) -> Fut,
+        Fut: std::future::Future<Output = Result<Json<serde_json::Value>, ApiError>>,
+    {
+        let forbidden = endpoint(
+            State(state.clone()),
+            Path(id.clone()),
+            Query(UserIdentityQuery {
+                user_id: "user-2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("foreign user must fail");
+        assert!(matches!(forbidden, ApiError::Forbidden(_)));
+
+        let missing_view = endpoint(
+            State(state),
+            Path(id),
+            Query(UserIdentityQuery {
+                user_id: "user-1".to_string(),
+            }),
+        )
+        .await
+        .expect_err("owner with no harness data must get conflict");
+        assert!(matches!(missing_view, ApiError::Conflict(_)));
     }
 
     #[tokio::test]
