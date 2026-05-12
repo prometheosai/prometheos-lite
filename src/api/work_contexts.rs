@@ -602,8 +602,8 @@ mod tests {
         get_harness_completion, get_harness_evidence, get_harness_patches, get_harness_review,
         get_harness_risk, get_harness_validation, get_trace_by_run, get_work_context,
         get_work_context_artifacts, get_work_cost, get_work_quality, list_work_contexts,
-        list_work_traces, required_harness_view, required_user_id, run_harness,
-        run_until_complete, update_work_context_status,
+        list_work_traces, required_harness_view, required_user_id, run_harness, run_until_complete,
+        update_work_context_status,
     };
     use crate::api::state::AppState;
     use crate::flow::memory::db::MemoryDb;
@@ -846,25 +846,40 @@ mod tests {
     async fn test_harness_views_enforce_ownership_and_report_conflict_when_absent() {
         let test_state = test_state();
         let id = test_state.context_id.clone();
-        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_evidence)
-            .await;
-        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_patches)
-            .await;
+        assert_harness_view_endpoint_guards(
+            test_state.state.clone(),
+            id.clone(),
+            get_harness_evidence,
+        )
+        .await;
+        assert_harness_view_endpoint_guards(
+            test_state.state.clone(),
+            id.clone(),
+            get_harness_patches,
+        )
+        .await;
         assert_harness_view_endpoint_guards(
             test_state.state.clone(),
             id.clone(),
             get_harness_validation,
         )
         .await;
-        assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_review)
-            .await;
+        assert_harness_view_endpoint_guards(
+            test_state.state.clone(),
+            id.clone(),
+            get_harness_review,
+        )
+        .await;
         assert_harness_view_endpoint_guards(test_state.state.clone(), id.clone(), get_harness_risk)
             .await;
         assert_harness_view_endpoint_guards(test_state.state, id, get_harness_completion).await;
     }
 
-    async fn assert_harness_view_endpoint_guards<F, Fut>(state: Arc<AppState>, id: String, endpoint: F)
-    where
+    async fn assert_harness_view_endpoint_guards<F, Fut>(
+        state: Arc<AppState>,
+        id: String,
+        endpoint: F,
+    ) where
         F: Fn(State<Arc<AppState>>, Path<String>, Query<UserIdentityQuery>) -> Fut,
         Fut: std::future::Future<Output = Result<Json<serde_json::Value>, ApiError>>,
     {
