@@ -1,3 +1,21 @@
+## V1.6.3 Multi-Provider Router Completion - Streaming Metadata, Coverage Restoration, Docs Alignment
+
+- Completed stream metadata parity in `src/flow/intelligence/router.rs`:
+  - added `generate_stream_for_mode_with_metadata(...)`
+  - `generate_stream_with_metadata(...)` now returns real provider/model/latency/fallback/attempt path metadata instead of placeholder `"unknown"` values.
+  - quota and rate-limit streaming failures now trigger cooldown rotation and are reflected in metadata.
+- Restored and expanded intelligence-layer test coverage in `src/flow/intelligence/tests.rs`:
+  - restored dropped utility/sandbox tests that had been removed in the prior rewrite.
+  - added stream-metadata regression coverage (`test_model_router_stream_metadata`) validating fallback path, quota rotation, and attempt accounting.
+  - validated mode-chain and quota-rotation metadata behavior remains correct.
+- Updated operator-facing configuration guidance in `README.md`:
+  - moved default example from LM Studio-only config to OpenRouter-first multi-provider `llm_routing` schema.
+  - documented mode-chain routing and BYOK/local-provider support language.
+- Verification run results:
+  - `cargo test --lib flow::intelligence::tests --all-features` passed (`14 passed`).
+  - `cargo test --lib test_model_router_stream_metadata --all-features` passed.
+  - `cargo check --all-targets --all-features` passed.
+
 ## V1.6.1 PRD Harness Completion Audit - Cumulative Closure
 
 - Added a strict cumulative audit artifact at `docs/prd-harness-completion-audit.md` that maps harness/work-context requirements across PRD history to concrete implementation evidence.

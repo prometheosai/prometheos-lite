@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
+    #[serde(default = "super::defaults::default_provider")]
     pub provider: String,
+    #[serde(default = "super::defaults::default_base_url")]
     pub base_url: String,
+    #[serde(default = "super::defaults::default_model")]
     pub model: String,
     #[serde(default = "super::defaults::default_embedding_url")]
     pub embedding_url: String,
@@ -21,6 +24,8 @@ pub struct AppConfig {
     pub strict_mode: StrictMode,
     #[serde(default = "super::defaults::default_repo_path")]
     pub repo_path: String,
+    #[serde(default = "super::defaults::default_llm_routing")]
+    pub llm_routing: LlmRoutingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -51,4 +56,39 @@ pub struct MemoryBudget {
     pub user_preferences: f32,
     pub recent_episodes: f32,
     pub decisions_constraints: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LlmRoutingConfig {
+    #[serde(default = "super::defaults::default_billing_source")]
+    pub billing_source: BillingSource,
+    #[serde(default = "super::defaults::default_provider_entries")]
+    pub providers: Vec<LlmProviderConfig>,
+    #[serde(default = "super::defaults::default_mode_chains")]
+    pub mode_chains: ModeChains,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingSource {
+    OpenrouterUser,
+    PrometheosSubscription,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LlmProviderConfig {
+    pub name: String,
+    pub provider_type: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModeChains {
+    pub fast: Vec<String>,
+    pub balanced: Vec<String>,
+    pub deep: Vec<String>,
+    pub coding: Vec<String>,
 }

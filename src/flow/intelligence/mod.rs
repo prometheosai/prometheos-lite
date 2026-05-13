@@ -8,7 +8,11 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
-pub use provider::{LlmProvider, OpenAiProvider, StreamCallback};
-pub use router::{GenerateResult, ModelRouter};
+pub use provider::{
+    AnthropicProvider, GenericOpenAiCompatibleProvider, LlmProvider, LmStudioProvider,
+    OllamaProvider, OpenAiProvider, OpenRouterProvider, ProviderError, ProviderErrorKind,
+    ProviderKind, ProviderMetadata, StreamCallback,
+};
+pub use router::{AttemptMetadata, GenerateResult, LlmMode, ModelRouter};
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolRuntime, ToolSandboxProfile};
 pub use utils::LlmUtilities;
