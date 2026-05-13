@@ -113,15 +113,96 @@ pub struct OpenRouterEmbeddingProvider {
     dimension: usize,
 }
 
+/// Jina AI embedding provider - free service without credits
+pub struct JinaEmbeddingProvider {
+    client: Client,
+    api_key: Option<String>,
+    dimension: usize,
+}
+
+impl JinaEmbeddingProvider {
+    /// Create a new Jina embedding provider
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            client: Client::new(),
+            api_key: std::env::var("JINA_API_KEY").ok(), // Use API key if available
+            dimension,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for JinaEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let json_body = serde_json::json!({
+            "input": text
+        });
+
+        let mut request = self
+            .client
+            .post("https://api.jina.ai/v1/embeddings")
+            .header("Content-Type", "application/json");
+
+        // Add Authorization header if API key is available
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .json(&json_body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send embedding request to Jina AI: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "Jina AI embedding request failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        let response_json: serde_json::Value = response.json().await
+            .map_err(|e| anyhow::anyhow!("Failed to parse Jina AI response: {}", e))?;
+
+        let embedding = response_json["data"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid response format from Jina AI"))?
+            .first()
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|first| first.as_array())
+            .and_then(|embedding_array| embedding_array.first())
+            .and_then(|embedding_vec| {
+                embedding_vec.as_array().and_then(|arr| {
+                    arr.first().and_then(|embedding| {
+                        embedding.as_array().and_then(|emb_arr| {
+                            emb_arr.iter().filter_map(|v| v.as_f64()).map(|f| f as f32).next()
+                        })
+                    })
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract embedding from Jina AI response"))?;
+
+        Ok(vec![embedding])
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+}
+
 impl OpenRouterEmbeddingProvider {
     /// Create a new OpenRouter embedding provider with fallback models
     pub fn new(api_key: String, dimension: usize) -> Self {
         // List of embedding models in order of preference
-        // Start with paid models, fallback to free tier
+        // Start with free tier models, fallback to paid models
         let models = vec![
-            "openai/text-embedding-3-large".to_string(),
             "openai/text-embedding-3-small".to_string(),
             "openai/text-embedding-ada-002".to_string(),
+            "openai/text-embedding-3-large".to_string(),
             "cohere/embed-english-v3.0".to_string(),
             "cohere/embed-multilingual-v3.0".to_string(),
         ];

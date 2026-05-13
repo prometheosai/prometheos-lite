@@ -10,7 +10,7 @@ pub mod types;
 pub mod vector;
 
 pub use db::MemoryDb;
-pub use embedding::{EmbeddingProvider, FallbackEmbeddingProvider, LocalEmbeddingProvider};
+pub use embedding::{EmbeddingProvider, FallbackEmbeddingProvider, JinaEmbeddingProvider, LocalEmbeddingProvider};
 pub use nodes::{ContextLoaderNode, MemoryExtractorNode, MemoryWriteNode};
 pub use scoring::{MemoryScore, prune, prune_by_threshold, prune_combined, rank_memories};
 pub use service::MemoryService;
