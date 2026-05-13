@@ -1,0 +1,7 @@
+{
+  "provider": "jina",
+  "base_url": "https://openrouter.ai/api",
+  "model": "meta-llama/llama-3.3-8b-instruct:free",
+  "embedding_url": "https://api.jina.ai/v1/embeddings",
+  "embedding_dimension": 1536
+}
