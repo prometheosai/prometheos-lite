@@ -1,3 +1,24 @@
+## V1.6.4 Runtime Identity, Tool Awareness, and Stack Alignment
+
+- Updated runtime/provider configuration toward an OpenRouter-first stack:
+  - `prometheos.config.json` now targets `openrouter` with primary model `owl-alpha`, fallback model chain entries, and explicit embedding model `openai/text-embedding-3-small`.
+  - `src/config/settings/{types,defaults}.rs`, `src/cli/runtime_builder.rs`, and `src/cli/commands/serve.rs` were updated to carry `embedding_model` and support local/OpenRouter/Jina embedding selection.
+  - `src/flow/memory/embedding.rs` now sends the configured embedding model to compatible embedding endpoints and accepts both legacy and OpenAI-style embedding payloads.
+- Added runtime stack visibility for the UI:
+  - `src/api/health.rs` and `src/api/router.rs` now expose `GET /runtime/stack`.
+  - `frontend/src/lib/api.ts`, `frontend/src/components/layout/app-layout.tsx`, and `frontend/src/components/layout/right-sidebar.tsx` now fetch and render the live runtime model stack instead of relying only on static frontend defaults.
+- Hardened conversation identity and capability behavior:
+  - `src/context/builder.rs` now propagates memory retrieval failures instead of silently degrading.
+  - `src/flow/factory/builtin_nodes.rs` now enforces PrometheOS Lite identity, sanitizes OWL/ZOO self-identification leaks, injects live tool inventory from the runtime registry, and shapes capability explanations through the personality system.
+  - `src/personality/prompt.rs`, `src/api/flow_runs/handler.rs`, `src/flow/factory/node_factory.rs`, and `src/flow/intelligence/tool.rs` now support personality-shaped identity/capability framing plus runtime tool enumeration with examples.
+  - `flows/chat.flow.yaml` and `flows/memory-augmented.json` were updated to align flow-level prompts with PrometheOS Lite identity.
+- Added repository continuity and diagnostic artifacts:
+  - refreshed `handoff.md` with a repository-grounded continuation audit.
+  - added untracked local diagnostics artifacts `request.json` and `test_embedding_provider/` for embedding-provider probing.
+- Verification run results:
+  - `cargo check` passed.
+  - API and SQLite verification confirmed new assistant replies identify as PrometheOS Lite and enumerate the live tool registry with concrete examples.
+
 ## V1.6.3 Multi-Provider Router Completion - Streaming Metadata, Coverage Restoration, Docs Alignment
 
 - Completed stream metadata parity in `src/flow/intelligence/router.rs`:
