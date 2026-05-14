@@ -19,12 +19,23 @@ interface FlowEvent {
   }
 }
 
+interface ActiveModelStack {
+  planner: string
+  coder: string
+  reviewer: string
+  memory: string
+  memorySource: string
+  memoryDescription: string
+}
+
 interface RightSidebarProps {
   events: FlowEvent[]
   status: string
+  activeStack: ActiveModelStack
+  activeProviderLabel: string
 }
 
-export function RightSidebar({ events, status }: RightSidebarProps) {
+export function RightSidebar({ events, status, activeStack, activeProviderLabel }: RightSidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
   const [activeTab, setActiveTab] = useState<"flow" | "artifacts" | "memory" | "debug" | "policy">("flow")
   const [memorySubTab, setMemorySubTab] = useState<"retrieved" | "new" | "pending" | "approved">("retrieved")
@@ -215,7 +226,7 @@ export function RightSidebar({ events, status }: RightSidebarProps) {
                             const startTime = prevEvent ? new Date(prevEvent.data.timestamp) : null
                             const endTime = new Date(event.data.timestamp)
                             const duration = startTime ? (endTime.getTime() - startTime.getTime()) / 1000 : null
-                            
+
                             return (
                               <div
                                 key={index}
@@ -286,34 +297,34 @@ export function RightSidebar({ events, status }: RightSidebarProps) {
                         <div className="p-2 rounded-lg bg-muted/50 border">
                           <div className="flex items-center justify-between mb-1">
                             <div className="text-[10px] font-medium">Planner</div>
-                            <div className="text-[10px] text-muted-foreground">LM Studio</div>
+                            <div className="text-[10px] text-muted-foreground">{activeProviderLabel}</div>
                           </div>
-                          <div className="text-xs">google/gemma-4-e4b</div>
-                          <div className="text-[10px] text-muted-foreground mt-0.5">Local • 4B parameters</div>
+                          <div className="text-xs">{activeStack.planner}</div>
+                          <div className="text-[10px] text-muted-foreground mt-0.5">{activeStack.memoryDescription}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-muted/50 border">
                           <div className="flex items-center justify-between mb-1">
                             <div className="text-[10px] font-medium">Coder</div>
-                            <div className="text-[10px] text-muted-foreground">LM Studio</div>
+                            <div className="text-[10px] text-muted-foreground">{activeProviderLabel}</div>
                           </div>
-                          <div className="text-xs">google/gemma-4-e4b</div>
-                          <div className="text-[10px] text-muted-foreground mt-0.5">Local • 4B parameters</div>
+                          <div className="text-xs">{activeStack.coder}</div>
+                          <div className="text-[10px] text-muted-foreground mt-0.5">{activeStack.memoryDescription}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-muted/50 border">
                           <div className="flex items-center justify-between mb-1">
                             <div className="text-[10px] font-medium">Reviewer</div>
-                            <div className="text-[10px] text-muted-foreground">LM Studio</div>
+                            <div className="text-[10px] text-muted-foreground">{activeProviderLabel}</div>
                           </div>
-                          <div className="text-xs">google/gemma-4-e4b</div>
-                          <div className="text-[10px] text-muted-foreground mt-0.5">Local • 4B parameters</div>
+                          <div className="text-xs">{activeStack.reviewer}</div>
+                          <div className="text-[10px] text-muted-foreground mt-0.5">{activeStack.memoryDescription}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-muted/50 border">
                           <div className="flex items-center justify-between mb-1">
                             <div className="text-[10px] font-medium">Memory</div>
-                            <div className="text-[10px] text-muted-foreground">Local</div>
+                            <div className="text-[10px] text-muted-foreground">{activeStack.memorySource}</div>
                           </div>
-                          <div className="text-xs">Embedding (1536 dim)</div>
-                          <div className="text-[10px] text-muted-foreground mt-0.5">LM Studio • text-embedding-ada-002</div>
+                          <div className="text-xs">{activeStack.memory}</div>
+                          <div className="text-[10px] text-muted-foreground mt-0.5">{activeStack.memoryDescription}</div>
                         </div>
                         <div className="p-2 rounded-lg bg-muted/50 border">
                           <div className="flex items-center justify-between mb-1">
@@ -321,7 +332,7 @@ export function RightSidebar({ events, status }: RightSidebarProps) {
                             <div className="text-[10px] text-muted-foreground">Session</div>
                           </div>
                           <div className="text-xs">$0.00</div>
-                          <div className="text-[10px] text-muted-foreground mt-0.5">All models running locally</div>
+                          <div className="text-[10px] text-muted-foreground mt-0.5">{activeProviderLabel === "LM Studio" ? "All models running locally" : "Cloud-backed models"}</div>
                         </div>
                       </div>
                     </TabsContent>
@@ -433,23 +444,23 @@ export function RightSidebar({ events, status }: RightSidebarProps) {
                       </Button>
                     </div>
                   </div>
-                  
+
                   <div className="space-y-2">
                     <div className="p-2 rounded-lg bg-muted/50 border">
                       <div className="text-[10px] font-medium mb-1 text-muted-foreground">Current Node</div>
                       <div className="text-xs">Not executing</div>
                     </div>
-                    
+
                     <div className="p-2 rounded-lg bg-muted/50 border">
                       <div className="text-[10px] font-medium mb-1 text-muted-foreground">Input State</div>
                       <pre className="text-[10px] overflow-x-auto">{JSON.stringify({ status: "idle" }, null, 2)}</pre>
                     </div>
-                    
+
                     <div className="p-2 rounded-lg bg-muted/50 border">
                       <div className="text-[10px] font-medium mb-1 text-muted-foreground">Output State</div>
                       <pre className="text-[10px] overflow-x-auto">{JSON.stringify({}, null, 2)}</pre>
                     </div>
-                    
+
                     <div className="p-2 rounded-lg bg-muted/50 border">
                       <div className="text-[10px] font-medium mb-1 text-muted-foreground">Next Transition</div>
                       <div className="text-xs">None</div>

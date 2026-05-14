@@ -41,6 +41,15 @@ export interface FlowEvent {
   };
 }
 
+export interface RuntimeModelStack {
+  provider: string;
+  provider_label: string;
+  primary_model: string;
+  fallback_models: string[];
+  embedding_model: string;
+  embedding_dimension: number;
+}
+
 // Projects API
 export async function getProjects(): Promise<Project[]> {
   const res = await fetch(`${API_BASE}/projects`);
@@ -106,7 +115,7 @@ export async function runFlow(conversationId: string, message: string): Promise<
 // WebSocket connection
 export function connectWebSocket(runId: string, onEvent: (event: FlowEvent) => void): WebSocket {
   const ws = new WebSocket(`ws://127.0.0.1:3000/ws/runs/${runId}`);
-  
+
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data) as FlowEvent;
@@ -117,4 +126,10 @@ export function connectWebSocket(runId: string, onEvent: (event: FlowEvent) => v
   };
 
   return ws;
+}
+
+export async function getRuntimeModelStack(): Promise<RuntimeModelStack> {
+  const res = await fetch(`${API_BASE}/runtime/stack`);
+  if (!res.ok) throw new Error('Failed to fetch runtime stack');
+  return res.json();
 }
