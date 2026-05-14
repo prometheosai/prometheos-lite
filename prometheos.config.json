@@ -1,7 +1,59 @@
 {
-  "provider": "jina",
+  "provider": "openrouter",
   "base_url": "https://openrouter.ai/api",
-  "model": "meta-llama/llama-3.3-8b-instruct:free",
-  "embedding_url": "https://api.jina.ai/v1/embeddings",
-  "embedding_dimension": 1536
+  "model": "owl-alpha",
+  "embedding_url": "https://openrouter.ai/api/v1/embeddings",
+  "embedding_dimension": 1536,
+  "embedding_model": "openai/text-embedding-3-small",
+  "llm_routing": {
+    "billing_source": "openrouter_user",
+    "providers": [
+      {
+        "name": "openrouter_primary",
+        "provider_type": "openrouter",
+        "enabled": true,
+        "base_url": "https://openrouter.ai/api",
+        "model": "owl-alpha",
+        "api_key_env": "OPENROUTER_API_KEY"
+      },
+      {
+        "name": "openrouter_fallback_1",
+        "provider_type": "openrouter",
+        "enabled": true,
+        "base_url": "https://openrouter.ai/api",
+        "model": "qwen/qwen3-8b:free",
+        "api_key_env": "OPENROUTER_API_KEY"
+      },
+      {
+        "name": "openrouter_fallback_2",
+        "provider_type": "openrouter",
+        "enabled": true,
+        "base_url": "https://openrouter.ai/api",
+        "model": "mistralai/mistral-7b-instruct:free",
+        "api_key_env": "OPENROUTER_API_KEY"
+      }
+    ],
+    "mode_chains": {
+      "fast": [
+        "openrouter_primary",
+        "openrouter_fallback_1",
+        "openrouter_fallback_2"
+      ],
+      "balanced": [
+        "openrouter_primary",
+        "openrouter_fallback_1",
+        "openrouter_fallback_2"
+      ],
+      "deep": [
+        "openrouter_primary",
+        "openrouter_fallback_1",
+        "openrouter_fallback_2"
+      ],
+      "coding": [
+        "openrouter_primary",
+        "openrouter_fallback_1",
+        "openrouter_fallback_2"
+      ]
+    }
+  }
 }

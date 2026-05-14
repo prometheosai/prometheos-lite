@@ -24,6 +24,10 @@ pub fn default_embedding_dimension() -> usize {
     1536
 }
 
+pub fn default_embedding_model() -> String {
+    "".to_string()
+}
+
 pub fn default_memory_db_path() -> String {
     "prometheos_memory.db".to_string()
 }

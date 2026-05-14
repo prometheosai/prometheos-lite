@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub embedding_url: String,
     #[serde(default = "super::defaults::default_embedding_dimension")]
     pub embedding_dimension: usize,
+    #[serde(default = "super::defaults::default_embedding_model")]
+    pub embedding_model: String,
     #[serde(default = "super::defaults::default_memory_db_path")]
     pub memory_db_path: String,
     #[serde(default = "super::defaults::default_context_window_size")]

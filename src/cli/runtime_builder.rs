@@ -22,6 +22,59 @@ pub struct RuntimeBuilder {
 }
 
 impl RuntimeBuilder {
+    fn should_use_local_embedding_provider(&self) -> bool {
+        let lower = self.config.embedding_url.to_ascii_lowercase();
+        self.config.provider == "lmstudio"
+            || lower.contains("127.0.0.1")
+            || lower.contains("localhost")
+    }
+
+    fn build_embedding_provider(&self) -> Box<dyn EmbeddingProvider> {
+        if self.should_use_local_embedding_provider() {
+            Box::new(LocalEmbeddingProvider::new(
+                self.config.embedding_url.clone(),
+                self.config.embedding_dimension,
+                if self.config.embedding_model.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.config.embedding_model.clone())
+                },
+            ))
+        } else if self.config.provider == "jina" {
+            // Use Jina AI embeddings
+            Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
+        } else if self.config.provider == "openrouter" {
+            // Check if we have OpenRouter credits, otherwise use Jina AI
+            if let Ok(_) = std::env::var("OPENROUTER_API_KEY") {
+                // Try OpenRouter first if API key is available
+                let embedding_model = if self.config.embedding_model.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.config.embedding_model.clone())
+                };
+                Box::new(OpenRouterEmbeddingProvider::new(
+                    std::env::var("OPENROUTER_API_KEY").unwrap(),
+                    self.config.embedding_dimension,
+                    embedding_model,
+                ))
+            } else {
+                // Fallback to Jina AI for free embeddings without credits
+                Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
+            }
+        } else {
+            // Default to local provider for other cases
+            Box::new(LocalEmbeddingProvider::new(
+                self.config.embedding_url.clone(),
+                self.config.embedding_dimension,
+                if self.config.embedding_model.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.config.embedding_model.clone())
+                },
+            ))
+        }
+    }
+
     /// Create a new RuntimeBuilder from loaded config
     pub fn new(config: AppConfig) -> Self {
         Self { config }
@@ -52,33 +105,7 @@ impl RuntimeBuilder {
         ));
 
         // Create persistent memory service with configurable embedding provider
-        let embedding: Box<dyn EmbeddingProvider> = if self.config.provider == "lmstudio" {
-            Box::new(LocalEmbeddingProvider::new(
-                self.config.embedding_url.clone(),
-                self.config.embedding_dimension,
-            ))
-        } else if self.config.provider == "jina" {
-            // Use Jina AI embeddings
-            Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
-        } else if self.config.provider == "openrouter" {
-            // Check if we have OpenRouter credits, otherwise use Jina AI
-            if let Ok(_) = std::env::var("OPENROUTER_API_KEY") {
-                // Try OpenRouter first if API key is available
-                Box::new(OpenRouterEmbeddingProvider::new(
-                    std::env::var("OPENROUTER_API_KEY").unwrap(),
-                    self.config.embedding_dimension,
-                ))
-            } else {
-                // Fallback to Jina AI for free embeddings without credits
-                Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
-            }
-        } else {
-            // Default to local provider for other cases
-            Box::new(LocalEmbeddingProvider::new(
-                self.config.embedding_url.clone(),
-                self.config.embedding_dimension,
-            ))
-        };
+        let embedding: Box<dyn EmbeddingProvider> = self.build_embedding_provider();
 
         let persistent_db =
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
@@ -100,33 +127,7 @@ impl RuntimeBuilder {
 
     /// Build memory service with configurable embedding provider
     pub fn build_memory_service(&self) -> anyhow::Result<Arc<MemoryService>> {
-        let embedding: Box<dyn EmbeddingProvider> = if self.config.provider == "lmstudio" {
-            Box::new(LocalEmbeddingProvider::new(
-                self.config.embedding_url.clone(),
-                self.config.embedding_dimension,
-            ))
-        } else if self.config.provider == "jina" {
-            // Use Jina AI embeddings
-            Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
-        } else if self.config.provider == "openrouter" {
-            // Check if we have OpenRouter credits, otherwise use Jina AI
-            if let Ok(_) = std::env::var("OPENROUTER_API_KEY") {
-                // Try OpenRouter first if API key is available
-                Box::new(OpenRouterEmbeddingProvider::new(
-                    std::env::var("OPENROUTER_API_KEY").unwrap(),
-                    self.config.embedding_dimension,
-                ))
-            } else {
-                // Fallback to Jina AI for free embeddings without credits
-                Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
-            }
-        } else {
-            // Default to local provider for other cases
-            Box::new(LocalEmbeddingProvider::new(
-                self.config.embedding_url.clone(),
-                self.config.embedding_dimension,
-            ))
-        };
+        let embedding: Box<dyn EmbeddingProvider> = self.build_embedding_provider();
 
         let persistent_db =
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
@@ -165,8 +166,8 @@ impl RuntimeBuilder {
                 match provider_cfg.provider_type.as_str() {
                     "openrouter" => {
                         if api_key.is_none() {
-                            anyhow::bail!(
-                                "OpenRouter provider '{}' requires api key env '{}'",
+                            eprintln!(
+                                "[WARN] OpenRouter provider '{}' has no API key set in env '{}'; requests may fail and fall through to next provider",
                                 provider_cfg.name,
                                 provider_cfg.api_key_env.clone().unwrap_or_default()
                             );

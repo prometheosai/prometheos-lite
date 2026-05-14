@@ -19,15 +19,17 @@ pub struct LocalEmbeddingProvider {
     client: Client,
     url: String,
     dimension: usize,
+    model: Option<String>,
 }
 
 impl LocalEmbeddingProvider {
     /// Create a new local embedding provider
-    pub fn new(url: String, dimension: usize) -> Self {
+    pub fn new(url: String, dimension: usize, model: Option<String>) -> Self {
         Self {
             client: Client::new(),
             url,
             dimension,
+            model,
         }
     }
 }
@@ -35,7 +37,19 @@ impl LocalEmbeddingProvider {
 #[async_trait]
 impl EmbeddingProvider for LocalEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let json_body = serde_json::json!({ "text": text });
+        // Support both legacy local format ({"text": ...}) and OpenAI-compatible
+        // embedding endpoints (LM Studio) by sending "input" and optional "model".
+        let mut json_body = serde_json::json!({
+            "text": text,
+            "input": [text]
+        });
+        if let Some(model) = self.model.as_ref().filter(|m| !m.trim().is_empty()) {
+            json_body["model"] = serde_json::Value::String(model.clone());
+        } else if let Ok(model) = std::env::var("LMSTUDIO_EMBEDDING_MODEL") {
+            if !model.trim().is_empty() {
+                json_body["model"] = serde_json::Value::String(model);
+            }
+        }
         let response = self
             .client
             .post(&self.url)
@@ -56,16 +70,31 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to parse embedding response: {}", e))?;
 
-        let embedding = output["embedding"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Missing embedding in response"))?
-            .iter()
-            .map(|v| {
-                v.as_f64()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid embedding value"))
-                    .map(|f| f as f32)
-            })
-            .collect::<Result<Vec<f32>>>()?;
+        let embedding = if let Some(arr) = output.get("embedding").and_then(|v| v.as_array()) {
+            arr.iter()
+                .map(|v| {
+                    v.as_f64()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid embedding value"))
+                        .map(|f| f as f32)
+                })
+                .collect::<Result<Vec<f32>>>()?
+        } else if let Some(arr) = output
+            .get("data")
+            .and_then(|v| v.as_array())
+            .and_then(|d| d.first())
+            .and_then(|first| first.get("embedding"))
+            .and_then(|v| v.as_array())
+        {
+            arr.iter()
+                .map(|v| {
+                    v.as_f64()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid embedding value"))
+                        .map(|f| f as f32)
+                })
+                .collect::<Result<Vec<f32>>>()?
+        } else {
+            anyhow::bail!("Missing embedding in response")
+        };
 
         Ok(embedding)
     }
@@ -196,16 +225,20 @@ impl EmbeddingProvider for JinaEmbeddingProvider {
 
 impl OpenRouterEmbeddingProvider {
     /// Create a new OpenRouter embedding provider with fallback models
-    pub fn new(api_key: String, dimension: usize) -> Self {
-        // List of embedding models in order of preference
-        // Start with free tier models, fallback to paid models
-        let models = vec![
+    pub fn new(api_key: String, dimension: usize, preferred_model: Option<String>) -> Self {
+        // List of embedding models in order of preference.
+        // User-specified preferred_model is tried first if provided.
+        let mut models = vec![];
+        if let Some(model) = preferred_model {
+            models.push(model);
+        }
+        models.extend([
             "openai/text-embedding-3-small".to_string(),
             "openai/text-embedding-ada-002".to_string(),
             "openai/text-embedding-3-large".to_string(),
             "cohere/embed-english-v3.0".to_string(),
             "cohere/embed-multilingual-v3.0".to_string(),
-        ];
+        ]);
 
         Self {
             client: Client::new(),
