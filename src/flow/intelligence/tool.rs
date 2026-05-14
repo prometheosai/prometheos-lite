@@ -354,6 +354,14 @@ impl ToolRegistry {
     pub fn list_tools(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }
+
+    /// Get metadata for all registered tools.
+    pub fn list_tool_metadata(&self) -> Vec<ToolMetadata> {
+        let mut metadata: Vec<ToolMetadata> =
+            self.tools.values().map(|tool| tool.metadata()).collect();
+        metadata.sort_by(|left, right| left.name.cmp(&right.name));
+        metadata
+    }
 }
 
 impl Default for ToolRegistry {

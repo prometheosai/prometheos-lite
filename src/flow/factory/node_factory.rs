@@ -161,6 +161,7 @@ impl DefaultNodeFactory {
             "llm" => Ok(Arc::new(super::builtin_nodes::LlmNode::new(
                 node_config,
                 self.model_router.clone(),
+                self.tool_runtime.clone(),
                 config,
                 context_builder,
             ))),

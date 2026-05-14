@@ -15,6 +15,7 @@ use crate::db::{Db, FlowRun, Repository, RunFlow};
 use crate::flow::MemoryKind;
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::intent::Intent;
+use crate::personality::{ModeSelector, PersonalityMode};
 use chrono::Utc;
 
 /// Run a flow for a conversation
@@ -121,6 +122,9 @@ pub async fn run_flow(
             actual_message
         };
 
+        let selected_mode = ModeSelector::new(PersonalityMode::default())
+            .select_from_text(&message_to_process);
+
         let message_with_context = if let Some(context) = relevant_context {
             format!("{}\n\nUser message: {}", context, message_to_process)
         } else {
@@ -129,6 +133,7 @@ pub async fn run_flow(
 
         // Build execution options
         let mut options = ExecutionOptions::default();
+        options = options.with_personality_mode(selected_mode.display_name().to_lowercase());
         if let Some(intent) = override_intent {
             options = options.with_override_intent(intent);
         }
@@ -153,14 +158,39 @@ pub async fn run_flow(
         match final_output {
             Ok(output) => {
                 if output.success {
-                    // Emit the output
+                    // Extract primary content (string or serialized JSON)
+                    let primary_content = match &output.primary {
+                        serde_json::Value::String(s) => s.trim().to_string(),
+                        other => other.to_string(),
+                    };
+
+                    // Save assistant message to DB
+                    if let Ok(db) = Db::new(&db_path) {
+                        let _ = db.create_message(crate::db::CreateMessage {
+                            conversation_id: conversation_id.clone(),
+                            role: "assistant".to_string(),
+                            content: primary_content.clone(),
+                        });
+                    }
+
+                    // Log assistant reply as episodic memory (non-blocking)
+                    if let Some(memory_service) = runtime.memory_service.as_ref() {
+                        let _ = memory_service.queue_episode(
+                            format!("Assistant: {}", primary_content),
+                            None,
+                            None,
+                            Some(conversation_id.clone()),
+                            serde_json::json!({ "role": "assistant", "flow_run_id": run_id }),
+                        );
+                    }
+
+                    // Emit assistant content event so frontend can display it immediately
                     let _ = ws_manager
                         .send_event(
                             &run_id,
                             FlowEvent::Output {
-                                node: "system".to_string(),
-                                data: serde_json::to_string_pretty(&output)
-                                    .unwrap_or_else(|_| "Failed to serialize output".to_string()),
+                                node: "assistant".to_string(),
+                                data: primary_content,
                                 timestamp: Utc::now(),
                             },
                         )

@@ -477,6 +477,7 @@ impl Node for ReviewerNode {
 pub struct LlmNode {
     config: NodeConfig,
     model_router: Option<std::sync::Arc<ModelRouter>>,
+    tool_runtime: Option<std::sync::Arc<ToolRuntime>>,
     prompt_template: Option<String>,
     context_builder: ContextBuilder,
 }
@@ -485,6 +486,7 @@ impl LlmNode {
     pub fn new(
         config: NodeConfig,
         model_router: Option<std::sync::Arc<ModelRouter>>,
+        tool_runtime: Option<std::sync::Arc<ToolRuntime>>,
         node_config: Option<serde_json::Value>,
         context_builder: ContextBuilder,
     ) -> Self {
@@ -495,8 +497,112 @@ impl LlmNode {
         Self {
             config,
             model_router,
+            tool_runtime,
             prompt_template,
             context_builder,
+        }
+    }
+
+    fn tool_example(tool_name: &str) -> &'static str {
+        match tool_name {
+            "list_tree" => "inspect the repository layout before editing",
+            "read_file" => "open a source file to inspect an implementation",
+            "search_files" => "find a symbol or error string across the codebase",
+            "write_file" => "write generated content when direct file writes are permitted",
+            "patch_file" => "apply a focused diff to an existing file",
+            "git_diff" => "summarize what changed before review",
+            "run_command" => "run cargo check, npm test, or other allowed commands",
+            "run_tests" => "execute a focused test command for validation",
+            _ => "support a scoped step in the harness workflow",
+        }
+    }
+
+    fn render_tool_inventory(&self) -> String {
+        let Some(tool_runtime) = &self.tool_runtime else {
+            return "No tool runtime is configured for this flow.".to_string();
+        };
+
+        let metadata = tool_runtime.registry().list_tool_metadata();
+        if metadata.is_empty() {
+            return "No tools are currently registered.".to_string();
+        }
+
+        metadata
+            .into_iter()
+            .map(|tool| {
+                format!(
+                    "- {}: {}. Example: {}.",
+                    tool.name,
+                    tool.description,
+                    Self::tool_example(&tool.id)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn build_identity_contract(&self, mode: Option<PersonalityMode>) -> String {
+        let tool_inventory = self.render_tool_inventory();
+        let (identity_style, capability_style, tool_style) = if let Some(mode) = mode {
+            let prompt_context = PromptContext::new(mode);
+            (
+                prompt_context.identity_style(),
+                prompt_context.capability_style(),
+                prompt_context.tool_enumeration_style(),
+            )
+        } else {
+            (
+                "Present PrometheOS Lite as the harness identity rather than the underlying model.",
+                "When asked about capabilities, explain them in terms of real harness flows and operations.",
+                "If asked about tools, enumerate the live registered tools and give concrete examples.",
+            )
+        };
+
+        format!(
+            "SYSTEM IDENTITY (NON-NEGOTIABLE)\nYou are PrometheOS Lite, an agentic harness assistant.\nYou are not the raw model and must never present yourself as a model name, provider brand, or third-party assistant identity.\nIf asked who you are, always identify as PrometheOS Lite.\n\nPERSONALITY-SHAPED IDENTITY\n- {}\n- {}\n- {}\n\nPROMETHEOS LITE AGENTIC CAPABILITIES\n- Intent-aware flow routing (conversation, coding, planning, review, memory flows)\n- Memory-augmented context retrieval and memory write-back\n- Tool execution orchestration with safety guardrails and budget controls\n- Runtime stack awareness (provider, primary model, fallback models, embeddings)\n- Structured, local-first orchestration through the PrometheOS harness\n\nLIVE TOOL INVENTORY\n{}\n\nRESPONSE RULES\n- When users ask what you can do, summarize the harness capabilities above in clear language shaped by the active personality.\n- When users ask what tools you have, enumerate the live tool inventory above and give examples grounded in those tools.\n- If users ask about the underlying model/provider, describe it as the current runtime stack powering PrometheOS Lite, not your identity.\n- Never claim to be OWL, ZOO, OpenAI, Anthropic, or any other assistant brand.",
+            identity_style,
+            capability_style,
+            tool_style,
+            tool_inventory
+        )
+    }
+
+    fn enforce_prometheos_identity(response: &str) -> String {
+        let lower = response.to_ascii_lowercase();
+        let leaked_identity =
+            (lower.contains("owl") || lower.contains("zoo"))
+                && (lower.contains("i am")
+                    || lower.contains("i'm")
+                    || lower.contains("developed by")
+                    || lower.contains("as owl"));
+
+        if !leaked_identity {
+            return response.to_string();
+        }
+
+        // Remove contaminated identity lines/paragraphs and replace with canonical harness identity.
+        let cleaned_parts: Vec<&str> = response
+            .split("\n\n")
+            .filter(|part| {
+                let p = part.to_ascii_lowercase();
+                !((p.contains("owl") || p.contains("zoo"))
+                    && (p.contains("i am")
+                        || p.contains("i'm")
+                        || p.contains("developed by")
+                        || p.contains("as owl")))
+            })
+            .collect();
+
+        let cleaned = cleaned_parts.join("\n\n").trim().to_string();
+        let identity = "I am PrometheOS Lite, an agentic harness assistant.";
+
+        if cleaned.is_empty() {
+            format!(
+                "{}\n\nI can route intents into specialized flows, use memory-augmented context, orchestrate tools with guardrails, and operate with runtime stack awareness.",
+                identity
+            )
+        } else {
+            format!("{}\n\n{}", identity, cleaned)
         }
     }
 }
@@ -537,6 +643,9 @@ impl Node for LlmNode {
             .as_str()
             .context("Missing prompt in LLM node input")?;
 
+        let mode = input["personality_mode"].as_str().and_then(PersonalityMode::parse);
+        let identity_contract = self.build_identity_contract(mode);
+
         let router = self
             .model_router
             .as_ref()
@@ -565,11 +674,14 @@ impl Node for LlmNode {
                 .context("Failed to build context with ContextBuilder")?
         };
 
-        let final_prompt = if let Some(template) = &self.prompt_template {
+        let templated_prompt = if let Some(template) = &self.prompt_template {
             template.replace("{{prompt}}", &built_context.prompt)
         } else {
             built_context.prompt
         };
+
+        // Always prepend explicit assistant identity and harness capability contract.
+        let final_prompt = format!("{}\n\n{}", identity_contract, templated_prompt);
 
         // Inject personality context if mode is set
         let enhanced_prompt = if let Some(mode_str) = input["personality_mode"].as_str() {
@@ -604,9 +716,11 @@ impl Node for LlmNode {
                 response.to_string()
             };
 
+            let identity_safe_response = Self::enforce_prometheos_identity(&filtered_response);
+
             state.set_output(
                 "llm_response".to_string(),
-                serde_json::json!(filtered_response),
+                serde_json::json!(identity_safe_response),
             );
         }
 
