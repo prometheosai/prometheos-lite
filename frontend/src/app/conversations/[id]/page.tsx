@@ -68,19 +68,20 @@ export default function ConversationPage({ params }: { params: { id: string } })
     try {
       // Run flow which saves the message and starts execution
       const flowRun = await runFlow(params.id, userMessage);
-      
+
       // Connect WebSocket for live updates
       const ws = connectWebSocket(flowRun.id, (event) => {
         setEvents((prev) => [...prev, event]);
-        
+
         // Show thinking state during LLM processing
         if (event.type === 'output' && event.data.data === 'Thinking...') {
           setThinking(true);
         }
-        
+
         // Display assistant response when received
         if (event.type === 'output' && event.data.node === 'assistant' && event.data.data) {
           setThinking(false);
+          setRunning(false);
           const assistantMessage: Message = {
             id: `assistant-${Date.now()}`,
             conversation_id: params.id,
@@ -90,30 +91,20 @@ export default function ConversationPage({ params }: { params: { id: string } })
           };
           setMessages((prev) => [...prev, assistantMessage]);
         }
-        
-        // Check if direct response completed
-        if (event.type === 'output' && event.data.data === 'Direct response completed') {
-          setThinking(false);
-          setRunning(false);
-          // Reload messages to ensure persistence
-          setTimeout(loadMessages, 500);
-        }
-        
-        // Check if flow is complete (after memory_write node)
+
+        // Check if flow is complete (error state)
         if (event.type === 'node_end' && event.data.node === 'memory_write') {
           setThinking(false);
           setRunning(false);
-          // Reload messages to get assistant response
-          setTimeout(loadMessages, 500);
         }
-        
+
         // Handle errors
         if (event.type === 'error') {
           setThinking(false);
           setRunning(false);
         }
       });
-      
+
       wsRef.current = ws;
     } catch (error) {
       console.error('Failed to run flow:', error);
@@ -172,13 +163,12 @@ export default function ConversationPage({ params }: { params: { id: string } })
                   className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
                   <div
-                    className={`max-w-2xl px-4 py-2 rounded-lg ${
-                      message.role === 'user'
+                    className={`max-w-2xl px-4 py-2 rounded-lg ${message.role === 'user'
                         ? 'bg-blue-600 text-white'
                         : darkMode
-                        ? 'bg-gray-800 border border-gray-700 text-gray-100'
-                        : 'bg-white border shadow-sm'
-                    }`}
+                          ? 'bg-gray-800 border border-gray-700 text-gray-100'
+                          : 'bg-white border shadow-sm'
+                      }`}
                   >
                     <p className="whitespace-pre-wrap">{message.content}</p>
                     <p className="text-xs mt-1 opacity-70">
@@ -189,11 +179,10 @@ export default function ConversationPage({ params }: { params: { id: string } })
               ))}
               {thinking && (
                 <div className="flex justify-start">
-                  <div className={`max-w-2xl px-4 py-2 rounded-lg ${
-                    darkMode
+                  <div className={`max-w-2xl px-4 py-2 rounded-lg ${darkMode
                       ? 'bg-gray-800 border border-gray-700 text-gray-100'
                       : 'bg-white border shadow-sm'
-                  }`}>
+                    }`}>
                     <div className="flex items-center gap-2">
                       <Loader2 className="animate-spin" size={16} />
                       <span className="text-sm text-gray-500">Thinking...</span>
@@ -215,11 +204,10 @@ export default function ConversationPage({ params }: { params: { id: string } })
               onChange={(e) => setInput(e.target.value)}
               placeholder="Type your message..."
               disabled={running}
-              className={`flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 ${
-                darkMode
+              className={`flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 ${darkMode
                   ? 'bg-gray-700 border-gray-600 text-gray-100 placeholder-gray-400'
                   : 'border-gray-300'
-              }`}
+                }`}
             />
             <button
               type="submit"
@@ -255,19 +243,18 @@ export default function ConversationPage({ params }: { params: { id: string } })
               {events.map((event, index) => (
                 <div
                   key={index}
-                  className={`p-3 rounded-lg text-sm ${
-                    event.type === 'error'
+                  className={`p-3 rounded-lg text-sm ${event.type === 'error'
                       ? darkMode
                         ? 'bg-red-900/30 border border-red-800 text-red-200'
                         : 'bg-red-50 border border-red-200'
                       : event.type === 'output'
-                      ? darkMode
-                        ? 'bg-green-900/30 border border-green-800 text-green-200'
-                        : 'bg-green-50 border border-green-200'
-                      : darkMode
-                      ? 'bg-gray-700 border border-gray-600 text-gray-200'
-                      : 'bg-gray-50 border border-gray-200'
-                  }`}
+                        ? darkMode
+                          ? 'bg-green-900/30 border border-green-800 text-green-200'
+                          : 'bg-green-50 border border-green-200'
+                        : darkMode
+                          ? 'bg-gray-700 border border-gray-600 text-gray-200'
+                          : 'bg-gray-50 border border-gray-200'
+                    }`}
                 >
                   <div className="font-medium">
                     {event.type === 'node_start' && `Started: ${event.data.node}`}
