@@ -16,7 +16,7 @@ use crate::api::AppState;
 use crate::api::control_panel::create_control_panel_router;
 use crate::api::conversations::{create_conversation, get_conversations};
 use crate::api::flow_runs::run_flow;
-use crate::api::health::health_check;
+use crate::api::health::{health_check, runtime_stack};
 use crate::api::messages::{create_message, get_messages};
 use crate::api::playbooks::{create_playbook, get_playbook, list_playbooks, update_playbook};
 use crate::api::projects::{create_project, get_projects};
@@ -47,6 +47,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health_check))
+        .route("/runtime/stack", get(runtime_stack))
         .route("/projects", get(get_projects).post(create_project))
         .route("/projects/:id/conversations", get(get_conversations))
         .route("/conversations", post(create_conversation))
