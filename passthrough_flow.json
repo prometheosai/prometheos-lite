@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "name": "PrometheOS Lite Self-Improvement Plan Output",
+  "description": "Outputs the architecture upgrade plan as text",
+  "start_node": "output_plan",
+  "inputs": {
+    "required": [
+      "plan"
+    ]
+  },
+  "outputs": {
+    "primary": "plan_output",
+    "include": [
+      "plan_output"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "output_plan",
+      "node_type": "passthrough",
+      "config": null
+    }
+  ],
+  "transitions": []
+}
