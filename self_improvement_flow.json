@@ -1,0 +1,113 @@
+{
+  "version": "1.0",
+  "name": "PrometheOS Lite Self-Improvement Plan",
+  "description": "A flow that outlines the architecture upgrade plan for Prometheos Lite",
+  "start_node": "overview",
+  "outputs": {
+    "primary": "summary",
+    "include": ["phases", "recommendation"]
+  },
+  "nodes": [
+    {
+      "id": "overview",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "phase1",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "phase2",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "phase3",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "phase4",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "phase5",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "recommendation",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "summary",
+      "node_type": "placeholder",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "overview",
+      "action": "continue",
+      "to": "phase1"
+    },
+    {
+      "from": "phase1",
+      "action": "continue",
+      "to": "phase2"
+    },
+    {
+      "from": "phase2",
+      "action": "continue",
+      "to": "phase3"
+    },
+    {
+      "from": "phase3",
+      "action": "continue",
+      "to": "phase4"
+    },
+    {
+      "from": "phase4",
+      "action": "continue",
+      "to": "phase5"
+    },
+    {
+      "from": "phase5",
+      "action": "continue",
+      "to": "recommendation"
+    },
+    {
+      "from": "recommendation",
+      "action": "continue",
+      "to": "summary"
+    }
+  ]
+}

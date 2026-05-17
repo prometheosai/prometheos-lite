@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "name": "Write Architecture Plan",
+  "description": "A flow that writes the architecture improvement plan to a file",
+  "start_node": "passthrough",
+  "inputs": {
+    "required": [
+      "generated",
+      "file_path"
+    ]
+  },
+  "outputs": {
+    "primary": "written",
+    "include": []
+  },
+  "nodes": [
+    {
+      "id": "passthrough",
+      "node_type": "passthrough",
+      "config": null
+    },
+    {
+      "id": "file_writer",
+      "node_type": "file_writer",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "passthrough",
+      "action": "continue",
+      "to": "file_writer"
+    }
+  ]
+}
