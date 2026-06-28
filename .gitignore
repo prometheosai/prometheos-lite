@@ -12,9 +12,12 @@
 /target/
 /dist/
 /build/
+/.cargo-target/
 
 # Logs and temporary files
+logs/
 *.log
+.ci-test-output.log
 *.tmp
 *.temp
 *.swp
@@ -36,4 +39,3 @@ prometheos-output/
 
 # Database files
 *.db
-*.txt

@@ -79,9 +79,36 @@ Create a `prometheos.config.json` file:
 
 ```json
 {
-  "provider": "lmstudio",
-  "base_url": "http://localhost:1234/v1",
-  "model": "your-model-name"
+  "provider": "openrouter",
+  "base_url": "https://openrouter.ai/api",
+  "model": "meta-llama/llama-3.3-8b-instruct:free",
+  "llm_routing": {
+    "billing_source": "openrouter_user",
+    "providers": [
+      {
+        "name": "openrouter_fast",
+        "provider_type": "openrouter",
+        "enabled": true,
+        "base_url": "https://openrouter.ai/api",
+        "model": "meta-llama/llama-3.3-8b-instruct:free",
+        "api_key_env": "OPENROUTER_API_KEY"
+      },
+      {
+        "name": "openrouter_balanced",
+        "provider_type": "openrouter",
+        "enabled": true,
+        "base_url": "https://openrouter.ai/api",
+        "model": "mistralai/mistral-7b-instruct:free",
+        "api_key_env": "OPENROUTER_API_KEY"
+      }
+    ],
+    "mode_chains": {
+      "fast": ["openrouter_fast", "openrouter_balanced"],
+      "balanced": ["openrouter_balanced", "openrouter_fast"],
+      "deep": ["openrouter_balanced"],
+      "coding": ["openrouter_balanced"]
+    }
+  }
 }
 ```
 
@@ -217,7 +244,7 @@ Flow
     /rate_limit.rs    → Token budgeting and guardrails
   /agents     → Legacy agent interfaces (deprecated)
   /core       → Legacy orchestration (deprecated)
-  /llm        → Model client (LM Studio-compatible)
+  /llm        → Model client (OpenAI-compatible, multi-provider)
   /fs         → File parsing & writing
   /logger     → Streaming logs
   /config     → Configuration loader
@@ -229,9 +256,10 @@ Flow
 
 Compatible with:
 
-- Local models via LM Studio (OpenAI-compatible API)
-- Any OpenAI-compatible endpoint
-- Multiple providers with automatic fallback
+- OpenRouter-first routing with mode-aware chains (`fast`, `balanced`, `deep`, `coding`)
+- Any OpenAI-compatible endpoint (BYOK)
+- Local providers such as LM Studio/Ollama through provider entries
+- Automatic quota/rate-limit cooldown failover
 
 ---
 

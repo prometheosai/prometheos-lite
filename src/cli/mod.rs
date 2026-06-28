@@ -30,6 +30,9 @@ enum Commands {
     Bench(commands::bench::BenchCommand),
     /// Manage WorkContexts
     Work(commands::work::WorkCommand),
+    /// MVP local repo workbench: scan, plan, stage artifacts, require approval, and remember
+    #[command(name = "repo", alias = "repo-workbench")]
+    RepoWorkbench(commands::repo_workbench::RepoWorkbenchCommand),
     /// Manage domain templates
     Templates(commands::templates::TemplatesCommand),
     /// Run provider/system/validation diagnostics
@@ -45,6 +48,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Serve(cmd) => cmd.execute().await,
         Commands::Bench(cmd) => cmd.execute().await,
         Commands::Work(cmd) => cmd.execute().await,
+        Commands::RepoWorkbench(cmd) => cmd.execute().await,
         Commands::Templates(cmd) => cmd.execute().await,
         Commands::Diagnostics(args) => {
             commands::diagnostics::handle_diagnostics_command(args).await

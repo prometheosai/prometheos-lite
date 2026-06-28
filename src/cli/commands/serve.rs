@@ -53,6 +53,11 @@ impl ServeCommand {
                     prometheos_lite::flow::memory::embedding::LocalEmbeddingProvider::new(
                         "http://127.0.0.1:1234".to_string(),
                         runtime_builder.config().embedding_dimension,
+                        if runtime_builder.config().embedding_model.trim().is_empty() {
+                            None
+                        } else {
+                            Some(runtime_builder.config().embedding_model.clone())
+                        },
                     ),
                 ),
                 memory_service,

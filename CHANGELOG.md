@@ -1,3 +1,73 @@
+## V1.6.4 Runtime Identity, Tool Awareness, and Stack Alignment
+
+- Updated runtime/provider configuration toward an OpenRouter-first stack:
+  - `prometheos.config.json` now targets `openrouter` with primary model `owl-alpha`, fallback model chain entries, and explicit embedding model `openai/text-embedding-3-small`.
+  - `src/config/settings/{types,defaults}.rs`, `src/cli/runtime_builder.rs`, and `src/cli/commands/serve.rs` were updated to carry `embedding_model` and support local/OpenRouter/Jina embedding selection.
+  - `src/flow/memory/embedding.rs` now sends the configured embedding model to compatible embedding endpoints and accepts both legacy and OpenAI-style embedding payloads.
+- Added runtime stack visibility for the UI:
+  - `src/api/health.rs` and `src/api/router.rs` now expose `GET /runtime/stack`.
+  - `frontend/src/lib/api.ts`, `frontend/src/components/layout/app-layout.tsx`, and `frontend/src/components/layout/right-sidebar.tsx` now fetch and render the live runtime model stack instead of relying only on static frontend defaults.
+- Hardened conversation identity and capability behavior:
+  - `src/context/builder.rs` now propagates memory retrieval failures instead of silently degrading.
+  - `src/flow/factory/builtin_nodes.rs` now enforces PrometheOS Lite identity, sanitizes OWL/ZOO self-identification leaks, injects live tool inventory from the runtime registry, and shapes capability explanations through the personality system.
+  - `src/personality/prompt.rs`, `src/api/flow_runs/handler.rs`, `src/flow/factory/node_factory.rs`, and `src/flow/intelligence/tool.rs` now support personality-shaped identity/capability framing plus runtime tool enumeration with examples.
+  - `flows/chat.flow.yaml` and `flows/memory-augmented.json` were updated to align flow-level prompts with PrometheOS Lite identity.
+- Added repository continuity and diagnostic artifacts:
+  - refreshed `handoff.md` with a repository-grounded continuation audit.
+  - added untracked local diagnostics artifacts `request.json` and `test_embedding_provider/` for embedding-provider probing.
+- Verification run results:
+  - `cargo check` passed.
+  - API and SQLite verification confirmed new assistant replies identify as PrometheOS Lite and enumerate the live tool registry with concrete examples.
+
+## V1.6.3 Multi-Provider Router Completion - Streaming Metadata, Coverage Restoration, Docs Alignment
+
+- Completed stream metadata parity in `src/flow/intelligence/router.rs`:
+  - added `generate_stream_for_mode_with_metadata(...)`
+  - `generate_stream_with_metadata(...)` now returns real provider/model/latency/fallback/attempt path metadata instead of placeholder `"unknown"` values.
+  - quota and rate-limit streaming failures now trigger cooldown rotation and are reflected in metadata.
+- Restored and expanded intelligence-layer test coverage in `src/flow/intelligence/tests.rs`:
+  - restored dropped utility/sandbox tests that had been removed in the prior rewrite.
+  - added stream-metadata regression coverage (`test_model_router_stream_metadata`) validating fallback path, quota rotation, and attempt accounting.
+  - validated mode-chain and quota-rotation metadata behavior remains correct.
+- Updated operator-facing configuration guidance in `README.md`:
+  - moved default example from LM Studio-only config to OpenRouter-first multi-provider `llm_routing` schema.
+  - documented mode-chain routing and BYOK/local-provider support language.
+- Verification run results:
+  - `cargo test --lib flow::intelligence::tests --all-features` passed (`14 passed`).
+  - `cargo test --lib test_model_router_stream_metadata --all-features` passed.
+  - `cargo check --all-targets --all-features` passed.
+
+## V1.6.1 PRD Harness Completion Audit - Cumulative Closure
+
+- Added a strict cumulative audit artifact at `docs/prd-harness-completion-audit.md` that maps harness/work-context requirements across PRD history to concrete implementation evidence.
+- Documented supersession handling where older interface expectations were replaced by later canonical contracts, with explicit rationale and compatibility notes.
+- Recorded an end-to-end operational health verdict for the harness path (`Complete with documented supersessions`) with local verification evidence.
+- Refreshed `handoff.md` as a continuity-grade transfer document for next-operator execution against the audit baseline.
+
+## V1.6.2 Router Hardening - WorkContext API Ownership Matrix Completion
+
+- Completed router-level integration hardening in `src/api/work_contexts.rs` by expanding API guard coverage beyond mutation routes into read/reporting surfaces.
+- Added ownership and identity enforcement tests for:
+  - `list_work_contexts`
+  - `get_work_context`
+  - `get_work_context_artifacts`
+  - `get_work_quality`
+  - `get_work_cost`
+  - `list_work_traces`
+- Added trace retrieval not-found regression test:
+  - `get_trace_by_run` now has explicit test coverage ensuring unknown run IDs return `404 NotFound`.
+- Added harness view guard matrix tests for:
+  - `get_harness_evidence`
+  - `get_harness_patches`
+  - `get_harness_validation`
+  - `get_harness_review`
+  - `get_harness_risk`
+  - `get_harness_completion`
+- Harness view tests now explicitly verify:
+  - foreign `user_id` -> `403 Forbidden`
+  - owner with absent harness view payload -> `409 Conflict`
+- Added a reusable async test helper to assert invariant behavior consistently across harness view endpoints, reducing drift risk and duplicated assertion logic.
+
 ## V1.6.1 Final Audit Closure - Ownership, CI Pinning, Versioning
 
 - Added explicit WorkContext ownership regression tests in `src/api/work_contexts.rs` for mutation/execution routes:
