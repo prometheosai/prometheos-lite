@@ -233,8 +233,10 @@ impl ModelRouter {
                     Ok(result) => return Ok(result),
                     Err(err) => {
                         let err_kind = provider.classify_error(&err);
-                        if matches!(err_kind, ProviderErrorKind::Quota | ProviderErrorKind::RateLimit)
-                        {
+                        if matches!(
+                            err_kind,
+                            ProviderErrorKind::Quota | ProviderErrorKind::RateLimit
+                        ) {
                             self.mark_cooldown(provider_idx);
                         }
                         last_error = Some(err);

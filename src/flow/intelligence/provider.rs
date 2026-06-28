@@ -1,8 +1,8 @@
 //! LLM Provider abstraction
 
+use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use anyhow::Result;
 
 use crate::llm::LlmClient;
 
@@ -79,11 +79,7 @@ pub trait LlmProvider: Send + Sync {
     async fn generate(&self, prompt: &str) -> Result<String>;
 
     /// Generate a completion with streaming support.
-    async fn generate_stream(
-        &self,
-        prompt: &str,
-        callback: StreamCallback,
-    ) -> Result<String>;
+    async fn generate_stream(&self, prompt: &str, callback: StreamCallback) -> Result<String>;
 
     /// Get the provider name
     fn name(&self) -> &str;
@@ -214,11 +210,7 @@ impl LlmProvider for OpenAiProvider {
         self.client.generate(prompt).await
     }
 
-    async fn generate_stream(
-        &self,
-        prompt: &str,
-        callback: StreamCallback,
-    ) -> Result<String> {
+    async fn generate_stream(&self, prompt: &str, callback: StreamCallback) -> Result<String> {
         self.client
             .generate_stream(prompt, |chunk| callback(chunk))
             .await

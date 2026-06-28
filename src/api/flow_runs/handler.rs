@@ -122,8 +122,8 @@ pub async fn run_flow(
             actual_message
         };
 
-        let selected_mode = ModeSelector::new(PersonalityMode::default())
-            .select_from_text(&message_to_process);
+        let selected_mode =
+            ModeSelector::new(PersonalityMode::default()).select_from_text(&message_to_process);
 
         let message_with_context = if let Some(context) = relevant_context {
             format!("{}\n\nUser message: {}", context, message_to_process)

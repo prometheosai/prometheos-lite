@@ -45,10 +45,10 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
         });
         if let Some(model) = self.model.as_ref().filter(|m| !m.trim().is_empty()) {
             json_body["model"] = serde_json::Value::String(model.clone());
-        } else if let Ok(model) = std::env::var("LMSTUDIO_EMBEDDING_MODEL") {
-            if !model.trim().is_empty() {
-                json_body["model"] = serde_json::Value::String(model);
-            }
+        } else if let Ok(model) = std::env::var("LMSTUDIO_EMBEDDING_MODEL")
+            && !model.trim().is_empty()
+        {
+            json_body["model"] = serde_json::Value::String(model);
         }
         let response = self
             .client
@@ -177,11 +177,10 @@ impl EmbeddingProvider for JinaEmbeddingProvider {
             request = request.header("Authorization", format!("Bearer {}", api_key));
         }
 
-        let response = request
-            .json(&json_body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send embedding request to Jina AI: {}", e))?;
+        let response =
+            request.json(&json_body).send().await.map_err(|e| {
+                anyhow::anyhow!("Failed to send embedding request to Jina AI: {}", e)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -193,7 +192,9 @@ impl EmbeddingProvider for JinaEmbeddingProvider {
             );
         }
 
-        let response_json: serde_json::Value = response.json().await
+        let response_json: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to parse Jina AI response: {}", e))?;
 
         let embedding = response_json["data"]
@@ -208,7 +209,11 @@ impl EmbeddingProvider for JinaEmbeddingProvider {
                 embedding_vec.as_array().and_then(|arr| {
                     arr.first().and_then(|embedding| {
                         embedding.as_array().and_then(|emb_arr| {
-                            emb_arr.iter().filter_map(|v| v.as_f64()).map(|f| f as f32).next()
+                            emb_arr
+                                .iter()
+                                .filter_map(|v| v.as_f64())
+                                .map(|f| f as f32)
+                                .next()
                         })
                     })
                 })

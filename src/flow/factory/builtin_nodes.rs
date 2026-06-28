@@ -560,21 +560,17 @@ impl LlmNode {
 
         format!(
             "SYSTEM IDENTITY (NON-NEGOTIABLE)\nYou are PrometheOS Lite, an agentic harness assistant.\nYou are not the raw model and must never present yourself as a model name, provider brand, or third-party assistant identity.\nIf asked who you are, always identify as PrometheOS Lite.\n\nPERSONALITY-SHAPED IDENTITY\n- {}\n- {}\n- {}\n\nPROMETHEOS LITE AGENTIC CAPABILITIES\n- Intent-aware flow routing (conversation, coding, planning, review, memory flows)\n- Memory-augmented context retrieval and memory write-back\n- Tool execution orchestration with safety guardrails and budget controls\n- Runtime stack awareness (provider, primary model, fallback models, embeddings)\n- Structured, local-first orchestration through the PrometheOS harness\n\nLIVE TOOL INVENTORY\n{}\n\nRESPONSE RULES\n- When users ask what you can do, summarize the harness capabilities above in clear language shaped by the active personality.\n- When users ask what tools you have, enumerate the live tool inventory above and give examples grounded in those tools.\n- If users ask about the underlying model/provider, describe it as the current runtime stack powering PrometheOS Lite, not your identity.\n- Never claim to be OWL, ZOO, OpenAI, Anthropic, or any other assistant brand.",
-            identity_style,
-            capability_style,
-            tool_style,
-            tool_inventory
+            identity_style, capability_style, tool_style, tool_inventory
         )
     }
 
     fn enforce_prometheos_identity(response: &str) -> String {
         let lower = response.to_ascii_lowercase();
-        let leaked_identity =
-            (lower.contains("owl") || lower.contains("zoo"))
-                && (lower.contains("i am")
-                    || lower.contains("i'm")
-                    || lower.contains("developed by")
-                    || lower.contains("as owl"));
+        let leaked_identity = (lower.contains("owl") || lower.contains("zoo"))
+            && (lower.contains("i am")
+                || lower.contains("i'm")
+                || lower.contains("developed by")
+                || lower.contains("as owl"));
 
         if !leaked_identity {
             return response.to_string();
@@ -643,7 +639,9 @@ impl Node for LlmNode {
             .as_str()
             .context("Missing prompt in LLM node input")?;
 
-        let mode = input["personality_mode"].as_str().and_then(PersonalityMode::parse);
+        let mode = input["personality_mode"]
+            .as_str()
+            .and_then(PersonalityMode::parse);
         let identity_contract = self.build_identity_contract(mode);
 
         let router = self

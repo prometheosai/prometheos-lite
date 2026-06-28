@@ -692,13 +692,14 @@ mod tests {
             .to_string();
         let runtime = Arc::new(RuntimeContext::new());
         let embedding: Arc<dyn crate::flow::EmbeddingProvider> = Arc::new(
-            LocalEmbeddingProvider::new("http://127.0.0.1:9/embeddings".to_string(), 8),
+            LocalEmbeddingProvider::new("http://127.0.0.1:9/embeddings".to_string(), 8, None),
         );
         let memory_service = Arc::new(MemoryService::new(
             MemoryDb::in_memory().expect("in-memory memory db"),
             Box::new(LocalEmbeddingProvider::new(
                 "http://127.0.0.1:9/embeddings".to_string(),
                 8,
+                None,
             )),
         ));
         let state = Arc::new(

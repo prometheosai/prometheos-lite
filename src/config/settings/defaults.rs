@@ -120,10 +120,22 @@ pub fn default_provider_entries() -> Vec<LlmProviderConfig> {
 
 pub fn default_mode_chains() -> ModeChains {
     ModeChains {
-        fast: vec!["openrouter_fast".to_string(), "openrouter_balanced".to_string()],
-        balanced: vec!["openrouter_balanced".to_string(), "openrouter_fast".to_string()],
-        deep: vec!["openrouter_deep".to_string(), "openrouter_balanced".to_string()],
-        coding: vec!["openrouter_coding".to_string(), "openrouter_deep".to_string()],
+        fast: vec![
+            "openrouter_fast".to_string(),
+            "openrouter_balanced".to_string(),
+        ],
+        balanced: vec![
+            "openrouter_balanced".to_string(),
+            "openrouter_fast".to_string(),
+        ],
+        deep: vec![
+            "openrouter_deep".to_string(),
+            "openrouter_balanced".to_string(),
+        ],
+        coding: vec![
+            "openrouter_coding".to_string(),
+            "openrouter_deep".to_string(),
+        ],
     }
 }
 

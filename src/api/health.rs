@@ -1,7 +1,7 @@
 //! Health check endpoint
 
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::StatusCode;
 use std::collections::HashSet;
 
 use crate::config::AppConfig;

@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 
@@ -145,13 +148,18 @@ struct RiskFinding {
 impl RepoWorkbenchCommand {
     pub async fn execute(self) -> Result<()> {
         match self.command {
-            RepoWorkbenchSubcommand::Create { repo, goal, mode, title } => {
+            RepoWorkbenchSubcommand::Create {
+                repo,
+                goal,
+                mode,
+                title,
+            } => {
                 let repo_path = normalize_repo_path(&repo)?;
                 let summary = scan_repo(&repo_path)?;
                 let id = Uuid::new_v4().to_string();
                 let now = Utc::now();
                 let title = title.unwrap_or_else(|| title_from_goal(&goal));
-                let mut context = WorkbenchContext {
+                let context = WorkbenchContext {
                     id: id.clone(),
                     title,
                     goal,
@@ -164,7 +172,10 @@ impl RepoWorkbenchCommand {
                     repo_summary: summary,
                     artifacts: Vec::new(),
                     decisions: Vec::new(),
-                    next_action: Some("Run `prometheos repo run <work_id>` to perform read-only risk review.".to_string()),
+                    next_action: Some(
+                        "Run `prometheos repo run <work_id>` to perform read-only risk review."
+                            .to_string(),
+                    ),
                 };
 
                 save_context(&context)?;
@@ -176,7 +187,10 @@ impl RepoWorkbenchCommand {
                 println!("  Repo: {}", context.repo_path.display());
                 println!("  Mode: {}", context.mode);
                 println!("  Project type: {}", context.repo_summary.project_type);
-                println!("  Candidate files: {}", context.repo_summary.candidate_files.len());
+                println!(
+                    "  Candidate files: {}",
+                    context.repo_summary.candidate_files.len()
+                );
                 println!("  Next: prometheos repo run {}", context.id);
             }
             RepoWorkbenchSubcommand::Run { id } => {
@@ -213,8 +227,15 @@ impl RepoWorkbenchCommand {
                 context.next_action = context
                     .artifacts
                     .iter()
-                    .find(|artifact| artifact.requires_approval && artifact.status == "awaiting_approval")
-                    .map(|artifact| format!("Review `{}` and approve with `prometheos repo approve {}`.", artifact.title, artifact.id));
+                    .find(|artifact| {
+                        artifact.requires_approval && artifact.status == "awaiting_approval"
+                    })
+                    .map(|artifact| {
+                        format!(
+                            "Review `{}` and approve with `prometheos repo approve {}`.",
+                            artifact.title, artifact.id
+                        )
+                    });
                 context.updated_at = Utc::now();
 
                 save_context(&context)?;
@@ -223,7 +244,10 @@ impl RepoWorkbenchCommand {
                 println!("Repo Workbench run complete");
                 println!("  WorkContext: {}", context.id);
                 println!("  Status: {}", context.status);
-                println!("  Files considered: {}", context.repo_summary.candidate_files.len());
+                println!(
+                    "  Files considered: {}",
+                    context.repo_summary.candidate_files.len()
+                );
                 println!("  Findings: {}", findings.len());
                 println!("  Artifacts: {}", context.artifacts.len());
                 if let Some(next) = &context.next_action {
@@ -238,7 +262,10 @@ impl RepoWorkbenchCommand {
                 let context = load_context_from_current_repo(&id)?;
                 println!("Artifacts for {}:", context.id);
                 if context.artifacts.is_empty() {
-                    println!("  No artifacts yet. Run `prometheos repo run {}` first.", context.id);
+                    println!(
+                        "  No artifacts yet. Run `prometheos repo run {}` first.",
+                        context.id
+                    );
                 }
                 for artifact in &context.artifacts {
                     println!("  {}", artifact.id);
@@ -249,7 +276,10 @@ impl RepoWorkbenchCommand {
                     println!("    Path: {}", artifact.path.display());
                 }
             }
-            RepoWorkbenchSubcommand::Approve { artifact_id, work_id } => {
+            RepoWorkbenchSubcommand::Approve {
+                artifact_id,
+                work_id,
+            } => {
                 let mut context = if let Some(work_id) = work_id {
                     load_context_from_current_repo(&work_id)?
                 } else {
@@ -263,7 +293,10 @@ impl RepoWorkbenchCommand {
                     .with_context(|| format!("Artifact `{}` not found", artifact_id))?;
 
                 if !artifact.requires_approval {
-                    println!("Artifact `{}` does not require approval; recording acknowledgement anyway.", artifact.id);
+                    println!(
+                        "Artifact `{}` does not require approval; recording acknowledgement anyway.",
+                        artifact.id
+                    );
                 }
 
                 artifact.status = "approved".to_string();
@@ -368,18 +401,27 @@ fn load_context_from_current_repo(id: &str) -> Result<WorkbenchContext> {
 fn find_context_by_artifact(artifact_id: &str) -> Result<WorkbenchContext> {
     let repo_path = normalize_repo_path(Path::new("."))?;
     let dir = contexts_dir(&repo_path);
-    for entry in fs::read_dir(&dir).with_context(|| format!("Context directory not found: {}", dir.display()))? {
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("Context directory not found: {}", dir.display()))?
+    {
         let entry = entry?;
         if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
         let json = fs::read_to_string(entry.path())?;
         let context: WorkbenchContext = serde_json::from_str(&json)?;
-        if context.artifacts.iter().any(|artifact| artifact.id == artifact_id) {
+        if context
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id == artifact_id)
+        {
             return Ok(context);
         }
     }
-    anyhow::bail!("Artifact `{}` not found in current repo workbench store", artifact_id)
+    anyhow::bail!(
+        "Artifact `{}` not found in current repo workbench store",
+        artifact_id
+    )
 }
 
 fn save_context(context: &WorkbenchContext) -> Result<()> {
@@ -452,7 +494,10 @@ fn is_ignored(entry: &DirEntry) -> bool {
 }
 
 fn is_candidate_file(path: &Path) -> bool {
-    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     if matches!(
         file_name,
         "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod" | "README.md"
@@ -461,7 +506,21 @@ fn is_candidate_file(path: &Path) -> bool {
     }
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
-        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "cpp" | "c" | "h" | "toml" | "yaml" | "yml")
+        Some(
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "go"
+                | "java"
+                | "cpp"
+                | "c"
+                | "h"
+                | "toml"
+                | "yaml"
+                | "yml"
+        )
     )
 }
 
@@ -470,7 +529,9 @@ fn detect_project_type(repo_path: &Path) -> String {
         "rust".to_string()
     } else if repo_path.join("package.json").exists() {
         "node".to_string()
-    } else if repo_path.join("pyproject.toml").exists() || repo_path.join("requirements.txt").exists() {
+    } else if repo_path.join("pyproject.toml").exists()
+        || repo_path.join("requirements.txt").exists()
+    {
         "python".to_string()
     } else if repo_path.join("go.mod").exists() {
         "go".to_string()
@@ -503,9 +564,11 @@ fn analyze_risks(repo_path: &Path, summary: &RepoSummary) -> Result<Vec<RiskFind
                     "Medium",
                     "panic-risk",
                     "Explicit panic path in application code".to_string(),
-                    "Return a typed error or convert the panic into a controlled failure path.".to_string(),
+                    "Return a typed error or convert the panic into a controlled failure path."
+                        .to_string(),
                 ))
-            } else if lower.contains("todo!") || lower.contains("fixme") || lower.contains("todo:") {
+            } else if lower.contains("todo!") || lower.contains("fixme") || lower.contains("todo:")
+            {
                 Some((
                     "Low",
                     "unfinished-work",
@@ -517,21 +580,24 @@ fn analyze_risks(repo_path: &Path, summary: &RepoSummary) -> Result<Vec<RiskFind
                     "High",
                     "secret-risk",
                     "Possible hardcoded secret or credential".to_string(),
-                    "Move the value into environment-backed configuration or a secret manager.".to_string(),
+                    "Move the value into environment-backed configuration or a secret manager."
+                        .to_string(),
                 ))
             } else if lower.contains("eval(") {
                 Some((
                     "High",
                     "code-execution-risk",
                     "Dynamic eval call detected".to_string(),
-                    "Avoid eval or strictly constrain and validate input before execution.".to_string(),
+                    "Avoid eval or strictly constrain and validate input before execution."
+                        .to_string(),
                 ))
             } else if lower.contains("shell=true") {
                 Some((
                     "High",
                     "command-injection-risk",
                     "Shell execution with shell=True detected".to_string(),
-                    "Use argument arrays and avoid shell interpolation for subprocess execution.".to_string(),
+                    "Use argument arrays and avoid shell interpolation for subprocess execution."
+                        .to_string(),
                 ))
             } else if lower.contains("innerhtml") {
                 Some((
@@ -582,7 +648,10 @@ fn render_risk_report(context: &WorkbenchContext, findings: &[RiskFinding]) -> S
     out.push_str(&format!("- ID: `{}`\n", context.id));
     out.push_str(&format!("- Goal: {}\n", context.goal));
     out.push_str(&format!("- Mode: {}\n", context.mode));
-    out.push_str(&format!("- Project type: {}\n\n", context.repo_summary.project_type));
+    out.push_str(&format!(
+        "- Project type: {}\n\n",
+        context.repo_summary.project_type
+    ));
 
     if findings.is_empty() {
         out.push_str("## Findings\n\nNo obvious risky patterns were found by the MVP heuristic scanner. This does not mean the repo is safe; it means the boring little scanner did not catch anything obvious.\n");
@@ -615,8 +684,14 @@ fn render_patch_suggestions(context: &WorkbenchContext, findings: &[RiskFinding]
 
     out.push_str("## Recommended Changes\n\n");
     for finding in findings.iter().take(20) {
-        out.push_str(&format!("### {}: `{}` line {}\n\n", finding.id, finding.file, finding.line));
-        out.push_str(&format!("Risk: {} / {}\n\n", finding.risk, finding.category));
+        out.push_str(&format!(
+            "### {}: `{}` line {}\n\n",
+            finding.id, finding.file, finding.line
+        ));
+        out.push_str(&format!(
+            "Risk: {} / {}\n\n",
+            finding.risk, finding.category
+        ));
         out.push_str(&format!("Suggested change: {}\n\n", finding.recommendation));
     }
 
@@ -651,7 +726,9 @@ fn write_artifact(
 }
 
 fn upsert_artifact(context: &mut WorkbenchContext, artifact: ArtifactRef) {
-    context.artifacts.retain(|existing| existing.kind != artifact.kind);
+    context
+        .artifacts
+        .retain(|existing| existing.kind != artifact.kind);
     context.artifacts.push(artifact);
 }
 
@@ -665,8 +742,14 @@ fn write_memory(context: &WorkbenchContext, findings: &[RiskFinding]) -> Result<
     out.push_str(&format!("- Repo: `{}`\n", context.repo_path.display()));
     out.push_str(&format!("- Status: {}\n", context.status));
     out.push_str(&format!("- Phase: {}\n", context.phase));
-    out.push_str(&format!("- Project type: {}\n", context.repo_summary.project_type));
-    out.push_str(&format!("- Candidate files: {}\n", context.repo_summary.candidate_files.len()));
+    out.push_str(&format!(
+        "- Project type: {}\n",
+        context.repo_summary.project_type
+    ));
+    out.push_str(&format!(
+        "- Candidate files: {}\n",
+        context.repo_summary.candidate_files.len()
+    ));
     out.push_str(&format!("- Artifacts: {}\n", context.artifacts.len()));
     out.push_str(&format!("- Decisions: {}\n", context.decisions.len()));
     if let Some(next) = &context.next_action {
@@ -698,7 +781,10 @@ fn write_memory(context: &WorkbenchContext, findings: &[RiskFinding]) -> Result<
         }
     }
 
-    fs::write(memory_dir(&context.repo_path).join(format!("{}.md", context.id)), out)?;
+    fs::write(
+        memory_dir(&context.repo_path).join(format!("{}.md", context.id)),
+        out,
+    )?;
     Ok(())
 }
 
@@ -716,7 +802,10 @@ fn print_status(context: &WorkbenchContext) {
     println!("  Status: {}", context.status);
     println!("  Phase: {}", context.phase);
     println!("  Project type: {}", context.repo_summary.project_type);
-    println!("  Candidate files: {}", context.repo_summary.candidate_files.len());
+    println!(
+        "  Candidate files: {}",
+        context.repo_summary.candidate_files.len()
+    );
     println!("  Artifacts: {}", context.artifacts.len());
     println!("  Decisions: {}", context.decisions.len());
     if let Some(next) = &context.next_action {

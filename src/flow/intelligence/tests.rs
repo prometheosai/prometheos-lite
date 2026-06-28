@@ -72,7 +72,11 @@ impl LlmProvider for MockLlmProvider {
 
 #[tokio::test]
 async fn test_model_router_basic() {
-    let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), None));
+    let provider = Box::new(MockLlmProvider::new(
+        "test".to_string(),
+        "gpt-4".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider]);
     let result = router.generate("test prompt").await.unwrap();
     assert!(result.contains("gpt-4"));
@@ -85,7 +89,11 @@ async fn test_model_router_fallback() {
         "gpt-3".to_string(),
         Some(ProviderErrorKind::Fatal),
     ));
-    let provider2 = Box::new(MockLlmProvider::new("working".to_string(), "gpt-4".to_string(), None));
+    let provider2 = Box::new(MockLlmProvider::new(
+        "working".to_string(),
+        "gpt-4".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider1, provider2]);
     let result = router.generate("test prompt").await.unwrap();
     assert!(result.contains("gpt-4"));
@@ -93,10 +101,22 @@ async fn test_model_router_fallback() {
 
 #[tokio::test]
 async fn test_model_router_mode_chain() {
-    let provider1 = Box::new(MockLlmProvider::new("p1".to_string(), "slow".to_string(), None));
-    let provider2 = Box::new(MockLlmProvider::new("p2".to_string(), "fast".to_string(), None));
-    let router = ModelRouter::new(vec![provider1, provider2]).with_mode_chain(LlmMode::Fast, vec![1, 0]);
-    let result = router.generate_for_mode(LlmMode::Fast, "test prompt").await.unwrap();
+    let provider1 = Box::new(MockLlmProvider::new(
+        "p1".to_string(),
+        "slow".to_string(),
+        None,
+    ));
+    let provider2 = Box::new(MockLlmProvider::new(
+        "p2".to_string(),
+        "fast".to_string(),
+        None,
+    ));
+    let router =
+        ModelRouter::new(vec![provider1, provider2]).with_mode_chain(LlmMode::Fast, vec![1, 0]);
+    let result = router
+        .generate_for_mode(LlmMode::Fast, "test prompt")
+        .await
+        .unwrap();
     assert!(result.contains("fast"));
 }
 
@@ -107,7 +127,11 @@ async fn test_model_router_quota_rotation_metadata() {
         "m1".to_string(),
         Some(ProviderErrorKind::Quota),
     ));
-    let provider2 = Box::new(MockLlmProvider::new("ok".to_string(), "m2".to_string(), None));
+    let provider2 = Box::new(MockLlmProvider::new(
+        "ok".to_string(),
+        "m2".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider1, provider2]);
 
     let result = router
@@ -186,7 +210,8 @@ fn test_tool_sandbox_profile_file_checking() {
 #[tokio::test]
 async fn test_tool_runtime_command_blocked() {
     use crate::tools::{ToolContext, ToolPolicy};
-    let profile = ToolSandboxProfile::custom(vec!["echo".to_string()], vec![], 30000, 10 * 1024 * 1024);
+    let profile =
+        ToolSandboxProfile::custom(vec!["echo".to_string()], vec![], 30000, 10 * 1024 * 1024);
     let runtime = ToolRuntime::new(profile);
     let context = ToolContext::new(
         "test_run".to_string(),
@@ -195,13 +220,19 @@ async fn test_tool_runtime_command_blocked() {
         "rm".to_string(),
         ToolPolicy::new(),
     );
-    let result = runtime.execute_command("rm", vec!["-rf".to_string(), "/".to_string()], &context).await;
+    let result = runtime
+        .execute_command("rm", vec!["-rf".to_string(), "/".to_string()], &context)
+        .await;
     assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_llm_utilities_call() {
-    let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), None));
+    let provider = Box::new(MockLlmProvider::new(
+        "test".to_string(),
+        "gpt-4".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider]);
     let utils = LlmUtilities::new(router);
     let result = utils.call("test prompt").await.unwrap();
@@ -210,7 +241,11 @@ async fn test_llm_utilities_call() {
 
 #[tokio::test]
 async fn test_llm_utilities_call_with_retry() {
-    let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), None));
+    let provider = Box::new(MockLlmProvider::new(
+        "test".to_string(),
+        "gpt-4".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider]);
     let utils = LlmUtilities::new(router);
     let result = utils.call_with_retry("test prompt", 2, 1).await.unwrap();
@@ -219,7 +254,11 @@ async fn test_llm_utilities_call_with_retry() {
 
 #[tokio::test]
 async fn test_llm_utilities_call_stream() {
-    let provider = Box::new(MockLlmProvider::new("test".to_string(), "gpt-4".to_string(), None));
+    let provider = Box::new(MockLlmProvider::new(
+        "test".to_string(),
+        "gpt-4".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider]);
     let utils = LlmUtilities::new(router);
     let result = utils.call_stream("test prompt", |_| {}).await.unwrap();
@@ -233,7 +272,11 @@ async fn test_model_router_stream_metadata() {
         "m1".to_string(),
         Some(ProviderErrorKind::Quota),
     ));
-    let provider2 = Box::new(MockLlmProvider::new("ok".to_string(), "m2".to_string(), None));
+    let provider2 = Box::new(MockLlmProvider::new(
+        "ok".to_string(),
+        "m2".to_string(),
+        None,
+    ));
     let router = ModelRouter::new(vec![provider1, provider2]);
     let res = router
         .generate_stream_with_metadata("test prompt", std::sync::Arc::new(|_| {}))

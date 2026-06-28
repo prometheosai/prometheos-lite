@@ -11,7 +11,10 @@ use prometheos_lite::{
     },
     flow::{
         EmbeddingProvider, MemoryDb, MemoryService, ModelRouter, RuntimeContext, ToolRuntime,
-        ToolSandboxProfile, memory::embedding::{JinaEmbeddingProvider, LocalEmbeddingProvider, OpenRouterEmbeddingProvider},
+        ToolSandboxProfile,
+        memory::embedding::{
+            JinaEmbeddingProvider, LocalEmbeddingProvider, OpenRouterEmbeddingProvider,
+        },
     },
     llm::LlmClient,
 };
@@ -45,7 +48,7 @@ impl RuntimeBuilder {
             Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
         } else if self.config.provider == "openrouter" {
             // Check if we have OpenRouter credits, otherwise use Jina AI
-            if let Ok(_) = std::env::var("OPENROUTER_API_KEY") {
+            if std::env::var("OPENROUTER_API_KEY").is_ok() {
                 // Try OpenRouter first if API key is available
                 let embedding_model = if self.config.embedding_model.trim().is_empty() {
                     None
@@ -140,6 +143,7 @@ impl RuntimeBuilder {
         &self.config
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_provider_registry(
         &self,
     ) -> anyhow::Result<(
@@ -174,7 +178,9 @@ impl RuntimeBuilder {
                         }
                         Box::new(OpenRouterProvider::new(client))
                     }
-                    "openai" => Box::new(OpenAiProvider::new(client).with_name(provider_cfg.name.clone())),
+                    "openai" => {
+                        Box::new(OpenAiProvider::new(client).with_name(provider_cfg.name.clone()))
+                    }
                     "anthropic" => Box::new(AnthropicProvider::new(client)),
                     "ollama" => Box::new(OllamaProvider::new(client)),
                     "lmstudio" => Box::new(LmStudioProvider::new(client)),
@@ -194,10 +200,9 @@ impl RuntimeBuilder {
         let resolve_chain = |names: &[String]| -> anyhow::Result<Vec<usize>> {
             let mut out = Vec::new();
             for name in names {
-                let idx = index_by_name
-                    .get(name)
-                    .copied()
-                    .ok_or_else(|| anyhow::anyhow!("Mode chain references unknown provider: {}", name))?;
+                let idx = index_by_name.get(name).copied().ok_or_else(|| {
+                    anyhow::anyhow!("Mode chain references unknown provider: {}", name)
+                })?;
                 out.push(idx);
             }
             if out.is_empty() {
