@@ -12,9 +12,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::repo_intelligence::{
-    build_repo_context, parse_dependency_graph, CodeSymbol, DependencyGraph,
-    DependencySpec, EdgeKind, PackageManagerType, RankedFile, RepoCache,
-    RepoContext, RepoMap, SymbolEdge, SymbolKind, Visibility,
+    CodeSymbol, DependencyGraph, DependencySpec, EdgeKind, PackageManagerType, RankedFile,
+    RepoCache, RepoContext, RepoMap, SymbolEdge, SymbolKind, Visibility, parse_dependency_graph,
 };
 
 // ============================================================================
@@ -32,6 +31,7 @@ fn test_repo_context_structure() {
         token_estimate: 0,
         language_breakdown: HashMap::new(),
         dependency_graph: DependencyGraph::default(),
+        repo_map: RepoMap::empty(),
     };
 
     assert_eq!(context.root, PathBuf::from("/test/repo"));
@@ -97,7 +97,7 @@ fn test_symbol_edge_creation() {
 fn test_parse_dependency_graph_from_cargo_toml() {
     // Use the sample_repo fixture which has a Cargo.toml
     let fixture_path = PathBuf::from("tests/fixtures/sample_repo");
-    
+
     let graph = parse_dependency_graph(&fixture_path);
 
     // The sample repo has an empty Cargo.toml
@@ -280,7 +280,7 @@ fn test_edge_kind_variants() {
 #[test]
 fn test_repop_map_alias() {
     // RepoMap is an alias for RepoContext
-    let _context: RepoMap = RepoContext {
+    let _context: RepoContext = RepoContext {
         root: PathBuf::from("/test"),
         ranked_files: vec![],
         symbols: vec![],
@@ -289,6 +289,6 @@ fn test_repop_map_alias() {
         token_estimate: 0,
         language_breakdown: HashMap::new(),
         dependency_graph: DependencyGraph::default(),
+        repo_map: RepoMap::empty(),
     };
 }
-

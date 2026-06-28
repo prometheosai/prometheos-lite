@@ -10,10 +10,10 @@
 //! - Decision factor tracking
 
 use prometheos_lite::harness::completion::{
-    CompletionDecision, CompletionEvidence, PatchEvidence, ValidationEvidence, ReviewEvidence,
-    RiskEvidence, VerificationEvidence, SemanticEvidence, ConfidenceEvidence, ProcessEvidence,
+    CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
+    ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence, VerificationEvidence,
 };
-use prometheos_lite::harness::confidence::{ConfidenceScore, ConfidenceFactor, FactorImpact};
+use prometheos_lite::harness::confidence::ConfidenceScore;
 use prometheos_lite::harness::verification::VerificationStrength;
 
 // ============================================================================
@@ -30,6 +30,12 @@ fn test_completion_evidence_creation() {
             patch_applied_cleanly: true,
             patch_hash: Some("abc123".to_string()),
             dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("hash".to_string()),
+            dry_run_patch_hash: Some("hash".to_string()),
+            applied_patch_hash: Some("hash".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
         },
         validation_evidence: ValidationEvidence {
             validation_performed: true,
@@ -39,6 +45,10 @@ fn test_completion_evidence_creation() {
             lint_check_passed: true,
             test_passed: true,
             validation_summary: "All passed".to_string(),
+            commands_planned: 3,
+            commands_executed: 3,
+            commands_skipped: 0,
+            categories_executed: vec![],
         },
         review_evidence: ReviewEvidence {
             review_performed: true,
@@ -50,6 +60,16 @@ fn test_completion_evidence_creation() {
             security_issues: 0,
             breaking_change_issues: 0,
             review_passed: true,
+            files_reviewed: 3,
+            lines_analyzed: 80,
+            security_patterns_checked: 1,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 0,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            documentation_updated: true,
+            review_depth_score: 1.0,
+            review_quality_indicators: vec![],
         },
         risk_evidence: RiskEvidence {
             risk_assessed: true,
@@ -94,6 +114,7 @@ fn test_completion_evidence_creation() {
             time_limit_respected: true,
             step_limit_respected: true,
         },
+        sandbox_evidence: vec![],
         patch_exists: true,
         validation_ran: true,
         validation_passed: true,
@@ -131,6 +152,12 @@ fn test_patch_evidence_success() {
         patch_applied_cleanly: true,
         patch_hash: Some("hash123".to_string()),
         dry_run_passed: true,
+        patch_identity: None,
+        generated_patch_hash: Some("hash123".to_string()),
+        dry_run_patch_hash: Some("hash123".to_string()),
+        applied_patch_hash: Some("hash123".to_string()),
+        hash_verification_passed: true,
+        hash_mismatch_details: None,
     };
 
     assert!(evidence.patch_created);
@@ -152,6 +179,10 @@ fn test_validation_evidence_all_pass() {
         lint_check_passed: true,
         test_passed: true,
         validation_summary: "All checks passed".to_string(),
+        commands_planned: 3,
+        commands_executed: 3,
+        commands_skipped: 0,
+        categories_executed: vec![],
     };
 
     assert!(evidence.all_validations_passed);
@@ -175,6 +206,16 @@ fn test_review_evidence_clean() {
         security_issues: 0,
         breaking_change_issues: 0,
         review_passed: true,
+        files_reviewed: 1,
+        lines_analyzed: 10,
+        security_patterns_checked: 1,
+        api_breaking_changes_detected: 0,
+        dependency_changes_analyzed: 0,
+        test_coverage_analyzed: true,
+        performance_impact_assessed: true,
+        documentation_updated: true,
+        review_depth_score: 1.0,
+        review_quality_indicators: vec![],
     };
 
     assert!(evidence.review_passed);
@@ -193,6 +234,16 @@ fn test_review_evidence_with_issues() {
         security_issues: 0,
         breaking_change_issues: 0,
         review_passed: false,
+        files_reviewed: 1,
+        lines_analyzed: 10,
+        security_patterns_checked: 1,
+        api_breaking_changes_detected: 0,
+        dependency_changes_analyzed: 0,
+        test_coverage_analyzed: true,
+        performance_impact_assessed: true,
+        documentation_updated: true,
+        review_depth_score: 0.7,
+        review_quality_indicators: vec!["issues found".to_string()],
     };
 
     assert!(!evidence.review_passed);
@@ -235,7 +286,10 @@ fn test_verification_evidence_full() {
         verification_summary: "All verification passed".to_string(),
     };
 
-    assert!(matches!(evidence.verification_level, VerificationStrength::Tests));
+    assert!(matches!(
+        evidence.verification_level,
+        VerificationStrength::Tests
+    ));
     assert!(evidence.test_count > 0);
 }
 
@@ -304,10 +358,22 @@ fn test_process_evidence_complete() {
 
 #[test]
 fn test_completion_decision_variants() {
-    assert!(matches!(CompletionDecision::Complete, CompletionDecision::Complete));
-    assert!(matches!(CompletionDecision::Blocked("test".to_string()), CompletionDecision::Blocked(_)));
-    assert!(matches!(CompletionDecision::NeedsRepair("test".to_string()), CompletionDecision::NeedsRepair(_)));
-    assert!(matches!(CompletionDecision::NeedsApproval("test".to_string()), CompletionDecision::NeedsApproval(_)));
+    assert!(matches!(
+        CompletionDecision::Complete,
+        CompletionDecision::Complete
+    ));
+    assert!(matches!(
+        CompletionDecision::Blocked("test".to_string()),
+        CompletionDecision::Blocked(_)
+    ));
+    assert!(matches!(
+        CompletionDecision::NeedsRepair("test".to_string()),
+        CompletionDecision::NeedsRepair(_)
+    ));
+    assert!(matches!(
+        CompletionDecision::NeedsApproval("test".to_string()),
+        CompletionDecision::NeedsApproval(_)
+    ));
 }
 
 // ============================================================================
@@ -324,6 +390,12 @@ fn test_complete_successful_evidence() {
             patch_applied_cleanly: true,
             patch_hash: Some("abc".to_string()),
             dry_run_passed: true,
+            patch_identity: None,
+            generated_patch_hash: Some("hash".to_string()),
+            dry_run_patch_hash: Some("hash".to_string()),
+            applied_patch_hash: Some("hash".to_string()),
+            hash_verification_passed: true,
+            hash_mismatch_details: None,
         },
         validation_evidence: ValidationEvidence {
             validation_performed: true,
@@ -333,6 +405,10 @@ fn test_complete_successful_evidence() {
             lint_check_passed: true,
             test_passed: true,
             validation_summary: "All passed".to_string(),
+            commands_planned: 3,
+            commands_executed: 3,
+            commands_skipped: 0,
+            categories_executed: vec![],
         },
         review_evidence: ReviewEvidence {
             review_performed: true,
@@ -344,6 +420,16 @@ fn test_complete_successful_evidence() {
             security_issues: 0,
             breaking_change_issues: 0,
             review_passed: true,
+            files_reviewed: 3,
+            lines_analyzed: 80,
+            security_patterns_checked: 1,
+            api_breaking_changes_detected: 0,
+            dependency_changes_analyzed: 0,
+            test_coverage_analyzed: true,
+            performance_impact_assessed: true,
+            documentation_updated: true,
+            review_depth_score: 1.0,
+            review_quality_indicators: vec![],
         },
         risk_evidence: RiskEvidence {
             risk_assessed: true,
@@ -388,6 +474,7 @@ fn test_complete_successful_evidence() {
             time_limit_respected: true,
             step_limit_respected: true,
         },
+        sandbox_evidence: vec![],
         patch_exists: true,
         validation_ran: true,
         validation_passed: true,

@@ -88,6 +88,12 @@ pub struct ModelRecommendation {
     pub alternatives: Vec<ModelProfile>,
 }
 
+impl Default for ModelStrategyEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelStrategyEngine {
     pub fn new() -> Self {
         let mut engine = Self {
@@ -328,10 +334,9 @@ impl ModelStrategyEngine {
         // Capability match (10%)
         let has_reasoning = model.strengths.contains(&"complex_reasoning".to_string())
             || model.strengths.contains(&"expert_reasoning".to_string());
-        let capability_score = if requirements.requires_reasoning && has_reasoning {
-            1.0
-        } else if requirements.requires_creativity
-            && model.strengths.contains(&"code_generation".to_string())
+        let capability_score = if (requirements.requires_reasoning && has_reasoning)
+            || (requirements.requires_creativity
+                && model.strengths.contains(&"code_generation".to_string()))
         {
             1.0
         } else {

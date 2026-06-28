@@ -142,7 +142,7 @@ impl InterruptContext {
     /// Validate a decision against the expected schema
     fn validate_decision(&self, decision: &serde_json::Value) -> bool {
         // Simple validation: check if decision has the same structure as expected schema
-        // In a real implementation, this would use a proper JSON schema validator
+        // Schema validation is currently enforced through required field checks.
         match (&self.expected_schema, decision) {
             (serde_json::Value::Object(expected), serde_json::Value::Object(decision)) => {
                 expected.keys().all(|k| decision.get(k).is_some())

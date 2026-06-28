@@ -47,7 +47,10 @@ fn test_permission_display() {
 #[test]
 fn test_permission_scope_variants() {
     assert!(matches!(PermissionScope::File, PermissionScope::File));
-    assert!(matches!(PermissionScope::Directory, PermissionScope::Directory));
+    assert!(matches!(
+        PermissionScope::Directory,
+        PermissionScope::Directory
+    ));
     assert!(matches!(PermissionScope::Command, PermissionScope::Command));
     assert!(matches!(PermissionScope::Network, PermissionScope::Network));
     assert!(matches!(PermissionScope::System, PermissionScope::System));
@@ -112,16 +115,14 @@ fn test_permission_grant_deny() {
 
 #[test]
 fn test_permission_ledger_new() {
-    let ledger = PermissionLedger::new();
+    let _ledger = PermissionLedger::new();
     // Ledger created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_permission_ledger_with_defaults() {
-    let ledger = PermissionLedger::with_defaults();
+    let _ledger = PermissionLedger::with_defaults();
     // Ledger created with defaults
-    assert!(true);
 }
 
 #[test]
@@ -138,7 +139,6 @@ fn test_permission_ledger_grant() {
     });
 
     // Grant added successfully
-    assert!(true);
 }
 
 #[test]
@@ -239,10 +239,16 @@ fn test_complex_permission_grants() {
     });
 
     // Check various permissions
-    let read_check = ledger.check(Permission::Read, PathBuf::from("/project/src/main.rs").as_path());
+    let read_check = ledger.check(
+        Permission::Read,
+        PathBuf::from("/project/src/main.rs").as_path(),
+    );
     assert!(read_check.granted);
 
-    let write_check = ledger.check(Permission::Write, PathBuf::from("/project/output/result.txt").as_path());
+    let write_check = ledger.check(
+        Permission::Write,
+        PathBuf::from("/project/output/result.txt").as_path(),
+    );
     assert!(write_check.granted);
 }
 

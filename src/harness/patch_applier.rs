@@ -2,17 +2,15 @@ use crate::harness::{
     edit_protocol::{
         EditOperation, ParsedDiff, apply_unified_diff, parse_unified_diff, validate_edit_operations,
     },
-    file_control::{
-        FilePolicy, FileSet, assert_delete_allowed, assert_rename_allowed, resolve_repo_path,
-    },
+    file_control::{FilePolicy, FileSet, resolve_repo_path},
 };
 use anyhow::{Context, Result, bail};
+use chrono;
 use diffy::create_patch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    io::Write,
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -82,11 +80,16 @@ impl Transaction {
 
         // P0 SAFETY: Store repo-relative path in snapshot, not absolute path
         // This ensures rollback works correctly in temp workspaces
-        let rel_path = full_path.strip_prefix(repo_root)
+        let rel_path = full_path
+            .strip_prefix(repo_root)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| {
                 // If we can't strip prefix, use the original (shouldn't happen with proper validation)
-                tracing::warn!("Path {} is not under repo root {}", full_path.display(), repo_root.display());
+                tracing::warn!(
+                    "Path {} is not under repo root {}",
+                    full_path.display(),
+                    repo_root.display()
+                );
                 full_path.clone()
             });
 
@@ -304,7 +307,7 @@ async fn run_with_transaction(
         dry_run,
         transaction_id: Some(transaction.id),
         content_hashes,
-        snapshots: vec![], // Will be populated by apply_patch_with_rollback
+        snapshots: vec![],
     })
 }
 
@@ -312,7 +315,7 @@ async fn apply_edit_to_transaction(
     edit: &EditOperation,
     policy: &FilePolicy,
     transaction: &mut Transaction,
-    edit_index: usize,
+    _edit_index: usize,
 ) -> std::result::Result<(), PatchFailure> {
     match edit {
         EditOperation::SearchReplace(x) => {
@@ -336,7 +339,7 @@ async fn apply_edit_to_transaction(
                 return Err(fail(
                     &x.file,
                     "search_replace",
-                    format!("Search block not found in file"),
+                    "Search block not found in file".to_string(),
                     Some(content.lines().take(10).collect::<Vec<_>>().join("\n")),
                 ));
             }
@@ -392,7 +395,13 @@ async fn apply_edit_to_transaction(
             let existing = fs::read_to_string(&path).await.ok();
             let existed = path.exists();
 
-            transaction.record_snapshot(path.clone(), &policy.repo_root, existing, Some(x.content.clone()), existed);
+            transaction.record_snapshot(
+                path.clone(),
+                &policy.repo_root,
+                existing,
+                Some(x.content.clone()),
+                existed,
+            );
             transaction.record_change(path, Some(x.content.clone()));
         }
 
@@ -405,7 +414,13 @@ async fn apply_edit_to_transaction(
                 return Err(fail(&x.file, "create_file", "File already exists", None));
             }
 
-            transaction.record_snapshot(path.clone(), &policy.repo_root, None, Some(x.content.clone()), false);
+            transaction.record_snapshot(
+                path.clone(),
+                &policy.repo_root,
+                None,
+                Some(x.content.clone()),
+                false,
+            );
             transaction.record_change(path, Some(x.content.clone()));
         }
 
@@ -462,10 +477,22 @@ async fn apply_edit_to_transaction(
             })?;
 
             // For rename: source file goes from content -> None (deleted)
-            transaction.record_snapshot(from_path.clone(), &policy.repo_root, Some(content.clone()), None, true);
+            transaction.record_snapshot(
+                from_path.clone(),
+                &policy.repo_root,
+                Some(content.clone()),
+                None,
+                true,
+            );
             transaction.record_change(from_path.clone(), None);
             // Target file goes from None -> content (created)
-            transaction.record_snapshot(to_path.clone(), &policy.repo_root, None, Some(content.clone()), false);
+            transaction.record_snapshot(
+                to_path.clone(),
+                &policy.repo_root,
+                None,
+                Some(content.clone()),
+                false,
+            );
             transaction.record_change(to_path, Some(content));
         }
 
@@ -495,7 +522,7 @@ async fn apply_edit_to_transaction(
                     })?;
 
                 // P0 SAFETY: Resolve repo-relative path safely
-        let full_path = resolve_repo_path(&policy.repo_root, target_path)
+                let full_path = resolve_repo_path(&policy.repo_root, target_path)
                     .map_err(|e| fail(target_path, "unified_diff", e.to_string(), None))?;
 
                 if diff.is_new_file {
@@ -520,7 +547,13 @@ async fn apply_edit_to_transaction(
                         )
                     })?;
 
-                    transaction.record_snapshot(full_path.clone(), &policy.repo_root, Some(content), None, true);
+                    transaction.record_snapshot(
+                        full_path.clone(),
+                        &policy.repo_root,
+                        Some(content),
+                        None,
+                        true,
+                    );
                     transaction.record_change(full_path, None);
                 } else {
                     let original = fs::read_to_string(&full_path).await.map_err(|e| {
@@ -551,16 +584,16 @@ async fn apply_edit_to_transaction(
     Ok(())
 }
 
-async fn commit_transaction(transaction: &Transaction, policy: &FilePolicy) -> Result<()> {
+async fn commit_transaction(transaction: &Transaction, _policy: &FilePolicy) -> Result<()> {
     let changes: Vec<_> = transaction.pending_changes.iter().collect();
 
-    for (path, new_content) in changes.iter().rev() {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-            }
+    for (path, _new_content) in changes.iter().rev() {
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
     }
 
@@ -634,10 +667,245 @@ fn compute_content_hashes(transaction: &Transaction) -> HashMap<PathBuf, String>
     hashes
 }
 
+/// Compute a hash for content
 fn compute_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    format!("{:x}", hasher.finalize())
+}
+
+/// P0-3.1: Compute hash of a patch diff for integrity verification
+pub fn compute_patch_hash(diff: &str) -> String {
+    compute_hash(diff)
+}
+
+/// P0-3.1: Comprehensive patch identity verification for audit-grade integrity
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PatchIdentity {
+    pub planned_patch_hash: String,
+    pub dry_run_patch_hash: String,
+    pub applied_patch_hash: String,
+    pub reviewed_diff_hash: String,
+    pub verification_timestamp: chrono::DateTime<chrono::Utc>,
+    pub verification_passed: bool,
+    pub mismatch_details: Option<String>,
+}
+
+/// P0-3.1: Legacy patch hash verification for backward compatibility
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PatchHashVerification {
+    pub generated_patch_hash: Option<String>,
+    pub dry_run_patch_hash: Option<String>,
+    pub applied_patch_hash: Option<String>,
+    pub hash_verification_passed: bool,
+    pub hash_mismatch_details: Option<String>,
+}
+
+impl PatchIdentity {
+    /// Create a new patch identity verification instance
+    pub fn new() -> Self {
+        Self {
+            planned_patch_hash: String::new(),
+            dry_run_patch_hash: String::new(),
+            applied_patch_hash: String::new(),
+            reviewed_diff_hash: String::new(),
+            verification_timestamp: chrono::Utc::now(),
+            verification_passed: false,
+            mismatch_details: None,
+        }
+    }
+
+    /// Record planned patch hash (from provider generation)
+    pub fn record_planned_hash(&mut self, diff: &str) {
+        self.planned_patch_hash = compute_patch_hash(diff);
+    }
+
+    /// Record dry-run patch hash
+    pub fn record_dry_run_hash(&mut self, diff: &str) {
+        self.dry_run_patch_hash = compute_patch_hash(diff);
+    }
+
+    /// Record applied patch hash
+    pub fn record_applied_hash(&mut self, diff: &str) {
+        self.applied_patch_hash = compute_patch_hash(diff);
+    }
+
+    /// Record reviewed diff hash
+    pub fn record_reviewed_hash(&mut self, diff: &str) {
+        self.reviewed_diff_hash = compute_patch_hash(diff);
+    }
+
+    /// P0-3.1: Verify complete patch identity - all hashes must match exactly
+    pub fn verify_complete_identity(&mut self) -> Result<()> {
+        let verification_result = self.planned_patch_hash == self.dry_run_patch_hash
+            && self.dry_run_patch_hash == self.applied_patch_hash
+            && self.applied_patch_hash == self.reviewed_diff_hash;
+
+        if verification_result {
+            self.verification_passed = true;
+            self.verification_timestamp = chrono::Utc::now();
+            tracing::info!("Patch identity verification passed - all hashes match");
+            Ok(())
+        } else {
+            self.verification_passed = false;
+            let details = format!(
+                "Patch identity mismatch - planned: {}, dry-run: {}, applied: {}, reviewed: {}",
+                self.planned_patch_hash,
+                self.dry_run_patch_hash,
+                self.applied_patch_hash,
+                self.reviewed_diff_hash
+            );
+            self.mismatch_details = Some(details.clone());
+            tracing::error!("Patch identity verification failed: {}", details);
+            anyhow::bail!("Patch identity verification failed: {}", details)
+        }
+    }
+
+    /// P0-3.1: Verify partial patch identity (for review-only mode)
+    pub fn verify_partial_identity(&mut self) -> Result<()> {
+        if !self.planned_patch_hash.is_empty() && !self.reviewed_diff_hash.is_empty() {
+            if self.planned_patch_hash == self.reviewed_diff_hash {
+                tracing::info!("Partial patch identity verification passed (planned == reviewed)");
+                Ok(())
+            } else {
+                let details = format!(
+                    "Partial patch identity mismatch - planned: {}, reviewed: {}",
+                    self.planned_patch_hash, self.reviewed_diff_hash
+                );
+                self.mismatch_details = Some(details.clone());
+                anyhow::bail!("Partial patch identity verification failed: {}", details)
+            }
+        } else {
+            anyhow::bail!("Insufficient hash data for partial verification")
+        }
+    }
+
+    /// Check if all required hash stages are present
+    pub fn has_complete_hashes(&self) -> bool {
+        !self.planned_patch_hash.is_empty()
+            && !self.dry_run_patch_hash.is_empty()
+            && !self.applied_patch_hash.is_empty()
+            && !self.reviewed_diff_hash.is_empty()
+    }
+
+    /// Get verification status for completion decision
+    pub fn can_complete(&self) -> bool {
+        self.verification_passed && self.has_complete_hashes()
+    }
+}
+
+impl Default for PatchHashVerification {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for PatchIdentity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PatchHashVerification {
+    pub fn new() -> Self {
+        Self {
+            generated_patch_hash: None,
+            dry_run_patch_hash: None,
+            applied_patch_hash: None,
+            hash_verification_passed: false,
+            hash_mismatch_details: None,
+        }
+    }
+
+    /// P0-3.1: Record generated patch hash
+    pub fn record_generated_hash(&mut self, diff: &str) {
+        self.generated_patch_hash = Some(compute_patch_hash(diff));
+    }
+
+    /// P0-3.1: Record dry-run patch hash
+    pub fn record_dry_run_hash(&mut self, diff: &str) {
+        self.dry_run_patch_hash = Some(compute_patch_hash(diff));
+    }
+
+    /// P0-3.1: Record applied patch hash
+    pub fn record_applied_hash(&mut self, diff: &str) {
+        self.applied_patch_hash = Some(compute_patch_hash(diff));
+    }
+
+    /// P0-3.1: Verify all patch hashes match
+    pub fn verify_hashes(&mut self) -> Result<()> {
+        match (
+            &self.generated_patch_hash,
+            &self.dry_run_patch_hash,
+            &self.applied_patch_hash,
+        ) {
+            (Some(generated), Some(dry), Some(app)) => {
+                if generated == dry && dry == app {
+                    self.hash_verification_passed = true;
+                    Ok(())
+                } else {
+                    self.hash_verification_passed = false;
+                    let details = format!(
+                        "Hash mismatch - generated: {}, dry-run: {}, applied: {}",
+                        generated, dry, app
+                    );
+                    self.hash_mismatch_details = Some(details.clone());
+                    anyhow::bail!("Patch hash verification failed: {}", details)
+                }
+            }
+            (Some(generated), Some(dry), None) => {
+                // Partial verification (dry-run only)
+                if generated == dry {
+                    tracing::warn!(
+                        "Partial hash verification passed (generated == dry-run), but applied hash missing"
+                    );
+                    Ok(())
+                } else {
+                    self.hash_verification_passed = false;
+                    let details = format!(
+                        "Hash mismatch between generated and dry-run - generated: {}, dry-run: {}",
+                        generated, dry
+                    );
+                    self.hash_mismatch_details = Some(details.clone());
+                    anyhow::bail!("Partial hash verification failed: {}", details)
+                }
+            }
+            _ => {
+                self.hash_verification_passed = false;
+                let missing = [
+                    if self.generated_patch_hash.is_none() {
+                        "generated"
+                    } else {
+                        ""
+                    },
+                    if self.dry_run_patch_hash.is_none() {
+                        "dry-run"
+                    } else {
+                        ""
+                    },
+                    if self.applied_patch_hash.is_none() {
+                        "applied"
+                    } else {
+                        ""
+                    },
+                ]
+                .iter()
+                .copied()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+                self.hash_mismatch_details = Some(format!("Missing hash stages: {}", missing));
+                anyhow::bail!("Incomplete hash verification: missing {}", missing)
+            }
+        }
+    }
+
+    /// P0-3.1: Check if verification is complete
+    pub fn is_complete(&self) -> bool {
+        self.generated_patch_hash.is_some()
+            && self.dry_run_patch_hash.is_some()
+            && self.applied_patch_hash.is_some()
+    }
 }
 
 fn fail(path: &Path, op: &str, reason: impl Into<String>, context: Option<String>) -> PatchFailure {
@@ -731,8 +999,13 @@ impl RollbackHandle {
         let full_path = self.repo_root.join(rel_path);
 
         // P0 SAFETY: Verify the resolved path is still within repo_root
-        let canonical_repo = self.repo_root.canonicalize().unwrap_or_else(|_| self.repo_root.clone());
-        let canonical_target = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+        let canonical_repo = self
+            .repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.repo_root.clone());
+        let canonical_target = full_path
+            .canonicalize()
+            .unwrap_or_else(|_| full_path.clone());
 
         if !canonical_target.starts_with(&canonical_repo) {
             bail!(

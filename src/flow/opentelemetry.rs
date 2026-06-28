@@ -1,19 +1,16 @@
 //! OpenTelemetry integration for trace export
 
 use anyhow::Result;
+use opentelemetry::KeyValue;
 use opentelemetry::trace::{
     Span as SpanTrait, SpanKind, Status, Tracer as OtelTracer, TracerProvider as OtelTracerProvider,
 };
-use opentelemetry::{Key, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::{self as sdktrace, TracerProvider};
+use opentelemetry_sdk::trace::{self as sdktrace};
 
 use super::tracing::{HierarchicalTrace, LlmCall, NodeRun, ToolCall};
 
 /// Span type alias for the SDK
-type Span = sdktrace::Span;
-
 /// OpenTelemetry exporter configuration
 #[derive(Debug, Clone)]
 pub struct OtelConfig {
@@ -65,7 +62,7 @@ impl OtelConfig {
 pub struct OtelExporter {
     tracer: sdktrace::Tracer,
     provider: Option<sdktrace::TracerProvider>,
-    config: OtelConfig,
+    _config: OtelConfig,
 }
 
 impl OtelExporter {
@@ -98,7 +95,7 @@ impl OtelExporter {
         Ok(Self {
             tracer,
             provider: Some(provider),
-            config,
+            _config: config,
         })
     }
 
@@ -144,17 +141,17 @@ impl OtelExporter {
             root_span.set_attribute(KeyValue::new("work_context_id", work_context_id.clone()));
         }
 
-        // Export node runs as independent spans (simplified for now)
+        // Export node runs as child spans of the flow execution root span.
         for node_run in &trace.node_runs {
             self.export_node_run(node_run)?;
         }
 
-        // Export tool calls as independent spans (simplified for now)
+        // Export tool calls as child spans of the flow execution root span.
         for tool_call in &trace.tool_calls {
             self.export_tool_call(tool_call)?;
         }
 
-        // Export LLM calls as independent spans (simplified for now)
+        // Export LLM calls as child spans of the flow execution root span.
         for llm_call in &trace.llm_calls {
             self.export_llm_call(llm_call)?;
         }

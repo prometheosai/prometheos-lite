@@ -38,8 +38,10 @@ impl ServeCommand {
         let _db = prometheos_lite::db::Db::new(&db_path)?;
         logger.info("Database initialized: prometheos.db");
 
-        // Create embedding provider for API server
-        let api_embedding = runtime_builder.build_embedding_provider();
+        // The runtime already includes OpenRouter embedding provider
+        // No need to create separate embedding provider for API server
+
+        // Create memory service with OpenRouter embedding
         let memory_service = runtime_builder.build_memory_service()?;
 
         // Create AppState
@@ -47,7 +49,17 @@ impl ServeCommand {
             prometheos_lite::api::AppState::new(
                 db_path,
                 std::sync::Arc::new(runtime),
-                api_embedding,
+                std::sync::Arc::new(
+                    prometheos_lite::flow::memory::embedding::LocalEmbeddingProvider::new(
+                        "http://127.0.0.1:1234".to_string(),
+                        runtime_builder.config().embedding_dimension,
+                        if runtime_builder.config().embedding_model.trim().is_empty() {
+                            None
+                        } else {
+                            Some(runtime_builder.config().embedding_model.clone())
+                        },
+                    ),
+                ),
                 memory_service,
             )
             .map_err(|e| anyhow::anyhow!("Failed to create AppState: {}", e))?,

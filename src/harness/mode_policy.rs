@@ -233,7 +233,9 @@ impl HarnessPolicyGate {
     ) -> GateDecision {
         // P0: ReviewOnly never applies real patches
         if matches!(self.mode, HarnessMode::ReviewOnly) {
-            return GateDecision::Block("ReviewOnly mode: real patch application is disabled".into());
+            return GateDecision::Block(
+                "ReviewOnly mode: real patch application is disabled".into(),
+            );
         }
 
         // P0: Dry-run must pass before real patch application
@@ -249,19 +251,26 @@ impl HarnessPolicyGate {
         // P0: Check risk level against mode policy
         if !self.policy.should_apply_for_risk(risk_level) {
             return match self.mode {
-                HarnessMode::Assisted => {
-                    GateDecision::RequireApproval(format!("High risk ({:?}) requires explicit approval in Assisted mode", risk_level))
-                }
-                HarnessMode::Autonomous => {
-                    GateDecision::Block(format!("Critical risk ({:?}) blocked in Autonomous mode", risk_level))
-                }
-                _ => GateDecision::Block(format!("Risk level ({:?}) exceeds mode policy", risk_level)),
+                HarnessMode::Assisted => GateDecision::RequireApproval(format!(
+                    "High risk ({:?}) requires explicit approval in Assisted mode",
+                    risk_level
+                )),
+                HarnessMode::Autonomous => GateDecision::Block(format!(
+                    "Critical risk ({:?}) blocked in Autonomous mode",
+                    risk_level
+                )),
+                _ => GateDecision::Block(format!(
+                    "Risk level ({:?}) exceeds mode policy",
+                    risk_level
+                )),
             };
         }
 
         // P0: Rollback handle is required for real repo patching (except Benchmark with BestEffort)
         if matches!(self.policy.checkpoint_policy, CheckpointPolicy::Required) && !has_rollback {
-            return GateDecision::Block("Rollback handle required for real repo patching but not available".into());
+            return GateDecision::Block(
+                "Rollback handle required for real repo patching but not available".into(),
+            );
         }
 
         GateDecision::Allow
@@ -270,7 +279,10 @@ impl HarnessPolicyGate {
     /// Gate check: Can we proceed without validation?
     pub fn check_validation_bypass(&self, reason: &str) -> GateDecision {
         if self.require_validation() {
-            GateDecision::Block(format!("Validation cannot be bypassed in {:?} mode: {}", self.mode, reason))
+            GateDecision::Block(format!(
+                "Validation cannot be bypassed in {:?} mode: {}",
+                self.mode, reason
+            ))
         } else {
             GateDecision::Allow
         }
@@ -297,8 +309,14 @@ mod tests {
         assert!(!policy.may_apply_real_patch);
         assert!(policy.may_apply_temp_patch);
         assert!(!policy.requires_user_approval);
-        assert!(matches!(policy.checkpoint_policy, CheckpointPolicy::Disabled));
-        assert!(matches!(policy.validation_target, ValidationTarget::TempWorkspace));
+        assert!(matches!(
+            policy.checkpoint_policy,
+            CheckpointPolicy::Disabled
+        ));
+        assert!(matches!(
+            policy.validation_target,
+            ValidationTarget::TempWorkspace
+        ));
     }
 
     #[test]
@@ -306,7 +324,10 @@ mod tests {
         let policy = HarnessModePolicy::assisted();
         assert!(policy.may_apply_real_patch);
         assert!(policy.requires_user_approval);
-        assert!(matches!(policy.checkpoint_policy, CheckpointPolicy::Required));
+        assert!(matches!(
+            policy.checkpoint_policy,
+            CheckpointPolicy::Required
+        ));
         assert!(policy.checkpoint_failure_blocks());
     }
 
@@ -315,7 +336,10 @@ mod tests {
         let policy = HarnessModePolicy::autonomous();
         assert!(policy.may_apply_real_patch);
         assert!(!policy.requires_user_approval);
-        assert!(matches!(policy.checkpoint_policy, CheckpointPolicy::Required));
+        assert!(matches!(
+            policy.checkpoint_policy,
+            CheckpointPolicy::Required
+        ));
         assert!(policy.allow_high_risk);
         assert!(!policy.allow_critical_risk);
     }
@@ -324,7 +348,10 @@ mod tests {
     fn test_benchmark_policy() {
         let policy = HarnessModePolicy::benchmark();
         assert!(policy.may_apply_real_patch);
-        assert!(matches!(policy.checkpoint_policy, CheckpointPolicy::BestEffort));
+        assert!(matches!(
+            policy.checkpoint_policy,
+            CheckpointPolicy::BestEffort
+        ));
         assert!(!policy.checkpoint_failure_blocks());
         assert!(policy.allow_critical_risk);
     }
@@ -348,7 +375,7 @@ mod tests {
             true,  // dry_run_passed
             false, // has_critical_issues
             crate::harness::risk::RiskLevel::Low,
-            true,  // has_rollback
+            true, // has_rollback
         );
         assert!(matches!(decision, GateDecision::Block(_)));
     }
@@ -360,7 +387,7 @@ mod tests {
             true,  // dry_run_passed
             false, // has_critical_issues
             crate::harness::risk::RiskLevel::Low,
-            true,  // has_rollback
+            true, // has_rollback
         );
         assert!(matches!(decision, GateDecision::Allow));
     }
@@ -372,7 +399,7 @@ mod tests {
             true,  // dry_run_passed
             false, // has_critical_issues
             crate::harness::risk::RiskLevel::High,
-            true,  // has_rollback
+            true, // has_rollback
         );
         assert!(matches!(decision, GateDecision::RequireApproval(_)));
     }
@@ -384,7 +411,7 @@ mod tests {
             true,  // dry_run_passed
             false, // has_critical_issues
             crate::harness::risk::RiskLevel::Critical,
-            true,  // has_rollback
+            true, // has_rollback
         );
         assert!(matches!(decision, GateDecision::Block(_)));
     }
@@ -396,7 +423,7 @@ mod tests {
             false, // dry_run_passed
             false, // has_critical_issues
             crate::harness::risk::RiskLevel::Low,
-            true,  // has_rollback
+            true, // has_rollback
         );
         assert!(matches!(decision, GateDecision::Block(_)));
     }
@@ -432,7 +459,7 @@ mod tests {
             true,  // dry_run_passed
             false, // has_critical_issues
             crate::harness::risk::RiskLevel::Critical,
-            true,  // has_rollback
+            true, // has_rollback
         );
         assert!(matches!(decision, GateDecision::Allow));
     }

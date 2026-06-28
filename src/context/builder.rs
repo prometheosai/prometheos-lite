@@ -3,11 +3,11 @@
 //! This module provides a unified interface for building LLM prompts
 //! with automatic token budgeting, memory integration, and context trimming.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::budgeter::{ContextBudgeter, ContextItem, ContextPriority, TrimmedContext};
+use super::budgeter::{ContextBudgeter, ContextItem, ContextPriority};
 use crate::flow::memory::service::MemoryService;
 use crate::flow::memory::types::Memory;
 
@@ -207,15 +207,12 @@ impl ContextBuilder {
         limit: usize,
     ) -> Result<BuiltContext> {
         let memory = if let Some(ref service) = self.memory_service {
-            // Use semantic_search with the provided limit
-            // Note: project_id filtering would need to be implemented in MemoryService
-            // For now, we pass the query and limit
-            let memories = service
-                .semantic_search(&task, limit)
-                .await
-                .context("Memory retrieval failed during context building")?;
+            // Use semantic_search with the provided limit. Memory retrieval errors are
+            // propagated so the caller can handle them explicitly rather than silently
+            // continuing with empty memory.
+            let memories = service.semantic_search(&task, limit).await?;
 
-            // Filter by project_id if provided
+            // Filter by project_id if provided.
             if let Some(ref pid) = project_id {
                 memories
                     .into_iter()

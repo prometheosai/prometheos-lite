@@ -2,6 +2,20 @@
 
 ## Harness Alignment, Enforcement & Token-Lean Correctness
 
+## Implementation Status (Strict Closeout)
+
+The following V1.6.1 enforcement items are implemented in production code:
+
+- Explicit harness API matrix for evidence/patches/validation/review/risk/completion plus work cost/quality/traces and trace-by-run.
+- Legacy `harness/:view` compatibility route retained as deprecated alias to canonical extractors.
+- Strict identity enforcement for API WorkContext list/create/submit paths (no implicit `api-user` fallback).
+- Dedicated `harness.*` NodeRegistry registration and node construction (no alias-only shortcut mapping).
+- Runtime tool gate denial for software-path `write_file`; patch protocol remains required for modifications.
+- First-class persisted harness metadata:
+  - trace summaries (`duration/node/tool/errors/tokens/cost`)
+  - quality metrics (`review/critical/rejection/hallucination-risk`)
+- CLI parity for cost/quality/traces inspection.
+
 ## 0. Executive Summary
 
 PrometheOS Lite V1.6 already has major harness-shaped pieces: WorkContext, Flow execution, repo tools, patching, tracing, model routing, memory, and software-domain workflows. The problem is no longer “build the harness from nothing.” The problem is uglier and more realistic: **the harness pieces are not yet consolidated into one mandatory, evidence-gated execution path**.

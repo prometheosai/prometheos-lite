@@ -1,3 +1,278 @@
+## V1.6.4 Runtime Identity, Tool Awareness, and Stack Alignment
+
+- Updated runtime/provider configuration toward an OpenRouter-first stack:
+  - `prometheos.config.json` now targets `openrouter` with primary model `owl-alpha`, fallback model chain entries, and explicit embedding model `openai/text-embedding-3-small`.
+  - `src/config/settings/{types,defaults}.rs`, `src/cli/runtime_builder.rs`, and `src/cli/commands/serve.rs` were updated to carry `embedding_model` and support local/OpenRouter/Jina embedding selection.
+  - `src/flow/memory/embedding.rs` now sends the configured embedding model to compatible embedding endpoints and accepts both legacy and OpenAI-style embedding payloads.
+- Added runtime stack visibility for the UI:
+  - `src/api/health.rs` and `src/api/router.rs` now expose `GET /runtime/stack`.
+  - `frontend/src/lib/api.ts`, `frontend/src/components/layout/app-layout.tsx`, and `frontend/src/components/layout/right-sidebar.tsx` now fetch and render the live runtime model stack instead of relying only on static frontend defaults.
+- Hardened conversation identity and capability behavior:
+  - `src/context/builder.rs` now propagates memory retrieval failures instead of silently degrading.
+  - `src/flow/factory/builtin_nodes.rs` now enforces PrometheOS Lite identity, sanitizes OWL/ZOO self-identification leaks, injects live tool inventory from the runtime registry, and shapes capability explanations through the personality system.
+  - `src/personality/prompt.rs`, `src/api/flow_runs/handler.rs`, `src/flow/factory/node_factory.rs`, and `src/flow/intelligence/tool.rs` now support personality-shaped identity/capability framing plus runtime tool enumeration with examples.
+  - `flows/chat.flow.yaml` and `flows/memory-augmented.json` were updated to align flow-level prompts with PrometheOS Lite identity.
+- Added repository continuity and diagnostic artifacts:
+  - refreshed `handoff.md` with a repository-grounded continuation audit.
+  - added untracked local diagnostics artifacts `request.json` and `test_embedding_provider/` for embedding-provider probing.
+- Verification run results:
+  - `cargo check` passed.
+  - API and SQLite verification confirmed new assistant replies identify as PrometheOS Lite and enumerate the live tool registry with concrete examples.
+
+## V1.6.3 Multi-Provider Router Completion - Streaming Metadata, Coverage Restoration, Docs Alignment
+
+- Completed stream metadata parity in `src/flow/intelligence/router.rs`:
+  - added `generate_stream_for_mode_with_metadata(...)`
+  - `generate_stream_with_metadata(...)` now returns real provider/model/latency/fallback/attempt path metadata instead of placeholder `"unknown"` values.
+  - quota and rate-limit streaming failures now trigger cooldown rotation and are reflected in metadata.
+- Restored and expanded intelligence-layer test coverage in `src/flow/intelligence/tests.rs`:
+  - restored dropped utility/sandbox tests that had been removed in the prior rewrite.
+  - added stream-metadata regression coverage (`test_model_router_stream_metadata`) validating fallback path, quota rotation, and attempt accounting.
+  - validated mode-chain and quota-rotation metadata behavior remains correct.
+- Updated operator-facing configuration guidance in `README.md`:
+  - moved default example from LM Studio-only config to OpenRouter-first multi-provider `llm_routing` schema.
+  - documented mode-chain routing and BYOK/local-provider support language.
+- Verification run results:
+  - `cargo test --lib flow::intelligence::tests --all-features` passed (`14 passed`).
+  - `cargo test --lib test_model_router_stream_metadata --all-features` passed.
+  - `cargo check --all-targets --all-features` passed.
+
+## V1.6.1 PRD Harness Completion Audit - Cumulative Closure
+
+- Added a strict cumulative audit artifact at `docs/prd-harness-completion-audit.md` that maps harness/work-context requirements across PRD history to concrete implementation evidence.
+- Documented supersession handling where older interface expectations were replaced by later canonical contracts, with explicit rationale and compatibility notes.
+- Recorded an end-to-end operational health verdict for the harness path (`Complete with documented supersessions`) with local verification evidence.
+- Refreshed `handoff.md` as a continuity-grade transfer document for next-operator execution against the audit baseline.
+
+## V1.6.2 Router Hardening - WorkContext API Ownership Matrix Completion
+
+- Completed router-level integration hardening in `src/api/work_contexts.rs` by expanding API guard coverage beyond mutation routes into read/reporting surfaces.
+- Added ownership and identity enforcement tests for:
+  - `list_work_contexts`
+  - `get_work_context`
+  - `get_work_context_artifacts`
+  - `get_work_quality`
+  - `get_work_cost`
+  - `list_work_traces`
+- Added trace retrieval not-found regression test:
+  - `get_trace_by_run` now has explicit test coverage ensuring unknown run IDs return `404 NotFound`.
+- Added harness view guard matrix tests for:
+  - `get_harness_evidence`
+  - `get_harness_patches`
+  - `get_harness_validation`
+  - `get_harness_review`
+  - `get_harness_risk`
+  - `get_harness_completion`
+- Harness view tests now explicitly verify:
+  - foreign `user_id` -> `403 Forbidden`
+  - owner with absent harness view payload -> `409 Conflict`
+- Added a reusable async test helper to assert invariant behavior consistently across harness view endpoints, reducing drift risk and duplicated assertion logic.
+
+## V1.6.1 Final Audit Closure - Ownership, CI Pinning, Versioning
+
+- Added explicit WorkContext ownership regression tests in `src/api/work_contexts.rs` for mutation/execution routes:
+  - `update_work_context_status`
+  - `continue_work_context`
+  - `run_until_complete`
+  - `run_harness`
+- Tests now assert:
+  - blank `user_id` -> `400 BadRequest`
+  - foreign `user_id` -> `403 Forbidden`
+- Added explicit CI step in `.github/workflows/ci.yml`:
+  - `Patch Provider Diagnostics Tests`
+  - runs `cargo test --test patch_provider_diagnostics_tests --quiet`
+- Updated crate version in `Cargo.toml` from `0.1.0` to `1.6.1` to align crate semver with current release milestone.
+
+## V1.6.1 Strict Audit Closure - Policy and API Hardening
+
+- Removed machine-local environment contamination from committed Cargo config:
+  - deleted hardcoded Windows-only `TMP`/`TEMP` overrides from `.cargo/config.toml`.
+- Hardened runtime policy scanning in `src/runtime_policy.rs`:
+  - detector-module exclusions are now path-scoped (`src/harness/{ci_enforcement,review,reproduction}.rs`) instead of filename-wide.
+  - expanded runtime violation detection to include placeholder identifiers and phrases (`mock/stub/fake/dummy/placeholder`, `not implemented`, `in a real implementation`).
+- Enforced explicit ownership identity on WorkContext read surfaces in `src/api/work_contexts.rs`:
+  - read endpoints now require non-empty `user_id` and return `403` for cross-user access.
+  - coverage includes context read, artifacts, harness views, quality/cost, traces, and trace-by-run.
+- Removed dead deprecated handler:
+  - dropped `get_harness_metadata` endpoint implementation after full explicit endpoint migration.
+- Strengthened harness API semantics:
+  - harness view endpoints now return `409 Conflict` when the requested view is not yet available, replacing silent `null` payload fallbacks.
+- Added targeted tests:
+  - runtime policy detector exclusion scope test.
+  - harness view availability and user identity validation tests in API module.
+
+## V1.6.1 Repo-Wide Codification - Runtime Policy Enforcement Pass
+
+- Added central runtime policy module `src/runtime_policy.rs` with:
+  - software-harness raw-write policy decision (`is_raw_write_allowed`)
+  - production source scanner for placeholder/stub markers (`scan_runtime_placeholder_violations`)
+  - explicit detector-module exclusions for pattern-vocabulary modules.
+- Wired tool runtime write-policy gate to central runtime policy:
+  - `src/flow/intelligence/tool.rs` now delegates raw-write decision to `runtime_policy` for harness software path.
+- Removed remaining implicit API identity fallback in playbook surface:
+  - `src/api/playbooks.rs` `list_playbooks` now requires explicit `user_id` query and rejects empty identity.
+  - Playbook endpoints are now routed in `src/api/router.rs` and module-exported via `src/api/mod.rs`.
+- Replaced CI placeholder grep heuristics with structured policy test invocation:
+  - `.github/workflows/ci.yml` `Anti-Placeholder Check` and `Stub/placeholder detection` now run `runtime_policy_enforcement` test.
+- Added repository-level enforcement integration test:
+  - `tests/runtime_policy_enforcement.rs` fails build if production `src/` contains runtime placeholder markers outside allowed detector modules.
+
+### Validation Notes
+
+- `cargo fmt --all` passes.
+- `RUSTFLAGS='-D warnings' cargo check --all-targets --all-features` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` passes.
+- `cargo test --quiet` passes end-to-end (including `runtime_policy_enforcement`).
+
+## V1.6.1 Strict Completion - Contract Closure, Runtime Enforcement, and API/CLI Parity
+
+- Replaced harness CLI placeholder failures with real persisted flows in `src/cli/commands/harness.rs`:
+  - `inspect` now loads persisted WorkContext/harness metadata and evidence logs.
+  - `apply` now replays persisted patch diff through patch protocol (`apply_patch_with_rollback`), no raw write fallback.
+  - `rollback` now restores from persisted patch snapshots/transaction metadata.
+- Removed API identity fallback behavior in `src/api/work_contexts.rs`:
+  - list/create/submit paths now require explicit `user_id`.
+  - blank/missing user identity returns `400`.
+- Added explicit V1.6.1 harness/work API matrix in `src/api/router.rs` + `src/api/work_contexts.rs`:
+  - `/work-contexts/:id/harness/evidence`
+  - `/work-contexts/:id/harness/patches`
+  - `/work-contexts/:id/harness/validation`
+  - `/work-contexts/:id/harness/review`
+  - `/work-contexts/:id/harness/risk`
+  - `/work-contexts/:id/harness/completion`
+  - `/work-contexts/:id/work-quality`
+  - `/work-contexts/:id/work-cost`
+  - `/work-contexts/:id/traces`
+  - `/work-contexts/:id/traces/:run_id`
+- Kept compatibility alias route `/work-contexts/:id/harness/:view` with deprecation behavior routed to same canonical extractors.
+- Replaced `harness.*` alias registration with dedicated NodeRegistry-backed node types:
+  - `src/flow/factory/register_harness.rs`
+  - `src/flow/factory/node_factory.rs`
+  - unknown `harness.*` node now hard-fails.
+- Enforced software-path raw write denial in runtime tool gate (`src/flow/intelligence/tool.rs`):
+  - `write_file` denied for harness execution path unless explicit override (`PROMETHEOS_ALLOW_RAW_WRITE=1`).
+- Added first-class persisted harness metadata models in `src/work/types.rs`:
+  - `HarnessTraceSummary` (duration/node/tool/error/tokens/cost)
+  - `HarnessQualityMetrics` (review/critical/rejection/hallucination-risk rates)
+- Wired persistence of these metrics from real run results in `src/harness/work_integration.rs`.
+- Wired API/CLI to expose persisted first-class metrics:
+  - API: `work-quality`, `work-cost`, `traces`, `trace-by-run`
+  - CLI: `work cost`, `work quality`, `work traces`
+- Added regression tests:
+  - harness view matrix extraction test
+  - dedicated `harness.*` node registration/unknown-node hard error tests
+  - runtime gate deny test for `write_file` on harness path
+
+## V1.6.1 Strict Alignment - Batch A/B + CI Coherence Spine
+
+- Added canonical harness contract types in `src/harness/contract.rs`:
+  - `HarnessRequest`
+  - `HarnessResult`
+  - `WorkContextBudget`
+- Added typed WorkContext harness metadata model in `src/work/types.rs`:
+  - `HarnessMetadata`
+  - `TokenUsageSummary`
+  - `WorkContext::harness_metadata()` and `WorkContext::set_harness_metadata()`
+- Wired harness result metadata persistence in `src/harness/work_integration.rs` so runs consistently persist:
+  - latest run/evidence IDs
+  - completion decision
+  - risk level
+  - verification strength
+  - token usage summary
+- Enforced strict software lifecycle gates in `WorkContextService`:
+  - software `Execution -> Review` requires patch + validation evidence
+  - software `Review -> Finalization` requires review + risk evidence
+  - software `Completed` status requires `CompletionDecision::Complete` evidence
+  - invalid phase transitions are rejected centrally
+- Added NodeRegistry-based node resolution and registration modules:
+  - `src/flow/factory/registry.rs`
+  - `src/flow/factory/register_builtin.rs`
+  - `src/flow/factory/register_harness.rs`
+  - `DefaultNodeFactory` now resolves all node types via `NodeRegistry`, including `harness.*` aliases, and returns strict unknown-node errors from registry lookup.
+- Added compatibility bridge in `WorkExecutionService` for legacy software flow execution path:
+  - successful legacy execution emits explicit transition evidence needed by strict software gates
+  - orchestrator completion path stamps software completion decision evidence before setting `Completed`
+- Fixed CI anti-placeholder coherence in `.github/workflows/ci.yml`:
+  - detector vocabulary files excluded from blunt pattern grep checks
+  - runtime stub/placeholder checks remain strict for production paths
+
+### Validation Notes
+
+- `RUSTFLAGS='-D warnings' cargo check --all-targets --all-features` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` passes.
+- `cargo test --quiet` passes end-to-end.
+
+## V1.6 Strict Audit Completion - Production Hygiene Sweep (No Stub/Placeholder Runtime Paths)
+
+- Executed a full compiler-driven production hygiene pass with `cargo fix --allow-dirty --allow-staged` across harness, flow, CLI, tooling, DB, context, queue, and work modules.
+- Removed large volumes of unused imports, dead temporary bindings, and warning-causing patterns while preserving runtime behavior.
+- Normalized code paths touched in strict audit rounds so previously patched runtime logic remains coherent after global cleanup.
+- Preserved detector-only placeholder/TODO vocabulary exclusively in enforcement/review rule modules; no runtime stub/no-op placeholders were reintroduced.
+- Kept all changes in production Rust code (no mock/stub fallback implementation paths added).
+
+### Validation Notes
+
+- `cargo fix --allow-dirty --allow-staged` completed successfully and applied fixes across affected modules.
+- `cargo fmt` passes.
+- Added test-profile build hardening in `Cargo.toml`:
+  - `[profile.test] debug = 0`
+  - `[profile.test] split-debuginfo = "off"`
+  - `[profile.test] incremental = true`
+- Fixed two compile regressions introduced during automated hygiene (`chrono::Duration`/`chrono::Datelike` test imports).
+- `cargo test --quiet` now passes end-to-end in this environment.
+
+## V1.6 Strict Audit Completion - CI Enforcement Integration and De-Placeholdering Pass 2
+
+- Wired diagnostics command into top-level CLI command routing:
+  - Added `Diagnostics` variant to CLI command enum.
+  - Added dispatch path to `handle_diagnostics_command`.
+- Completed anti-placeholder CI module cleanup:
+  - Removed embedded test fixture payloads from `src/harness/ci_enforcement.rs`.
+  - Moved CI enforcement tests into standalone integration test `tests/ci_enforcement_tests.rs`.
+- Fixed CI enforcement type coherence:
+  - Added `Hash` derivation for `Severity` so `HashMap<Severity, usize>` compiles, serializes, and compares correctly.
+- Exposed CI enforcement APIs through harness module exports for stable external imports.
+- Corrected malformed regex literals in CI enforcement patterns.
+- Updated CI enforcement integration tests to align with real matcher behavior:
+  - Exclusion matching via concrete filename substring.
+  - TODO detection uses comment-form markers (`// TODO`), matching production patterns.
+- Fixed trace storage deadlock in `get_traces_by_flow_run`:
+  - Removed self-deadlock caused by nested mutex acquisition via `get_trace`.
+  - Collect trace IDs under lock, release lock, then hydrate traces.
+- Fixed failing doctest parsing in patch provider docs by replacing invalid pseudo-code fence content with non-rust text format.
+- Added repo-local Cargo build stability config in `.cargo/config.toml`:
+  - `jobs = 1` to reduce Windows linker/resource contention under full-suite test load.
+  - `incremental = true` to keep full test cycle practical.
+
+### Validation Notes
+
+- `cargo check --quiet` passes.
+- `cargo test --test ci_enforcement_tests --quiet` passes (6/6).
+- `cargo test --test v15_observability_test --quiet` passes (10/10).
+- `cargo test --quiet` passes end-to-end in this environment.
+
+## V1.6 Strict Audit Completion - Runtime De-Placeholdering
+
+- Rewired runtime embedding usage so `serve` and runtime builder paths consistently use OpenRouter embedding provider instead of legacy local embedding stubs.
+- Hardened CI enforcement configuration coherence: pattern initialization now reflects active config flags and reinitializes correctly on config updates.
+- Replaced diagnostics provider connectivity placeholder with real HTTP connectivity checks, including provider-specific endpoints and auth/header handling.
+- Removed silent dependency discovery fallback:
+  - Replaced `PlaceholderDiscovery` with explicit `UnsupportedDiscovery` failures for unimplemented discovery types (`Network`, `Database`, `Custom`).
+  - This prevents false-positive “successful” discovery when unsupported mechanisms are configured.
+- Implemented adaptive timeout engine state updates:
+  - Added learned adaptive multiplier updates from historical timeout/success/utilization statistics.
+  - Adaptive escalation now uses bounded learned multipliers instead of static no-op behavior.
+- Added regression tests for adaptive timeout learning behavior (increase/decrease paths).
+- Renamed flow unit-test node kind from `"mock"` to `"test"` and corresponding helper type names for clearer test semantics.
+
+### Validation Notes
+
+- `cargo check --quiet` passes.
+- `cargo test --test harness_risk --quiet` passes.
+- Full `cargo test` remains constrained by Windows linker resource limits in this environment (`LNK1102`/`LNK1104`) on large test binaries, not by runtime logic regressions in the changed modules.
+
 ## V1.6 Harness Engine
 
 - Added the src/harness subsystem for repo intelligence, environment fingerprinting, file policy, structured edit validation, atomic patch application, sandboxed validation, review/risk/confidence scoring, trajectory recording, artifacts, and evidence-based completion.

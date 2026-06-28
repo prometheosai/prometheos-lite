@@ -2,11 +2,10 @@
 //! First-class harness output providing complete event ledger of all tool calls and decisions
 
 use crate::harness::{
-    edit_protocol::EditOperation,
-    failure::FailureKind,
     git_checkpoint::GitCheckpoint,
     patch_applier::{PatchResult, RollbackHandle},
-    risk::{RiskAssessment, RiskLevel},
+    risk::RiskAssessment,
+    sandbox::SandboxRuntimeKind,
     validation::{CommandResult, ValidationResult},
 };
 use anyhow::Result;
@@ -14,6 +13,33 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// P0-Issue1: Real sandbox evidence for autonomous mode safety
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxEvidence {
+    pub runtime_kind: SandboxRuntimeKind,
+    pub isolated_process: bool,
+    pub isolated_filesystem: bool,
+    pub network_disabled: bool,
+    pub cpu_limited: bool,
+    pub memory_limited: bool,
+    pub container_id: Option<String>,
+    pub mount_mode: SandboxMountMode,
+    pub resource_limits_applied: bool,
+    pub no_new_privileges: bool,
+    pub capabilities_dropped: bool,
+    pub seccomp_enabled: bool,
+    // P0-Audit-005: Additional hardening evidence fields
+    pub pids_limit: Option<u32>,
+    pub non_root_user: bool,
+    pub tmpfs_protected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SandboxMountMode {
+    ReadOnly,
+    ReadWrite,
+}
 
 /// Types of evidence entries for the execution ledger
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +72,8 @@ pub enum EvidenceEntryKind {
     CompletionEvaluated,
     /// Side effect blocked
     SideEffectBlocked,
+    /// P0-C3: Sandbox backend used for execution
+    SandboxBackendUsed,
     /// User approval requested
     ApprovalRequested,
     /// User approval granted
@@ -68,6 +96,21 @@ pub enum EvidenceEntryKind {
     RepairCompleted,
     /// P2-011: Repair failed after max attempts
     RepairFailed,
+    /// P1-5.1: Tracing events converted to evidence
+    RepositoryContextBuilt,
+    ProviderAutoResolved,
+    ProviderResolutionFailed,
+    FileSetLimitsChecked,
+    TempWorkspaceCreated,
+    SandboxRuntimeCreated,
+    ValidationCommandStarted,
+    ValidationCommandCompleted,
+    CacheInvalidated,
+    SymbolExtractionCompleted,
+    DependencyGraphParsed,
+    AttemptPoolCandidateEvaluated,
+    RepairStrategyApplied,
+    ConfigurationLoaded,
 }
 
 /// A single entry in the evidence log
@@ -138,7 +181,10 @@ impl EvidenceLog {
             id: format!("{}_repo_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
             kind: EvidenceEntryKind::RepoMapBuilt,
-            description: format!("Repository analysis complete: {} files, {} symbols", files_found, symbols_found),
+            description: format!(
+                "Repository analysis complete: {} files, {} symbols",
+                files_found, symbols_found
+            ),
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
@@ -170,7 +216,11 @@ impl EvidenceLog {
             id: format!("{}_gen_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
             kind: EvidenceEntryKind::PatchGenerated,
-            description: format!("Patch generated from {} with {} edits", source.into(), edits_count),
+            description: format!(
+                "Patch generated from {} with {} edits",
+                source.into(),
+                edits_count
+            ),
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
@@ -191,12 +241,21 @@ impl EvidenceLog {
     }
 
     /// Record dry-run result
-    pub fn record_dry_run(&mut self, patch_result: &PatchResult, duration_ms: u64, trace_id: Option<String>) -> EvidenceEntry {
+    pub fn record_dry_run(
+        &mut self,
+        patch_result: &PatchResult,
+        duration_ms: u64,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
         let success = patch_result.failures.is_empty();
         let entry = EvidenceEntry {
             id: format!("{}_dry_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
-            kind: if success { EvidenceEntryKind::DryRunPassed } else { EvidenceEntryKind::DryRunFailed },
+            kind: if success {
+                EvidenceEntryKind::DryRunPassed
+            } else {
+                EvidenceEntryKind::DryRunFailed
+            },
             description: if success {
                 "Dry-run verification passed".to_string()
             } else {
@@ -205,8 +264,14 @@ impl EvidenceLog {
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
-                map.insert("changed_files".to_string(), patch_result.changed_files.len().to_string());
-                map.insert("failures".to_string(), patch_result.failures.len().to_string());
+                map.insert(
+                    "changed_files".to_string(),
+                    patch_result.changed_files.len().to_string(),
+                );
+                map.insert(
+                    "failures".to_string(),
+                    patch_result.failures.len().to_string(),
+                );
                 map
             },
             command: None,
@@ -222,7 +287,11 @@ impl EvidenceLog {
     }
 
     /// Record risk assessment
-    pub fn record_risk_assessed(&mut self, risk: &RiskAssessment, trace_id: Option<String>) -> EvidenceEntry {
+    pub fn record_risk_assessed(
+        &mut self,
+        risk: &RiskAssessment,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_risk_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -232,7 +301,10 @@ impl EvidenceLog {
             output_summary: {
                 let mut map = HashMap::new();
                 map.insert("risk_level".to_string(), format!("{:?}", risk.level));
-                map.insert("requires_approval".to_string(), risk.requires_approval.to_string());
+                map.insert(
+                    "requires_approval".to_string(),
+                    risk.requires_approval.to_string(),
+                );
                 map.insert("reasons_count".to_string(), risk.reasons.len().to_string());
                 map
             },
@@ -249,7 +321,11 @@ impl EvidenceLog {
     }
 
     /// Record checkpoint creation
-    pub fn record_checkpoint_created(&mut self, checkpoint: &GitCheckpoint, trace_id: Option<String>) -> EvidenceEntry {
+    pub fn record_checkpoint_created(
+        &mut self,
+        checkpoint: &GitCheckpoint,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_checkpoint_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -286,18 +362,31 @@ impl EvidenceLog {
         let entry = EvidenceEntry {
             id: format!("{}_apply_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
-            kind: if to_temp_workspace { EvidenceEntryKind::PatchAppliedToTemp } else { EvidenceEntryKind::PatchApplied },
+            kind: if to_temp_workspace {
+                EvidenceEntryKind::PatchAppliedToTemp
+            } else {
+                EvidenceEntryKind::PatchApplied
+            },
             description: if to_temp_workspace {
                 "Patch applied to temp workspace".to_string()
             } else {
-                format!("Patch applied to real repo with rollback: {}", rollback_handle.is_some())
+                format!(
+                    "Patch applied to real repo with rollback: {}",
+                    rollback_handle.is_some()
+                )
             },
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
-                map.insert("changed_files".to_string(), patch_result.changed_files.len().to_string());
+                map.insert(
+                    "changed_files".to_string(),
+                    patch_result.changed_files.len().to_string(),
+                );
                 map.insert("applied".to_string(), patch_result.applied.to_string());
-                map.insert("has_rollback".to_string(), rollback_handle.is_some().to_string());
+                map.insert(
+                    "has_rollback".to_string(),
+                    rollback_handle.is_some().to_string(),
+                );
                 map
             },
             command: None,
@@ -313,12 +402,19 @@ impl EvidenceLog {
     }
 
     /// Record validation command run
-    pub fn record_validation_command(&mut self, result: &CommandResult, trace_id: Option<String>) -> EvidenceEntry {
+    pub fn record_validation_command(
+        &mut self,
+        result: &CommandResult,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_valcmd_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
             kind: EvidenceEntryKind::ValidationCommandRun,
-            description: format!("Validation command: {} (exit: {:?})", result.command, result.exit_code),
+            description: format!(
+                "Validation command: {} (exit: {:?})",
+                result.command, result.exit_code
+            ),
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
@@ -340,17 +436,31 @@ impl EvidenceLog {
     }
 
     /// Record validation completion
-    pub fn record_validation_completed(&mut self, validation: &ValidationResult, trace_id: Option<String>) -> EvidenceEntry {
+    pub fn record_validation_completed(
+        &mut self,
+        validation: &ValidationResult,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_val_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
             kind: EvidenceEntryKind::ValidationCompleted,
-            description: format!("Validation completed: {}", if validation.passed { "PASSED" } else { "FAILED" }),
+            description: format!(
+                "Validation completed: {}",
+                if validation.passed() {
+                    "PASSED"
+                } else {
+                    "FAILED"
+                }
+            ),
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
-                map.insert("passed".to_string(), validation.passed.to_string());
-                map.insert("commands_run".to_string(), validation.command_results.len().to_string());
+                map.insert("passed".to_string(), validation.passed().to_string());
+                map.insert(
+                    "commands_run".to_string(),
+                    validation.command_results.len().to_string(),
+                );
                 map.insert("errors".to_string(), validation.errors.len().to_string());
                 map
             },
@@ -360,14 +470,18 @@ impl EvidenceLog {
             trace_id,
             span_id: None,
             duration_ms: validation.duration_ms,
-            success: validation.passed,
+            success: validation.passed(),
         };
         self.add_entry(entry.clone());
         entry
     }
 
     /// Record rollback
-    pub fn record_rollback(&mut self, reason: impl Into<String>, trace_id: Option<String>) -> EvidenceEntry {
+    pub fn record_rollback(
+        &mut self,
+        reason: impl Into<String>,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
         let entry = EvidenceEntry {
             id: format!("{}_rollback_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
@@ -402,7 +516,10 @@ impl EvidenceLog {
             input_summary: HashMap::new(),
             output_summary: {
                 let mut map = HashMap::new();
-                map.insert("passed_validation".to_string(), passed_validation.to_string());
+                map.insert(
+                    "passed_validation".to_string(),
+                    passed_validation.to_string(),
+                );
                 map
             },
             command: None,
@@ -489,7 +606,12 @@ impl EvidenceLog {
             id: format!("{}_attempt_{}", self.execution_id, self.entries.len()),
             timestamp: Utc::now(),
             kind: EvidenceEntryKind::AttemptPoolResult,
-            description: format!("Attempt {} scored {:.2} - {}", attempt_id, score, if passed { "PASSED" } else { "FAILED" }),
+            description: format!(
+                "Attempt {} scored {:.2} - {}",
+                attempt_id,
+                score,
+                if passed { "PASSED" } else { "FAILED" }
+            ),
             input_summary: {
                 let mut map = HashMap::new();
                 map.insert("attempt_id".to_string(), attempt_id.to_string());
@@ -508,6 +630,179 @@ impl EvidenceLog {
             span_id: None,
             duration_ms: 0,
             success: passed,
+        };
+        self.add_entry(entry.clone());
+        entry
+    }
+
+    /// P0-C3: Record sandbox backend used for execution
+    pub fn record_sandbox_backend_used(
+        &mut self,
+        backend_type: impl Into<String>,
+        backend_details: impl Into<String>,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
+        let backend_type_str = backend_type.into();
+        let backend_details_str = backend_details.into();
+
+        let entry = EvidenceEntry {
+            id: format!("{}_sandbox_{}", self.execution_id, self.entries.len()),
+            timestamp: Utc::now(),
+            kind: EvidenceEntryKind::SandboxBackendUsed,
+            description: format!("Sandbox backend used: {}", backend_type_str),
+            input_summary: {
+                let mut map = HashMap::new();
+                map.insert("backend_type".to_string(), backend_type_str);
+                map
+            },
+            output_summary: {
+                let mut map = HashMap::new();
+                map.insert("backend_details".to_string(), backend_details_str);
+                map
+            },
+            command: None,
+            command_result: None,
+            files_touched: Vec::new(),
+            trace_id,
+            span_id: None,
+            duration_ms: 0,
+            success: true,
+        };
+        self.add_entry(entry.clone());
+        entry
+    }
+
+    /// P0-Issue1: Record detailed sandbox evidence for autonomous mode safety
+    pub fn record_sandbox_evidence(
+        &mut self,
+        evidence: &SandboxEvidence,
+        command: Option<&str>,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
+        let entry = EvidenceEntry {
+            id: format!(
+                "{}_sandbox_evidence_{}",
+                self.execution_id,
+                self.entries.len()
+            ),
+            timestamp: Utc::now(),
+            kind: EvidenceEntryKind::SandboxBackendUsed,
+            description: format!(
+                "Sandbox execution: {:?} - process: {}, filesystem: {}, network: {}",
+                evidence.runtime_kind,
+                evidence.isolated_process,
+                evidence.isolated_filesystem,
+                evidence.network_disabled
+            ),
+            input_summary: {
+                let mut map = HashMap::new();
+                map.insert(
+                    "runtime_kind".to_string(),
+                    format!("{:?}", evidence.runtime_kind),
+                );
+                map.insert(
+                    "isolated_process".to_string(),
+                    evidence.isolated_process.to_string(),
+                );
+                map.insert(
+                    "isolated_filesystem".to_string(),
+                    evidence.isolated_filesystem.to_string(),
+                );
+                map.insert(
+                    "network_disabled".to_string(),
+                    evidence.network_disabled.to_string(),
+                );
+                map.insert("cpu_limited".to_string(), evidence.cpu_limited.to_string());
+                map.insert(
+                    "memory_limited".to_string(),
+                    evidence.memory_limited.to_string(),
+                );
+                map.insert(
+                    "resource_limits_applied".to_string(),
+                    evidence.resource_limits_applied.to_string(),
+                );
+                map.insert(
+                    "no_new_privileges".to_string(),
+                    evidence.no_new_privileges.to_string(),
+                );
+                map.insert(
+                    "capabilities_dropped".to_string(),
+                    evidence.capabilities_dropped.to_string(),
+                );
+                map.insert(
+                    "seccomp_enabled".to_string(),
+                    evidence.seccomp_enabled.to_string(),
+                );
+                map.insert(
+                    "mount_mode".to_string(),
+                    format!("{:?}", evidence.mount_mode),
+                );
+                if let Some(ref container_id) = evidence.container_id {
+                    map.insert("container_id".to_string(), container_id.clone());
+                }
+                map
+            },
+            output_summary: HashMap::new(),
+            command: command.map(|c| c.to_string()),
+            command_result: None,
+            files_touched: Vec::new(),
+            trace_id,
+            span_id: None,
+            duration_ms: 0,
+            success: true,
+        };
+        self.add_entry(entry.clone());
+        entry
+    }
+
+    /// P0-Issue2.1: Record validation command execution counters
+    pub fn record_validation_command_counters(
+        &mut self,
+        commands_planned: usize,
+        commands_executed: usize,
+        commands_skipped: usize,
+        categories_executed: Vec<crate::harness::validation::ValidationCategory>,
+        trace_id: Option<String>,
+    ) -> EvidenceEntry {
+        let entry = EvidenceEntry {
+            id: format!("{}_val_counters_{}", self.execution_id, self.entries.len()),
+            timestamp: Utc::now(),
+            kind: EvidenceEntryKind::ValidationCompleted,
+            description: format!(
+                "Validation command counters: {} planned, {} executed, {} skipped, {} categories",
+                commands_planned,
+                commands_executed,
+                commands_skipped,
+                categories_executed.len()
+            ),
+            input_summary: {
+                let mut map = HashMap::new();
+                map.insert("commands_planned".to_string(), commands_planned.to_string());
+                map.insert(
+                    "commands_executed".to_string(),
+                    commands_executed.to_string(),
+                );
+                map.insert("commands_skipped".to_string(), commands_skipped.to_string());
+                map.insert(
+                    "categories_count".to_string(),
+                    categories_executed.len().to_string(),
+                );
+                map
+            },
+            output_summary: {
+                let mut map = HashMap::new();
+                for (i, category) in categories_executed.iter().enumerate() {
+                    map.insert(format!("category_{}", i), format!("{:?}", category));
+                }
+                map
+            },
+            command: None,
+            command_result: None,
+            files_touched: Vec::new(),
+            trace_id,
+            span_id: None,
+            duration_ms: 0,
+            success: commands_executed > 0,
         };
         self.add_entry(entry.clone());
         entry

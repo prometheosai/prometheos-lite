@@ -9,7 +9,7 @@ import { Moon, Sun, ChevronDown, Cpu } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { type FlowEvent } from "@/lib/api"
+import { getRuntimeModelStack, type FlowEvent, type RuntimeModelStack } from "@/lib/api"
 import { useChat } from "@/context/chat-context"
 
 const LeftSidebar = dynamic(() => import("./left-sidebar").then(mod => ({ default: mod.LeftSidebar })), { ssr: false })
@@ -20,23 +20,71 @@ interface AppLayoutProps {
 }
 
 const modelProviders = [
-  { key: "lmstudio", label: "LM Studio", type: "local" },
-  { key: "llama", label: "Llama", type: "local" },
-  { key: "openai", label: "OpenAI", type: "cloud" },
-  { key: "anthropic", label: "Anthropic", type: "cloud" },
+  {
+    key: "lmstudio",
+    label: "LM Studio",
+    type: "local",
+    stack: {
+      planner: "google/gemma-4-e4b",
+      coder: "google/gemma-4-e4b",
+      reviewer: "google/gemma-4-e4b",
+      memory: "text-embedding-ada-002",
+      memorySource: "LM Studio",
+      memoryDescription: "Local • 4B parameters",
+    },
+  },
+  {
+    key: "openrouter",
+    label: "OpenRouter",
+    type: "cloud",
+    stack: {
+      planner: "owl-alpha",
+      coder: "owl-alpha",
+      reviewer: "owl-alpha",
+      memory: "openai/text-embedding-3-small",
+      memorySource: "OpenRouter",
+      memoryDescription: "Free tier embeddings",
+    },
+  },
+  {
+    key: "openai",
+    label: "OpenAI",
+    type: "cloud",
+    stack: {
+      planner: "gpt-4o-mini",
+      coder: "gpt-4o-mini",
+      reviewer: "gpt-4o-mini",
+      memory: "text-embedding-3-small",
+      memorySource: "OpenAI",
+      memoryDescription: "Cloud embeddings",
+    },
+  },
+  {
+    key: "anthropic",
+    label: "Anthropic",
+    type: "cloud",
+    stack: {
+      planner: "claude-2.1",
+      coder: "claude-2.1",
+      reviewer: "claude-2.1",
+      memory: "text-embedding-3-small",
+      memorySource: "Anthropic",
+      memoryDescription: "Cloud embeddings",
+    },
+  },
 ] as const
 
 function ClientIcon({ icon: Icon, className }: { icon: any; className?: string }) {
   const [isClient, setIsClient] = useState(false)
-  
+
   useEffect(() => {
     setIsClient(true)
   }, [])
-  
+
   if (!isClient) {
     return null
   }
-  
+
   return <Icon className={className} />
 }
 
@@ -45,11 +93,25 @@ export function AppLayout({ children, hideConversation = false }: AppLayoutProps
   const { currentConversation } = useChat()
   const [events, setEvents] = useState<FlowEvent[]>([])
   const [status, setStatus] = useState("Idle")
-  const [selectedProvider, setSelectedProvider] = useState("lmstudio")
+  const [selectedProvider, setSelectedProvider] = useState("openrouter")
+  const [runtimeStack, setRuntimeStack] = useState<RuntimeModelStack | null>(null)
+
+  useEffect(() => {
+    const loadRuntimeStack = async () => {
+      try {
+        const stack = await getRuntimeModelStack()
+        setRuntimeStack(stack)
+        setSelectedProvider(stack.provider)
+      } catch {
+        // Keep static fallback stack if runtime endpoint is unavailable.
+      }
+    }
+    loadRuntimeStack()
+  }, [])
 
   const handleFlowEvent = (event: FlowEvent) => {
     setEvents((prev) => [...prev, event])
-    
+
     if (event.type === 'node_start') {
       setStatus(`Running: ${event.data.node}`)
     } else if (event.type === 'node_end') {
@@ -62,6 +124,20 @@ export function AppLayout({ children, hideConversation = false }: AppLayoutProps
   }
 
   const activeProvider = modelProviders.find(p => p.key === selectedProvider) || modelProviders[0]
+  const activeProviderLabel = runtimeStack?.provider_label || activeProvider.label
+  const activeStack = runtimeStack
+    ? {
+      planner: runtimeStack.primary_model,
+      coder: runtimeStack.primary_model,
+      reviewer: runtimeStack.primary_model,
+      memory: runtimeStack.embedding_model,
+      memorySource: runtimeStack.provider_label,
+      memoryDescription:
+        runtimeStack.fallback_models.length > 0
+          ? `Fallbacks: ${runtimeStack.fallback_models.join(", ")}`
+          : "No fallback models configured",
+    }
+    : activeProvider.stack
 
   return (
     <div className="flex h-screen w-full bg-background overflow-hidden">
@@ -134,7 +210,12 @@ export function AppLayout({ children, hideConversation = false }: AppLayoutProps
 
       {/* Right Sidebar - Hidden on mobile, visible on lg and up */}
       <div className="hidden lg:block">
-        <RightSidebar events={events} status={status} />
+        <RightSidebar
+          events={events}
+          status={status}
+          activeStack={activeStack}
+          activeProviderLabel={activeProviderLabel}
+        />
       </div>
     </div>
   )

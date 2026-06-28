@@ -13,7 +13,7 @@ fn create_test_trace() -> HierarchicalTrace {
     HierarchicalTrace {
         trace_id: trace_id.clone(),
         work_context_id: Some("test_context".to_string()),
-        flow_run_id: flow_run_id,
+        flow_run_id,
         node_runs: vec![NodeRun {
             node_id: node_id.clone(),
             trace_id: trace_id.clone(),
@@ -35,8 +35,8 @@ fn create_test_trace() -> HierarchicalTrace {
             called_at: Utc::now(),
         }],
         llm_calls: vec![LlmCall {
-            node_id: node_id,
-            trace_id: trace_id,
+            node_id,
+            trace_id,
             provider: "openai".to_string(),
             model: "gpt-4".to_string(),
             prompt_tokens: 100,
@@ -53,7 +53,7 @@ fn create_test_trace() -> HierarchicalTrace {
 
 #[test]
 fn test_trace_storage_init() {
-    let storage = TraceStorage::in_memory().unwrap();
+    let _storage = TraceStorage::in_memory().unwrap();
     // Schema should be created without errors
 }
 

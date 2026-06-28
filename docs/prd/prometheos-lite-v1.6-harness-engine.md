@@ -1,5 +1,14 @@
 # PrometheOS Lite V1.6 PRD — Harness Engine
 
+## V1.6.1 Enforcement Addendum
+
+V1.6 harness execution is now aligned under strict software-path enforcement:
+
+- completion and phase transitions are evidence-gated in WorkContext service paths.
+- patch/apply/rollback inspect paths are persisted and queryable through CLI/API.
+- runtime write policy enforces patch-first discipline (raw `write_file` denied on harness path unless explicit override policy).
+- trace/cost/quality summaries are persisted in first-class harness metadata and exposed via API/CLI.
+
 ## Executive Summary
 
 PrometheOS Lite V1.6 ships the **Harness Engine**: the missing “hands, eyes, spine, and courtroom” of the system. The existing product already has the high-level architecture: `WorkContext`, `WorkOrchestrator`, `FlowExecutionService`, playbooks, memory, execution metadata, API/CLI paths, tracing, and local-first Rust infrastructure. The previous V1.6 plans correctly define the target as a deterministic coding execution system that turns coding tasks into **real, tested, reviewable code changes**, not “the model wrote something and everyone clapped like civilization hasn’t learned anything.” 

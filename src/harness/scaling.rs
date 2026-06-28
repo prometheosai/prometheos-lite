@@ -1,9 +1,7 @@
 //! Scaling Engine - Issue #10
 //! Multi-attempt repair scaling and resource allocation
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScalingConfig {
@@ -32,7 +30,7 @@ pub struct ScalingEngine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AttemptRecord {
+pub(crate) struct AttemptRecord {
     attempt_number: u32,
     strategy: String,
     duration_ms: u64,
@@ -248,7 +246,7 @@ impl ScalingEngine {
         }
     }
 
-    pub fn get_attempt_history(&self) -> &[AttemptRecord] {
+    pub(crate) fn get_attempt_history(&self) -> &[AttemptRecord] {
         &self.attempt_history
     }
 
@@ -359,8 +357,10 @@ mod tests {
 
     #[test]
     fn test_max_attempts_terminates() {
-        let mut config = ScalingConfig::default();
-        config.max_attempts = 2;
+        let config = ScalingConfig {
+            max_attempts: 2,
+            ..Default::default()
+        };
         let mut engine = ScalingEngine::new(config);
 
         let _ = engine.next_attempt(None);

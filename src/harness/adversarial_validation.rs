@@ -1,9 +1,7 @@
 use crate::harness::repo_intelligence::{CodeSymbol, SymbolKind};
-use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdversarialTestSuite {

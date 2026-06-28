@@ -122,7 +122,7 @@ impl ContextBudgeter {
         }
 
         // Calculate remaining budget for non-System items
-        let remaining_tokens = available_tokens - system_tokens;
+        let _remaining_tokens = available_tokens - system_tokens;
 
         // Sort non-System items by priority (lower = higher priority)
         let mut sorted_items: Vec<_> = other_items;
@@ -253,11 +253,7 @@ impl ContextBudgeter {
             .sum();
 
         let available = self.available_input_tokens();
-        let usage_percentage = if available > 0 {
-            (total_tokens * 100) / available
-        } else {
-            100
-        };
+        let usage_percentage = (total_tokens * 100).checked_div(available).unwrap_or(100);
 
         report.insert("total_tokens".to_string(), total_tokens);
         report.insert("available_tokens".to_string(), available);
@@ -449,7 +445,7 @@ mod tests {
         let json_content = r#"{"key": "value", "nested": {"data": "test"}}"#;
 
         let result = budgeter.trim_content(json_content, 5).unwrap();
-        // Should either be valid JSON or a placeholder
+        // Should either be valid JSON or an explicit truncation marker
         if !result.contains("Content too large") {
             assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok());
         }

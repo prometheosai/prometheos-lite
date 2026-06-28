@@ -7,7 +7,7 @@ use crate::harness::{
     review::{ReviewIssue, ReviewSeverity},
     risk::{RiskAssessment, RiskLevel},
     semantic_diff::SemanticDiff,
-    validation::{ValidationCategory, ValidationResult},
+    validation::ValidationResult,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -126,7 +126,7 @@ pub struct SelectionEngine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SelectionRecord {
+pub(crate) struct SelectionRecord {
     selected_candidate_id: String,
     scores: HashMap<String, f32>,
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -227,7 +227,12 @@ impl SelectionEngine {
 
     fn calculate_risk_score(&self, candidate: &PatchCandidate) -> f32 {
         // Higher score for lower risk
-        match candidate.risk.as_ref().map(|r| r.level).unwrap_or(RiskLevel::Low) {
+        match candidate
+            .risk
+            .as_ref()
+            .map(|r| r.level)
+            .unwrap_or(RiskLevel::Low)
+        {
             RiskLevel::None => 1.0,
             RiskLevel::Critical => 0.0,
             RiskLevel::High => 0.4,
@@ -272,7 +277,7 @@ impl SelectionEngine {
         match &candidate.validation {
             None => 0.0,
             Some(v) => {
-                if !v.passed {
+                if !v.passed() {
                     0.0
                 } else {
                     let command_count = v.command_results.len();
@@ -300,7 +305,11 @@ impl SelectionEngine {
         }
 
         // Check risk level
-        let risk_level = candidate.risk.as_ref().map(|r| r.level).unwrap_or(RiskLevel::Low);
+        let risk_level = candidate
+            .risk
+            .as_ref()
+            .map(|r| r.level)
+            .unwrap_or(RiskLevel::Low);
         let risk_level_value = match risk_level {
             RiskLevel::None => 0,
             RiskLevel::Low => 1,
@@ -364,10 +373,6 @@ impl SelectionEngine {
         scores.insert("review".to_string(), scored.review_score);
         scores.insert("validation".to_string(), scored.validation_score);
         scores
-    }
-
-    pub fn get_selection_history(&self) -> &[SelectionRecord] {
-        &self.scoring_history
     }
 
     pub fn clear_history(&mut self) {
@@ -443,9 +448,11 @@ mod tests {
 
     #[test]
     fn test_eligibility_threshold() {
-        let mut criteria = SelectionCriteria::default();
-        criteria.min_confidence_threshold = 0.8;
-        criteria.require_validation = false; // Disable validation for test
+        let criteria = SelectionCriteria {
+            min_confidence_threshold: 0.8,
+            require_validation: false, // Disable validation for test
+            ..Default::default()
+        };
 
         let mut engine = SelectionEngine::new(criteria);
         let candidates = vec![

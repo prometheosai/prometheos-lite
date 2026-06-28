@@ -10,7 +10,6 @@
 use chrono::Utc;
 use prometheos_lite::context::{Artifact, ContextBudgeter, ContextBuilder, ContextInputs};
 use prometheos_lite::flow::memory::types::Memory;
-use tokio;
 
 #[tokio::test]
 async fn test_context_budget_enforcement_integration() {

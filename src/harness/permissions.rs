@@ -3,7 +3,6 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -45,7 +44,7 @@ pub struct PermissionLedger {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeniedOperation {
+pub(crate) struct DeniedOperation {
     permission: Permission,
     path: Option<PathBuf>,
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -58,6 +57,12 @@ pub struct PermissionCheck {
     pub permission: Permission,
     pub matched_grant: Option<PermissionGrant>,
     pub reason: String,
+}
+
+impl Default for PermissionLedger {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionLedger {
@@ -225,10 +230,6 @@ impl PermissionLedger {
                 1.0
             },
         }
-    }
-
-    pub fn get_denied_operations(&self) -> &[DeniedOperation] {
-        &self.denied_operations
     }
 }
 

@@ -14,13 +14,13 @@
 use std::collections::HashMap;
 
 use prometheos_lite::harness::confidence::ConfidenceScore;
-use prometheos_lite::harness::edit_protocol::EditOperation;
-use prometheos_lite::harness::risk::{RiskAssessment, RiskLevel};
+
 use prometheos_lite::harness::review::ReviewIssue;
+use prometheos_lite::harness::risk::{RiskAssessment, RiskLevel};
 use prometheos_lite::harness::selection::{
     PatchCandidate, ScoredCandidate, SelectionCriteria, SelectionEngine,
 };
-use prometheos_lite::harness::semantic_diff::SemanticDiff;
+
 use prometheos_lite::harness::validation::ValidationResult;
 
 // ============================================================================
@@ -80,7 +80,10 @@ fn test_patch_candidate_with_metadata() {
     };
 
     assert_eq!(candidate.metadata.len(), 2);
-    assert_eq!(candidate.metadata.get("author"), Some(&"ai-model".to_string()));
+    assert_eq!(
+        candidate.metadata.get("author"),
+        Some(&"ai-model".to_string())
+    );
 }
 
 // ============================================================================
@@ -209,16 +212,14 @@ fn test_scored_candidate_ineligible() {
 #[test]
 fn test_selection_engine_new() {
     let criteria = SelectionCriteria::default();
-    let engine = SelectionEngine::new(criteria);
+    let _engine = SelectionEngine::new(criteria);
     // Engine created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_selection_engine_default_criteria() {
-    let engine = SelectionEngine::with_default_criteria();
+    let _engine = SelectionEngine::with_default_criteria();
     // Engine created with default criteria
-    assert!(true);
 }
 
 // ============================================================================
@@ -244,15 +245,23 @@ fn test_candidate_scoring_high_confidence() {
             requires_approval: false,
             can_override: true,
             override_conditions: vec![],
+            assessed: true,
         }),
         validation: Some(ValidationResult {
-            passed: true,
+            status: prometheos_lite::harness::validation::ValidationStatus::Passed,
             duration_ms: 1000,
             command_results: vec![],
             cached: false,
             category_results: std::collections::HashMap::new(),
             errors: vec![],
             flaky_tests_detected: vec![],
+            validation_performed: true,
+            is_final_gate: false,
+            cache_disabled: false,
+            commands_planned: 1,
+            commands_executed: 1,
+            commands_skipped: 0,
+            categories_executed: vec![],
         }),
         review_issues: vec![],
         semantic_diff: None,
@@ -262,7 +271,7 @@ fn test_candidate_scoring_high_confidence() {
 
     assert_eq!(candidate.confidence.score, 0.95);
     assert!(candidate.risk.as_ref().unwrap().level == RiskLevel::Low);
-    assert!(candidate.validation.as_ref().unwrap().passed);
+    assert!(candidate.validation.as_ref().unwrap().passed());
 }
 
 #[test]
@@ -284,15 +293,23 @@ fn test_candidate_scoring_high_risk() {
             requires_approval: true,
             can_override: false,
             override_conditions: vec![],
+            assessed: true,
         }),
         validation: Some(ValidationResult {
-            passed: false,
+            status: prometheos_lite::harness::validation::ValidationStatus::Failed,
             duration_ms: 2000,
             command_results: vec![],
             cached: false,
             category_results: std::collections::HashMap::new(),
             errors: vec![],
             flaky_tests_detected: vec![],
+            validation_performed: true,
+            is_final_gate: false,
+            cache_disabled: false,
+            commands_planned: 1,
+            commands_executed: 1,
+            commands_skipped: 0,
+            categories_executed: vec![],
         }),
         review_issues: vec![ReviewIssue {
             issue_type: prometheos_lite::harness::review::ReviewIssueType::Security,
@@ -309,7 +326,7 @@ fn test_candidate_scoring_high_risk() {
     };
 
     assert_eq!(candidate.risk.as_ref().unwrap().level, RiskLevel::Critical);
-    assert!(!candidate.validation.as_ref().unwrap().passed);
+    assert!(!candidate.validation.as_ref().unwrap().passed());
     assert!(!candidate.review_issues.is_empty());
 }
 
@@ -321,7 +338,7 @@ fn test_empty_candidates() {
 
 #[test]
 fn test_multiple_candidates() {
-    let candidates = vec![
+    let candidates = [
         PatchCandidate {
             id: "patch-a".to_string(),
             edits: vec![],

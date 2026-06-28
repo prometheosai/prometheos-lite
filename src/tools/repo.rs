@@ -9,7 +9,7 @@
 //! - git_diff: Get git diff output
 
 use crate::flow::Tool;
-use crate::tools::{PathGuard, ToolContext, ToolMetadata};
+use crate::tools::PathGuard;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -126,10 +126,10 @@ impl ListTreeTool {
             let entry_path = entry.path();
 
             // Skip common ignored directories
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if name == "target" || name == "node_modules" || name == ".git" || name == ".next" {
-                    continue;
-                }
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
+                && (name == "target" || name == "node_modules" || name == ".git" || name == ".next")
+            {
+                continue;
             }
 
             if entry_path.is_dir() {
@@ -228,16 +228,11 @@ impl Tool for RepoReadFileTool {
 /// Search files tool - searches for patterns across files
 pub struct SearchFilesTool {
     repo_path: PathBuf,
-    path_guard: PathGuard,
 }
 
 impl SearchFilesTool {
     pub fn new(repo_path: PathBuf) -> Self {
-        let base_dir = repo_path.to_string_lossy().to_string();
-        Self {
-            repo_path,
-            path_guard: PathGuard::new(base_dir),
-        }
+        Self { repo_path }
     }
 }
 
@@ -303,29 +298,29 @@ impl SearchFilesTool {
             let path = entry.path();
 
             if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name == "target" || name == "node_modules" || name == ".git" {
-                        continue;
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && (name == "target" || name == "node_modules" || name == ".git")
+                {
+                    continue;
                 }
 
                 let mut sub_entries = tokio::fs::read_dir(&path).await?;
                 while let Some(sub_entry) = sub_entries.next_entry().await? {
                     let sub_path = sub_entry.path();
                     if sub_path.is_file() {
-                        if let Some(glob_pattern) = glob {
-                            if !self.matches_glob(&sub_path, glob_pattern) {
-                                continue;
-                            }
+                        if let Some(glob_pattern) = glob
+                            && !self.matches_glob(&sub_path, glob_pattern)
+                        {
+                            continue;
                         }
                         self.search_file(&sub_path, query, results).await?;
                     }
                 }
             } else if path.is_file() {
-                if let Some(glob_pattern) = glob {
-                    if !self.matches_glob(&path, glob_pattern) {
-                        continue;
-                    }
+                if let Some(glob_pattern) = glob
+                    && !self.matches_glob(&path, glob_pattern)
+                {
+                    continue;
                 }
                 self.search_file(&path, query, results).await?;
             }
@@ -537,10 +532,10 @@ impl Tool for PatchFileTool {
             }));
         }
 
-        // Validate diff format
-        if !self.validate_diff_format(diff) {
+        // Validate diff target and format against the requested path.
+        if let Err(err) = self.validate_diff_for_path(diff, path) {
             return Ok(serde_json::json!({
-                "error": "Invalid diff format",
+                "error": err.to_string(),
                 "success": false,
                 "validation": "failed"
             }));
@@ -551,15 +546,22 @@ impl Tool for PatchFileTool {
             .await
             .context("Failed to read original file")?;
 
-        // Apply patch
-        let patched_content = self
-            .apply_patch(&original_content, diff)
-            .context("Failed to apply patch")?;
-
-        // Write patched content
-        tokio::fs::write(&full_path, &patched_content)
-            .await
-            .context("Failed to write patched file")?;
+        // Apply patch. When system `patch` succeeds, it modifies the file in-place.
+        // Only write content ourselves when using the simplified fallback path.
+        if self.apply_patch_with_system(diff).is_err() {
+            if self.allow_fallback {
+                let patched_content = self
+                    .apply_patch_simplified(&original_content, diff)
+                    .context("Failed to apply patch with fallback")?;
+                tokio::fs::write(&full_path, &patched_content)
+                    .await
+                    .context("Failed to write patched file")?;
+            } else {
+                anyhow::bail!(
+                    "System patch command not available and fallback is disabled for production safety"
+                );
+            }
+        }
 
         Ok(serde_json::json!({
             "path": path,
@@ -572,37 +574,108 @@ impl Tool for PatchFileTool {
 }
 
 impl PatchFileTool {
-    fn validate_diff_format(&self, diff: &str) -> bool {
-        // Basic validation: check for diff headers
-        let lines: Vec<&str> = diff.lines().collect();
-        if lines.is_empty() {
-            return false;
+    fn validate_diff_for_path(&self, diff: &str, requested_path: &str) -> Result<()> {
+        // Basic validation: check for hunk headers.
+        if !diff.lines().any(|line| line.starts_with("@@")) {
+            anyhow::bail!("Invalid diff format: missing hunk header");
         }
 
-        // Check for diff header
-        let has_header = lines
-            .iter()
-            .any(|line| line.starts_with("---") || line.starts_with("+++"));
-        // Check for hunk headers
-        let has_hunk = lines.iter().any(|line| line.starts_with("@@"));
+        let targets = self.extract_diff_targets(diff)?;
+        if targets.len() != 1 {
+            anyhow::bail!("patch_file requires exactly one target file in diff headers");
+        }
 
-        has_header && has_hunk
+        let requested = Self::normalize_diff_path(requested_path)?;
+        let target = Self::normalize_diff_path(&targets[0])?;
+
+        if requested != target {
+            anyhow::bail!(
+                "Diff target '{}' does not match requested path '{}'",
+                targets[0],
+                requested_path
+            );
+        }
+
+        if !self.path_guard.is_safe_path(&target) {
+            anyhow::bail!("Diff target path validation failed: {}", target);
+        }
+
+        Ok(())
     }
 
-    fn apply_patch(&self, original: &str, diff: &str) -> Result<String> {
-        // Try to use system patch command for robust diff application
-        if let Ok(patched) = self.apply_patch_with_system(diff) {
-            return Ok(patched);
+    fn extract_diff_targets(&self, diff: &str) -> Result<Vec<String>> {
+        let mut old_targets = Vec::new();
+        let mut new_targets = Vec::new();
+
+        for line in diff.lines() {
+            if let Some(path) = line.strip_prefix("--- ") {
+                old_targets.push(Self::parse_diff_header_path(path)?);
+            } else if let Some(path) = line.strip_prefix("+++ ") {
+                new_targets.push(Self::parse_diff_header_path(path)?);
+            }
         }
 
-        // Fallback to simplified implementation only if explicitly allowed (dev-only)
-        if self.allow_fallback {
-            self.apply_patch_simplified(original, diff)
-        } else {
-            anyhow::bail!(
-                "System patch command not available and fallback is disabled for production safety"
-            )
+        if old_targets.is_empty() || new_targets.is_empty() {
+            anyhow::bail!("Invalid diff format: missing ---/+++ headers");
         }
+        if old_targets.len() != new_targets.len() {
+            anyhow::bail!("Invalid diff format: mismatched ---/+++ header count");
+        }
+
+        let mut targets = Vec::new();
+        for (old_path, new_path) in old_targets.iter().zip(new_targets.iter()) {
+            if old_path == "/dev/null" || new_path == "/dev/null" {
+                anyhow::bail!("Create/delete patches are not supported by patch_file");
+            }
+
+            let old_norm = Self::normalize_diff_path(old_path)?;
+            let new_norm = Self::normalize_diff_path(new_path)?;
+            if old_norm != new_norm {
+                anyhow::bail!(
+                    "Rename/multi-target patch is not supported: '{}' -> '{}'",
+                    old_path,
+                    new_path
+                );
+            }
+            targets.push(old_norm);
+        }
+
+        Ok(targets)
+    }
+
+    fn parse_diff_header_path(header_value: &str) -> Result<String> {
+        let candidate = header_value
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid diff header path"))?;
+        if candidate.is_empty() {
+            anyhow::bail!("Invalid empty diff header path");
+        }
+        Ok(candidate.to_string())
+    }
+
+    fn normalize_diff_path(path: &str) -> Result<String> {
+        let trimmed = path.trim();
+        let stripped = trimmed
+            .strip_prefix("a/")
+            .or_else(|| trimmed.strip_prefix("b/"))
+            .unwrap_or(trimmed);
+
+        if stripped.is_empty() {
+            anyhow::bail!("Invalid empty diff target path");
+        }
+        if stripped.starts_with('/') || stripped.starts_with('\\') {
+            anyhow::bail!("Absolute diff target paths are not allowed");
+        }
+        if stripped.contains(':') {
+            anyhow::bail!("Drive-letter or URI-like diff target paths are not allowed");
+        }
+        if stripped.split('/').any(|seg| seg == "..") || stripped.split('\\').any(|seg| seg == "..")
+        {
+            anyhow::bail!("Path traversal in diff target is not allowed");
+        }
+
+        Ok(stripped.replace('\\', "/"))
     }
 
     fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
@@ -714,9 +787,9 @@ impl PatchFileTool {
                         } else if diff_line.starts_with('-') {
                             // Remove line
                             old_idx += 1;
-                        } else if diff_line.starts_with('+') {
+                        } else if let Some(stripped) = diff_line.strip_prefix('+') {
                             // Add line
-                            new_lines.push(&diff_line[1..]);
+                            new_lines.push(stripped);
                         }
 
                         i += 1;
@@ -840,7 +913,7 @@ mod tests {
         let result = tool.call(serde_json::json!({})).await.unwrap();
 
         assert!(result["success"].as_bool().unwrap());
-        assert!(result["files"].as_array().unwrap().len() > 0);
+        assert!(!result["files"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -919,11 +992,97 @@ mod tests {
         let tool = PatchFileTool::new(repo_path.to_path_buf());
 
         // Invalid diff format
-        assert!(!tool.validate_diff_format("not a diff"));
+        assert!(
+            tool.validate_diff_for_path("not a diff", "test.txt")
+                .is_err()
+        );
 
         // Valid diff format
         let valid_diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old\n+new";
-        assert!(tool.validate_diff_format(valid_diff));
+        assert!(tool.validate_diff_for_path(valid_diff, "test.txt").is_ok());
+    }
+
+    #[test]
+    fn test_patch_file_rejects_mismatched_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let diff = "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-old\n+new";
+        assert!(tool.validate_diff_for_path(diff, "test.txt").is_err());
+    }
+
+    #[test]
+    fn test_patch_file_rejects_multifile_diff() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let diff = "--- a/one.txt\n+++ b/one.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n--- a/two.txt\n+++ b/two.txt\n@@ -1,1 +1,1 @@\n-c\n+d";
+        assert!(tool.validate_diff_for_path(diff, "one.txt").is_err());
+    }
+
+    #[test]
+    fn test_patch_file_rejects_traversal_or_absolute_targets() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let traversal = "--- a/../secret.txt\n+++ b/../secret.txt\n@@ -1,1 +1,1 @@\n-a\n+b";
+        assert!(
+            tool.validate_diff_for_path(traversal, "../secret.txt")
+                .is_err()
+        );
+
+        let absolute = "--- /tmp/secret.txt\n+++ /tmp/secret.txt\n@@ -1,1 +1,1 @@\n-a\n+b";
+        assert!(tool.validate_diff_for_path(absolute, "secret.txt").is_err());
+    }
+
+    #[test]
+    fn test_patch_file_allows_timestamped_headers() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+
+        let diff = "--- a/test.txt\t2026-05-11 12:00:00\n+++ b/test.txt\t2026-05-11 12:01:00\n@@ -1,1 +1,1 @@\n-old\n+new";
+        assert!(tool.validate_diff_for_path(diff, "test.txt").is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(not(windows))]
+    async fn test_patch_file_system_patch_updates_file_content() {
+        let patch_available = std::process::Command::new("sh")
+            .arg("-lc")
+            .arg("command -v patch >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !patch_available {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+        tokio::fs::write(repo_path.join("test.txt"), "old content\n")
+            .await
+            .unwrap();
+
+        let tool = PatchFileTool::new(repo_path.to_path_buf());
+        let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old content\n+new content\n";
+        let result = tool
+            .call(serde_json::json!({
+                "path": "test.txt",
+                "diff": diff
+            }))
+            .await
+            .unwrap();
+        assert!(result["success"].as_bool().unwrap());
+
+        let content = tokio::fs::read_to_string(repo_path.join("test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content.trim_end_matches('\n'), "new content");
+        assert!(!content.contains("patching file"));
     }
 
     #[test]

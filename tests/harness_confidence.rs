@@ -15,8 +15,6 @@ use prometheos_lite::harness::confidence::{
     ConfidenceCalibrator, ConfidenceFactor, ConfidenceScore, ConfidenceThresholds,
     ConfidenceWeights, FactorImpact,
 };
-use prometheos_lite::harness::risk::{RiskAssessment, RiskLevel};
-use prometheos_lite::harness::verification::VerificationStrength;
 
 // ============================================================================
 // ConfidenceScore Tests
@@ -180,15 +178,13 @@ fn test_confidence_thresholds_custom() {
 
 #[test]
 fn test_confidence_calibrator_new() {
-    let calibrator = ConfidenceCalibrator::new();
+    let _calibrator = ConfidenceCalibrator::new();
     // Should have default weights and thresholds
-    assert!(true); // Construction succeeded
 }
 
 #[test]
 fn test_confidence_calibrator_default() {
-    let calibrator: ConfidenceCalibrator = Default::default();
-    assert!(true); // Construction succeeded
+    let _calibrator: ConfidenceCalibrator = Default::default();
 }
 
 #[test]
@@ -202,8 +198,7 @@ fn test_confidence_calibrator_with_weights() {
         test_coverage: 0.05,
     };
 
-    let calibrator = ConfidenceCalibrator::with_weights(custom_weights);
-    assert!(true); // Construction with custom weights succeeded
+    let _calibrator = ConfidenceCalibrator::with_weights(custom_weights);
 }
 
 // ============================================================================

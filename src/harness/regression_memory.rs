@@ -1,11 +1,9 @@
 //! Regression Memory - Issue #26
 //! Learn from failures to prevent recurring issues
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FailurePattern {
@@ -90,6 +88,12 @@ pub struct LearningResult {
     pub confidence_improvement: f64,
 }
 
+impl Default for RegressionMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RegressionMemory {
     pub fn new() -> Self {
         Self {
@@ -140,14 +144,14 @@ impl RegressionMemory {
             if let Some(path) = file_path {
                 self.file_index
                     .entry(path.to_path_buf())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(pattern_signature.clone());
             }
 
             // Index by type
             self.type_index
                 .entry(failure_type)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(pattern_signature.clone());
 
             pattern_signature
@@ -190,29 +194,25 @@ impl RegressionMemory {
         }
 
         // Search by file
-        if let Some(path) = file_path {
-            if let Some(pattern_ids) = self.file_index.get(path) {
-                for id in pattern_ids {
-                    if let Some(pattern) = self.patterns.get(id) {
-                        // Skip if already added
-                        if matches.iter().any(|m| m.pattern.id == pattern.id) {
-                            continue;
-                        }
+        if let Some(path) = file_path
+            && let Some(pattern_ids) = self.file_index.get(path)
+        {
+            for id in pattern_ids {
+                if let Some(pattern) = self.patterns.get(id) {
+                    // Skip if already added
+                    if matches.iter().any(|m| m.pattern.id == pattern.id) {
+                        continue;
+                    }
 
-                        let similarity = self.calculate_similarity(
-                            pattern,
-                            error_message,
-                            &context_hash,
-                            file_path,
-                        );
+                    let similarity =
+                        self.calculate_similarity(pattern, error_message, &context_hash, file_path);
 
-                        if similarity > 0.5 {
-                            matches.push(PatternMatch {
-                                pattern: pattern.clone(),
-                                similarity,
-                                recommended_solutions: pattern.successful_solutions.clone(),
-                            });
-                        }
+                    if similarity > 0.5 {
+                        matches.push(PatternMatch {
+                            pattern: pattern.clone(),
+                            similarity,
+                            recommended_solutions: pattern.successful_solutions.clone(),
+                        });
                     }
                 }
             }
@@ -229,7 +229,7 @@ impl RegressionMemory {
         solution_approach: &str,
         success: bool,
     ) -> LearningResult {
-        let now = chrono::Utc::now();
+        let _now = chrono::Utc::now();
 
         if let Some(pattern) = self.patterns.get_mut(pattern_id) {
             if success {
@@ -285,7 +285,7 @@ impl RegressionMemory {
 
     pub fn get_hot_patterns(&self, limit: usize) -> Vec<FailurePattern> {
         let mut patterns: Vec<_> = self.patterns.values().cloned().collect();
-        patterns.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        patterns.sort_by_key(|b| std::cmp::Reverse(b.frequency));
         patterns.into_iter().take(limit).collect()
     }
 
@@ -399,10 +399,10 @@ impl RegressionMemory {
         }
 
         // File path match (20%)
-        if let Some(path) = file_path {
-            if pattern.file_path.as_ref() == Some(&path.to_path_buf()) {
-                score += 0.2;
-            }
+        if let Some(path) = file_path
+            && pattern.file_path.as_ref() == Some(&path.to_path_buf())
+        {
+            score += 0.2;
         }
 
         score

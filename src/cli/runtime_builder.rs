@@ -2,14 +2,19 @@
 
 use anyhow::Context;
 use std::sync::Arc;
-use tracing;
 
 use prometheos_lite::{
     config::AppConfig,
-    flow::intelligence::OpenAiProvider,
+    flow::intelligence::{
+        AnthropicProvider, GenericOpenAiCompatibleProvider, LlmMode, LmStudioProvider,
+        OllamaProvider, OpenAiProvider, OpenRouterProvider,
+    },
     flow::{
-        EmbeddingProvider, LocalEmbeddingProvider, MemoryDb, MemoryService, ModelRouter,
-        RuntimeContext, ToolRuntime, ToolSandboxProfile,
+        EmbeddingProvider, MemoryDb, MemoryService, ModelRouter, RuntimeContext, ToolRuntime,
+        ToolSandboxProfile,
+        memory::embedding::{
+            JinaEmbeddingProvider, LocalEmbeddingProvider, OpenRouterEmbeddingProvider,
+        },
     },
     llm::LlmClient,
 };
@@ -20,6 +25,59 @@ pub struct RuntimeBuilder {
 }
 
 impl RuntimeBuilder {
+    fn should_use_local_embedding_provider(&self) -> bool {
+        let lower = self.config.embedding_url.to_ascii_lowercase();
+        self.config.provider == "lmstudio"
+            || lower.contains("127.0.0.1")
+            || lower.contains("localhost")
+    }
+
+    fn build_embedding_provider(&self) -> Box<dyn EmbeddingProvider> {
+        if self.should_use_local_embedding_provider() {
+            Box::new(LocalEmbeddingProvider::new(
+                self.config.embedding_url.clone(),
+                self.config.embedding_dimension,
+                if self.config.embedding_model.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.config.embedding_model.clone())
+                },
+            ))
+        } else if self.config.provider == "jina" {
+            // Use Jina AI embeddings
+            Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
+        } else if self.config.provider == "openrouter" {
+            // Check if we have OpenRouter credits, otherwise use Jina AI
+            if std::env::var("OPENROUTER_API_KEY").is_ok() {
+                // Try OpenRouter first if API key is available
+                let embedding_model = if self.config.embedding_model.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.config.embedding_model.clone())
+                };
+                Box::new(OpenRouterEmbeddingProvider::new(
+                    std::env::var("OPENROUTER_API_KEY").unwrap(),
+                    self.config.embedding_dimension,
+                    embedding_model,
+                ))
+            } else {
+                // Fallback to Jina AI for free embeddings without credits
+                Box::new(JinaEmbeddingProvider::new(self.config.embedding_dimension))
+            }
+        } else {
+            // Default to local provider for other cases
+            Box::new(LocalEmbeddingProvider::new(
+                self.config.embedding_url.clone(),
+                self.config.embedding_dimension,
+                if self.config.embedding_model.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.config.embedding_model.clone())
+                },
+            ))
+        }
+    }
+
     /// Create a new RuntimeBuilder from loaded config
     pub fn new(config: AppConfig) -> Self {
         Self { config }
@@ -33,11 +91,14 @@ impl RuntimeBuilder {
 
     /// Build a full RuntimeContext with all services
     pub fn build_full(&self) -> anyhow::Result<RuntimeContext> {
-        // Create LlmClient and wrap in OpenAiProvider for ModelRouter
-        let llm_client = LlmClient::from_config(&self.config)?;
-        let openai_provider =
-            OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
-        let model_router = Arc::new(ModelRouter::new(vec![Box::new(openai_provider)]));
+        let (providers, mode_chains) = self.build_provider_registry()?;
+        let mut model_router = ModelRouter::new(providers);
+        model_router = model_router
+            .with_mode_chain(LlmMode::Fast, mode_chains.0)
+            .with_mode_chain(LlmMode::Balanced, mode_chains.1)
+            .with_mode_chain(LlmMode::Deep, mode_chains.2)
+            .with_mode_chain(LlmMode::Coding, mode_chains.3);
+        let model_router = Arc::new(model_router);
 
         // Create tool runtime with default tools registered
         let repo_path = std::path::PathBuf::from(self.config.repo_path.clone());
@@ -46,11 +107,9 @@ impl RuntimeBuilder {
             repo_path,
         ));
 
-        // Create persistent memory service with local embedding provider from config
-        let embedding: Box<dyn EmbeddingProvider> = Box::new(LocalEmbeddingProvider::new(
-            self.config.embedding_url.clone(),
-            self.config.embedding_dimension,
-        ));
+        // Create persistent memory service with configurable embedding provider
+        let embedding: Box<dyn EmbeddingProvider> = self.build_embedding_provider();
+
         let persistent_db =
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
                 .context("Failed to create memory database")?;
@@ -69,68 +128,102 @@ impl RuntimeBuilder {
         ))
     }
 
-    /// Build RuntimeContext with minimal services (no memory)
-    pub fn build_minimal(&self) -> anyhow::Result<RuntimeContext> {
-        let llm_client = LlmClient::from_config(&self.config)?;
-        let openai_provider =
-            OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
-        let model_router = Arc::new(ModelRouter::new(vec![Box::new(openai_provider)]));
-
-        // Create tool runtime with default tools registered
-        let repo_path = std::path::PathBuf::from(self.config.repo_path.clone());
-        let tool_runtime = Arc::new(ToolRuntime::with_default_tools(
-            ToolSandboxProfile::new(),
-            repo_path,
-        ));
-
-        Ok(RuntimeContext::new()
-            .with_model_router(model_router)
-            .with_tool_runtime(tool_runtime))
-    }
-
-    /// Build only the model router
-    pub fn build_model_router(&self) -> anyhow::Result<Arc<ModelRouter>> {
-        let llm_client = LlmClient::from_config(&self.config)?;
-        let openai_provider =
-            OpenAiProvider::new(llm_client).with_name(self.config.provider.clone());
-        Ok(Arc::new(ModelRouter::new(vec![Box::new(openai_provider)])))
-    }
-
-    /// Build only the tool runtime
-    pub fn build_tool_runtime(&self) -> Arc<ToolRuntime> {
-        Arc::new(ToolRuntime::new(ToolSandboxProfile::new()))
-    }
-
-    /// Build the memory service
+    /// Build memory service with configurable embedding provider
     pub fn build_memory_service(&self) -> anyhow::Result<Arc<MemoryService>> {
-        let embedding: Box<dyn EmbeddingProvider> = Box::new(LocalEmbeddingProvider::new(
-            self.config.embedding_url.clone(),
-            self.config.embedding_dimension,
-        ));
+        let embedding: Box<dyn EmbeddingProvider> = self.build_embedding_provider();
+
         let persistent_db =
             MemoryDb::new(std::path::PathBuf::from(self.config.memory_db_path.clone()))
                 .context("Failed to create memory database")?;
         Ok(Arc::new(MemoryService::new(persistent_db, embedding)))
     }
 
-    /// Build the embedding provider
-    pub fn build_embedding_provider(&self) -> Arc<dyn EmbeddingProvider> {
-        Arc::new(LocalEmbeddingProvider::new(
-            self.config.embedding_url.clone(),
-            self.config.embedding_dimension,
-        ))
-    }
-
     /// Get the config
     pub fn config(&self) -> &AppConfig {
         &self.config
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn build_provider_registry(
+        &self,
+    ) -> anyhow::Result<(
+        Vec<Box<dyn prometheos_lite::flow::intelligence::LlmProvider>>,
+        (Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>),
+    )> {
+        let mut providers: Vec<Box<dyn prometheos_lite::flow::intelligence::LlmProvider>> =
+            Vec::new();
+        let mut index_by_name = std::collections::HashMap::new();
+
+        for provider_cfg in &self.config.llm_routing.providers {
+            if !provider_cfg.enabled {
+                continue;
+            }
+
+            let api_key = provider_cfg
+                .api_key_env
+                .as_ref()
+                .and_then(|env_name| std::env::var(env_name).ok());
+            let client = LlmClient::new(&provider_cfg.base_url, &provider_cfg.model)?
+                .with_api_key(api_key.clone());
+
+            let provider: Box<dyn prometheos_lite::flow::intelligence::LlmProvider> =
+                match provider_cfg.provider_type.as_str() {
+                    "openrouter" => {
+                        if api_key.is_none() {
+                            eprintln!(
+                                "[WARN] OpenRouter provider '{}' has no API key set in env '{}'; requests may fail and fall through to next provider",
+                                provider_cfg.name,
+                                provider_cfg.api_key_env.clone().unwrap_or_default()
+                            );
+                        }
+                        Box::new(OpenRouterProvider::new(client))
+                    }
+                    "openai" => {
+                        Box::new(OpenAiProvider::new(client).with_name(provider_cfg.name.clone()))
+                    }
+                    "anthropic" => Box::new(AnthropicProvider::new(client)),
+                    "ollama" => Box::new(OllamaProvider::new(client)),
+                    "lmstudio" => Box::new(LmStudioProvider::new(client)),
+                    _ => Box::new(GenericOpenAiCompatibleProvider::new(
+                        client,
+                        provider_cfg.name.clone(),
+                    )),
+                };
+            index_by_name.insert(provider_cfg.name.clone(), providers.len());
+            providers.push(provider);
+        }
+
+        if providers.is_empty() {
+            anyhow::bail!("No LLM providers enabled in llm_routing.providers");
+        }
+
+        let resolve_chain = |names: &[String]| -> anyhow::Result<Vec<usize>> {
+            let mut out = Vec::new();
+            for name in names {
+                let idx = index_by_name.get(name).copied().ok_or_else(|| {
+                    anyhow::anyhow!("Mode chain references unknown provider: {}", name)
+                })?;
+                out.push(idx);
+            }
+            if out.is_empty() {
+                anyhow::bail!("Mode chain cannot be empty");
+            }
+            Ok(out)
+        };
+
+        let mode_chains = (
+            resolve_chain(&self.config.llm_routing.mode_chains.fast)?,
+            resolve_chain(&self.config.llm_routing.mode_chains.balanced)?,
+            resolve_chain(&self.config.llm_routing.mode_chains.deep)?,
+            resolve_chain(&self.config.llm_routing.mode_chains.coding)?,
+        );
+
+        Ok((providers, mode_chains))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_runtime_builder_creation() {
         // This test requires a valid config file, so we skip it in CI

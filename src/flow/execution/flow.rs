@@ -1,8 +1,6 @@
 //! Flow execution engine with validation and retry support.
 
-use crate::flow::{
-    Action, BudgetGuard, ExecutionBudget, Input, Node, NodeConfig, NodeId, Output, SharedState,
-};
+use crate::flow::{Action, BudgetGuard, Input, Node, NodeConfig, NodeId, Output, SharedState};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -125,44 +123,44 @@ impl Flow {
         // Generate one run_id and trace_id for the entire execution, store in SharedState
         let run_id = state
             .get_run_id()
-            .unwrap_or_else(|| crate::flow::tracing::Tracer::generate_run_id());
+            .unwrap_or_else(crate::flow::tracing::Tracer::generate_run_id);
         let trace_id = state
             .get_trace_id()
-            .unwrap_or_else(|| crate::flow::tracing::Tracer::generate_trace_id());
+            .unwrap_or_else(crate::flow::tracing::Tracer::generate_trace_id);
         state.set_run_id(&run_id);
         state.set_trace_id(&trace_id);
 
         // Store flow snapshot for this run (if flow source is available in state)
-        if let Some(flow_source) = state.get_input("flow_source").and_then(|v| v.as_str()) {
-            if let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str()) {
-                let source_hash = crate::flow::FlowSnapshot::compute_hash(flow_source);
-                let db_path = ".prometheos/runs.db";
-                if std::path::Path::new(db_path).exists() {
-                    if let Ok(db) = crate::db::repository::Db::new(db_path) {
-                        use crate::db::repository::FlowSnapshotOperations;
-                        let _ = FlowSnapshotOperations::create_flow_snapshot(
-                            &db,
-                            flow_name,
-                            "1.0",
-                            &source_hash,
-                            flow_source,
-                        );
-                    }
-                }
+        if let Some(flow_source) = state.get_input("flow_source").and_then(|v| v.as_str())
+            && let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str())
+        {
+            let source_hash = crate::flow::FlowSnapshot::compute_hash(flow_source);
+            let db_path = ".prometheos/runs.db";
+            if std::path::Path::new(db_path).exists()
+                && let Ok(db) = crate::db::repository::Db::new(db_path)
+            {
+                use crate::db::repository::FlowSnapshotOperations;
+                let _ = FlowSnapshotOperations::create_flow_snapshot(
+                    &db,
+                    flow_name,
+                    "1.0",
+                    &source_hash,
+                    flow_source,
+                );
             }
         }
 
         // Log flow start
-        if let Some(tracer) = &self.tracer {
-            if let Ok(mut t) = tracer.lock() {
-                t.log_run_event(
-                    crate::flow::tracing::TraceEvent::RunStarted {
-                        run_id: run_id.clone(),
-                        flow_name: "flow".to_string(),
-                    },
-                    "Flow execution started".to_string(),
-                );
-            }
+        if let Some(tracer) = &self.tracer
+            && let Ok(mut t) = tracer.lock()
+        {
+            t.log_run_event(
+                crate::flow::tracing::TraceEvent::RunStarted {
+                    run_id: run_id.clone(),
+                    flow_name: "flow".to_string(),
+                },
+                "Flow execution started".to_string(),
+            );
         }
 
         loop {
@@ -173,23 +171,23 @@ impl Flow {
                 }
 
                 // Emit loop detection trace event
-                if let Some(tracer) = &self.tracer {
-                    if let Ok(mut t) = tracer.lock() {
-                        t.log_flow_event(
-                            crate::flow::tracing::TraceEvent::LoopDetected {
-                                run_id: run_id.clone(),
-                                trace_id: trace_id.clone(),
-                                node_id: current.clone(),
-                                loop_type: "node_repetition".to_string(),
-                            },
-                            Some(current.clone()),
-                            format!(
-                                "Loop check: node {} count {}",
-                                current,
-                                detector.get_node_count(&current)
-                            ),
-                        );
-                    }
+                if let Some(tracer) = &self.tracer
+                    && let Ok(mut t) = tracer.lock()
+                {
+                    t.log_flow_event(
+                        crate::flow::tracing::TraceEvent::LoopDetected {
+                            run_id: run_id.clone(),
+                            trace_id: trace_id.clone(),
+                            node_id: current.clone(),
+                            loop_type: "node_repetition".to_string(),
+                        },
+                        Some(current.clone()),
+                        format!(
+                            "Loop check: node {} count {}",
+                            current,
+                            detector.get_node_count(&current)
+                        ),
+                    );
                 }
             }
 
@@ -206,21 +204,21 @@ impl Flow {
                 state.set_budget_report(guard.get_report());
 
                 // Emit budget trace event
-                if let Some(tracer) = &self.tracer {
-                    if let Ok(mut t) = tracer.lock() {
-                        let usage = guard.get_usage();
-                        let budget = guard.get_budget();
-                        t.log_flow_event(
-                            crate::flow::tracing::TraceEvent::BudgetChecked {
-                                run_id: run_id.clone(),
-                                resource: "steps".to_string(),
-                                current: usage.steps as u64,
-                                limit: budget.max_steps as u64,
-                            },
-                            None,
-                            format!("Budget check: steps {}/{}", usage.steps, budget.max_steps),
-                        );
-                    }
+                if let Some(tracer) = &self.tracer
+                    && let Ok(mut t) = tracer.lock()
+                {
+                    let usage = guard.get_usage();
+                    let budget = guard.get_budget();
+                    t.log_flow_event(
+                        crate::flow::tracing::TraceEvent::BudgetChecked {
+                            run_id: run_id.clone(),
+                            resource: "steps".to_string(),
+                            current: usage.steps as u64,
+                            limit: budget.max_steps as u64,
+                        },
+                        None,
+                        format!("Budget check: steps {}/{}", usage.steps, budget.max_steps),
+                    );
                 }
             }
 
@@ -237,19 +235,19 @@ impl Flow {
             hooks.on_node_start(&current, state, &input);
 
             // Log node start (reuse same run_id and trace_id)
-            if let Some(tracer) = &self.tracer {
-                if let Ok(mut t) = tracer.lock() {
-                    t.log_flow_event(
-                        crate::flow::tracing::TraceEvent::NodeStarted {
-                            run_id: run_id.clone(),
-                            trace_id: trace_id.clone(),
-                            node_id: current.clone(),
-                            input_summary: input_summary.clone(),
-                        },
-                        Some(current.clone()),
-                        format!("Executing node: {}", current),
-                    );
-                }
+            if let Some(tracer) = &self.tracer
+                && let Ok(mut t) = tracer.lock()
+            {
+                t.log_flow_event(
+                    crate::flow::tracing::TraceEvent::NodeStarted {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        node_id: current.clone(),
+                        input_summary: input_summary.clone(),
+                    },
+                    Some(current.clone()),
+                    format!("Executing node: {}", current),
+                );
             }
 
             let start_time = std::time::Instant::now();
@@ -259,20 +257,20 @@ impl Flow {
                 Ok(output) => output,
                 Err(e) => {
                     // Log node failure before returning
-                    if let Some(tracer) = &self.tracer {
-                        if let Ok(mut t) = tracer.lock() {
-                            t.log_flow_event(
-                                crate::flow::tracing::TraceEvent::NodeFailed {
-                                    run_id: run_id.clone(),
-                                    trace_id: trace_id.clone(),
-                                    node_id: current.clone(),
-                                    error: e.to_string(),
-                                    input_summary,
-                                },
-                                Some(current.clone()),
-                                format!("Node failed: {}", current),
-                            );
-                        }
+                    if let Some(tracer) = &self.tracer
+                        && let Ok(mut t) = tracer.lock()
+                    {
+                        t.log_flow_event(
+                            crate::flow::tracing::TraceEvent::NodeFailed {
+                                run_id: run_id.clone(),
+                                trace_id: trace_id.clone(),
+                                node_id: current.clone(),
+                                error: e.to_string(),
+                                input_summary,
+                            },
+                            Some(current.clone()),
+                            format!("Node failed: {}", current),
+                        );
                     }
                     hooks.on_flow_error(&e);
                     return Err(e);
@@ -285,36 +283,35 @@ impl Flow {
             let duration_ms = start_time.elapsed().as_millis() as u64;
 
             // Log node completion (reuse same run_id and trace_id)
-            if let Some(tracer) = &self.tracer {
-                if let Ok(mut t) = tracer.lock() {
-                    let output_summary =
-                        crate::flow::tracing::Tracer::summarize_value(&output, 200);
-                    t.log_flow_event(
-                        crate::flow::tracing::TraceEvent::NodeCompleted {
-                            run_id: run_id.clone(),
-                            trace_id: trace_id.clone(),
-                            node_id: current.clone(),
-                            duration_ms,
-                            output_summary,
-                            status: "success".to_string(),
-                        },
-                        Some(current.clone()),
-                        format!("Node completed: {}", current),
-                    );
-                    t.add_timeline_event(
-                        crate::flow::tracing::TraceEvent::NodeCompleted {
-                            run_id: run_id.clone(),
-                            trace_id: trace_id.clone(),
-                            node_id: current.clone(),
-                            duration_ms,
-                            output_summary: None,
-                            status: "success".to_string(),
-                        },
-                        Some(current.clone()),
-                        Some(duration_ms),
-                        serde_json::json!({ "output": &output }),
-                    );
-                }
+            if let Some(tracer) = &self.tracer
+                && let Ok(mut t) = tracer.lock()
+            {
+                let output_summary = crate::flow::tracing::Tracer::summarize_value(&output, 200);
+                t.log_flow_event(
+                    crate::flow::tracing::TraceEvent::NodeCompleted {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        node_id: current.clone(),
+                        duration_ms,
+                        output_summary,
+                        status: "success".to_string(),
+                    },
+                    Some(current.clone()),
+                    format!("Node completed: {}", current),
+                );
+                t.add_timeline_event(
+                    crate::flow::tracing::TraceEvent::NodeCompleted {
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        node_id: current.clone(),
+                        duration_ms,
+                        output_summary: None,
+                        status: "success".to_string(),
+                    },
+                    Some(current.clone()),
+                    Some(duration_ms),
+                    serde_json::json!({ "output": &output }),
+                );
             }
 
             // Post-process: update state and get action
@@ -343,26 +340,26 @@ impl Flow {
                     hooks.on_transition(&current, &action, next);
 
                     // Check loop detection for transitions
-                    if let Some(detector) = &mut self.loop_detector {
-                        if let Err(e) = detector.record_transition(&current, next) {
-                            anyhow::bail!("Loop detection: {}", e);
-                        }
+                    if let Some(detector) = &mut self.loop_detector
+                        && let Err(e) = detector.record_transition(&current, next)
+                    {
+                        anyhow::bail!("Loop detection: {}", e);
                     }
 
                     // Log transition (reuse same run_id)
-                    if let Some(tracer) = &self.tracer {
-                        if let Ok(mut t) = tracer.lock() {
-                            t.log_flow_event(
-                                crate::flow::tracing::TraceEvent::TransitionTaken {
-                                    run_id: run_id.clone(),
-                                    from: current.clone(),
-                                    action: action.clone(),
-                                    to: next.clone(),
-                                },
-                                Some(current.clone()),
-                                format!("Transition: {} -> {} via {}", current, next, action),
-                            );
-                        }
+                    if let Some(tracer) = &self.tracer
+                        && let Ok(mut t) = tracer.lock()
+                    {
+                        t.log_flow_event(
+                            crate::flow::tracing::TraceEvent::TransitionTaken {
+                                run_id: run_id.clone(),
+                                from: current.clone(),
+                                action: action.clone(),
+                                to: next.clone(),
+                            },
+                            Some(current.clone()),
+                            format!("Transition: {} -> {} via {}", current, next, action),
+                        );
                     }
 
                     current = next.clone();
@@ -372,18 +369,17 @@ impl Flow {
                     hooks.on_flow_complete(state);
 
                     // Log flow completion (reuse same run_id)
-                    if let Some(tracer) = &self.tracer {
-                        if let Ok(mut t) = tracer.lock() {
-                            let total_duration =
-                                std::time::Instant::now().elapsed().as_millis() as u64;
-                            t.log_run_event(
-                                crate::flow::tracing::TraceEvent::RunCompleted {
-                                    run_id: run_id.clone(),
-                                    duration_ms: total_duration,
-                                },
-                                "Flow execution completed".to_string(),
-                            );
-                        }
+                    if let Some(tracer) = &self.tracer
+                        && let Ok(mut t) = tracer.lock()
+                    {
+                        let total_duration = std::time::Instant::now().elapsed().as_millis() as u64;
+                        t.log_run_event(
+                            crate::flow::tracing::TraceEvent::RunCompleted {
+                                run_id: run_id.clone(),
+                                duration_ms: total_duration,
+                            },
+                            "Flow execution completed".to_string(),
+                        );
                     }
 
                     break; // No transition, end of flow
@@ -492,12 +488,11 @@ impl Flow {
         let mut path = Vec::new();
 
         for node_id in self.nodes.keys() {
-            if !visited.contains(node_id) {
-                if let Some(cycle) =
+            if !visited.contains(node_id)
+                && let Some(cycle) =
                     self.dfs_cycle(node_id, &mut visited, &mut recursion_stack, &mut path)
-                {
-                    return Some(cycle);
-                }
+            {
+                return Some(cycle);
             }
         }
 
@@ -737,13 +732,13 @@ mod tests {
     use async_trait::async_trait;
 
     // Test node implementation
-    struct MockNode {
+    struct TestNode {
         id: String,
         config: NodeConfig,
         output_value: String,
     }
 
-    impl MockNode {
+    impl TestNode {
         fn new(id: String, output_value: String) -> Self {
             Self {
                 id,
@@ -754,13 +749,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl Node for MockNode {
+    impl Node for TestNode {
         fn id(&self) -> NodeId {
             self.id.clone()
         }
 
         fn kind(&self) -> &str {
-            "mock"
+            "test"
         }
 
         fn prep(&self, _state: &SharedState) -> Result<Input> {
@@ -783,8 +778,8 @@ mod tests {
 
     #[test]
     fn test_flow_builder_validation() {
-        let node1 = MockNode::new("node1".to_string(), "output1".to_string());
-        let node2 = MockNode::new("node2".to_string(), "output2".to_string());
+        let node1 = TestNode::new("node1".to_string(), "output1".to_string());
+        let node2 = TestNode::new("node2".to_string(), "output2".to_string());
 
         let flow = Flow::builder()
             .start("node1".to_string())
@@ -802,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_flow_builder_missing_start() {
-        let node = MockNode::new("node1".to_string(), "output1".to_string());
+        let node = TestNode::new("node1".to_string(), "output1".to_string());
 
         let flow = Flow::builder()
             .add_node("node1".to_string(), Arc::new(node))
@@ -813,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_flow_builder_missing_node() {
-        let node1 = MockNode::new("node1".to_string(), "output1".to_string());
+        let node1 = TestNode::new("node1".to_string(), "output1".to_string());
 
         let flow = Flow::builder()
             .start("node1".to_string())
@@ -830,8 +825,8 @@ mod tests {
 
     #[test]
     fn test_flow_builder_unreachable_node() {
-        let node1 = MockNode::new("node1".to_string(), "output1".to_string());
-        let node2 = MockNode::new("node2".to_string(), "output2".to_string());
+        let node1 = TestNode::new("node1".to_string(), "output1".to_string());
+        let node2 = TestNode::new("node2".to_string(), "output2".to_string());
 
         let flow = Flow::builder()
             .start("node1".to_string())
@@ -844,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_node() {
-        let node = Arc::new(MockNode::new("test".to_string(), "output".to_string()));
+        let node = Arc::new(TestNode::new("test".to_string(), "output".to_string()));
         let mut state = SharedState::new();
 
         let input = node.prep(&state).unwrap();
@@ -857,8 +852,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_execution() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
-        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(TestNode::new("node2".to_string(), "output2".to_string()));
 
         let mut flow = Flow::builder()
             .start("node1".to_string())
@@ -883,7 +878,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_execution_terminal() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
 
         let mut flow = Flow::builder()
             .start("node1".to_string())
@@ -903,7 +898,7 @@ mod tests {
     #[tokio::test]
     async fn test_nested_flow_execution() {
         // Create inner flow
-        let inner_node = MockNode::new("inner_node".to_string(), "inner_output".to_string());
+        let inner_node = TestNode::new("inner_node".to_string(), "inner_output".to_string());
         let inner_flow = Flow::builder()
             .start("inner_node".to_string())
             .add_node("inner_node".to_string(), Arc::new(inner_node))
@@ -914,7 +909,7 @@ mod tests {
         let flow_node = FlowNode::new("nested".to_string(), inner_flow);
 
         // Create outer flow with FlowNode
-        let outer_node = MockNode::new("outer_node".to_string(), "outer_output".to_string());
+        let outer_node = TestNode::new("outer_node".to_string(), "outer_output".to_string());
         let mut outer_flow = Flow::builder()
             .start("outer_node".to_string())
             .add_node("outer_node".to_string(), Arc::new(outer_node))
@@ -938,8 +933,8 @@ mod tests {
 
     #[test]
     fn test_flow_builder_chain() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
-        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(TestNode::new("node2".to_string(), "output2".to_string()));
 
         let flow = FlowBuilder::new()
             .start("node1".to_string())
@@ -957,17 +952,17 @@ mod tests {
         let nodes = vec![
             (
                 "node1".to_string(),
-                Arc::new(MockNode::new("node1".to_string(), "output1".to_string()))
+                Arc::new(TestNode::new("node1".to_string(), "output1".to_string()))
                     as Arc<dyn Node>,
             ),
             (
                 "node2".to_string(),
-                Arc::new(MockNode::new("node2".to_string(), "output2".to_string()))
+                Arc::new(TestNode::new("node2".to_string(), "output2".to_string()))
                     as Arc<dyn Node>,
             ),
             (
                 "node3".to_string(),
-                Arc::new(MockNode::new("node3".to_string(), "output3".to_string()))
+                Arc::new(TestNode::new("node3".to_string(), "output3".to_string()))
                     as Arc<dyn Node>,
             ),
         ];
@@ -981,12 +976,12 @@ mod tests {
         let nodes = vec![
             (
                 "node1".to_string(),
-                Arc::new(MockNode::new("node1".to_string(), "output1".to_string()))
+                Arc::new(TestNode::new("node1".to_string(), "output1".to_string()))
                     as Arc<dyn Node>,
             ),
             (
                 "node2".to_string(),
-                Arc::new(MockNode::new("node2".to_string(), "output2".to_string()))
+                Arc::new(TestNode::new("node2".to_string(), "output2".to_string()))
                     as Arc<dyn Node>,
             ),
         ];
@@ -1003,9 +998,9 @@ mod tests {
 
     #[test]
     fn test_flow_cycle_detection() {
-        let node1 = Arc::new(MockNode::new("node1".to_string(), "output1".to_string()));
-        let node2 = Arc::new(MockNode::new("node2".to_string(), "output2".to_string()));
-        let node3 = Arc::new(MockNode::new("node3".to_string(), "output3".to_string()));
+        let node1 = Arc::new(TestNode::new("node1".to_string(), "output1".to_string()));
+        let node2 = Arc::new(TestNode::new("node2".to_string(), "output2".to_string()));
+        let node3 = Arc::new(TestNode::new("node3".to_string(), "output3".to_string()));
 
         let flow = Flow::builder()
             .start("node1".to_string())

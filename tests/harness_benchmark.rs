@@ -80,11 +80,20 @@ fn test_benchmark_test_unit() {
 #[test]
 fn test_test_type_variants() {
     assert!(matches!(TestType::UnitTest, TestType::UnitTest));
-    assert!(matches!(TestType::IntegrationTest, TestType::IntegrationTest));
-    assert!(matches!(TestType::PerformanceTest, TestType::PerformanceTest));
+    assert!(matches!(
+        TestType::IntegrationTest,
+        TestType::IntegrationTest
+    ));
+    assert!(matches!(
+        TestType::PerformanceTest,
+        TestType::PerformanceTest
+    ));
     assert!(matches!(TestType::LoadTest, TestType::LoadTest));
     assert!(matches!(TestType::StressTest, TestType::StressTest));
-    assert!(matches!(TestType::CorrectnessTest, TestType::CorrectnessTest));
+    assert!(matches!(
+        TestType::CorrectnessTest,
+        TestType::CorrectnessTest
+    ));
 }
 
 // ============================================================================

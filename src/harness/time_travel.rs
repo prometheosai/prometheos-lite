@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TimeTravelSession {
@@ -113,6 +113,12 @@ pub struct VariableChange {
     pub before: String,
     pub after: String,
     pub scope: String,
+}
+
+impl Default for TimeTravelDebugger {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TimeTravelDebugger {
@@ -264,7 +270,7 @@ impl TimeTravelDebugger {
         }
 
         let start_index = session.current_index;
-        drop(session); // Release borrow
+        let _ = session; // Release borrow
 
         for i in (start_index + 1)..self.sessions.get(session_id).unwrap().checkpoints.len() {
             // Check if any breakpoint condition matches

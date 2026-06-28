@@ -1,9 +1,9 @@
 //! Local-first LLM client integrations
 
-mod client;
+mod llm_client;
 mod types;
 mod utils;
 
-pub use client::LlmClient;
+pub use llm_client::LlmClient;
 pub use types::*;
 pub use utils::generate;

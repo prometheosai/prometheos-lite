@@ -1,9 +1,9 @@
 //! Playbook API endpoints
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
-    Json,
+    response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,7 +11,30 @@ use std::sync::Arc;
 use crate::api::state::AppState;
 use crate::db::Db;
 use crate::db::repository::PlaybookOperations;
-use crate::work::playbook::{CreativityLevel, FlowPreference, NodePreference, PatternRecord, PatternType, ResearchDepth, WorkContextPlaybook};
+use crate::work::playbook::{
+    CreativityLevel, FlowPreference, NodePreference, PatternRecord, ResearchDepth,
+    WorkContextPlaybook,
+};
+
+#[derive(Debug, Clone)]
+pub enum ApiError {
+    Internal(String),
+    NotFound(String),
+    BadRequest(String),
+    Forbidden(String),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = match self {
+            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+        };
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
+    }
+}
 
 /// Request to create a new Playbook
 #[derive(Debug, Deserialize)]
@@ -66,14 +89,24 @@ pub struct PlaybookResponse {
     pub updated_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UserIdentityQuery {
+    pub user_id: String,
+}
+
 /// List all playbooks for a user
 pub async fn list_playbooks(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PlaybookResponse>>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Query(identity): Query<UserIdentityQuery>,
+) -> Result<Json<Vec<PlaybookResponse>>, ApiError> {
+    if identity.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("failed to open database: {}", e)))?;
 
-    let playbooks = PlaybookOperations::get_playbooks_for_user(&db, "api-user")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let playbooks = PlaybookOperations::get_playbooks_for_user(&db, &identity.user_id)
+        .map_err(|e| ApiError::Internal(format!("failed to list playbooks: {}", e)))?;
 
     let response: Vec<PlaybookResponse> = playbooks
         .into_iter()
@@ -102,12 +135,22 @@ pub async fn list_playbooks(
 pub async fn get_playbook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<PlaybookResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Query(identity): Query<UserIdentityQuery>,
+) -> Result<Json<PlaybookResponse>, ApiError> {
+    if identity.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("failed to open database: {}", e)))?;
 
     let playbook = PlaybookOperations::get_playbook(&db, &id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| ApiError::Internal(format!("failed to load playbook: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("playbook not found: {}", id)))?;
+    if playbook.user_id != identity.user_id {
+        return Err(ApiError::Forbidden(
+            "playbook does not belong to requested user".to_string(),
+        ));
+    }
 
     let response = PlaybookResponse {
         id: playbook.id,
@@ -133,8 +176,12 @@ pub async fn get_playbook(
 pub async fn create_playbook(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePlaybookRequest>,
-) -> Result<Json<PlaybookResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<PlaybookResponse>, ApiError> {
+    if req.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("failed to open database: {}", e)))?;
 
     let research_depth = match req.default_research_depth.to_lowercase().as_str() {
         "minimal" => ResearchDepth::Minimal,
@@ -159,7 +206,7 @@ pub async fn create_playbook(
         req.description,
     );
 
-    let mut playbook = WorkContextPlaybook {
+    let playbook = WorkContextPlaybook {
         preferred_flows: req.preferred_flows,
         preferred_nodes: req.preferred_nodes,
         default_research_depth: research_depth,
@@ -168,7 +215,7 @@ pub async fn create_playbook(
     };
 
     let playbook = PlaybookOperations::create_playbook(&db, &playbook)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::Internal(format!("failed to create playbook: {}", e)))?;
 
     let response = PlaybookResponse {
         id: playbook.id,
@@ -194,13 +241,23 @@ pub async fn create_playbook(
 pub async fn update_playbook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
     Json(req): Json<UpdatePlaybookRequest>,
-) -> Result<Json<PlaybookResponse>, StatusCode> {
-    let db = Db::new(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<PlaybookResponse>, ApiError> {
+    if identity.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let db = Db::new(&state.db_path)
+        .map_err(|e| ApiError::Internal(format!("failed to open database: {}", e)))?;
 
     let mut playbook = PlaybookOperations::get_playbook(&db, &id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| ApiError::Internal(format!("failed to load playbook: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("playbook not found: {}", id)))?;
+    if playbook.user_id != identity.user_id {
+        return Err(ApiError::Forbidden(
+            "playbook does not belong to requested user".to_string(),
+        ));
+    }
 
     if let Some(name) = req.name {
         playbook.name = name;
@@ -233,7 +290,7 @@ pub async fn update_playbook(
     }
 
     let playbook = PlaybookOperations::update_playbook(&db, &playbook)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::Internal(format!("failed to update playbook: {}", e)))?;
 
     let response = PlaybookResponse {
         id: playbook.id,

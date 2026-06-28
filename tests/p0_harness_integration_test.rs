@@ -7,38 +7,6 @@
 //! 4. EvidenceLog on every decision
 
 use std::path::PathBuf;
-use tempfile::TempDir;
-
-/// Create a minimal test repo with a Rust file
-fn create_test_repo() -> TempDir {
-    let temp_dir = TempDir::new().unwrap();
-    let repo_root = temp_dir.path();
-
-    // Create src directory
-    std::fs::create_dir_all(repo_root.join("src")).unwrap();
-
-    // Create a simple Rust file
-    std::fs::write(
-        repo_root.join("src/main.rs"),
-        r#"fn main() {
-    println!("Hello, world!");
-}"#,
-    )
-    .unwrap();
-
-    // Create Cargo.toml
-    std::fs::write(
-        repo_root.join("Cargo.toml"),
-        r#"[package]
-name = "test-project"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-
-    temp_dir
-}
 
 /// Test that WorkContext integration extracts mentioned files from task
 #[test]
@@ -51,11 +19,15 @@ fn test_extract_task_hints_finds_files() {
     let (files, symbols) = extract_task_hints(task, &requirements);
 
     assert!(
-        files.iter().any(|f| f.to_string_lossy().contains("execution_loop.rs")),
+        files
+            .iter()
+            .any(|f| f.to_string_lossy().contains("execution_loop.rs")),
         "Should extract execution_loop.rs from task"
     );
     assert!(
-        symbols.iter().any(|s| s.contains("error") || s.contains("handling")),
+        symbols
+            .iter()
+            .any(|s| s.contains("error") || s.contains("handling")),
         "Should extract relevant symbols"
     );
 }
@@ -71,12 +43,16 @@ fn test_extract_task_hints_finds_symbols() {
     let (_files, symbols) = extract_task_hints(task, &requirements);
 
     assert!(
-        symbols.iter().any(|s| s == "execute_harness_task" || s.contains("execute_harness")),
+        symbols
+            .iter()
+            .any(|s| s == "execute_harness_task" || s.contains("execute_harness")),
         "Should extract execute_harness_task symbol, got: {:?}",
         symbols
     );
     assert!(
-        symbols.iter().any(|s| s.contains("HarnessExecutionRequest")),
+        symbols
+            .iter()
+            .any(|s| s.contains("HarnessExecutionRequest")),
         "Should extract HarnessExecutionRequest symbol, got: {:?}",
         symbols
     );
@@ -90,7 +66,7 @@ fn test_llm_patch_provider_strict_mode_default() {
 
     // This would need a mock client in practice
     // For now, just verify the API exists and strict mode is the default
-    let provider = LlmPatchProvider::new(
+    let _provider = LlmPatchProvider::new(
         LlmClient::new("http://localhost:11434", "test-model").unwrap(),
         "test-model".to_string(),
     );
@@ -119,7 +95,10 @@ async fn test_provider_context_includes_hints() {
 
     assert_eq!(ctx.mentioned_files.len(), 1);
     assert_eq!(ctx.mentioned_symbols.len(), 1);
-    assert!(ctx.mentioned_symbols.contains(&"execute_harness_task".to_string()));
+    assert!(
+        ctx.mentioned_symbols
+            .contains(&"execute_harness_task".to_string())
+    );
 }
 
 /// Test EvidenceLog records side-effect blocks

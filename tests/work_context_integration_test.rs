@@ -4,9 +4,10 @@
 //! create -> execute -> artifact -> phase update -> continue
 
 use prometheos_lite::db::Db;
+use prometheos_lite::harness::completion::CompletionDecision;
 use prometheos_lite::work::{
     WorkContextService,
-    types::{WorkDomain, WorkPhase, WorkStatus},
+    types::{HarnessMetadata, WorkDomain, WorkPhase, WorkStatus},
 };
 use std::sync::Arc;
 
@@ -379,7 +380,6 @@ async fn test_golden_integration_with_flow_execution() {
     let db = Db::in_memory().expect("Failed to create in-memory database");
     let db_arc = Arc::new(db);
     let work_context_service = Arc::new(WorkContextService::new(db_arc.clone()));
-
     let runtime = Arc::new(RuntimeContext::default());
     let flow_execution_service = Arc::new(
         FlowExecutionService::new(runtime).expect("Failed to create FlowExecutionService"),
@@ -532,6 +532,19 @@ fn test_golden_integration_work_context_lifecycle() {
     work_context_service
         .update_status(&mut context, WorkStatus::InProgress)
         .expect("Failed to update status to InProgress");
+
+    // V1.6.1 strict gate: software Execution -> Review requires patch + validation evidence.
+    context.metadata = serde_json::json!({
+        "harness": {
+            "patch_result": { "applied": true },
+            "validation_result": { "passed": true }
+        }
+    });
+    context.set_harness_metadata(HarnessMetadata {
+        completion_decision: Some(CompletionDecision::Complete),
+        ..Default::default()
+    });
+
     work_context_service
         .update_phase(&mut context, WorkPhase::Review)
         .expect("Failed to update phase to Review");
@@ -563,8 +576,7 @@ async fn test_deterministic_no_api_flow_execution() {
     use prometheos_lite::flow::execution_service::FlowExecutionService;
 
     let db = Db::in_memory().expect("Failed to create in-memory database");
-    let db_arc = Arc::new(db);
-    let work_context_service = Arc::new(WorkContextService::new(db_arc.clone()));
+    let _db_arc = Arc::new(db);
 
     let runtime = Arc::new(RuntimeContext::default());
     let flow_execution_service = Arc::new(

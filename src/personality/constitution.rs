@@ -41,16 +41,16 @@ impl ConstitutionalFilter {
     fn apply_anchor_filter(&self, text: &str) -> String {
         let text = text.replace("must", "should");
         let text = text.replace("have to", "might want to");
-        let text = text.replace("need to", "could consider");
-        text
+
+        text.replace("need to", "could consider")
     }
 
     /// Mirror mode: ensure directness
     fn apply_mirror_filter(&self, text: &str) -> String {
         let text = text.replace("I think", "");
         let text = text.replace("I believe", "");
-        let text = text.replace("It seems like", "");
-        text
+
+        text.replace("It seems like", "")
     }
 
     /// Universal: shorten excessive output
@@ -67,7 +67,7 @@ impl ConstitutionalFilter {
     fn remove_false_certainty(&self, text: &str) -> String {
         let text = text.replace("definitely", "likely");
         let text = text.replace("certainly", "probably");
-        let text = text.replace("without a doubt", "most likely");
-        text
+
+        text.replace("without a doubt", "most likely")
     }
 }

@@ -89,7 +89,7 @@ impl ExecutionBudget {
 }
 
 /// Budget usage tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BudgetUsage {
     /// Number of steps executed
     pub steps: u32,
@@ -103,19 +103,6 @@ pub struct BudgetUsage {
     pub memory_reads: u32,
     /// Number of memory writes
     pub memory_writes: u32,
-}
-
-impl Default for BudgetUsage {
-    fn default() -> Self {
-        Self {
-            steps: 0,
-            llm_calls: 0,
-            tool_calls: 0,
-            runtime_ms: 0,
-            memory_reads: 0,
-            memory_writes: 0,
-        }
-    }
 }
 
 impl BudgetUsage {

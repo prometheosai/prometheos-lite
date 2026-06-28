@@ -4,8 +4,7 @@ use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 
-use super::domain::{LifecycleTemplate, WorkDomainProfile};
-use super::types::ApprovalPolicy;
+use super::domain::WorkDomainProfile;
 
 /// TemplateLoader - loads domain profiles from YAML files
 pub struct TemplateLoader {
@@ -19,7 +18,7 @@ impl TemplateLoader {
     }
 
     /// Create a TemplateLoader with the default templates directory
-    pub fn default() -> Result<Self> {
+    pub fn from_default_templates_dir() -> Result<Self> {
         let templates_dir = PathBuf::from("templates");
         Ok(Self::new(templates_dir))
     }

@@ -28,6 +28,7 @@ fn test_risk_assessment_none() {
         requires_approval: false,
         can_override: true,
         override_conditions: vec![],
+        assessed: true,
     };
 
     assert!(matches!(assessment.level, RiskLevel::None));
@@ -39,17 +40,16 @@ fn test_risk_assessment_none() {
 fn test_risk_assessment_critical() {
     let assessment = RiskAssessment {
         level: RiskLevel::Critical,
-        reasons: vec![
-            RiskReason {
-                category: RiskCategory::Security,
-                description: "SQL injection vulnerability".to_string(),
-                severity: RiskSeverity::Critical,
-                mitigation: Some("Use parameterized queries".to_string()),
-            },
-        ],
+        reasons: vec![RiskReason {
+            category: RiskCategory::Security,
+            description: "SQL injection vulnerability".to_string(),
+            severity: RiskSeverity::Critical,
+            mitigation: Some("Use parameterized queries".to_string()),
+        }],
         requires_approval: true,
         can_override: false,
         override_conditions: vec![],
+        assessed: true,
     };
 
     assert!(matches!(assessment.level, RiskLevel::Critical));
@@ -74,7 +74,10 @@ fn test_risk_reason_creation() {
     assert!(matches!(reason.category, RiskCategory::ApiBreaking));
     assert_eq!(reason.description, "Function signature changed");
     assert!(matches!(reason.severity, RiskSeverity::High));
-    assert_eq!(reason.mitigation, Some("Maintain backward compatibility".to_string()));
+    assert_eq!(
+        reason.mitigation,
+        Some("Maintain backward compatibility".to_string())
+    );
 }
 
 #[test]
@@ -126,12 +129,24 @@ fn test_risk_level_display() {
 #[test]
 fn test_risk_category_variants() {
     assert!(matches!(RiskCategory::Security, RiskCategory::Security));
-    assert!(matches!(RiskCategory::ApiBreaking, RiskCategory::ApiBreaking));
-    assert!(matches!(RiskCategory::DatabaseBreaking, RiskCategory::DatabaseBreaking));
+    assert!(matches!(
+        RiskCategory::ApiBreaking,
+        RiskCategory::ApiBreaking
+    ));
+    assert!(matches!(
+        RiskCategory::DatabaseBreaking,
+        RiskCategory::DatabaseBreaking
+    ));
     assert!(matches!(RiskCategory::Dependency, RiskCategory::Dependency));
-    assert!(matches!(RiskCategory::Configuration, RiskCategory::Configuration));
+    assert!(matches!(
+        RiskCategory::Configuration,
+        RiskCategory::Configuration
+    ));
     assert!(matches!(RiskCategory::Logic, RiskCategory::Logic));
-    assert!(matches!(RiskCategory::Performance, RiskCategory::Performance));
+    assert!(matches!(
+        RiskCategory::Performance,
+        RiskCategory::Performance
+    ));
     assert!(matches!(RiskCategory::Compliance, RiskCategory::Compliance));
 }
 
@@ -139,7 +154,10 @@ fn test_risk_category_variants() {
 fn test_risk_category_display() {
     assert_eq!(format!("{:?}", RiskCategory::Security), "Security");
     assert_eq!(format!("{:?}", RiskCategory::ApiBreaking), "ApiBreaking");
-    assert_eq!(format!("{:?}", RiskCategory::DatabaseBreaking), "DatabaseBreaking");
+    assert_eq!(
+        format!("{:?}", RiskCategory::DatabaseBreaking),
+        "DatabaseBreaking"
+    );
 }
 
 // ============================================================================
@@ -187,10 +205,17 @@ fn test_risk_engine_new() {
 #[test]
 fn test_override_policy_default() {
     let policy = OverridePolicy::default();
-    assert!(policy.allowed_categories.is_empty());
-    assert!(!policy.require_secondary_approval);
-    assert_eq!(policy.max_override_count, 0);
-    assert!(!policy.audit_required);
+    assert_eq!(
+        policy.allowed_categories,
+        vec![
+            RiskCategory::ApiBreaking,
+            RiskCategory::Configuration,
+            RiskCategory::Dependency
+        ]
+    );
+    assert!(policy.require_secondary_approval);
+    assert_eq!(policy.max_override_count, 3);
+    assert!(policy.audit_required);
 }
 
 #[test]

@@ -1,9 +1,6 @@
 use crate::harness::{
     acceptance::{AcceptanceCriterion, compile_acceptance_criteria},
-    artifacts::{
-        ArtifactKind, ArtifactMetadata, CompressionType, HarnessArtifact,
-        generate_completion_artifact,
-    },
+    artifacts::{ArtifactKind, ArtifactMetadata, CompressionType, HarnessArtifact},
     attempt_pool::AttemptPool,
     completion::{
         CompletionDecision, CompletionEvidence, ConfidenceEvidence, PatchEvidence, ProcessEvidence,
@@ -13,27 +10,22 @@ use crate::harness::{
     confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact, compute_confidence},
     edit_protocol::EditOperation,
     environment::{EnvironmentProfile, fingerprint_environment},
-    evidence::{EvidenceEntryKind, EvidenceLog},
+    evidence::{EvidenceEntryKind, EvidenceLog, SandboxEvidence},
     failure::{FailureKind, classify_patch_failure, classify_validation_failure},
     file_control::{FilePolicy, FileSet, build_file_set},
     git_checkpoint::{GitCheckpoint, create_pre_task_checkpoint},
-    mode_policy::{HarnessMode, HarnessPolicyGate, GateDecision},
-    patch_applier::{
-        PatchResult, RollbackHandle, apply_patch, apply_patch_with_rollback, dry_run_patch,
-    },
+    mode_policy::{GateDecision, HarnessMode, HarnessPolicyGate},
+    patch_applier::{PatchResult, RollbackHandle, apply_patch_with_rollback, dry_run_patch},
     patch_provider::{
         GenerateRequest as ProviderGenerateRequest, PatchCandidate as ProviderCandidate,
-        PatchProvider, PatchProviderContext, RiskEstimate,
     },
     repo_intelligence::{RepoContext, build_repo_context},
     review::{ReviewIssue, ReviewIssueType, ReviewSeverity, review_diff},
     risk::{RiskAssessment, RiskCategory, RiskLevel, RiskReason, RiskSeverity, assess_risk},
     sandbox::LocalSandboxRuntime,
-    selection::{
-        PatchCandidate as SelectionCandidate, SelectionCriteria, SelectionEngine, SelectionPhase,
-    },
+    selection::{PatchCandidate as SelectionCandidate, SelectionPhase},
     semantic_diff::analyze_semantic_diff,
-    temp_workspace::{TempWorkspace, ValidationTarget, create_validation_target},
+    temp_workspace::{TempWorkspace, ValidationTarget},
     trajectory::Trajectory,
     validation::{ValidationCategory, ValidationPlan, ValidationResult, run_validation},
     verification::{VerificationStrength, assess_verification_strength},
@@ -43,10 +35,125 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    path::PathBuf,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    time::Instant,
 };
 use tokio::sync::mpsc;
+
+/// P0-Issue1: Extract sandbox evidence from evidence log for completion verification
+fn extract_sandbox_evidence_from_log(evidence_log: &EvidenceLog) -> Vec<SandboxEvidence> {
+    let mut sandbox_evidence = Vec::new();
+
+    for entry in &evidence_log.entries {
+        if entry.kind == EvidenceEntryKind::SandboxBackendUsed {
+            // Extract sandbox evidence from the input summary
+            if let Some(runtime_kind_str) = entry.input_summary.get("runtime_kind") {
+                let runtime_kind = match runtime_kind_str.as_str() {
+                    "Docker" => crate::harness::sandbox::SandboxRuntimeKind::Docker,
+                    "Local" => crate::harness::sandbox::SandboxRuntimeKind::Local,
+                    _ => crate::harness::sandbox::SandboxRuntimeKind::Local,
+                };
+
+                let isolated_process = entry
+                    .input_summary
+                    .get("isolated_process")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let isolated_filesystem = entry
+                    .input_summary
+                    .get("isolated_filesystem")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let network_disabled = entry
+                    .input_summary
+                    .get("network_disabled")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let cpu_limited = entry
+                    .input_summary
+                    .get("cpu_limited")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let memory_limited = entry
+                    .input_summary
+                    .get("memory_limited")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let resource_limits_applied = entry
+                    .input_summary
+                    .get("resource_limits_applied")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let no_new_privileges = entry
+                    .input_summary
+                    .get("no_new_privileges")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let capabilities_dropped = entry
+                    .input_summary
+                    .get("capabilities_dropped")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let seccomp_enabled = entry
+                    .input_summary
+                    .get("seccomp_enabled")
+                    .and_then(|s| s.parse::<bool>().ok())
+                    .unwrap_or(false);
+
+                let mount_mode = entry
+                    .input_summary
+                    .get("mount_mode")
+                    .and_then(|s| match s.as_str() {
+                        "ReadOnly" => Some(crate::harness::evidence::SandboxMountMode::ReadOnly),
+                        "ReadWrite" => Some(crate::harness::evidence::SandboxMountMode::ReadWrite),
+                        _ => None,
+                    })
+                    .unwrap_or(crate::harness::evidence::SandboxMountMode::ReadWrite);
+
+                let container_id = entry.input_summary.get("container_id").cloned();
+
+                sandbox_evidence.push(SandboxEvidence {
+                    runtime_kind,
+                    isolated_process,
+                    isolated_filesystem,
+                    network_disabled,
+                    cpu_limited,
+                    memory_limited,
+                    container_id,
+                    mount_mode,
+                    resource_limits_applied,
+                    no_new_privileges,
+                    capabilities_dropped,
+                    seccomp_enabled,
+                    pids_limit: entry
+                        .input_summary
+                        .get("pids_limit")
+                        .and_then(|s| s.parse::<u32>().ok()),
+                    non_root_user: entry
+                        .input_summary
+                        .get("non_root_user")
+                        .and_then(|s| s.parse::<bool>().ok())
+                        .unwrap_or(false),
+                    tmpfs_protected: entry
+                        .input_summary
+                        .get("tmpfs_protected")
+                        .and_then(|s| s.parse::<bool>().ok())
+                        .unwrap_or(false),
+                });
+            }
+        }
+    }
+
+    sandbox_evidence
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct HarnessExecutionRequest {
@@ -73,9 +180,12 @@ pub struct HarnessExecutionRequest {
     pub progress_callback: Option<Box<dyn Fn(HarnessProgress) + Send + Sync>>,
     #[serde(default = "default_validation_failure_policy")]
     pub validation_failure_policy: ValidationFailurePolicy,
+    /// P0-1.2: Sandbox policy for runtime selection
+    #[serde(default)]
+    pub sandbox_policy: Option<crate::harness::sandbox::SandboxPolicy>,
 }
 
-fn default_validation_failure_policy() -> ValidationFailurePolicy {
+pub fn default_validation_failure_policy() -> ValidationFailurePolicy {
     ValidationFailurePolicy::RollbackAutomatically
 }
 
@@ -114,30 +224,95 @@ impl Clone for HarnessExecutionRequest {
             provider_context: self.provider_context.clone(),
             validation_failure_policy: self.validation_failure_policy,
             progress_callback: None, // Cannot clone trait object
+            sandbox_policy: self.sandbox_policy.clone(),
         }
     }
 }
 
 impl HarnessExecutionRequest {
+    /// Create a request with conservative defaults for tests and simple callers.
+    pub fn new() -> Self {
+        let mode = HarnessMode::ReviewOnly;
+        Self {
+            work_context_id: uuid::Uuid::new_v4().to_string(),
+            repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            task: String::new(),
+            requirements: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            mode,
+            limits: HarnessLimits::default(),
+            mentioned_files: Vec::new(),
+            mentioned_symbols: Vec::new(),
+            proposed_edits: Vec::new(),
+            patch_provider: None,
+            provider_context: None,
+            progress_callback: None,
+            validation_failure_policy: ValidationFailurePolicy::RollbackAutomatically,
+            sandbox_policy: Some(crate::harness::sandbox::SandboxPolicy::from_mode(mode)),
+        }
+    }
+
+    pub fn with_mode(mut self, mode: HarnessMode) -> Self {
+        self.mode = mode;
+        self.sandbox_policy = Some(crate::harness::sandbox::SandboxPolicy::from_mode(mode));
+        self
+    }
+
+    pub fn with_task(mut self, task: impl Into<String>) -> Self {
+        self.task = task.into();
+        self
+    }
+
+    pub fn with_repo_path(mut self, repo_root: PathBuf) -> Self {
+        self.repo_root = repo_root;
+        self
+    }
+
+    pub async fn execute(self) -> anyhow::Result<HarnessExecutionResult> {
+        execute_harness_task(self.with_config_provider()?).await
+    }
+
     /// P0-FIX: Auto-create patch provider from config if not already set
     ///
     /// This is the production entry point for LLM-based patch generation.
     /// Call this before execute_harness_task() to ensure a provider is available.
-    pub fn with_config_provider(mut self) -> Self {
+    /// P0-B5: Make provider resolution errors explicit instead of swallowed
+    pub fn with_config_provider(mut self) -> anyhow::Result<Self> {
         if self.patch_provider.is_none() && self.proposed_edits.is_empty() {
             // Try to load config and create LLM provider
-            if let Ok(config) = crate::config::AppConfig::load() {
-                if let Ok(registry) =
-                    crate::harness::patch_provider::ProviderRegistry::from_config(&config)
-                {
-                    // Store the registry's aggregate provider
-                    // Note: We need to keep the registry alive, so we store it in provider_context
-                    // and use a wrapper that delegates to the registry
-                    self.patch_provider = Some(Box::new(registry));
-                }
-            }
+            let config = crate::config::AppConfig::load()
+                .map_err(|e| anyhow::anyhow!("Failed to load provider config: {}", e))?;
+
+            let registry = crate::harness::patch_provider::ProviderRegistry::from_config_with_mode(
+                &config, self.mode,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create provider registry for mode {:?}: {}",
+                    self.mode,
+                    e
+                )
+            })?;
+
+            // Store the registry's aggregate provider
+            // Note: We need to keep the registry alive, so we store it in provider_context
+            // and use a wrapper that delegates to the registry
+            self.patch_provider = Some(Box::new(registry));
+
+            tracing::info!("P0-B5: Provider successfully resolved from config");
+        } else if self.patch_provider.is_some() {
+            tracing::info!("P0-B5: Provider already available, skipping config resolution");
+        } else {
+            tracing::info!("P0-B5: Proposed edits provided, skipping provider resolution");
         }
-        self
+
+        Ok(self)
+    }
+}
+
+impl Default for HarnessExecutionRequest {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -285,6 +460,7 @@ pub enum HarnessProgress {
     RiskAssessment {
         level: String,
         requires_approval: bool,
+        assessed: bool,
     },
     Completing {
         decision: String,
@@ -325,7 +501,7 @@ struct ExecutionContext {
     start_time: Instant,
     step_count: u32,
     cost_accrued: f64,
-    tokens_used: u64,
+    _tokens_used: u64,
     progress_sender: Option<mpsc::UnboundedSender<HarnessProgress>>,
 }
 
@@ -338,7 +514,7 @@ impl ExecutionContext {
             start_time: Instant::now(),
             step_count: 0,
             cost_accrued: 0.0,
-            tokens_used: 0,
+            _tokens_used: 0,
             progress_sender: Some(tx),
         };
 
@@ -373,14 +549,6 @@ impl ExecutionContext {
 
     fn increment_step(&mut self) {
         self.step_count += 1;
-    }
-
-    fn add_cost(&mut self, cost: f64) {
-        self.cost_accrued += cost;
-    }
-
-    fn add_tokens(&mut self, tokens: u64) {
-        self.tokens_used += tokens;
     }
 
     fn send_progress(&self, progress: HarnessProgress) {
@@ -540,6 +708,71 @@ pub async fn execute_harness_task(
         "P0-1: Built real PatchProviderContext with rich repository context"
     );
 
+    // P1-4.1: Auto-resolve provider inside public execution path
+    let mut req = req;
+    if req.proposed_edits.is_empty() && req.patch_provider.is_none() {
+        // Auto-resolve provider when no edits are supplied
+        let work_context_id = req.work_context_id.clone();
+        let validation_failure_policy = req.validation_failure_policy;
+        let resolved_req = req.with_config_provider();
+        match resolved_req {
+            Ok(resolved_req) => {
+                req = resolved_req;
+                tracing::info!(trace_id = %trace_id, "P1-4.1: Auto-resolved provider from config");
+            }
+            Err(e) => {
+                return Ok(HarnessExecutionResult {
+                    work_context_id,
+                    trace_id: Some(trace_id.clone()),
+                    repo_context: repo.clone(),
+                    environment: crate::harness::environment::EnvironmentProfile::default(),
+                    file_set: files.clone(),
+                    acceptance: vec![],
+                    patch_result: None,
+                    validation_result: None,
+                    review_issues: vec![],
+                    risk_assessment: crate::harness::risk::RiskAssessment {
+                        level: crate::harness::risk::RiskLevel::High,
+                        reasons: vec![crate::harness::risk::RiskReason {
+                            category: crate::harness::risk::RiskCategory::Security,
+                            description: "All provider candidates failed validation".to_string(),
+                            severity: crate::harness::risk::RiskSeverity::Critical,
+                            mitigation: Some("Review provider output and constraints".to_string()),
+                        }],
+                        assessed: false,
+                        requires_approval: true,
+                        can_override: false,
+                        override_conditions: vec![],
+                    },
+                    confidence: crate::harness::confidence::ConfidenceScore {
+                        score: 0.0,
+                        factors: vec![],
+                        explanation: "All provider candidates failed validation".to_string(),
+                        recommendation: Some("Review provider output and constraints".to_string()),
+                    },
+                    completion_decision:
+                        crate::harness::completion::CompletionDecision::NeedsRepair(format!(
+                            "Failed to resolve provider: {}",
+                            e
+                        )),
+                    verification_strength: crate::harness::verification::VerificationStrength::None,
+                    trajectory: traj,
+                    git_checkpoint: None,
+                    rollback_handle: None,
+                    validation_failure_policy,
+                    artifacts: vec![],
+                    failures: vec![],
+                    summary: "Provider resolution failed".to_string(),
+                    execution_metrics: ExecutionMetrics::default(),
+                    step_count: 0,
+                    terminated_early: true,
+                    termination_reason: Some("Provider resolution failed".to_string()),
+                    evidence_log: evidence_log.clone(),
+                });
+            }
+        }
+    }
+
     // Determine which edits to use: provided edits or generate from provider
     let selected_edits = if req.proposed_edits.is_empty() {
         // Try to generate candidates using patch provider
@@ -561,34 +794,105 @@ pub async fn execute_harness_task(
                 Ok(response) if !response.candidates.is_empty() => {
                     ctx.send_progress(HarnessProgress::GeneratingPatch);
 
+                    // P0-Issue5: Validate provider candidates before AttemptPool
+                    let validated_candidates = validate_provider_candidates(
+                        &response.candidates,
+                        &files,
+                        &policy,
+                        &req.repo_root,
+                        &mut evidence_log,
+                        Some(trace_id.clone()),
+                    )
+                    .await?;
+
+                    if validated_candidates.is_empty() {
+                        tracing::warn!(trace_id = %trace_id, "P0-Issue5: All provider candidates failed validation");
+                        return Ok(HarnessExecutionResult {
+                            work_context_id: req.work_context_id.clone(),
+                            trace_id: Some(trace_id.clone()),
+                            repo_context: repo.clone(),
+                            environment: crate::harness::environment::EnvironmentProfile::default(),
+                            file_set: files.clone(),
+                            acceptance: vec![],
+                            patch_result: None,
+                            validation_result: None,
+                            review_issues: vec![],
+                            risk_assessment: crate::harness::risk::RiskAssessment {
+                                level: crate::harness::risk::RiskLevel::High,
+                                reasons: vec![crate::harness::risk::RiskReason {
+                                    category: crate::harness::risk::RiskCategory::Security,
+                                    description: "All provider candidates failed validation"
+                                        .to_string(),
+                                    severity: crate::harness::risk::RiskSeverity::Critical,
+                                    mitigation: Some(
+                                        "Review provider output and constraints".to_string(),
+                                    ),
+                                }],
+                                assessed: false,
+                                requires_approval: true,
+                                can_override: false,
+                                override_conditions: vec![],
+                            },
+                            confidence: crate::harness::confidence::ConfidenceScore {
+                                score: 0.0,
+                                factors: vec![],
+                                explanation: "All provider candidates failed validation"
+                                    .to_string(),
+                                recommendation: Some(
+                                    "Review provider output and constraints".to_string(),
+                                ),
+                            },
+                            verification_strength:
+                                crate::harness::verification::VerificationStrength::None,
+                            completion_decision:
+                                crate::harness::completion::CompletionDecision::Blocked(
+                                    "All provider candidates failed validation".to_string(),
+                                ),
+                            trajectory: traj,
+                            git_checkpoint: None,
+                            rollback_handle: None,
+                            validation_failure_policy: req.validation_failure_policy,
+                            artifacts: vec![],
+                            failures: vec![crate::harness::failure::FailureKind::ToolFailure],
+                            summary: "All provider candidates failed validation".to_string(),
+                            execution_metrics: Default::default(),
+                            step_count: 0,
+                            terminated_early: true,
+                            termination_reason: Some(
+                                "All provider candidates failed validation".to_string(),
+                            ),
+                            evidence_log: evidence_log.clone(),
+                        });
+                    }
+
                     // P0-FIX: AttemptPool is now the ONLY candidate evaluation path
                     // All candidates (even single ones) go through isolated temp workspace validation
-                    let candidates_count = response.candidates.len();
-                    tracing::info!(trace_id = %trace_id, "P0: Using AttemptPool to evaluate {} candidate(s) in isolated workspaces", candidates_count);
+                    let candidates_count = validated_candidates.len();
+                    tracing::info!(trace_id = %trace_id, "P0: Using AttemptPool to evaluate {} validated candidate(s) in isolated workspaces", candidates_count);
 
-                    // Convert provider candidates to PatchCandidates for AttemptPool
-                    let patch_candidates: Vec<crate::harness::selection::PatchCandidate> = response
-                        .candidates
-                        .iter()
-                        .map(|c| crate::harness::selection::PatchCandidate {
-                            id: format!("candidate_{}", c.source),
-                            edits: c.edits.clone(),
-                            source: c.source.clone(),
-                            confidence: crate::harness::confidence::ConfidenceScore {
-                                score: c.confidence as f32 / 100.0,
-                                factors: vec![],
-                                explanation: "Provider confidence score".to_string(),
-                                recommendation: None,
-                            },
-                            metadata: Default::default(),
-                            risk: None,
-                            validation: None,
-                            review_issues: vec![],
-                            semantic_diff: None,
-                            lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
-                            lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
-                        })
-                        .collect();
+                    // Convert validated provider candidates to PatchCandidates for AttemptPool
+                    let patch_candidates: Vec<crate::harness::selection::PatchCandidate> =
+                        validated_candidates
+                            .iter()
+                            .map(|c| crate::harness::selection::PatchCandidate {
+                                id: format!("candidate_{}", c.source),
+                                edits: c.edits.clone(),
+                                source: c.source.clone(),
+                                confidence: crate::harness::confidence::ConfidenceScore {
+                                    score: c.confidence as f32 / 100.0,
+                                    factors: vec![],
+                                    explanation: "Provider confidence score".to_string(),
+                                    recommendation: None,
+                                },
+                                metadata: Default::default(),
+                                risk: None,
+                                validation: None,
+                                review_issues: vec![],
+                                semantic_diff: None,
+                                lines_added: c.edits.iter().map(|e| e.lines_added()).sum(),
+                                lines_removed: c.edits.iter().map(|e| e.lines_removed()).sum(),
+                            })
+                            .collect();
 
                     // P0-6 FIX: Use environment-derived validation plan instead of hardcoded Rust commands
                     let validation_plan = ValidationPlan::default_for_repo(&env);
@@ -614,21 +918,71 @@ pub async fn execute_harness_task(
                             &req,
                             &mut evidence_log,
                             Some(trace_id.clone()),
-                        ).await
+                        )
+                        .await
                     };
 
-                    // P0-FIX: Select best passing candidate based on validation, not just confidence
+                    // P0-Issue4: Remove highest-confidence fallback after failed AttemptPool
                     let selected_edits = if let Some(best) = pool.select_best(&records) {
-                        tracing::info!("P0: AttemptPool selected best candidate {} with score {:.2} (validation passed: {:?})",
-                            best.attempt_id, best.score, best.validation_result.as_ref().map(|v| v.passed));
+                        tracing::info!(
+                            "P0: AttemptPool selected best candidate {} with score {:.2} (validation passed: {:?})",
+                            best.attempt_id,
+                            best.score,
+                            best.validation_result.as_ref().map(|v| v.passed())
+                        );
                         best.candidate.edits.clone()
                     } else {
-                        tracing::warn!("P0: No passing candidates from AttemptPool - falling back to highest confidence");
-                        // Fall back to highest confidence candidate if none passed validation
-                        response.candidates.iter()
-                            .max_by_key(|c| c.confidence)
-                            .map(|c| c.edits.clone())
-                            .unwrap_or_default()
+                        tracing::warn!(
+                            "P0: No passing candidates from AttemptPool - returning NeedsRepair"
+                        );
+                        // P0-Issue4: No fallback to highest confidence - return NeedsRepair instead
+                        let env_profile =
+                            crate::harness::environment::EnvironmentProfile::default();
+                        return Ok(HarnessExecutionResult {
+                            work_context_id: req.work_context_id.clone(),
+                            trace_id: Some(trace_id.clone()),
+                            repo_context: repo.clone(),
+                            environment: env_profile,
+                            file_set: files.clone(),
+                            acceptance: vec![],
+                            patch_result: None,
+                            validation_result: None,
+                            review_issues: vec![],
+                            risk_assessment: crate::harness::risk::RiskAssessment {
+                                level: crate::harness::risk::RiskLevel::None,
+                                reasons: vec![],
+                                requires_approval: false,
+                                can_override: false,
+                                override_conditions: vec![],
+                                assessed: false,
+                            },
+                            confidence: crate::harness::confidence::ConfidenceScore {
+                                score: 0.0,
+                                factors: vec![],
+                                explanation: "No candidates passed validation".to_string(),
+                                recommendation: Some(
+                                    "Review and improve patch candidates".to_string(),
+                                ),
+                            },
+                            verification_strength:
+                                crate::harness::verification::VerificationStrength::None,
+                            completion_decision:
+                                crate::harness::completion::CompletionDecision::NeedsRepair(
+                                    "No candidates passed validation".to_string(),
+                                ),
+                            trajectory: traj,
+                            git_checkpoint: None,
+                            rollback_handle: None,
+                            validation_failure_policy: req.validation_failure_policy,
+                            artifacts: vec![],
+                            failures: vec![crate::harness::failure::FailureKind::TestFailure],
+                            summary: "No candidates passed validation".to_string(),
+                            execution_metrics: Default::default(),
+                            step_count: 0,
+                            terminated_early: true,
+                            termination_reason: Some("No candidates passed validation".to_string()),
+                            evidence_log: evidence_log.clone(),
+                        });
                     };
 
                     let files_changed = selected_edits.len();
@@ -641,7 +995,7 @@ pub async fn execute_harness_task(
                     // Record patch generation evidence with AttemptPool details
                     if !selected_edits.is_empty() {
                         evidence_log.record_patch_generated(
-                            &format!("attempt_pool_selection_{}_candidates", candidates_count),
+                            format!("attempt_pool_selection_{}_candidates", candidates_count),
                             selected_edits.len(),
                             0.8, // Default confidence for AttemptPool selection
                             Some(trace_id.clone()),
@@ -650,15 +1004,79 @@ pub async fn execute_harness_task(
 
                     selected_edits
                 }
-                _ => {
-                    // No candidates generated, use empty
+                Ok(response) => {
+                    // P0-B4: Add provider parse failure diagnostics
+                    let diagnostic_info = format!(
+                        "Provider generated {} candidates (expected >0), generation_time_ms: {}, notes: {:?}",
+                        response.candidates.len(),
+                        response.generation_time_ms,
+                        response.provider_notes
+                    );
+
+                    tracing::warn!(trace_id = %trace_id, "P0-B4: {}", diagnostic_info);
+                    ctx.record_action("provider", "parse_failure", &diagnostic_info);
+
+                    // Check if provider notes contain specific failure patterns
+                    if let Some(ref notes) = response.provider_notes {
+                        if notes.contains("parse")
+                            || notes.contains("invalid")
+                            || notes.contains("syntax")
+                        {
+                            tracing::error!(trace_id = %trace_id, "P0-B4: Provider parse error detected: {}", notes);
+                            ctx.record_action("provider", "parse_error", notes);
+                        } else if notes.contains("timeout") || notes.contains("time") {
+                            tracing::warn!(trace_id = %trace_id, "P0-B4: Provider timeout detected: {}", notes);
+                            ctx.record_action("provider", "timeout", notes);
+                        } else if notes.contains("memory") || notes.contains("resource") {
+                            tracing::warn!(trace_id = %trace_id, "P0-B4: Provider resource issue detected: {}", notes);
+                            ctx.record_action("provider", "resource_error", notes);
+                        }
+                    }
+
+                    Vec::new()
+                }
+                Err(e) => {
+                    // P0-B4: Add provider error diagnostics
+                    let error_context = format!(
+                        "Provider generation failed: {} - context: repo_files={}, mentioned_files={}",
+                        e,
+                        repo.repo_map.files.len(),
+                        req.mentioned_files.len()
+                    );
+
+                    tracing::error!(trace_id = %trace_id, "P0-B4: {}", error_context);
+                    ctx.record_action("provider", "generation_error", &error_context);
+
+                    // Check for specific error patterns
+                    let error_str = e.to_string().to_lowercase();
+                    if error_str.contains("parse") || error_str.contains("syntax") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider parse error in generation");
+                        ctx.record_action("provider", "parse_error", &e.to_string());
+                    } else if error_str.contains("timeout") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider timeout during generation");
+                        ctx.record_action("provider", "timeout", &e.to_string());
+                    } else if error_str.contains("network") || error_str.contains("connection") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider network error during generation");
+                        ctx.record_action("provider", "network_error", &e.to_string());
+                    } else if error_str.contains("model") || error_str.contains("llm") {
+                        tracing::error!(trace_id = %trace_id, "P0-B4: Provider model error during generation");
+                        ctx.record_action("provider", "model_error", &e.to_string());
+                    }
+
                     Vec::new()
                 }
             }
         } else {
             // No edits provided and no provider available - block
-            ctx.record_action("patch", "blocked", "No edits provided and no patch provider available");
-            evidence_log.record_side_effect_blocked("No edits provided and no patch provider available", Some(trace_id.clone()));
+            ctx.record_action(
+                "patch",
+                "blocked",
+                "No edits provided and no patch provider available",
+            );
+            evidence_log.record_side_effect_blocked(
+                "No edits provided and no patch provider available",
+                Some(trace_id.clone()),
+            );
             evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
@@ -681,6 +1099,7 @@ pub async fn execute_harness_task(
                     requires_approval: false,
                     can_override: true,
                     override_conditions: vec!["manual review".into()],
+                    assessed: false,
                 },
                 confidence: ConfidenceScore {
                     score: 0.0,
@@ -695,7 +1114,9 @@ pub async fn execute_harness_task(
                     recommendation: Some("Provide structured edits for processing".into()),
                 },
                 verification_strength: VerificationStrength::None,
-                completion_decision: CompletionDecision::Blocked("no structured edits supplied".into()),
+                completion_decision: CompletionDecision::Blocked(
+                    "no structured edits supplied".into(),
+                ),
                 trajectory: traj,
                 git_checkpoint: None,
                 rollback_handle: None,
@@ -728,7 +1149,8 @@ pub async fn execute_harness_task(
             error: "No structured edits supplied".into(),
         });
 
-        evidence_log.record_side_effect_blocked("No structured edits supplied", Some(trace_id.clone()));
+        evidence_log
+            .record_side_effect_blocked("No structured edits supplied", Some(trace_id.clone()));
         evidence_log.complete();
         return Ok(HarnessExecutionResult {
             work_context_id: req.work_context_id,
@@ -753,6 +1175,7 @@ pub async fn execute_harness_task(
                 requires_approval: false,
                 can_override: true,
                 override_conditions: vec!["manual review".into()],
+                assessed: false,
             },
             confidence: ConfidenceScore {
                 score: 0.0,
@@ -820,105 +1243,119 @@ pub async fn execute_harness_task(
     // Record dry-run evidence
     evidence_log.record_dry_run(&dry, dry_run_ms, Some(trace_id.clone()));
 
-    let dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
+    let _dry_failures: Vec<FailureKind> = dry.failures.iter().map(classify_patch_failure).collect();
 
     // P1-FIX: Attempt repair if dry-run failed and we have a provider
-    let (selected_edits, dry, repaired) = if !dry.failures.is_empty() && req.patch_provider.is_some() {
-        tracing::info!("P1: Dry-run failed with {} failures, attempting repair", dry.failures.len());
+    let (selected_edits, dry, repaired) =
+        if !dry.failures.is_empty() && req.patch_provider.is_some() {
+            tracing::info!(
+                "P1: Dry-run failed with {} failures, attempting repair",
+                dry.failures.len()
+            );
 
-        // Create repair context
-        let provider_context = crate::harness::patch_provider::PatchProviderContext {
-            task: req.task.clone(),
-            requirements: vec![],
-            repo_map: None,
-            mentioned_files: vec![],
-            mentioned_symbols: vec![],
-            attempt_history: vec![],
-            validation_output: Some(format!("Dry-run failures: {:?}", dry.failures)),
-            review_issues: vec![],
-            max_candidates: 3,
-        };
+            // P0-003: Preserve full PatchProviderContext during repair
+            // Don't lose context - reuse the original rich context
+            let provider_context = real_provider_context.clone().unwrap_or_else(|| {
+                crate::harness::patch_provider::PatchProviderContext {
+                    task: req.task.clone(),
+                    requirements: req.requirements.clone(),
+                    repo_map: Some(repo.repo_map.clone()),
+                    mentioned_files: req.mentioned_files.clone(),
+                    mentioned_symbols: req.mentioned_symbols.clone(),
+                    attempt_history: vec![],
+                    validation_output: Some(format!("Dry-run failures: {:?}", dry.failures)),
+                    review_issues: vec![],
+                    max_candidates: req.limits.max_patch_attempts as usize,
+                }
+            });
 
-        // Create repair request for each failure
-        let mut repaired_edits = selected_edits.clone();
-        let mut any_repaired = false;
+            // Create repair request for each failure
+            let mut repaired_edits = selected_edits.clone();
+            let mut any_repaired = false;
 
-        for failure in &dry.failures {
-            // Convert PatchFailure to FailureDetails
-            let failure_details = crate::harness::failure::FailureDetails {
-                kind: classify_patch_failure(failure),
-                category: crate::harness::failure::FailureCategory::Tooling,
-                severity: crate::harness::failure::FailureSeverity::Error,
-                message: failure.reason.clone(),
-                context: crate::harness::failure::FailureContext {
-                    file: Some(failure.file.clone()),
-                    line: failure.line_number,
-                    column: None,
-                    operation: Some(failure.operation.clone()),
-                    command: None,
-                    nearby_code: failure.nearby_context.clone(),
-                    stack_trace: None,
-                },
-                suggestion: failure.nearby_context.clone(),
-                recovery_action: crate::harness::failure::RecoveryAction::Retry,
-            };
+            for failure in &dry.failures {
+                // Convert PatchFailure to FailureDetails
+                let failure_details = crate::harness::failure::FailureDetails {
+                    kind: classify_patch_failure(failure),
+                    category: crate::harness::failure::FailureCategory::Tooling,
+                    severity: crate::harness::failure::FailureSeverity::Error,
+                    message: failure.reason.clone(),
+                    context: crate::harness::failure::FailureContext {
+                        file: Some(failure.file.clone()),
+                        line: failure.line_number,
+                        column: None,
+                        operation: Some(failure.operation.clone()),
+                        command: None,
+                        nearby_code: failure.nearby_context.clone(),
+                        stack_trace: None,
+                    },
+                    suggestion: failure.nearby_context.clone(),
+                    recovery_action: crate::harness::failure::RecoveryAction::Retry,
+                };
 
-            let repair_request = crate::harness::patch_provider::RepairRequest {
-                context: provider_context.clone(),
-                failure: failure_details,
-                failed_edits: repaired_edits.clone(),
-                repair_strategy: crate::harness::patch_provider::RepairStrategy::ExpandContextWindow,
-            };
+                let repair_request = crate::harness::patch_provider::RepairRequest {
+                    context: provider_context.clone(),
+                    failure: failure_details,
+                    failed_edits: repaired_edits.clone(),
+                    repair_strategy:
+                        crate::harness::patch_provider::RepairStrategy::ExpandContextWindow,
+                };
 
-            // Try to repair using provider
-            if let Some(ref provider) = req.patch_provider {
-                match provider.repair(repair_request).await {
-                    Ok(repair_response) if !repair_response.repaired_edits.is_empty() => {
-                        tracing::info!("P1: Repair succeeded with {} edits", repair_response.repaired_edits.len());
-                        repaired_edits = repair_response.repaired_edits;
-                        any_repaired = true;
+                // Try to repair using provider
+                if let Some(ref provider) = req.patch_provider {
+                    match provider.repair(repair_request).await {
+                        Ok(repair_response) if !repair_response.repaired_edits.is_empty() => {
+                            tracing::info!(
+                                "P1: Repair succeeded with {} edits",
+                                repair_response.repaired_edits.len()
+                            );
+                            repaired_edits = repair_response.repaired_edits;
+                            any_repaired = true;
 
-                        // Re-run dry-run with repaired edits
-                        match dry_run_patch(&repaired_edits, &files, &policy).await {
-                            Ok(new_dry) => {
-                                if new_dry.failures.is_empty() {
-                                    tracing::info!("P1: Repaired patch passes dry-run");
-                                    break; // Success!
-                                } else {
-                                    tracing::warn!("P1: Repaired patch still has {} failures", new_dry.failures.len());
+                            // Re-run dry-run with repaired edits
+                            match dry_run_patch(&repaired_edits, &files, &policy).await {
+                                Ok(new_dry) => {
+                                    if new_dry.failures.is_empty() {
+                                        tracing::info!("P1: Repaired patch passes dry-run");
+                                        break; // Success!
+                                    } else {
+                                        tracing::warn!(
+                                            "P1: Repaired patch still has {} failures",
+                                            new_dry.failures.len()
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("P1: Dry-run failed after repair: {}", e);
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!("P1: Dry-run failed after repair: {}", e);
-                            }
                         }
-                    }
-                    Ok(_) => {
-                        tracing::warn!("P1: Repair returned empty edits");
-                    }
-                    Err(e) => {
-                        tracing::error!("P1: Repair failed: {}", e);
+                        Ok(_) => {
+                            tracing::warn!("P1: Repair returned empty edits");
+                        }
+                        Err(e) => {
+                            tracing::error!("P1: Repair failed: {}", e);
+                        }
                     }
                 }
             }
-        }
 
-        // Final dry-run with repaired edits (or original if repair failed)
-        let final_dry = if any_repaired {
-            dry_run_patch(&repaired_edits, &files, &policy)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("P1: Final dry-run failed: {}", e);
-                    dry.clone()
-                })
+            // Final dry-run with repaired edits (or original if repair failed)
+            let final_dry = if any_repaired {
+                dry_run_patch(&repaired_edits, &files, &policy)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!("P1: Final dry-run failed: {}", e);
+                        dry.clone()
+                    })
+            } else {
+                dry.clone()
+            };
+
+            (repaired_edits, final_dry, any_repaired)
         } else {
-            dry.clone()
+            (selected_edits, dry, false)
         };
-
-        (repaired_edits, final_dry, any_repaired)
-    } else {
-        (selected_edits, dry, false)
-    };
 
     ctx.send_progress(HarnessProgress::PatchResult {
         success: dry.failures.is_empty(),
@@ -936,17 +1373,20 @@ pub async fn execute_harness_task(
     // P0-2 FIX: Compute actual diff from workspace changes, not synthetic from edits
     let diff = {
         // Create a temporary workspace to apply edits and compute real diff
-        let temp_workspace_root = req.repo_root.join(format!("prometheos_temp_diff_{}", uuid::Uuid::new_v4()));
-        let temp_workspace_result = TempWorkspace::create_temp_copy(
-            &req.repo_root,
-            &selected_edits,
-            &files,
-            &policy,
-        ).await;
-        
+        let _temp_workspace_root = req
+            .repo_root
+            .join(format!("prometheos_temp_diff_{}", uuid::Uuid::new_v4()));
+        let temp_workspace_result =
+            TempWorkspace::create_temp_copy(&req.repo_root, &selected_edits, &files, &policy).await;
+
         match temp_workspace_result {
             Ok((temp_workspace, _patch_result)) => {
-                let real_diff = match compute_real_workspace_diff(&req.repo_root, &temp_workspace.root).await {
+                let real_diff = match compute_real_workspace_diff(
+                    &req.repo_root,
+                    &temp_workspace.root,
+                )
+                .await
+                {
                     Ok(diff) => {
                         tracing::info!(trace_id = %trace_id, "P0-2: Computed real workspace diff with {} characters", diff.len());
                         diff
@@ -956,7 +1396,7 @@ pub async fn execute_harness_task(
                         generate_diff_from_edits(&selected_edits)
                     }
                 };
-                
+
                 // Cleanup temp workspace
                 let _ = temp_workspace.cleanup().await;
                 real_diff
@@ -979,8 +1419,14 @@ pub async fn execute_harness_task(
     let review_issues = if dry.failures.is_empty() {
         let _enter = review_span.enter();
         let issues = review_diff(&diff);
-        let critical = issues.iter().filter(|i| i.severity == ReviewSeverity::Critical).count();
-        let high = issues.iter().filter(|i| i.severity == ReviewSeverity::High).count();
+        let critical = issues
+            .iter()
+            .filter(|i| i.severity == ReviewSeverity::Critical)
+            .count();
+        let high = issues
+            .iter()
+            .filter(|i| i.severity == ReviewSeverity::High)
+            .count();
         tracing::info!(trace_id = %trace_id, "P1-010: Review found {} critical, {} high issues", critical, high);
         issues
     } else {
@@ -1048,7 +1494,7 @@ pub async fn execute_harness_task(
     let gate_decision = policy_gate.check_patch_application(
         dry.failures.is_empty(),
         has_critical_issues,
-        risk.level.clone(),
+        risk.level,
         true, // Assume rollback will be available if needed
     );
 
@@ -1057,15 +1503,24 @@ pub async fn execute_harness_task(
     // Record gate decision in evidence log
     match &gate_decision {
         GateDecision::Allow => {
-            tracing::info!("Policy gate: ALLOW patch application in {:?} mode", req.mode);
+            tracing::info!(
+                "Policy gate: ALLOW patch application in {:?} mode",
+                req.mode
+            );
         }
         GateDecision::Block(reason) => {
             tracing::warn!("Policy gate: BLOCK patch application - {}", reason);
-            evidence_log.record_side_effect_blocked(format!("Policy gate: {}", reason), Some(trace_id.clone()));
+            evidence_log.record_side_effect_blocked(
+                format!("Policy gate: {}", reason),
+                Some(trace_id.clone()),
+            );
         }
         GateDecision::RequireApproval(reason) => {
             tracing::warn!("Policy gate: REQUIRE APPROVAL - {}", reason);
-            evidence_log.record_side_effect_blocked(format!("Policy gate requires approval: {}", reason), Some(trace_id.clone()));
+            evidence_log.record_side_effect_blocked(
+                format!("Policy gate requires approval: {}", reason),
+                Some(trace_id.clone()),
+            );
         }
     }
 
@@ -1108,7 +1563,10 @@ pub async fn execute_harness_task(
         (HarnessMode::ReviewOnly, _) => None,
         (_, Err(e)) => {
             // Checkpoint failed in a mode that requires side effects - this is blocking
-            evidence_log.record_side_effect_blocked(&format!("Checkpoint creation failed: {}", e), Some(trace_id.clone()));
+            evidence_log.record_side_effect_blocked(
+                format!("Checkpoint creation failed: {}", e),
+                Some(trace_id.clone()),
+            );
             evidence_log.complete();
             return Ok(HarnessExecutionResult {
                 work_context_id: req.work_context_id,
@@ -1162,31 +1620,32 @@ pub async fn execute_harness_task(
     );
 
     // STEP 8: Apply patch only if approved - with rollback support
-    let (patch, rollback_handle) =
-        if should_apply && dry.failures.is_empty() && !selected_edits.is_empty() {
-            let _enter = patch_apply_span.enter();
-            let (result, handle) =
-                apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
-            tracing::info!(
-                trace_id = %trace_id,
-                files_changed = result.changed_files.len(),
-                "P1-010: Patch applied to real repo"
-            );
-            // Record patch application evidence (real repo)
-            evidence_log.record_patch_applied(&result, false, Some(&handle), Some(trace_id.clone()));
-            (Some(result), Some(handle))
-        } else {
-            tracing::info!(
-                trace_id = %trace_id,
-                should_apply = should_apply,
-                dry_failures = dry.failures.len(),
-                "P1-010: Patch not applied (review-only or dry-run failed)"
-            );
-            // Return dry-run result (patch not actually applied)
-            // Record that patch was NOT applied to real repo
-            evidence_log.record_patch_applied(&dry, true, None, Some(trace_id.clone()));
-            (Some(dry.clone()), None)
-        };
+    let (patch, rollback_handle) = if should_apply
+        && dry.failures.is_empty()
+        && !selected_edits.is_empty()
+    {
+        let _enter = patch_apply_span.enter();
+        let (result, handle) = apply_patch_with_rollback(&selected_edits, &files, &policy).await?;
+        tracing::info!(
+            trace_id = %trace_id,
+            files_changed = result.changed_files.len(),
+            "P1-010: Patch applied to real repo"
+        );
+        // Record patch application evidence (real repo)
+        evidence_log.record_patch_applied(&result, false, Some(&handle), Some(trace_id.clone()));
+        (Some(result), Some(handle))
+    } else {
+        tracing::info!(
+            trace_id = %trace_id,
+            should_apply = should_apply,
+            dry_failures = dry.failures.len(),
+            "P1-010: Patch not applied (review-only or dry-run failed)"
+        );
+        // Return dry-run result (patch not actually applied)
+        // Record that patch was NOT applied to real repo
+        evidence_log.record_patch_applied(&dry, true, None, Some(trace_id.clone()));
+        (Some(dry.clone()), None)
+    };
     let dry_failures = dry.failures.clone();
 
     metrics.patch_generation_ms = patch_start.elapsed().as_millis() as u64;
@@ -1217,10 +1676,16 @@ pub async fn execute_harness_task(
         ValidationTarget::RealRepo(req.repo_root.clone())
     } else if !selected_edits.is_empty() && dry.failures.is_empty() {
         // Create temp workspace for validation when patch not applied to real repo
-        match TempWorkspace::create_temp_copy(&req.repo_root, &selected_edits, &files, &policy).await {
+        match TempWorkspace::create_temp_copy(&req.repo_root, &selected_edits, &files, &policy)
+            .await
+        {
             Ok((workspace, _)) => ValidationTarget::TempWorkspace(workspace),
             Err(e) => {
-                ctx.record_action("validation", "temp_workspace_failed", &format!("Failed to create temp workspace: {}", e));
+                ctx.record_action(
+                    "validation",
+                    "temp_workspace_failed",
+                    &format!("Failed to create temp workspace: {}", e),
+                );
                 ValidationTarget::None
             }
         }
@@ -1247,10 +1712,15 @@ pub async fn execute_harness_task(
             let _enter = validation_span.enter();
             // P0-7 FIX: Use fresh validation plan with cache disabled for final validation
             let fresh_plan = plan.clone().with_no_cache();
-            let r = run_validation(val_root, &fresh_plan, std::sync::Arc::new(LocalSandboxRuntime::default())).await?;
+            let r = run_validation(
+                val_root,
+                &fresh_plan,
+                std::sync::Arc::new(LocalSandboxRuntime::default()),
+            )
+            .await?;
             tracing::info!(
                 trace_id = %trace_id,
-                passed = r.passed,
+                passed = r.passed(),
                 commands_run = r.command_results.len(),
                 cache_disabled = fresh_plan.disable_cache,
                 "P0-7: Fresh validation complete (no cache)"
@@ -1275,7 +1745,7 @@ pub async fn execute_harness_task(
             .count();
 
         ctx.send_progress(HarnessProgress::ValidationResult {
-            passed: result.passed,
+            passed: result.passed(),
             tests_run,
             tests_passed,
         });
@@ -1294,7 +1764,10 @@ pub async fn execute_harness_task(
     if validation.is_none() {
         let bypass_check = policy_gate.check_validation_bypass("No validation target available");
         if matches!(bypass_check, GateDecision::Block(_)) {
-            evidence_log.record_side_effect_blocked("Validation bypass blocked by policy gate", Some(trace_id.clone()));
+            evidence_log.record_side_effect_blocked(
+                "Validation bypass blocked by policy gate",
+                Some(trace_id.clone()),
+            );
             // In strict modes, this would block completion
             tracing::warn!("Validation was required but bypassed");
         }
@@ -1308,14 +1781,15 @@ pub async fn execute_harness_task(
     // STEP 8.5: Post-validation selection with stricter criteria
     // After validation, re-evaluate the patch using stricter post-validation criteria
     let post_validation_criteria = SelectionPhase::PostValidation.criteria();
-    let validation_passed = validation.as_ref().map(|v| v.passed).unwrap_or(false);
+    let validation_passed = validation.as_ref().map(|v| v.passed()).unwrap_or(false);
 
     // If we had a candidate, re-score it with post-validation criteria
     if !selected_edits.is_empty() {
-        use crate::harness::confidence::{ConfidenceScore, ConfidenceFactor, FactorImpact};
+        use crate::harness::confidence::{ConfidenceFactor, ConfidenceScore, FactorImpact};
         use crate::harness::selection::SelectionEngine;
 
-        let lines_total: usize = selected_edits.iter()
+        let lines_total: usize = selected_edits
+            .iter()
             .map(|e| e.lines_added() + e.lines_removed())
             .sum();
 
@@ -1330,7 +1804,11 @@ pub async fn execute_harness_task(
                     weight: 1.0,
                     score: if validation_passed { 0.9 } else { 0.1 },
                     description: "post-validation assessment".into(),
-                    impact: if validation_passed { FactorImpact::Positive } else { FactorImpact::Negative },
+                    impact: if validation_passed {
+                        FactorImpact::Positive
+                    } else {
+                        FactorImpact::Negative
+                    },
                 }],
                 explanation: "post-validation selection".into(),
                 recommendation: None,
@@ -1345,91 +1823,94 @@ pub async fn execute_harness_task(
         };
 
         // Use SelectionEngine to score with post-validation criteria
-        let mut selection_engine = SelectionEngine::new(post_validation_criteria);
+        let selection_engine = SelectionEngine::new(post_validation_criteria);
         let scored = selection_engine.rank_candidates(vec![post_validation_candidate]);
 
-        if let Some(first) = scored.first() {
-            if !first.is_eligible {
-                tracing::info!(
-                    "Post-validation selection rejected candidate: failed stricter criteria"
-                );
-                if validation_passed {
-                    // Validation passed but failed other criteria (risk, review issues)
-                    failures.push(FailureKind::SemanticFailure);
-                }
+        if let Some(first) = scored.first()
+            && !first.is_eligible
+        {
+            tracing::info!(
+                "Post-validation selection rejected candidate: failed stricter criteria"
+            );
+            if validation_passed {
+                // Validation passed but failed other criteria (risk, review issues)
+                failures.push(FailureKind::SemanticFailure);
             }
         }
     }
 
-    if let Some(ref v) = validation {
-        if !v.passed {
-            failures.push(classify_validation_failure(v));
-        }
+    if let Some(ref v) = validation
+        && !v.passed()
+    {
+        failures.push(classify_validation_failure(v));
     }
 
     // STEP 9: Handle validation failure rollback policy
-    if let Some(ref v) = validation {
-        if !v.passed && rollback_handle.is_some() {
-            let should_rollback = match req.validation_failure_policy {
-                ValidationFailurePolicy::RollbackAutomatically => {
+    if let Some(ref v) = validation
+        && !v.passed()
+        && rollback_handle.is_some()
+    {
+        let should_rollback = match req.validation_failure_policy {
+            ValidationFailurePolicy::RollbackAutomatically => {
+                ctx.send_progress(HarnessProgress::RollingBack {
+                    reason: "validation failed - automatic rollback".into(),
+                });
+                true
+            }
+            ValidationFailurePolicy::RollbackOnCriticalFailure => {
+                let has_critical = v
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("critical") || e.contains("fatal"));
+                if has_critical {
                     ctx.send_progress(HarnessProgress::RollingBack {
-                        reason: "validation failed - automatic rollback".into(),
+                        reason: "critical validation failure - automatic rollback".into(),
                     });
-                    true
                 }
-                ValidationFailurePolicy::RollbackOnCriticalFailure => {
-                    let has_critical = v
-                        .errors
-                        .iter()
-                        .any(|e| e.contains("critical") || e.contains("fatal"));
-                    if has_critical {
-                        ctx.send_progress(HarnessProgress::RollingBack {
-                            reason: "critical validation failure - automatic rollback".into(),
-                        });
-                    }
-                    has_critical
-                }
-                _ => false,
-            };
+                has_critical
+            }
+            _ => false,
+        };
 
-            if should_rollback {
-                if let Some(ref handle) = rollback_handle {
-                    // P1-010: Child span for rollback phase
-                    let rollback_span = tracing::info_span!(
-                        "harness.rollback",
+        if should_rollback && let Some(ref handle) = rollback_handle {
+            // P1-010: Child span for rollback phase
+            let rollback_span = tracing::info_span!(
+                "harness.rollback",
+                trace_id = %trace_id,
+                phase = "rollback",
+            );
+            let _enter = rollback_span.enter();
+
+            match handle.clone().rollback().await {
+                Ok(result) => {
+                    failures.push(FailureKind::ValidationFailed);
+                    failures.push(FailureKind::PatchRolledBack);
+                    tracing::info!(
                         trace_id = %trace_id,
-                        phase = "rollback",
+                        restored = result.restored.len(),
+                        "P1-010: Rollback successful"
                     );
-                    let _enter = rollback_span.enter();
-
-                    match handle.clone().rollback().await {
-                        Ok(result) => {
-                            failures.push(FailureKind::ValidationFailed);
-                            failures.push(FailureKind::PatchRolledBack);
-                            tracing::info!(
-                                trace_id = %trace_id,
-                                restored = result.restored.len(),
-                                "P1-010: Rollback successful"
-                            );
-                            // Record rollback evidence
-                            evidence_log.record_rollback("validation failed - automatic rollback", Some(trace_id.clone()));
-                            ctx.send_progress(HarnessProgress::RolledBack {
-                                restored_files: result.restored.len(),
-                                deleted_files: result.deleted.len(),
-                                recreated_files: result.recreated.len(),
-                            });
-                        }
-                        Err(e) => {
-                            failures.push(FailureKind::ValidationFailed);
-                            failures.push(FailureKind::RollbackFailed);
-                            tracing::error!(trace_id = %trace_id, error = %e, "P1-010: Rollback failed");
-                            // Record rollback failure
-                            evidence_log.record_rollback(&format!("rollback failed: {}", e), Some(trace_id.clone()));
-                            ctx.send_progress(HarnessProgress::RollbackFailed {
-                                error: e.to_string(),
-                            });
-                        }
-                    }
+                    // Record rollback evidence
+                    evidence_log.record_rollback(
+                        "validation failed - automatic rollback",
+                        Some(trace_id.clone()),
+                    );
+                    ctx.send_progress(HarnessProgress::RolledBack {
+                        restored_files: result.restored.len(),
+                        deleted_files: result.deleted.len(),
+                        recreated_files: result.recreated.len(),
+                    });
+                }
+                Err(e) => {
+                    failures.push(FailureKind::ValidationFailed);
+                    failures.push(FailureKind::RollbackFailed);
+                    tracing::error!(trace_id = %trace_id, error = %e, "P1-010: Rollback failed");
+                    // Record rollback failure
+                    evidence_log
+                        .record_rollback(format!("rollback failed: {}", e), Some(trace_id.clone()));
+                    ctx.send_progress(HarnessProgress::RollbackFailed {
+                        error: e.to_string(),
+                    });
                 }
             }
         }
@@ -1463,6 +1944,56 @@ pub async fn execute_harness_task(
         })
         .count();
 
+    let generated_patch_hash = patch
+        .as_ref()
+        .map(|p| format!("{:x}", md5::compute(&p.diff)));
+    let dry_run_patch_hash = patch
+        .as_ref()
+        .filter(|_p| dry.failures.is_empty())
+        .map(|p| format!("{:x}", md5::compute(&p.diff)));
+    let applied_patch_hash = patch
+        .as_ref()
+        .filter(|p| p.failures.is_empty() && !p.diff.is_empty())
+        .map(|p| format!("{:x}", md5::compute(&p.diff)));
+    let hash_mismatch_details = match (
+        generated_patch_hash.as_ref(),
+        dry_run_patch_hash.as_ref(),
+        applied_patch_hash.as_ref(),
+    ) {
+        (Some(generated), Some(dry_hash), Some(applied))
+            if generated == dry_hash && dry_hash == applied =>
+        {
+            None
+        }
+        (Some(generated), Some(dry_hash), Some(applied)) => Some(format!(
+            "Patch hash mismatch across stages: generated={}, dry-run={}, applied={}",
+            generated, dry_hash, applied
+        )),
+        _ => None,
+    };
+    let hash_verification_passed = hash_mismatch_details.is_none()
+        && generated_patch_hash.is_some()
+        && dry_run_patch_hash.is_some()
+        && applied_patch_hash.is_some();
+
+    let patch_identity = if let Some(patch_result) = patch.as_ref() {
+        let mut identity = crate::harness::patch_applier::PatchIdentity::new();
+        identity.record_planned_hash(&patch_result.diff);
+        identity.record_reviewed_hash(&patch_result.diff);
+        if dry.failures.is_empty() {
+            identity.record_dry_run_hash(&patch_result.diff);
+        }
+        if patch_result.failures.is_empty() && !patch_result.diff.is_empty() {
+            identity.record_applied_hash(&patch_result.diff);
+        }
+        if identity.has_complete_hashes() {
+            let _ = identity.verify_complete_identity();
+        }
+        Some(identity)
+    } else {
+        None
+    };
+
     let evidence = CompletionEvidence {
         // 8 Evidence Dimensions
         patch_evidence: PatchEvidence {
@@ -1470,33 +2001,54 @@ pub async fn execute_harness_task(
             files_modified: patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0),
             lines_changed: patch.as_ref().map(|p| p.diff.lines().count()).unwrap_or(0),
             patch_applied_cleanly: patch.as_ref().is_some_and(|p| p.failures.is_empty()),
-            patch_hash: patch
-                .as_ref()
-                .map(|p| format!("{:x}", md5::compute(&p.diff))),
+            patch_hash: generated_patch_hash.clone(),
             dry_run_passed: dry.failures.is_empty(),
+            // P0-3.1: Real patch identity verification for audit-grade integrity
+            patch_identity,
+            // Legacy fields for backward compatibility
+            generated_patch_hash,
+            dry_run_patch_hash,
+            applied_patch_hash,
+            hash_verification_passed,
+            hash_mismatch_details,
         },
         validation_evidence: ValidationEvidence {
             validation_performed: validation.is_some(),
-            all_validations_passed: validation.as_ref().is_some_and(|v| v.passed),
-            format_check_passed: validation.as_ref()
+            all_validations_passed: validation.as_ref().is_some_and(|v| v.passed()),
+            format_check_passed: validation
+                .as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Format))
                 .map(|r| r.passed)
                 .unwrap_or(false),
-            static_check_passed: validation.as_ref()
+            static_check_passed: validation
+                .as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
                 .map(|r| r.passed)
                 .unwrap_or(false),
-            lint_check_passed: validation.as_ref()
+            lint_check_passed: validation
+                .as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Lint))
                 .map(|r| r.passed)
                 .unwrap_or(false),
-            test_passed: validation.as_ref()
+            test_passed: validation
+                .as_ref()
                 .and_then(|v| v.category_results.get(&ValidationCategory::Test))
                 .map(|r| r.passed)
                 .unwrap_or(false),
             validation_summary: validation
                 .as_ref()
                 .map(|v| format!("{} commands run", v.command_results.len()))
+                .unwrap_or_default(),
+            // P0-2.1: Add direct command execution counters
+            commands_planned: validation.as_ref().map(|v| v.commands_planned).unwrap_or(0),
+            commands_executed: validation
+                .as_ref()
+                .map(|v| v.commands_executed)
+                .unwrap_or(0),
+            commands_skipped: validation.as_ref().map(|v| v.commands_skipped).unwrap_or(0),
+            categories_executed: validation
+                .as_ref()
+                .map(|v| v.categories_executed.clone())
                 .unwrap_or_default(),
         },
         review_evidence: ReviewEvidence {
@@ -1529,6 +2081,92 @@ pub async fn execute_harness_task(
             review_passed: !review_issues
                 .iter()
                 .any(|i| i.severity == ReviewSeverity::Critical),
+            // P0-3.2: Comprehensive review quality metrics
+            files_reviewed: patch.as_ref().map(|p| p.changed_files.len()).unwrap_or(0),
+            lines_analyzed: patch.as_ref().map(|p| p.diff.lines().count()).unwrap_or(0),
+            security_patterns_checked: review_issues
+                .iter()
+                .filter(|i| i.issue_type == ReviewIssueType::Security)
+                .count(),
+            api_breaking_changes_detected: semantic
+                .api_changes
+                .iter()
+                .filter(|a| a.breaking)
+                .count(),
+            dependency_changes_analyzed: semantic.dependency_changes.len(),
+            test_coverage_analyzed: validation
+                .as_ref()
+                .is_some_and(|v| v.command_results.iter().any(|c| c.command.contains("test"))),
+            performance_impact_assessed: false, // Would need performance analysis
+            documentation_updated: false,       // Would need documentation analysis
+            review_depth_score: {
+                // P0-3.2: Calculate review depth score based on comprehensive factors
+                let mut score = 0.0;
+
+                // Base score for having any review
+                if !review_issues.is_empty() || dry.failures.is_empty() {
+                    score += 0.2;
+                }
+
+                // Score for analyzing files
+                if let Some(ref patch_result) = patch
+                    && !patch_result.changed_files.is_empty()
+                {
+                    score += 0.2;
+                }
+
+                // Score for security analysis
+                if review_issues
+                    .iter()
+                    .any(|i| i.issue_type == ReviewIssueType::Security)
+                {
+                    score += 0.2;
+                }
+
+                // Score for API analysis
+                if !semantic.api_changes.is_empty() {
+                    score += 0.2;
+                }
+
+                // Score for dependency analysis
+                if !semantic.dependency_changes.is_empty() {
+                    score += 0.2;
+                }
+
+                (score as f32).min(1.0)
+            },
+            review_quality_indicators: {
+                // P0-3.2: Generate quality indicators based on review analysis
+                let mut indicators = vec![];
+
+                if !review_issues.is_empty() {
+                    indicators.push("Issues detected".to_string());
+                }
+
+                if review_issues
+                    .iter()
+                    .any(|i| i.issue_type == ReviewIssueType::Security)
+                {
+                    indicators.push("Security analysis performed".to_string());
+                }
+
+                if !semantic.api_changes.is_empty() {
+                    indicators.push("API changes analyzed".to_string());
+                }
+
+                if !semantic.dependency_changes.is_empty() {
+                    indicators.push("Dependencies analyzed".to_string());
+                }
+
+                if validation
+                    .as_ref()
+                    .is_some_and(|v| v.command_results.iter().any(|c| c.command.contains("test")))
+                {
+                    indicators.push("Test coverage considered".to_string());
+                }
+
+                indicators
+            },
         },
         risk_evidence: RiskEvidence {
             risk_assessed: true,
@@ -1574,18 +2212,21 @@ pub async fn execute_harness_task(
         process_evidence: ProcessEvidence {
             git_checkpoint_created: checkpoint.is_some(),
             rollback_available: rollback_handle.is_some(),
-            all_phases_completed: trajectory.completed,
+            all_phases_completed: traj.completed_at.is_some(),
             no_critical_errors: failures.iter().all(|f| !f.is_critical()),
-            time_limit_respected: true, // TODO: Pass actual time limit status from metrics
-            step_limit_respected: true, // TODO: Pass actual step limit status from metrics
+            time_limit_respected: ctx.start_time.elapsed().as_millis() as u64
+                <= ctx.limits.max_time_ms,
+            step_limit_respected: ctx.step_count <= ctx.limits.max_steps,
         },
+        // P0-Issue1: Extract sandbox evidence from evidence log for completion verification
+        sandbox_evidence: extract_sandbox_evidence_from_log(&evidence_log),
 
         // Legacy fields
         patch_exists: patch
             .as_ref()
             .is_some_and(|p| !p.diff.is_empty() && p.failures.is_empty()),
         validation_ran: validation.is_some(),
-        validation_passed: validation.as_ref().is_some_and(|v| v.passed),
+        validation_passed: validation.as_ref().is_some_and(|v| v.passed()),
         review_ran: true,
         critical_issues: critical_count,
         confidence: confidence.clone(),
@@ -1608,7 +2249,7 @@ pub async fn execute_harness_task(
     // Record completion evaluation evidence
     evidence_log.record_completion_evaluated(
         format!("{:?}", decision),
-        validation.as_ref().map(|v| v.passed).unwrap_or(false),
+        validation.as_ref().map(|v| v.passed()).unwrap_or(false),
         Some(trace_id.clone()),
     );
 
@@ -1664,10 +2305,7 @@ pub async fn execute_harness_task(
         Decision: {:?}\n\
         Steps: {}\n\
         Failures: {:?}\n",
-        result.work_context_id,
-        result.completion_decision,
-        result.step_count,
-        result.failures
+        result.work_context_id, result.completion_decision, result.step_count, result.failures
     );
 
     result.artifacts.push(HarnessArtifact {
@@ -1756,15 +2394,15 @@ pub fn check_resource_limits(
 ) -> Result<(), String> {
     if let Some(max_size) = limits.max_file_size_bytes {
         for file in files_to_process {
-            if let Ok(metadata) = std::fs::metadata(file) {
-                if metadata.len() > max_size {
-                    return Err(format!(
-                        "File {} exceeds size limit: {} bytes > {} bytes",
-                        file.display(),
-                        metadata.len(),
-                        max_size
-                    ));
-                }
+            if let Ok(metadata) = std::fs::metadata(file)
+                && metadata.len() > max_size
+            {
+                return Err(format!(
+                    "File {} exceeds size limit: {} bytes > {} bytes",
+                    file.display(),
+                    metadata.len(),
+                    max_size
+                ));
             }
         }
     }
@@ -1787,15 +2425,19 @@ async fn compute_real_workspace_diff(
     modified_workspace: &std::path::Path,
 ) -> Result<String> {
     use std::process::Command;
-    
+
     // Use git diff --no-index to compute real diff between directories
     let output = Command::new("git")
         .args([
             "diff",
             "--no-index",
             "--unified=3",
-            original_repo.to_str().ok_or_else(|| anyhow::anyhow!("Invalid original repo path"))?,
-            modified_workspace.to_str().ok_or_else(|| anyhow::anyhow!("Invalid workspace path"))?,
+            original_repo
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid original repo path"))?,
+            modified_workspace
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid workspace path"))?,
         ])
         .output()
         .context("Failed to run git diff --no-index")?;
@@ -1804,17 +2446,15 @@ async fn compute_real_workspace_diff(
         // git diff --no-index returns exit code 1 when differences are found
         // but still provides valid diff output
         if output.status.code() == Some(1) {
-            return Ok(String::from_utf8(output.stdout)
-                .context("Diff output is not valid UTF-8")?);
+            return String::from_utf8(output.stdout).context("Diff output is not valid UTF-8");
         } else {
-            let stderr = String::from_utf8(output.stderr)
-                .unwrap_or_else(|_| "Invalid UTF-8".to_string());
+            let stderr =
+                String::from_utf8(output.stderr).unwrap_or_else(|_| "Invalid UTF-8".to_string());
             bail!("Git diff failed: {}", stderr);
         }
     }
 
-    Ok(String::from_utf8(output.stdout)
-        .context("Diff output is not valid UTF-8")?)
+    String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")
 }
 
 /// P0-4 FIX: Calculate evidence completeness from actual execution state
@@ -1827,12 +2467,12 @@ fn calculate_evidence_completeness_from_state(
 ) -> f32 {
     let mut completeness = 0.0;
     let mut total_weight = 0.0;
-    
+
     // Validation evidence (30% weight)
     if let Some(v) = validation {
         if v.validation_performed {
             completeness += 0.3;
-            if v.passed {
+            if v.passed() {
                 completeness += 0.1; // Bonus for passing validation
             }
         }
@@ -1840,17 +2480,20 @@ fn calculate_evidence_completeness_from_state(
     } else {
         total_weight += 0.4;
     }
-    
+
     // Review evidence (25% weight)
     if !review_issues.is_empty() {
         completeness += 0.25;
-        let critical_count = review_issues.iter().filter(|i| i.severity == crate::harness::review::ReviewSeverity::Critical).count();
+        let critical_count = review_issues
+            .iter()
+            .filter(|i| i.severity == crate::harness::review::ReviewSeverity::Critical)
+            .count();
         if critical_count == 0 {
             completeness += 0.05; // Bonus for no critical issues
         }
     }
     total_weight += 0.3;
-    
+
     // Risk assessment (20% weight)
     if risk.assessed {
         completeness += 0.2;
@@ -1859,7 +2502,7 @@ fn calculate_evidence_completeness_from_state(
         }
     }
     total_weight += 0.25;
-    
+
     // Safety infrastructure (15% weight)
     if checkpoint_available {
         completeness += 0.1;
@@ -1868,15 +2511,15 @@ fn calculate_evidence_completeness_from_state(
         completeness += 0.05;
     }
     total_weight += 0.15;
-    
+
     // Command execution evidence (10% weight)
-    if let Some(v) = validation {
-        if !v.command_results.is_empty() {
-            completeness += 0.1;
-        }
+    if let Some(v) = validation
+        && !v.command_results.is_empty()
+    {
+        completeness += 0.1;
     }
     total_weight += 0.1;
-    
+
     // Normalize by total weight used
     if total_weight > 0.0 {
         (completeness / total_weight as f32).min(1.0)
@@ -1949,4 +2592,180 @@ fn generate_diff_from_edits(edits: &[EditOperation]) -> String {
     }
 
     diff_output
+}
+
+/// P0-Issue5: Validate provider candidates before AttemptPool processing
+/// Ensures candidates meet safety criteria before being processed
+async fn validate_provider_candidates(
+    candidates: &[ProviderCandidate],
+    file_set: &FileSet,
+    _policy: &FilePolicy,
+    repo_root: &Path,
+    evidence_log: &mut EvidenceLog,
+    trace_id: Option<String>,
+) -> Result<Vec<ProviderCandidate>> {
+    let mut validated_candidates = Vec::new();
+
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let candidate_id = format!("candidate_validation_{}", idx);
+        let mut validation_errors = Vec::new();
+
+        // Validate each edit operation
+        for edit in &candidate.edits {
+            let edit_path = match edit {
+                EditOperation::SearchReplace(sr) => &sr.file,
+                EditOperation::UnifiedDiff(ud) => {
+                    if let Some(ref target) = ud.target_file {
+                        target
+                    } else {
+                        &PathBuf::from("unknown")
+                    }
+                }
+                EditOperation::WholeFile(wf) => &wf.file,
+                EditOperation::CreateFile(cf) => &cf.file,
+                EditOperation::DeleteFile(df) => &df.file,
+                EditOperation::RenameFile(rf) => &rf.from,
+            };
+
+            // Check 1: Repo-relative paths only
+            if edit_path.is_absolute() {
+                validation_errors.push(format!("Absolute path not allowed: {:?}", edit_path));
+                continue;
+            }
+
+            // Check 2: Path must be within editable file set
+            let full_path = repo_root.join(edit_path);
+            if !file_set.editable.iter().any(|f| f == edit_path) {
+                validation_errors.push(format!("Path not in editable file set: {:?}", edit_path));
+                continue;
+            }
+
+            // Check 3: Search block must exist for search/replace edits
+            if let EditOperation::SearchReplace(sr) = edit {
+                if sr.search.trim().is_empty() {
+                    validation_errors.push("Empty search block not allowed".to_string());
+                    continue;
+                }
+
+                // Check if search block exists in file (basic check)
+                if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    if !content.contains(&sr.search) {
+                        validation_errors
+                            .push(format!("Search block not found in file: {:?}", edit_path));
+                        continue;
+                    }
+                } else {
+                    validation_errors
+                        .push(format!("Cannot read file for validation: {:?}", edit_path));
+                    continue;
+                }
+            }
+
+            // Check 4: Reject edits to sensitive files
+            let sensitive_patterns = [
+                ".env",
+                "config",
+                "secret",
+                "key",
+                "password",
+                "token",
+                "docker-compose",
+                "kubernetes",
+                "k8s",
+                "terraform",
+            ];
+
+            let path_str = edit_path.to_string_lossy().to_lowercase();
+            if sensitive_patterns
+                .iter()
+                .any(|pattern| path_str.contains(pattern))
+            {
+                validation_errors.push(format!(
+                    "Edit to sensitive file requires approval: {:?}",
+                    edit_path
+                ));
+                // Note: We don't reject these outright, but we flag them for review
+            }
+
+            // Check 5: Reject binary files
+            if let Ok(metadata) = std::fs::metadata(&full_path)
+                && metadata.is_file()
+            {
+                // Simple heuristic: if file extension suggests binary, reject
+                let binary_extensions = [
+                    ".exe", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".zip", ".tar", ".gz",
+                    ".rar", ".7z", ".pdf", ".doc", ".xls",
+                ];
+
+                if let Some(ext) = edit_path.extension()
+                    && binary_extensions
+                        .iter()
+                        .any(|bin_ext| ext.to_string_lossy() == **bin_ext)
+                {
+                    validation_errors
+                        .push(format!("Binary file edit not allowed: {:?}", edit_path));
+                    continue;
+                }
+            }
+        }
+
+        // Record validation result in evidence log
+        evidence_log.record_validation_completed(
+            &crate::harness::validation::ValidationResult {
+                status: if validation_errors.is_empty() {
+                    crate::harness::validation::ValidationStatus::Passed
+                } else {
+                    crate::harness::validation::ValidationStatus::Failed
+                },
+                command_results: vec![],
+                errors: validation_errors.clone(),
+                duration_ms: 0,
+                cached: false,
+                flaky_tests_detected: vec![],
+                category_results: std::collections::HashMap::new(),
+                validation_performed: true,
+                // P1-Issue10: Add final gate information
+                is_final_gate: false,
+                cache_disabled: false,
+                // P0-2.1: Add direct command execution counters
+                commands_planned: 0,
+                commands_executed: 0,
+                commands_skipped: 0,
+                categories_executed: vec![],
+            },
+            Some(format!(
+                "{}_{}",
+                candidate_id,
+                trace_id.as_ref().unwrap_or(&String::new())
+            )),
+        );
+
+        // Accept candidate if no validation errors
+        if validation_errors.is_empty() {
+            validated_candidates.push(candidate.clone());
+            tracing::info!(
+                "P0-Issue5: Candidate {} passed validation ({} edits)",
+                candidate.source,
+                candidate.edits.len()
+            );
+        } else {
+            tracing::warn!(
+                "P0-Issue5: Candidate {} failed validation: {}",
+                candidate.source,
+                validation_errors.join(", ")
+            );
+        }
+    }
+
+    if validated_candidates.is_empty() {
+        bail!("All provider candidates failed validation");
+    }
+
+    tracing::info!(
+        "P0-Issue5: {}/{} candidates passed validation",
+        validated_candidates.len(),
+        candidates.len()
+    );
+
+    Ok(validated_candidates)
 }

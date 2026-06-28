@@ -96,16 +96,12 @@ fn test_resource_limits_custom() {
 #[test]
 fn test_scaling_engine_new() {
     let config = ScalingConfig::default();
-    let engine = ScalingEngine::new(config);
-    // Engine created successfully
-    assert!(true);
+    let _engine = ScalingEngine::new(config);
 }
 
 #[test]
 fn test_scaling_engine_with_defaults() {
-    let engine = ScalingEngine::with_defaults();
-    // Engine created with default config
-    assert!(true);
+    let _engine = ScalingEngine::with_defaults();
 }
 
 #[test]
@@ -190,7 +186,10 @@ fn test_attempt_priority_variants() {
     assert!(matches!(AttemptPriority::Low, AttemptPriority::Low));
     assert!(matches!(AttemptPriority::Normal, AttemptPriority::Normal));
     assert!(matches!(AttemptPriority::High, AttemptPriority::High));
-    assert!(matches!(AttemptPriority::Critical, AttemptPriority::Critical));
+    assert!(matches!(
+        AttemptPriority::Critical,
+        AttemptPriority::Critical
+    ));
 }
 
 #[test]

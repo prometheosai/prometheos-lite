@@ -2,7 +2,6 @@
 //!
 //! Tests for enhanced evaluation with structural validation and semantic evaluation.
 
-use chrono::Utc;
 use prometheos_lite::work::evaluation::EvaluationDimensions;
 use prometheos_lite::work::types::{WorkContext, WorkDomain};
 use prometheos_lite::work::{Artifact, ArtifactKind, EvaluationEngine};
@@ -155,7 +154,7 @@ fn test_evaluate_artifact_completeness_no_artifacts() {
 
 #[test]
 fn test_evaluation_engine_default() {
-    let engine = EvaluationEngine::default();
+    let _engine = EvaluationEngine::default();
     // Should create without errors
 }
 

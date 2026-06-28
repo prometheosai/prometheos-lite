@@ -3,14 +3,20 @@ pub mod adversarial_validation;
 pub mod artifacts;
 pub mod attempt_pool;
 pub mod benchmark;
+pub mod ci_enforcement;
+pub mod compiler_diagnostics;
 pub mod completion;
 pub mod confidence;
+pub mod context_budget;
+pub mod contract;
 pub mod edit_protocol;
 pub mod environment;
 pub mod evidence;
+pub mod evidence_persistence;
 pub mod execution_loop;
 pub mod failure;
 pub mod file_control;
+pub mod file_impact;
 pub mod git_checkpoint;
 pub mod golden_paths;
 pub mod knowledge_cache;
@@ -39,8 +45,8 @@ pub mod trajectory;
 pub mod trust_report;
 pub mod validation;
 pub mod verification;
-pub mod workspace;
 pub mod work_integration;
+pub mod workspace;
 
 pub use acceptance::{
     AcceptanceCompiler, AcceptanceCriterion, CompiledAcceptanceCriteria, CriterionPriority,
@@ -60,16 +66,21 @@ pub use benchmark::{
     BenchmarkTest, ComparisonResult, MetricResult, MetricType, TestType, create_benchmark_runner,
     format_anti_overfitting_report, format_benchmark_result, format_comparison,
 };
+pub use ci_enforcement::{
+    AntiPlaceholderCI, CIConfig, CIEnforcementResult, CustomPattern, PlaceholderPattern,
+    PlaceholderViolation, Severity,
+};
 pub use completion::{
-    CompletionDecision, CompletionEvaluator, CompletionEvidence, CompletionInvariant, ConfidenceEvidence, PatchEvidence,
-    ProcessEvidence, ReviewEvidence, RiskEvidence, SemanticEvidence, ValidationEvidence,
-    VerificationEvidence, create_evidence_from_components, evaluate_completion,
-    format_completion_decision,
+    CompletionDecision, CompletionEvaluator, CompletionEvidence, CompletionInvariant,
+    ConfidenceEvidence, PatchEvidence, ProcessEvidence, ReviewEvidence, RiskEvidence,
+    SemanticEvidence, ValidationEvidence, VerificationEvidence, create_evidence_from_components,
+    evaluate_completion, format_completion_decision,
 };
 pub use confidence::{
     ConfidenceCalibrator, ConfidenceClassification, ConfidenceFactor, ConfidenceScore,
     ConfidenceWeights, FactorImpact, compute_confidence,
 };
+pub use contract::{HarnessRequest, HarnessResult, WorkContextBudget};
 pub use edit_protocol::*;
 pub use environment::*;
 pub use evidence::*;
@@ -127,7 +138,8 @@ pub use reproduction::{
 };
 pub use review::{
     ReviewEngine, ReviewIssue, ReviewIssueType, ReviewReport, ReviewSeverity, format_review_report,
-    generate_review_report, has_critical_issues, review_diff, review_diff_with_context, review_file,
+    generate_review_report, has_critical_issues, review_diff, review_diff_with_context,
+    review_file,
 };
 pub use risk::{
     OverridePolicy, OverrideResult, RiskAssessment, RiskCategory, RiskEngine, RiskLevel,

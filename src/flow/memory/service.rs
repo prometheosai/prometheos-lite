@@ -1,7 +1,6 @@
 //! Memory service for high-level memory operations
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use super::db::MemoryDb;
 use super::embedding::EmbeddingProvider;
 use super::scoring::{prune_combined, rank_memories};
 use super::summarizer::MemorySummarizer;
-use super::types::{ContextBundle, Memory, MemoryKind, MemoryType, MemoryWriteTask};
+use super::types::{Memory, MemoryKind, MemoryType, MemoryWriteTask};
 use super::vector::{BruteForceBackend, VectorSearchBackend};
 
 /// Memory service for high-level memory operations
@@ -227,19 +226,19 @@ impl MemoryService {
         metadata: serde_json::Value,
     ) -> Result<()> {
         // Check for deduplication before queuing
-        if let Ok(similar) = self.find_similar_memory(&content, &kind, project_id.as_deref()) {
-            if let Some(existing) = similar {
-                // Update existing memory instead of creating new one
-                if let Err(e) = self.update_memory_importance(&existing.id, importance_score) {
-                    tracing::warn!(
-                        "Failed to update memory importance for {}: {}",
-                        existing.id,
-                        e
-                    );
-                    // Continue with creating new memory instead of failing silently
-                } else {
-                    return Ok(()); // Successfully updated existing memory
-                }
+        if let Ok(similar) = self.find_similar_memory(&content, &kind, project_id.as_deref())
+            && let Some(existing) = similar
+        {
+            // Update existing memory instead of creating new one
+            if let Err(e) = self.update_memory_importance(&existing.id, importance_score) {
+                tracing::warn!(
+                    "Failed to update memory importance for {}: {}",
+                    existing.id,
+                    e
+                );
+                // Continue with creating new memory instead of failing silently
+            } else {
+                return Ok(()); // Successfully updated existing memory
             }
         }
 

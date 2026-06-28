@@ -1,9 +1,7 @@
 use crate::harness::{
-    edit_protocol::EditOperation,
-    patch_applier::{PatchFailure, PatchResult},
+    patch_applier::PatchFailure,
     validation::{CommandResult, ValidationCategory, ValidationResult},
 };
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
@@ -31,6 +29,16 @@ pub enum FailureKind {
     RollbackFailed,
     CheckpointFailed,
     SyntaxError,
+}
+
+impl FailureKind {
+    /// Returns true if this failure kind is critical
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            Self::Fatal | Self::Critical | Self::SandboxFailure | Self::PermissionFailure
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,16 +175,14 @@ pub fn classify_patch_failure(failure: &PatchFailure) -> FailureKind {
         }
     }
 
-    if operation_lower.contains("create") {
-        if reason_lower.contains("exists") {
-            return FailureKind::PatchApplyFailure;
-        }
+    if operation_lower.contains("create") && reason_lower.contains("exists") {
+        return FailureKind::PatchApplyFailure;
     }
 
-    if operation_lower.contains("delete") || operation_lower.contains("rename") {
-        if reason_lower.contains("not exist") || reason_lower.contains("cannot find") {
-            return FailureKind::PatchApplyFailure;
-        }
+    if (operation_lower.contains("delete") || operation_lower.contains("rename"))
+        && (reason_lower.contains("not exist") || reason_lower.contains("cannot find"))
+    {
+        return FailureKind::PatchApplyFailure;
     }
 
     if reason_lower.contains("denied") || reason_lower.contains("permission") {

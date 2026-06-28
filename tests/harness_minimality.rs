@@ -11,15 +11,13 @@
 //! - enforce_patch_minimality function
 //! - format_analysis_report function
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use prometheos_lite::harness::minimality::{
-    analyze_patch_minimality, enforce_patch_minimality, format_analysis_report,
-    MinimalityConfig, MinimalityEnforcer, MinimalityViolation, MinimalityStats,
-    PatchAnalysis, UnrelatedChange, ViolationSeverity, ChangeType, FileChange,
+    ChangeType, FileChange, MinimalityConfig, MinimalityEnforcer, MinimalityViolation,
+    PatchAnalysis, UnrelatedChange, ViolationSeverity, analyze_patch_minimality,
+    enforce_patch_minimality, format_analysis_report,
 };
-use prometheos_lite::harness::edit_protocol::EditOperation;
 
 // ============================================================================
 // MinimalityConfig Tests
@@ -61,15 +59,13 @@ fn test_minimality_config_custom() {
 #[test]
 fn test_patch_analysis_creation() {
     let analysis = PatchAnalysis {
-        files_changed: vec![
-            FileChange {
-                path: PathBuf::from("src/main.rs"),
-                lines_added: 10,
-                lines_removed: 5,
-                functions_modified: vec!["main".to_string()],
-                change_type: ChangeType::Fix,
-            }
-        ],
+        files_changed: vec![FileChange {
+            path: PathBuf::from("src/main.rs"),
+            lines_added: 10,
+            lines_removed: 5,
+            functions_modified: vec!["main".to_string()],
+            change_type: ChangeType::Fix,
+        }],
         total_lines_added: 10,
         total_lines_removed: 5,
         concerns_detected: vec![],
@@ -87,28 +83,24 @@ fn test_patch_analysis_creation() {
 #[test]
 fn test_patch_analysis_with_violations() {
     let analysis = PatchAnalysis {
-        files_changed: vec![
-            FileChange {
-                path: PathBuf::from("src/main.rs"),
-                lines_added: 150,
-                lines_removed: 10,
-                functions_modified: vec!["main".to_string()],
-                change_type: ChangeType::Feature,
-            }
-        ],
+        files_changed: vec![FileChange {
+            path: PathBuf::from("src/main.rs"),
+            lines_added: 150,
+            lines_removed: 10,
+            functions_modified: vec!["main".to_string()],
+            change_type: ChangeType::Feature,
+        }],
         total_lines_added: 150,
         total_lines_removed: 10,
         concerns_detected: vec!["Too many lines changed".to_string()],
         unrelated_changes: vec![],
         is_minimal: false,
-        violations: vec![
-            MinimalityViolation {
-                rule: "line_count_limit".to_string(),
-                severity: ViolationSeverity::Warning,
-                description: "Exceeded maximum lines per file".to_string(),
-                suggestion: "Split into smaller changes".to_string(),
-            }
-        ],
+        violations: vec![MinimalityViolation {
+            rule: "line_count_limit".to_string(),
+            severity: ViolationSeverity::Warning,
+            description: "Exceeded maximum lines per file".to_string(),
+            suggestion: "Split into smaller changes".to_string(),
+        }],
     };
 
     assert!(!analysis.is_minimal);
@@ -176,7 +168,10 @@ fn test_minimality_violation_creation() {
 
 #[test]
 fn test_violation_severity_variants() {
-    assert!(matches!(ViolationSeverity::Warning, ViolationSeverity::Warning));
+    assert!(matches!(
+        ViolationSeverity::Warning,
+        ViolationSeverity::Warning
+    ));
     assert!(matches!(ViolationSeverity::Error, ViolationSeverity::Error));
 }
 
@@ -200,8 +195,14 @@ fn test_unrelated_change_creation() {
     };
 
     assert_eq!(change.file, PathBuf::from("README.md"));
-    assert_eq!(change.description, "Updated documentation unrelated to bug fix");
-    assert_eq!(change.suggested_action, "Remove documentation changes from this patch");
+    assert_eq!(
+        change.description,
+        "Updated documentation unrelated to bug fix"
+    );
+    assert_eq!(
+        change.suggested_action,
+        "Remove documentation changes from this patch"
+    );
 }
 
 // ============================================================================
@@ -211,16 +212,14 @@ fn test_unrelated_change_creation() {
 #[test]
 fn test_minimality_enforcer_new() {
     let config = MinimalityConfig::default();
-    let enforcer = MinimalityEnforcer::new(config);
+    let _enforcer = MinimalityEnforcer::new(config);
     // Enforcer created successfully
-    assert!(true);
 }
 
 #[test]
 fn test_minimality_enforcer_with_defaults() {
-    let enforcer = MinimalityEnforcer::with_defaults();
+    let _enforcer = MinimalityEnforcer::with_defaults();
     // Default enforcer created
-    assert!(true);
 }
 
 // ============================================================================
@@ -232,9 +231,9 @@ fn test_analyze_patch_minimality_small() {
     let patch_content = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    println!(\"Hello\");\n+    println!(\"Hello World\");\n }\n";
     let target_issue = "Fix greeting message";
     let analysis = analyze_patch_minimality(patch_content, target_issue);
-    
+
     // Should analyze successfully
-    assert!(analysis.files_changed.len() >= 0);
+    assert!(analysis.files_changed.len() <= 1);
 }
 
 #[test]
@@ -242,7 +241,7 @@ fn test_analyze_patch_minimality_empty() {
     let patch_content = "";
     let target_issue = "Empty patch";
     let analysis = analyze_patch_minimality(patch_content, target_issue);
-    
+
     // Should handle empty patch gracefully
     assert!(analysis.files_changed.is_empty());
 }
@@ -256,7 +255,7 @@ fn test_enforce_patch_minimality_pass() {
     let patch_content = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    println!(\"Hello\");\n+    println!(\"Hello World\");\n }\n";
     let target_issue = "Fix greeting message";
     let result = enforce_patch_minimality(patch_content, target_issue);
-    
+
     // Should enforce successfully
     assert!(result.is_ok() || result.is_err()); // Depends on implementation
 }
@@ -290,14 +289,12 @@ fn test_format_analysis_report_with_violations() {
         concerns_detected: vec!["Large change".to_string()],
         unrelated_changes: vec![],
         is_minimal: false,
-        violations: vec![
-            MinimalityViolation {
-                rule: "scope".to_string(),
-                severity: ViolationSeverity::Warning,
-                description: "Change scope too broad".to_string(),
-                suggestion: "Narrow the focus".to_string(),
-            }
-        ],
+        violations: vec![MinimalityViolation {
+            rule: "scope".to_string(),
+            severity: ViolationSeverity::Warning,
+            description: "Change scope too broad".to_string(),
+            suggestion: "Narrow the focus".to_string(),
+        }],
     };
 
     let report = format_analysis_report(&analysis);

@@ -1,12 +1,8 @@
 use crate::harness::{
     review::{ReviewIssue, ReviewIssueType, ReviewSeverity},
-    semantic_diff::{
-        RiskLevel as SemanticRiskLevel, SemanticDiff, has_breaking_changes, requires_approval,
-    },
+    semantic_diff::{RiskLevel as SemanticRiskLevel, SemanticDiff},
 };
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RiskAssessment {

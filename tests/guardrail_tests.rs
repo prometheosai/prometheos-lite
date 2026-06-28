@@ -10,7 +10,7 @@
 use prometheos_lite::flow::loop_detection::{LoopDetectionConfig, LoopDetector};
 use prometheos_lite::flow::{FlowSnapshot, IdempotencyKey};
 use prometheos_lite::tools::{
-    ApprovalPolicy, ToolContext, ToolPermission, ToolPolicy, TrustLevel, TrustPolicy, TrustRegistry,
+    ApprovalPolicy, ToolContext, ToolPermission, ToolPolicy, TrustLevel, TrustRegistry,
 };
 
 #[test]

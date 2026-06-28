@@ -555,10 +555,10 @@ impl ContinuationEngine {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    checkpoints.push(stem.to_string());
-                }
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                checkpoints.push(stem.to_string());
             }
         }
 

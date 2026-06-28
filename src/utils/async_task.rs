@@ -61,7 +61,7 @@ where
     use futures::stream::{self, StreamExt};
 
     stream::iter(tasks)
-        .map(|task| async move { task.await })
+        .map(|task| task)
         .buffer_unordered(max_concurrency)
         .collect()
         .await

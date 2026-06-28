@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use prometheos_lite::{
     config::AppConfig,
@@ -290,7 +290,7 @@ impl ResumeCommand {
 
         // Initialize RunDb and ContinuationEngine
         let db_path = PathBuf::from(".prometheos/runs.db");
-        let run_db = RunDb::new(db_path.clone())?;
+        let _run_db = RunDb::new(db_path.clone())?;
         logger.info(&format!("RunDb initialized at: {}", db_path.display()));
 
         let checkpoint_dir = PathBuf::from(".prometheos/checkpoints");
@@ -312,29 +312,27 @@ impl ResumeCommand {
         // Validate flow snapshot if available
         if let Some(flow_name) = state.get_input("flow_name").and_then(|v| v.as_str()) {
             let db = prometheos_lite::db::repository::Db::new(&db_path.to_string_lossy())?;
-            if let Ok(snapshot) =
+            if let Ok(Some(stored_snapshot)) =
                 prometheos_lite::db::repository::FlowSnapshotOperations::get_latest_flow_snapshot(
                     &db, flow_name,
                 )
             {
-                if let Some(stored_snapshot) = snapshot {
-                    // Get current flow source from state
-                    if let Some(current_source) =
-                        state.get_input("flow_source").and_then(|v| v.as_str())
-                    {
-                        let current_hash =
-                            prometheos_lite::flow::FlowSnapshot::compute_hash(current_source);
+                // Get current flow source from state
+                if let Some(current_source) =
+                    state.get_input("flow_source").and_then(|v| v.as_str())
+                {
+                    let current_hash =
+                        prometheos_lite::flow::FlowSnapshot::compute_hash(current_source);
 
-                        if current_hash != stored_snapshot.source_hash {
-                            logger.error("Flow source hash mismatch!");
-                            logger.error(&format!("Stored hash: {}", stored_snapshot.source_hash));
-                            logger.error(&format!("Current hash: {}", current_hash));
-                            anyhow::bail!(
-                                "Cannot resume: flow definition has changed since run started"
-                            );
-                        }
-                        logger.info("Flow snapshot validation passed");
+                    if current_hash != stored_snapshot.source_hash {
+                        logger.error("Flow source hash mismatch!");
+                        logger.error(&format!("Stored hash: {}", stored_snapshot.source_hash));
+                        logger.error(&format!("Current hash: {}", current_hash));
+                        anyhow::bail!(
+                            "Cannot resume: flow definition has changed since run started"
+                        );
                     }
+                    logger.info("Flow snapshot validation passed");
                 }
             }
         }
@@ -375,14 +373,12 @@ impl ResumeCommand {
     /// Execute a resumed flow with checkpointed state
     async fn execute_resumed_flow(
         &self,
-        flow_path: &PathBuf,
+        flow_path: &Path,
         mut state: prometheos_lite::flow::SharedState,
         logger: &Logger,
     ) -> anyhow::Result<()> {
         use prometheos_lite::flow::loader::{FlowLoader, JsonLoader, YamlLoader};
-        use prometheos_lite::flow::{
-            DefaultNodeFactory, Flow, FlowBuilder, NodeFactory, SharedState,
-        };
+        use prometheos_lite::flow::{DefaultNodeFactory, FlowBuilder, NodeFactory};
 
         // Load the flow file based on extension
         let flow_file = if let Some(ext) = flow_path.extension() {

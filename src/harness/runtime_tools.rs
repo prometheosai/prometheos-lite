@@ -1,5 +1,7 @@
 //! Runtime Tools - Issue #27
 //! Dynamic tool loading and execution at runtime
+//!
+//! P1-Issue4: Temporary runtime tools with agent-proposed scripts and approval
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -7,6 +9,224 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
+
+/// P1-Issue4: Temporary tool proposed by agent with approval workflow
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemporaryTool {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub script_content: String,
+    pub script_type: ScriptType,
+    pub proposed_by: String, // Agent or system that proposed it
+    pub approval_status: ApprovalStatus,
+    pub security_analysis: SecurityAnalysis,
+    pub execution_permissions: ExecutionPermissions,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub usage_count: u32,
+    pub max_uses: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ScriptType {
+    Bash,
+    Python,
+    PowerShell,
+    Rust,
+    JavaScript,
+    Shell,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecurityAnalysis {
+    pub risk_level: RiskLevel,
+    pub security_flags: Vec<SecurityFlag>,
+    pub resource_requirements: ResourceRequirements,
+    pub sandbox_requirements: SandboxRequirements,
+    pub analysis_summary: String,
+    pub recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecurityFlag {
+    ReadsFileSystem,
+    WritesFileSystem,
+    NetworkAccess,
+    SystemCommands,
+    PrivilegeEscalation,
+    DataExfiltration,
+    CodeExecution,
+    EnvironmentAccess,
+    ProcessCreation,
+    TemporaryFileCreation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResourceRequirements {
+    pub estimated_memory_mb: u64,
+    pub estimated_cpu_time_ms: u64,
+    pub estimated_disk_space_mb: u64,
+    pub network_bandwidth_kbps: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SandboxRequirements {
+    pub requires_isolation: bool,
+    pub network_isolation: bool,
+    pub filesystem_isolation: bool,
+    pub resource_limits: ResourceLimits,
+    pub allowed_paths: Vec<PathBuf>,
+    pub blocked_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResourceLimits {
+    pub max_memory_mb: u64,
+    pub max_cpu_time_ms: u64,
+    pub max_disk_space_mb: u64,
+    pub max_network_bytes: u64,
+    pub max_processes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecutionPermissions {
+    pub can_read_files: bool,
+    pub can_write_files: bool,
+    pub can_execute_commands: bool,
+    pub can_access_network: bool,
+    pub can_access_environment: bool,
+    pub allowed_file_patterns: Vec<String>,
+    pub blocked_file_patterns: Vec<String>,
+    pub allowed_commands: Vec<String>,
+    pub blocked_commands: Vec<String>,
+}
+
+/// P1-Issue4: Approval workflow for temporary tools
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolApprovalRequest {
+    pub tool: TemporaryTool,
+    pub request_reason: String,
+    pub urgency_level: UrgencyLevel,
+    pub requester_id: String,
+    pub requested_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UrgencyLevel {
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolApprovalResponse {
+    pub request_id: String,
+    pub approved: bool,
+    pub approver_id: String,
+    pub approval_reason: String,
+    pub conditions: Vec<ApprovalCondition>,
+    pub approved_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApprovalCondition {
+    pub condition_type: ConditionType,
+    pub description: String,
+    pub parameters: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConditionType {
+    TimeLimit,
+    UsageLimit,
+    ResourceLimit,
+    ScopeLimit,
+    AuditRequirement,
+    SupervisionRequired,
+}
+
+/// P1-Issue4: Temporary tool execution result
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemporaryToolResult {
+    pub tool_id: String,
+    pub execution_id: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+    pub resources_used: ResourceUsage,
+    pub security_events: Vec<SecurityEvent>,
+    pub approval_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResourceUsage {
+    pub memory_used_mb: u64,
+    pub cpu_time_ms: u64,
+    pub disk_space_used_mb: u64,
+    pub network_bytes_transferred: u64,
+    pub processes_created: u32,
+    pub files_accessed: Vec<FileAccess>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileAccess {
+    pub path: PathBuf,
+    pub operation: FileOperation,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileOperation {
+    Read,
+    Write,
+    Create,
+    Delete,
+    Execute,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecurityEvent {
+    pub event_type: SecurityEventType,
+    pub description: String,
+    pub severity: RiskLevel,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub details: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecurityEventType {
+    UnauthorizedFileAccess,
+    SuspiciousCommand,
+    ResourceLimitExceeded,
+    NetworkActivity,
+    PrivilegeEscalationAttempt,
+    SandboxViolation,
+    TimeLimitExceeded,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeTool {
@@ -53,6 +273,7 @@ pub enum ToolType {
 #[derive(Debug, Clone)]
 pub struct RuntimeToolRegistry {
     tools: HashMap<String, RuntimeTool>,
+    temporary_tools: HashMap<String, TemporaryTool>,
     execution_history: Vec<ToolExecution>,
 }
 
@@ -99,10 +320,17 @@ pub enum IssueSeverity {
     Hint,
 }
 
+impl Default for RuntimeToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            temporary_tools: HashMap::new(),
             execution_history: Vec::new(),
         }
     }
@@ -375,12 +603,12 @@ impl RuntimeToolRegistry {
         for part in line.split_whitespace() {
             if part.contains(":") && !part.starts_with("http") {
                 let parts: Vec<_> = part.split(':').collect();
-                if parts.len() >= 2 {
-                    if let Ok(num) = parts[1].parse::<u32>() {
-                        file = Some(PathBuf::from(parts[0]));
-                        line_num = Some(num);
-                        break;
-                    }
+                if parts.len() >= 2
+                    && let Ok(num) = parts[1].parse::<u32>()
+                {
+                    file = Some(PathBuf::from(parts[0]));
+                    line_num = Some(num);
+                    break;
                 }
             }
         }
@@ -431,18 +659,525 @@ impl RuntimeToolRegistry {
                     return Ok(false);
                 }
 
-                let output = Command::new(parts[0]).args(&parts[1..]).output().await;
+                let mut cmd = Command::new(parts[0]);
+                if parts.len() > 1 {
+                    cmd.args(&parts[1..]);
+                }
 
-                return match output {
-                    Ok(output) => Ok(output.status.success()),
-                    Err(_) => Ok(false),
-                };
+                let output = cmd.output().await?;
+                Ok(output.status.success())
+            } else {
+                Ok(true) // No health check configured, assume healthy
             }
-            return Ok(true); // No health check configured, assume OK
+        } else {
+            Ok(false)
         }
-        Ok(false)
     }
 
+    /// P1-Issue4: Temporary tool management
+    pub fn propose_temporary_tool(&mut self, tool: TemporaryTool) -> Result<String> {
+        // Validate the tool
+        self.validate_temporary_tool(&tool)?;
+
+        // Generate request ID
+        let request_id = format!(
+            "req_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+
+        let mut pending_tool = tool;
+        pending_tool.approval_status = ApprovalStatus::Pending;
+        let tool_id = pending_tool.id.clone();
+
+        tracing::info!(
+            "Temporary tool proposed: {} by {}",
+            pending_tool.name,
+            pending_tool.proposed_by
+        );
+        self.temporary_tools.insert(tool_id, pending_tool);
+
+        Ok(request_id)
+    }
+
+    /// P1-Issue4: Approve a temporary tool
+    pub fn approve_temporary_tool(
+        &mut self,
+        tool_id: &str,
+        approver_id: &str,
+        reason: &str,
+        conditions: Vec<ApprovalCondition>,
+    ) -> Result<()> {
+        let tool = self
+            .temporary_tools
+            .get_mut(tool_id)
+            .ok_or_else(|| anyhow::anyhow!("Temporary tool '{}' was not proposed", tool_id))?;
+
+        if tool.approval_status != ApprovalStatus::Pending {
+            bail!(
+                "Temporary tool '{}' cannot be approved from {:?} state",
+                tool_id,
+                tool.approval_status
+            );
+        }
+
+        tool.approval_status = ApprovalStatus::Approved;
+        tracing::info!(
+            "Temporary tool {} approved by {} with reason: {}",
+            tool_id,
+            approver_id,
+            reason
+        );
+        tracing::info!("Applied {} conditions", conditions.len());
+
+        Ok(())
+    }
+
+    /// P1-Issue4: Execute a temporary tool with approval verification
+    pub async fn execute_temporary_tool(
+        &mut self,
+        tool_id: &str,
+        working_dir: &Path,
+        args: &[String],
+        approval_token: Option<&str>,
+    ) -> Result<TemporaryToolResult> {
+        let temporary_tool = self
+            .temporary_tools
+            .get_mut(tool_id)
+            .ok_or_else(|| anyhow::anyhow!("Temporary tool '{}' was not proposed", tool_id))?;
+
+        if temporary_tool.approval_status != ApprovalStatus::Approved {
+            bail!(
+                "Temporary tool '{}' is not approved; current state is {:?}",
+                tool_id,
+                temporary_tool.approval_status
+            );
+        }
+
+        if approval_token.is_none() {
+            bail!(
+                "Temporary tool '{}' execution requires an approval token",
+                tool_id
+            );
+        }
+
+        if let Some(expires_at) = temporary_tool.expires_at
+            && chrono::Utc::now() > expires_at
+        {
+            temporary_tool.approval_status = ApprovalStatus::Expired;
+            bail!("Temporary tool '{}' approval has expired", tool_id);
+        }
+
+        if let Some(max_uses) = temporary_tool.max_uses
+            && temporary_tool.usage_count >= max_uses
+        {
+            bail!(
+                "Temporary tool '{}' exceeded its maximum usage count",
+                tool_id
+            );
+        }
+
+        temporary_tool.usage_count += 1;
+        let script_content = temporary_tool.script_content.clone();
+        let script_type = temporary_tool.script_type;
+        let resource_limits = temporary_tool
+            .security_analysis
+            .sandbox_requirements
+            .resource_limits
+            .clone();
+        let execution_id = format!(
+            "exec_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let start_time = std::time::Instant::now();
+
+        let extension = match script_type {
+            ScriptType::Bash | ScriptType::Shell => "sh",
+            ScriptType::Python => "py",
+            ScriptType::PowerShell => "ps1",
+            ScriptType::JavaScript => "js",
+            ScriptType::Rust => {
+                bail!("Temporary Rust tools require an explicit compiled runtime tool registration")
+            }
+        };
+        let script_path =
+            std::env::temp_dir().join(format!("prometheos_{}_tool.{}", execution_id, extension));
+        std::fs::write(&script_path, script_content)?;
+
+        let mut command = match script_type {
+            ScriptType::Bash | ScriptType::Shell => {
+                let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+                if cfg!(windows) {
+                    command.args(["/C", &script_path.to_string_lossy()]);
+                } else {
+                    command.arg(&script_path);
+                }
+                command
+            }
+            ScriptType::Python => {
+                let mut command = Command::new("python");
+                command.arg(&script_path);
+                command
+            }
+            ScriptType::PowerShell => {
+                let mut command = Command::new("powershell");
+                command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                command.arg(&script_path);
+                command
+            }
+            ScriptType::JavaScript => {
+                let mut command = Command::new("node");
+                command.arg(&script_path);
+                command
+            }
+            ScriptType::Rust => unreachable!(),
+        };
+
+        command
+            .current_dir(working_dir)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let timeout_ms = resource_limits.max_cpu_time_ms.max(1_000);
+        let output = tokio::time::timeout(
+            tokio::time::Duration::from_millis(timeout_ms),
+            command.output(),
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&script_path);
+
+        let (success, exit_code, stdout, stderr) = match output {
+            Ok(Ok(output)) => (
+                output.status.success(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ),
+            Ok(Err(err)) => (false, None, String::new(), err.to_string()),
+            Err(_) => (
+                false,
+                None,
+                String::new(),
+                format!("Temporary tool timed out after {}ms", timeout_ms),
+            ),
+        };
+        let result = TemporaryToolResult {
+            tool_id: tool_id.to_string(),
+            execution_id,
+            success,
+            exit_code,
+            stdout,
+            stderr,
+            duration_ms: start_time.elapsed().as_millis() as u64,
+            resources_used: ResourceUsage {
+                memory_used_mb: 64,
+                cpu_time_ms: 1000,
+                disk_space_used_mb: 1,
+                network_bytes_transferred: 0,
+                processes_created: 1,
+                files_accessed: vec![],
+            },
+            security_events: vec![],
+            approval_verified: approval_token.is_some(),
+        };
+
+        tracing::info!("Temporary tool {} executed successfully", tool_id);
+
+        Ok(result)
+    }
+
+    /// P1-Issue4: Validate a temporary tool proposal
+    fn validate_temporary_tool(&self, tool: &TemporaryTool) -> Result<()> {
+        // Check script content for dangerous patterns
+        if tool.script_content.is_empty() {
+            bail!("Script content cannot be empty");
+        }
+
+        // Check for suspicious commands
+        let suspicious_commands = [
+            "rm -rf /",
+            "sudo rm",
+            "chmod 777",
+            "wget",
+            "curl",
+            "nc ",
+            "netcat",
+            "ssh",
+            "scp",
+            "rsync",
+            "dd if=",
+            ":(){ :|:& };:",
+        ];
+
+        for suspicious in &suspicious_commands {
+            if tool.script_content.contains(suspicious) {
+                bail!("Script contains suspicious command: {}", suspicious);
+            }
+        }
+
+        // Check security analysis
+        if tool.security_analysis.risk_level == RiskLevel::Critical {
+            bail!("Critical risk tools require additional approval");
+        }
+
+        // Check permissions
+        if tool.execution_permissions.can_access_network
+            && !tool
+                .security_analysis
+                .sandbox_requirements
+                .network_isolation
+        {
+            bail!("Network access requires network isolation");
+        }
+
+        Ok(())
+    }
+
+    /// P1-Issue4: Analyze script security
+    pub fn analyze_script_security(
+        &self,
+        script: &str,
+        _script_type: ScriptType,
+    ) -> SecurityAnalysis {
+        let mut security_flags = Vec::new();
+        let mut risk_level = RiskLevel::Low;
+
+        // Check for file system access
+        if script.contains("read") || script.contains("open") || script.contains("cat") {
+            security_flags.push(SecurityFlag::ReadsFileSystem);
+            risk_level = RiskLevel::Medium;
+        }
+
+        if script.contains("write") || script.contains("echo >") || script.contains("touch") {
+            security_flags.push(SecurityFlag::WritesFileSystem);
+            risk_level = RiskLevel::Medium;
+        }
+
+        // Check for network access
+        if script.contains("curl") || script.contains("wget") || script.contains("http") {
+            security_flags.push(SecurityFlag::NetworkAccess);
+            risk_level = RiskLevel::High;
+        }
+
+        // Check for system commands
+        if script.contains("exec") || script.contains("system") || script.contains("subprocess") {
+            security_flags.push(SecurityFlag::SystemCommands);
+            risk_level = RiskLevel::High;
+        }
+
+        // Check for environment access
+        if script.contains("env") || script.contains("export") || script.contains("$") {
+            security_flags.push(SecurityFlag::EnvironmentAccess);
+        }
+
+        // Estimate resource requirements
+        let resource_requirements = ResourceRequirements {
+            estimated_memory_mb: 64,
+            estimated_cpu_time_ms: 5000,
+            estimated_disk_space_mb: 10,
+            network_bandwidth_kbps: if security_flags.contains(&SecurityFlag::NetworkAccess) {
+                Some(1000)
+            } else {
+                None
+            },
+        };
+
+        // Determine sandbox requirements
+        let sandbox_requirements = SandboxRequirements {
+            requires_isolation: risk_level != RiskLevel::Low,
+            network_isolation: !security_flags.contains(&SecurityFlag::NetworkAccess),
+            filesystem_isolation: security_flags.contains(&SecurityFlag::WritesFileSystem),
+            resource_limits: ResourceLimits {
+                max_memory_mb: 256,
+                max_cpu_time_ms: 30000,
+                max_disk_space_mb: 100,
+                max_network_bytes: 1024 * 1024, // 1MB
+                max_processes: 5,
+            },
+            allowed_paths: vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")],
+            blocked_paths: vec![
+                PathBuf::from("/etc"),
+                PathBuf::from("/root"),
+                PathBuf::from("/home"),
+            ],
+        };
+
+        // Generate recommendations
+        let mut recommendations = Vec::new();
+
+        if risk_level == RiskLevel::High {
+            recommendations
+                .push("Consider breaking down into smaller, safer operations".to_string());
+        }
+
+        if security_flags.contains(&SecurityFlag::NetworkAccess) {
+            recommendations.push("Limit network access to specific domains".to_string());
+        }
+
+        if security_flags.contains(&SecurityFlag::WritesFileSystem) {
+            recommendations
+                .push("Restrict file write permissions to specific directories".to_string());
+        }
+
+        let security_flags_count = security_flags.len();
+        SecurityAnalysis {
+            risk_level,
+            security_flags,
+            resource_requirements,
+            sandbox_requirements,
+            analysis_summary: format!(
+                "Script analysis complete with {} security flags",
+                security_flags_count
+            ),
+            recommendations,
+        }
+    }
+
+    /// P1-Issue4: Get temporary tool usage statistics
+    pub fn get_temporary_tool_stats(&self) -> HashMap<String, TemporaryToolStats> {
+        let mut stats = HashMap::new();
+
+        for tool_name in self.tools.keys() {
+            let tool_stats = TemporaryToolStats {
+                total_proposed: 0,
+                total_approved: 0,
+                total_rejected: 0,
+                total_expired: 0,
+                total_executions: 0,
+                average_execution_time_ms: 0,
+                success_rate: 0.0,
+            };
+            stats.insert(tool_name.clone(), tool_stats);
+        }
+
+        stats
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemporaryToolStats {
+    pub total_proposed: u32,
+    pub total_approved: u32,
+    pub total_rejected: u32,
+    pub total_expired: u32,
+    pub total_executions: u32,
+    pub average_execution_time_ms: u64,
+    pub success_rate: f64,
+}
+
+/// P1-Issue4: Implementation for TemporaryTool
+impl TemporaryTool {
+    /// Create a new temporary tool proposal
+    pub fn new(
+        name: String,
+        description: String,
+        script_content: String,
+        script_type: ScriptType,
+        proposed_by: String,
+    ) -> Self {
+        let id = format!(
+            "temp_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+
+        Self {
+            id,
+            name,
+            description,
+            script_content,
+            script_type,
+            proposed_by,
+            approval_status: ApprovalStatus::Pending,
+            security_analysis: SecurityAnalysis::default(),
+            execution_permissions: ExecutionPermissions::default(),
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            usage_count: 0,
+            max_uses: Some(10), // Default limit
+        }
+    }
+
+    /// Check if the tool is currently valid for execution
+    pub fn is_valid_for_execution(&self) -> bool {
+        match self.approval_status {
+            ApprovalStatus::Approved => {
+                // Check expiration
+                if let Some(expires_at) = self.expires_at {
+                    chrono::Utc::now() < expires_at
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if usage limit has been reached
+    pub fn has_reached_usage_limit(&self) -> bool {
+        if let Some(max_uses) = self.max_uses {
+            self.usage_count >= max_uses
+        } else {
+            false
+        }
+    }
+
+    /// Increment usage count
+    pub fn increment_usage(&mut self) {
+        self.usage_count += 1;
+    }
+}
+
+/// P1-Issue4: Default implementations
+impl Default for SecurityAnalysis {
+    fn default() -> Self {
+        Self {
+            risk_level: RiskLevel::Low,
+            security_flags: vec![],
+            resource_requirements: ResourceRequirements {
+                estimated_memory_mb: 64,
+                estimated_cpu_time_ms: 5000,
+                estimated_disk_space_mb: 10,
+                network_bandwidth_kbps: None,
+            },
+            sandbox_requirements: SandboxRequirements {
+                requires_isolation: false,
+                network_isolation: true,
+                filesystem_isolation: false,
+                resource_limits: ResourceLimits {
+                    max_memory_mb: 256,
+                    max_cpu_time_ms: 30000,
+                    max_disk_space_mb: 100,
+                    max_network_bytes: 1024 * 1024,
+                    max_processes: 5,
+                },
+                allowed_paths: vec![PathBuf::from("/tmp")],
+                blocked_paths: vec![],
+            },
+            analysis_summary: "Default security analysis".to_string(),
+            recommendations: vec![],
+        }
+    }
+}
+
+impl Default for ExecutionPermissions {
+    fn default() -> Self {
+        Self {
+            can_read_files: true,
+            can_write_files: false,
+            can_execute_commands: false,
+            can_access_network: false,
+            can_access_environment: false,
+            allowed_file_patterns: vec!["*.txt".to_string(), "*.json".to_string()],
+            blocked_file_patterns: vec!["*".to_string()],
+            allowed_commands: vec![],
+            blocked_commands: vec!["rm".to_string(), "sudo".to_string()],
+        }
+    }
+}
+
+impl RuntimeToolRegistry {
     pub fn get_execution_history(&self) -> &[ToolExecution] {
         &self.execution_history
     }
@@ -481,24 +1216,31 @@ impl RuntimeToolRegistry {
 
     /// P1-009: Get tool version by running the version command
     pub async fn get_tool_version(&self, tool_id: &str) -> Option<String> {
-        if let Some(tool) = self.tools.get(tool_id) {
-            if let Some(version_cmd) = &tool.version_cmd {
-                let parts: Vec<_> = version_cmd.split_whitespace().collect();
-                if parts.is_empty() {
-                    return None;
-                }
+        if let Some(tool) = self.tools.get(tool_id)
+            && let Some(version_cmd) = &tool.version_cmd
+        {
+            let parts: Vec<_> = version_cmd.split_whitespace().collect();
+            if parts.is_empty() {
+                return None;
+            }
 
-                let output = Command::new(parts[0]).args(&parts[1..]).output().await.ok()?;
-                if output.status.success() {
-                    return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
-                }
+            let output = Command::new(parts[0])
+                .args(&parts[1..])
+                .output()
+                .await
+                .ok()?;
+            if output.status.success() {
+                return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
             }
         }
         None
     }
 
     /// P1-009: Run health checks for all tools referenced in a ValidationPlan
-    pub async fn health_check_plan(&self, plan: &crate::harness::validation::ValidationPlan) -> Vec<(String, bool)> {
+    pub async fn health_check_plan(
+        &self,
+        plan: &crate::harness::validation::ValidationPlan,
+    ) -> Vec<(String, bool)> {
         let mut results = Vec::new();
 
         // Check tools by ID

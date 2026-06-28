@@ -6,13 +6,9 @@ use rusqlite::Connection;
 use super::artifacts::ArtifactOperations;
 use super::conversations::ConversationOperations;
 use super::flow_runs::FlowRunOperations;
-use super::interrupts::InterruptOperations;
 use super::messages::MessageOperations;
-use super::outbox::OutboxOperations;
 use super::projects::ProjectOperations;
-use super::snapshots::FlowSnapshotOperations;
 use super::trait_def::Repository;
-use super::trust_policies::TrustPolicyOperations;
 
 /// Database connection wrapper
 pub struct Db {
@@ -235,6 +231,23 @@ impl Db {
                 [],
             )
             .context("Failed to create work_context_events table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS harness_run_metrics (
+                work_context_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                trace_summary TEXT NOT NULL,
+                token_usage TEXT NOT NULL,
+                quality_metrics TEXT NOT NULL,
+                trajectory TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (work_context_id, run_id),
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create harness_run_metrics table")?;
 
         self.conn
             .execute(

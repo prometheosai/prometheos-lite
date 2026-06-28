@@ -13,6 +13,7 @@ pub struct LlmClient {
     http: Client,
     base_url: String,
     model: String,
+    api_key: Option<String>,
     max_retries: u32,
 }
 
@@ -27,16 +28,18 @@ impl LlmClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             model: model.into(),
+            api_key: None,
             max_retries: 3,
         })
     }
 
     pub fn from_config(config: &AppConfig) -> Result<Self> {
-        if config.provider != "lmstudio" {
-            bail!("unsupported LLM provider: {}", config.provider);
-        }
-
         Self::new(&config.base_url, &config.model)
+    }
+
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key;
+        self
     }
 
     pub fn with_retries(mut self, max_retries: u32) -> Self {
@@ -56,12 +59,13 @@ impl LlmClient {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
-            let response = self
+            let mut request_builder = self
                 .http
-                .post(format!("{}/v1/chat/completions", self.base_url))
-                .json(request)
-                .send()
-                .await;
+                .post(format!("{}/v1/chat/completions", self.base_url));
+            if let Some(api_key) = self.api_key.as_deref() {
+                request_builder = request_builder.bearer_auth(api_key);
+            }
+            let response = request_builder.json(request).send().await;
 
             match response {
                 Ok(resp) => match resp.error_for_status() {
@@ -122,9 +126,13 @@ impl LlmClient {
             stream: true,
         };
 
-        let response = self
+        let mut request_builder = self
             .http
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(format!("{}/v1/chat/completions", self.base_url));
+        if let Some(api_key) = self.api_key.as_deref() {
+            request_builder = request_builder.bearer_auth(api_key);
+        }
+        let response = request_builder
             .json(&request)
             .send()
             .await
@@ -141,22 +149,20 @@ impl LlmClient {
         let mut full_content = String::new();
 
         for line in text.lines() {
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+            if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
                     continue;
                 }
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(content) = parsed
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                    && let Some(content) = parsed
                         .get("choices")
                         .and_then(|c| c.get(0))
                         .and_then(|c| c.get("delta"))
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
-                    {
-                        callback(content);
-                        full_content.push_str(content);
-                    }
+                {
+                    callback(content);
+                    full_content.push_str(content);
                 }
             }
         }

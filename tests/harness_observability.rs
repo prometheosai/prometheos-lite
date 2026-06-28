@@ -82,9 +82,8 @@ fn test_harness_metrics_with_custom() {
 
 #[test]
 fn test_observability_collector_new() {
-    let collector = ObservabilityCollector::new("test-exec".to_string());
+    let _collector = ObservabilityCollector::new("test-exec".to_string());
     // Collector created successfully
-    assert!(true);
 }
 
 // ============================================================================
@@ -158,7 +157,10 @@ fn test_operation_span_error() {
 fn test_span_status_variants() {
     assert!(matches!(SpanStatus::Ok, SpanStatus::Ok));
     assert!(matches!(SpanStatus::InProgress, SpanStatus::InProgress));
-    assert!(matches!(SpanStatus::Error("test".to_string()), SpanStatus::Error(_)));
+    assert!(matches!(
+        SpanStatus::Error("test".to_string()),
+        SpanStatus::Error(_)
+    ));
 }
 
 // ============================================================================
@@ -178,7 +180,10 @@ fn test_span_event_creation() {
     };
 
     assert_eq!(event.name, "validation_start");
-    assert_eq!(event.attributes.get("command"), Some(&"cargo test".to_string()));
+    assert_eq!(
+        event.attributes.get("command"),
+        Some(&"cargo test".to_string())
+    );
 }
 
 // ============================================================================

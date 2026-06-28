@@ -4,7 +4,7 @@ use anyhow::Context;
 use rusqlite::params;
 
 use super::trait_def::Repository;
-use crate::work::{ExecutionPlan, PlanStep, StepStatus};
+use crate::work::{ExecutionPlan, PlanStep};
 
 /// PlanOperations trait for execution plan repository operations
 pub trait PlanOperations: Repository {

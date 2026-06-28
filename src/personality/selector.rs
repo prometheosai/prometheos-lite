@@ -40,7 +40,7 @@ impl ModeSelector {
 
     /// Select mode explicitly by name
     pub fn select_by_name(&self, name: &str) -> Option<PersonalityMode> {
-        PersonalityMode::from_str(name)
+        PersonalityMode::parse(name)
     }
 
     /// Get the default mode

@@ -1,4 +1,6 @@
-use crate::harness::file_control::{FilePolicy, FileSet, assert_edit_allowed, resolve_repo_path, validate_repo_relative_path};
+use crate::harness::file_control::{
+    FilePolicy, FileSet, assert_edit_allowed, resolve_repo_path, validate_repo_relative_path,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -265,8 +267,8 @@ fn parse_hunk(lines: &[&str]) -> Result<(DiffHunk, usize)> {
             break;
         }
 
-        if line.starts_with('+') {
-            diff_lines.push(DiffLine::Added(line[1..].to_string()));
+        if let Some(stripped) = line.strip_prefix('+') {
+            diff_lines.push(DiffLine::Added(stripped.to_string()));
         } else if line.starts_with('-') && !line.starts_with("---") {
             diff_lines.push(DiffLine::Removed(line[1..].to_string()));
         } else if line.starts_with(' ') || line.is_empty() {
@@ -414,12 +416,11 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
         // Apply operations
         for (pos, op, content) in operations {
             match op {
-                '-' => {
+                '-'
                     // Remove line
-                    if pos < result.len() {
+                    if pos < result.len() => {
                         result.remove(pos);
                     }
-                }
                 '+' => {
                     // Insert line
                     if let Some(text) = content {
@@ -537,28 +538,6 @@ pub fn validate_edit_operations(
     Ok(())
 }
 
-fn is_path_denied(path: &Path, policy: &FilePolicy) -> Result<bool> {
-    // For existing paths, use canonicalization
-    let canonical = path.canonicalize()?;
-    let repo_root = policy.repo_root.canonicalize()?;
-
-    if !canonical.starts_with(&repo_root) {
-        return Ok(true);
-    }
-
-    let relative = canonical
-        .strip_prefix(&repo_root)
-        .map_err(|_| anyhow::anyhow!("Failed to get relative path"))?;
-
-    for denied in &policy.denied_paths {
-        if relative.starts_with(denied) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 /// Check if a repo-relative path is denied (for CreateFile where file doesn't exist yet)
 fn is_path_denied_for_create(rel_path: &Path, policy: &FilePolicy) -> Result<bool> {
     // P0 SAFETY: Check denied paths against the relative path directly
@@ -570,7 +549,10 @@ fn is_path_denied_for_create(rel_path: &Path, policy: &FilePolicy) -> Result<boo
     }
 
     // Also check if the path tries to escape the repo (should already be caught by validate_repo_relative_path)
-    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if rel_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         // Path contains ".." - this should have been rejected by validate_repo_relative_path
         return Ok(true);
     }
@@ -632,7 +614,7 @@ pub fn merge_edits(edits: Vec<EditOperation>) -> Vec<EditOperation> {
 
     let mut merged = Vec::new();
 
-    for (file, file_edits) in by_file {
+    for (_file, file_edits) in by_file {
         if file_edits.len() == 1 {
             merged.push(file_edits.into_iter().next().unwrap());
         } else {
@@ -669,7 +651,10 @@ impl EditOperation {
             }
             EditOperation::UnifiedDiff(ud) => {
                 // Count added lines in unified diff format
-                ud.diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count()
+                ud.diff
+                    .lines()
+                    .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+                    .count()
             }
             EditOperation::WholeFile(wf) => wf.content.lines().count(),
             EditOperation::CreateFile(cf) => cf.content.lines().count(),
@@ -688,7 +673,10 @@ impl EditOperation {
             }
             EditOperation::UnifiedDiff(ud) => {
                 // Count removed lines in unified diff format
-                ud.diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count()
+                ud.diff
+                    .lines()
+                    .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+                    .count()
             }
             EditOperation::WholeFile(_) => 0, // Whole file doesn't track removals
             EditOperation::CreateFile(_) => 0,
