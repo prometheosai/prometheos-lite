@@ -203,6 +203,25 @@ let artifact = execution_service
     .await?;
 ```
 
+### 7. Repo Workbench MVP Quickstart
+
+```bash
+cargo run -- repo create \
+  --repo . \
+  --goal "Find risky code and suggest safe improvements" \
+  --mode review
+
+cargo run -- repo run <work_id>
+cargo run -- repo artifacts <work_id>
+cargo run -- repo approve <artifact_id>
+cargo run -- repo memory show <work_id>
+cargo run -- repo continue <work_id>
+```
+
+The Repo Workbench is a local-first, file-backed MVP that scans a repository for risky code patterns, generates a risk report and suggested patch plan, requires explicit approval, and persists memory for continuation.
+
+See [docs/guides/repo-workbench-mvp.md](docs/guides/repo-workbench-mvp.md) for the full guide.
+
 ---
 
 ## 🧠 Architecture
