@@ -37,5 +37,8 @@ prometheos-output/
 .prometheos/runs.db-wal
 .prometheos/runs.db-shm
 
+# Repo Workbench local state (MVP)
+.prometheos-lite/workbench/
+
 # Database files
 *.db

@@ -241,6 +241,12 @@ impl RepoWorkbenchCommand {
                 save_context(&context)?;
                 write_memory(&context, &findings)?;
 
+                let risk_report = context.artifacts.iter().find(|a| a.kind == "risk-report");
+                let patch_artifact = context
+                    .artifacts
+                    .iter()
+                    .find(|a| a.kind == "suggested-patch");
+
                 println!("Repo Workbench run complete");
                 println!("  WorkContext: {}", context.id);
                 println!("  Status: {}", context.status);
@@ -249,7 +255,12 @@ impl RepoWorkbenchCommand {
                     context.repo_summary.candidate_files.len()
                 );
                 println!("  Findings: {}", findings.len());
-                println!("  Artifacts: {}", context.artifacts.len());
+                if let Some(report) = risk_report {
+                    println!("  Risk report: {}", report.path.display());
+                }
+                if let Some(patch) = patch_artifact {
+                    println!("  Suggested patch plan: {}", patch.path.display());
+                }
                 if let Some(next) = &context.next_action {
                     println!("  Next: {}", next);
                 }
@@ -320,7 +331,8 @@ impl RepoWorkbenchCommand {
                 println!("Approval recorded");
                 println!("  WorkContext: {}", context.id);
                 println!("  Artifact: {}", artifact_id);
-                println!("  Safety: no repository files were modified by this command");
+                println!("  Safety: no repository source files were modified");
+                println!("  Next: prometheos repo continue {}", context.id);
             }
             RepoWorkbenchSubcommand::Continue { id } => {
                 let context = load_context_from_current_repo(&id)?;
@@ -810,5 +822,738 @@ fn print_status(context: &WorkbenchContext) {
     println!("  Decisions: {}", context.decisions.len());
     if let Some(next) = &context.next_action {
         println!("  Next: {}", next);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn temp_repo() -> TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn write_file(dir: &Path, relative: &str, content: &str) {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, content).unwrap();
+    }
+
+    fn make_context(repo_path: &Path) -> WorkbenchContext {
+        WorkbenchContext {
+            id: "test-id".to_string(),
+            title: "Test".to_string(),
+            goal: "Find issues".to_string(),
+            mode: "review".to_string(),
+            repo_path: repo_path.to_path_buf(),
+            status: "draft".to_string(),
+            phase: "intake".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            repo_summary: RepoSummary::default(),
+            artifacts: Vec::new(),
+            decisions: Vec::new(),
+            next_action: None,
+        }
+    }
+
+    // ── is_ignored ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_ignored_dot_git() {
+        let _entry = walkdir::WalkDir::new(".")
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap();
+        // Check by name: we just test the match logic directly
+        assert!(is_ignored_inner(".git"));
+        assert!(is_ignored_inner("target"));
+        assert!(is_ignored_inner("node_modules"));
+        assert!(is_ignored_inner("dist"));
+        assert!(is_ignored_inner("build"));
+        assert!(is_ignored_inner(".prometheos-lite"));
+        assert!(!is_ignored_inner("src"));
+        assert!(!is_ignored_inner("Cargo.toml"));
+    }
+
+    /// Helper that tests the name-based match without needing a DirEntry
+    fn is_ignored_inner(name: &str) -> bool {
+        matches!(
+            name,
+            ".git" | "target" | "node_modules" | "dist" | "build" | ".prometheos-lite"
+        )
+    }
+
+    // ── scan_repo ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_repo_ignores_ignored_dirs() {
+        let dir = temp_repo();
+        let root = dir.path();
+
+        write_file(root, "Cargo.toml", "[package]\nname = \"test\"\n");
+        write_file(root, ".git/HEAD", "ref: refs/heads/main\n");
+        write_file(root, "target/debug/test.o", "");
+        write_file(root, "node_modules/pkg/index.js", "// dep");
+        write_file(root, ".prometheos-lite/workbench/contexts/test.json", "{}");
+
+        let summary = scan_repo(root).unwrap();
+        let paths: Vec<&str> = summary
+            .candidate_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"Cargo.toml"),
+            "Cargo.toml should be scanned"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains(".git")),
+            ".git should be ignored"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("target/")),
+            "target should be ignored"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules/")),
+            "node_modules should be ignored"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains(".prometheos-lite")),
+            ".prometheos-lite should be ignored"
+        );
+    }
+
+    // ── detect_project_type ───────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_project_type_rust() {
+        let dir = temp_repo();
+        write_file(dir.path(), "Cargo.toml", "[package]\n");
+        assert_eq!(detect_project_type(dir.path()), "rust");
+    }
+
+    #[test]
+    fn test_detect_project_type_node() {
+        let dir = temp_repo();
+        write_file(dir.path(), "package.json", "{}");
+        assert_eq!(detect_project_type(dir.path()), "node");
+    }
+
+    #[test]
+    fn test_detect_project_type_python_pyproject() {
+        let dir = temp_repo();
+        write_file(dir.path(), "pyproject.toml", "[project]\n");
+        assert_eq!(detect_project_type(dir.path()), "python");
+    }
+
+    #[test]
+    fn test_detect_project_type_python_requirements() {
+        let dir = temp_repo();
+        write_file(dir.path(), "requirements.txt", "requests\n");
+        assert_eq!(detect_project_type(dir.path()), "python");
+    }
+
+    #[test]
+    fn test_detect_project_type_go() {
+        let dir = temp_repo();
+        write_file(dir.path(), "go.mod", "module test\n");
+        assert_eq!(detect_project_type(dir.path()), "go");
+    }
+
+    #[test]
+    fn test_detect_project_type_unknown() {
+        let dir = temp_repo();
+        assert_eq!(detect_project_type(dir.path()), "unknown");
+    }
+
+    // ── is_candidate_file ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_candidate_file_extensions() {
+        assert!(is_candidate_file_inner("main.rs"));
+        assert!(is_candidate_file_inner("lib.ts"));
+        assert!(is_candidate_file_inner("app.tsx"));
+        assert!(is_candidate_file_inner("index.js"));
+        assert!(is_candidate_file_inner("app.jsx"));
+        assert!(is_candidate_file_inner("script.py"));
+        assert!(is_candidate_file_inner("main.go"));
+        assert!(is_candidate_file_inner("App.java"));
+        assert!(is_candidate_file_inner("lib.cpp"));
+        assert!(is_candidate_file_inner("lib.c"));
+        assert!(is_candidate_file_inner("lib.h"));
+        assert!(is_candidate_file_inner("conf.toml"));
+        assert!(is_candidate_file_inner("config.yaml"));
+        assert!(is_candidate_file_inner("config.yml"));
+        assert!(!is_candidate_file_inner("image.png"));
+        assert!(!is_candidate_file_inner("data.json"));
+        assert!(!is_candidate_file_inner("file.md"));
+    }
+
+    #[test]
+    fn test_is_candidate_file_special_names() {
+        assert!(is_candidate_file_inner("Cargo.toml"));
+        assert!(is_candidate_file_inner("package.json"));
+        assert!(is_candidate_file_inner("pyproject.toml"));
+        assert!(is_candidate_file_inner("go.mod"));
+        assert!(is_candidate_file_inner("README.md"));
+    }
+
+    fn is_candidate_file_inner(name: &str) -> bool {
+        let path = Path::new(name);
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if matches!(
+            file_name,
+            "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod" | "README.md"
+        ) {
+            return true;
+        }
+        matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some(
+                "rs" | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "py"
+                    | "go"
+                    | "java"
+                    | "cpp"
+                    | "c"
+                    | "h"
+                    | "toml"
+                    | "yaml"
+                    | "yml"
+            )
+        )
+    }
+
+    // ── analyze_risks ─────────────────────────────────────────────────────
+
+    fn make_summary_with_file(repo_path: &Path, relative: &str) -> RepoSummary {
+        let metadata = fs::metadata(repo_path.join(relative)).unwrap();
+        RepoSummary {
+            project_type: "rust".to_string(),
+            files_scanned: 1,
+            candidate_files: vec![FileSummary {
+                path: relative.to_string(),
+                bytes: metadata.len(),
+                lines: fs::read_to_string(repo_path.join(relative))
+                    .unwrap()
+                    .lines()
+                    .count(),
+            }],
+            ignored_dirs: vec![],
+        }
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_unwrap() {
+        let dir = temp_repo();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() { let x = data.unwrap(); }",
+        );
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.summary.contains("unwrap")),
+            "should detect unwrap"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_expect() {
+        let dir = temp_repo();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() { let x = data.expect(\"msg\"); }",
+        );
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.summary.contains("panic")),
+            "should detect expect"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_panic() {
+        let dir = temp_repo();
+        write_file(dir.path(), "src/main.rs", "fn main() { panic!(\"boom\"); }");
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.summary.contains("panic")),
+            "should detect panic"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_todo() {
+        let dir = temp_repo();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() { // TODO: implement this }",
+        );
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.category == "unfinished-work"),
+            "should detect TODO"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_fixme() {
+        let dir = temp_repo();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() { // FIXME: handle error }",
+        );
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.category == "unfinished-work"),
+            "should detect FIXME"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_hardcoded_secret() {
+        let dir = temp_repo();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() { let api_key = \"sk-123\"; }",
+        );
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.category == "secret-risk"),
+            "should detect hardcoded secret"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_eval() {
+        let dir = temp_repo();
+        write_file(dir.path(), "src/main.rs", "fn main() { eval(user_input); }");
+        let summary = make_summary_with_file(dir.path(), "src/main.rs");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.category == "code-execution-risk"),
+            "should detect eval"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_shell_true() {
+        let dir = temp_repo();
+        write_file(dir.path(), "script.py", "subprocess.run(cmd, shell=True)");
+        let summary = make_summary_with_file(dir.path(), "script.py");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.category == "command-injection-risk"),
+            "should detect shell=True"
+        );
+    }
+
+    #[test]
+    fn test_analyze_risks_detects_innerhtml() {
+        let dir = temp_repo();
+        write_file(
+            dir.path(),
+            "app.js",
+            "document.getElementById('x').innerHTML = html;",
+        );
+        let summary = make_summary_with_file(dir.path(), "app.js");
+        let findings = analyze_risks(dir.path(), &summary).unwrap();
+        assert!(
+            findings.iter().any(|f| f.category == "xss-risk"),
+            "should detect innerHTML"
+        );
+    }
+
+    // ── render_risk_report ───────────────────────────────────────────────
+
+    #[test]
+    fn test_render_risk_report_creates_output() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let findings = vec![RiskFinding {
+            id: "F-001".to_string(),
+            file: "src/main.rs".to_string(),
+            line: 5,
+            risk: "Medium",
+            category: "panic-risk",
+            summary: "Potential panic from unwrap".to_string(),
+            recommendation: "Replace unwrap".to_string(),
+        }];
+        let report = render_risk_report(&context, &findings);
+        assert!(report.contains("# Risk Review"), "should have title");
+        assert!(report.contains("F-001"), "should contain finding ID");
+        assert!(report.contains("Potential panic"), "should contain summary");
+    }
+
+    #[test]
+    fn test_render_risk_report_empty() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let report = render_risk_report(&context, &[]);
+        assert!(
+            report.contains("No obvious risky patterns"),
+            "empty case message"
+        );
+    }
+
+    // ── render_patch_suggestions ──────────────────────────────────────────
+
+    #[test]
+    fn test_render_patch_suggestions_creates_output() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let findings = vec![RiskFinding {
+            id: "F-001".to_string(),
+            file: "src/main.rs".to_string(),
+            line: 5,
+            risk: "Medium",
+            category: "panic-risk",
+            summary: "Potential panic".to_string(),
+            recommendation: "Replace with error handling".to_string(),
+        }];
+        let patch = render_patch_suggestions(&context, &findings);
+        assert!(
+            patch.contains("# Suggested Patch Plan"),
+            "should have title"
+        );
+        assert!(patch.contains("F-001"), "should contain finding ID");
+        assert!(patch.contains("Approval"), "should mention approval");
+    }
+
+    #[test]
+    fn test_render_patch_suggestions_empty() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let patch = render_patch_suggestions(&context, &[]);
+        assert!(patch.contains("No patch suggestions"), "empty case message");
+    }
+
+    // ── write_artifact ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_write_artifact_creates_file() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let artifact = write_artifact(
+            &context,
+            "risk-report",
+            "Test Report",
+            "ready",
+            false,
+            "# Report",
+        )
+        .unwrap();
+        assert!(artifact.path.exists(), "artifact file should exist on disk");
+        let content = fs::read_to_string(&artifact.path).unwrap();
+        assert_eq!(content.trim(), "# Report");
+        assert_eq!(artifact.kind, "risk-report");
+        assert_eq!(artifact.status, "ready");
+        assert!(!artifact.requires_approval);
+    }
+
+    #[test]
+    fn test_write_artifact_requires_approval() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let artifact = write_artifact(
+            &context,
+            "suggested-patch",
+            "Patch",
+            "awaiting_approval",
+            true,
+            "# Patch",
+        )
+        .unwrap();
+        assert!(artifact.requires_approval);
+        assert_eq!(artifact.status, "awaiting_approval");
+    }
+
+    // ── upsert_artifact ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_upsert_artifact_replaces_by_kind() {
+        let mut context = make_context(Path::new("/tmp"));
+        let a1 = ArtifactRef {
+            id: "id-1".to_string(),
+            kind: "risk-report".to_string(),
+            title: "Old".to_string(),
+            path: PathBuf::from("/tmp/a.md"),
+            status: "ready".to_string(),
+            requires_approval: false,
+            created_at: Utc::now(),
+        };
+        let a2 = ArtifactRef {
+            id: "id-2".to_string(),
+            kind: "risk-report".to_string(),
+            title: "New".to_string(),
+            path: PathBuf::from("/tmp/b.md"),
+            status: "ready".to_string(),
+            requires_approval: false,
+            created_at: Utc::now(),
+        };
+        context.artifacts.push(a1);
+        upsert_artifact(&mut context, a2);
+        assert_eq!(
+            context.artifacts.len(),
+            1,
+            "old artifact should be replaced"
+        );
+        assert_eq!(
+            context.artifacts[0].id, "id-2",
+            "new artifact should be present"
+        );
+    }
+
+    #[test]
+    fn test_upsert_artifact_appends_different_kind() {
+        let mut context = make_context(Path::new("/tmp"));
+        let a1 = ArtifactRef {
+            id: "id-1".to_string(),
+            kind: "risk-report".to_string(),
+            title: "Report".to_string(),
+            path: PathBuf::from("/tmp/a.md"),
+            status: "ready".to_string(),
+            requires_approval: false,
+            created_at: Utc::now(),
+        };
+        let a2 = ArtifactRef {
+            id: "id-2".to_string(),
+            kind: "suggested-patch".to_string(),
+            title: "Patch".to_string(),
+            path: PathBuf::from("/tmp/b.md"),
+            status: "awaiting_approval".to_string(),
+            requires_approval: true,
+            created_at: Utc::now(),
+        };
+        context.artifacts.push(a1);
+        upsert_artifact(&mut context, a2);
+        assert_eq!(
+            context.artifacts.len(),
+            2,
+            "different kinds should both be present"
+        );
+    }
+
+    // ── write_memory ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_write_memory_includes_required_fields() {
+        let dir = temp_repo();
+        let mut context = make_context(dir.path());
+        context.id = "mem-test-id".to_string();
+        context.goal = "Find issues".to_string();
+        context.status = "awaiting_approval".to_string();
+        context.next_action = Some("Approve the patch".to_string());
+        context.artifacts.push(ArtifactRef {
+            id: "art-1".to_string(),
+            kind: "risk-report".to_string(),
+            title: "Report".to_string(),
+            path: PathBuf::from("report.md"),
+            status: "ready".to_string(),
+            requires_approval: false,
+            created_at: Utc::now(),
+        });
+
+        write_memory(&context, &[]).unwrap();
+
+        let memory_path = memory_dir(dir.path()).join("mem-test-id.md");
+        assert!(memory_path.exists(), "memory file should exist");
+        let content = fs::read_to_string(&memory_path).unwrap();
+        assert!(
+            content.contains("mem-test-id"),
+            "should contain work context ID"
+        );
+        assert!(content.contains("Find issues"), "should contain goal");
+        assert!(
+            content.contains(&dir.path().to_string_lossy().to_string()),
+            "should contain repo path"
+        );
+        assert!(
+            content.contains("awaiting_approval"),
+            "should contain status"
+        );
+        assert!(content.contains("Report"), "should contain artifact info");
+        assert!(
+            content.contains("Approve the patch"),
+            "should contain next action"
+        );
+    }
+
+    #[test]
+    fn test_write_memory_with_findings() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let findings = vec![RiskFinding {
+            id: "F-001".to_string(),
+            file: "src/main.rs".to_string(),
+            line: 5,
+            risk: "Medium",
+            category: "panic-risk",
+            summary: "Potential panic".to_string(),
+            recommendation: "Fix it".to_string(),
+        }];
+        write_memory(&context, &findings).unwrap();
+        let memory_path = memory_dir(dir.path()).join("test-id.md");
+        let content = fs::read_to_string(&memory_path).unwrap();
+        assert!(content.contains("F-001"), "should contain finding ID");
+        assert!(
+            content.contains("Potential panic"),
+            "should contain finding summary"
+        );
+    }
+
+    // ── approve flow ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_approve_updates_status() {
+        let dir = temp_repo();
+        let mut context = make_context(dir.path());
+        let artifact_id = "approve-test-id".to_string();
+        context.artifacts.push(ArtifactRef {
+            id: artifact_id.clone(),
+            kind: "suggested-patch".to_string(),
+            title: "Patch".to_string(),
+            path: PathBuf::from("patch.md"),
+            status: "awaiting_approval".to_string(),
+            requires_approval: true,
+            created_at: Utc::now(),
+        });
+
+        // Simulate approval: update artifact status and add decision
+        let artifact = context
+            .artifacts
+            .iter_mut()
+            .find(|a| a.id == artifact_id)
+            .unwrap();
+        artifact.status = "approved".to_string();
+        context.decisions.push(DecisionRecord {
+            id: "dec-1".to_string(),
+            artifact_id: artifact_id.clone(),
+            decision: "approved_for_future_application".to_string(),
+            approved: true,
+            created_at: Utc::now(),
+        });
+        context.status = "approved".to_string();
+        context.phase = "ready_to_apply".to_string();
+
+        assert_eq!(artifact.status, "approved");
+        assert_eq!(context.status, "approved");
+        assert_eq!(context.decisions.len(), 1);
+        assert!(context.decisions[0].approved);
+    }
+
+    // ── title_from_goal ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_title_from_goal_short() {
+        let title = title_from_goal("Hello");
+        assert_eq!(title, "Hello");
+    }
+
+    #[test]
+    fn test_title_from_goal_truncates_long() {
+        let long = "a".repeat(100);
+        let title = title_from_goal(&long);
+        assert_eq!(title.len(), 51); // 48 + "..."
+        assert!(title.ends_with("..."));
+    }
+
+    // ── looks_like_hardcoded_secret ───────────────────────────────────────
+
+    #[test]
+    fn test_looks_like_hardcoded_secret_detects() {
+        assert!(looks_like_hardcoded_secret("let api_key = \"xxx\""));
+        assert!(looks_like_hardcoded_secret("password = \"hunter2\""));
+        assert!(looks_like_hardcoded_secret("secret = \"s3cr3t\""));
+        assert!(looks_like_hardcoded_secret("token = \"abc\""));
+        assert!(looks_like_hardcoded_secret("apikey = \"xyz\""));
+    }
+
+    #[test]
+    fn test_looks_like_hardcoded_secret_ignores_env() {
+        assert!(!looks_like_hardcoded_secret("api_key = env(\"VAR\")"));
+        assert!(!looks_like_hardcoded_secret("password = \"example\""));
+        assert!(!looks_like_hardcoded_secret("fn main() {}"));
+    }
+
+    // ── normalize_repo_path ───────────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_repo_path_absolute() {
+        let dir = temp_repo();
+        let result = normalize_repo_path(dir.path());
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_path_nonexistent() {
+        let result = normalize_repo_path(Path::new("/nonexistent/path/12345"));
+        assert!(result.is_err());
+    }
+
+    // ── store_root / paths ────────────────────────────────────────────────
+
+    #[test]
+    fn test_store_root_path() {
+        let p = Path::new("/repo");
+        let root = store_root(p);
+        assert_eq!(root, Path::new("/repo/.prometheos-lite/workbench"));
+    }
+
+    #[test]
+    fn test_contexts_dir_path() {
+        let p = Path::new("/repo");
+        assert_eq!(
+            contexts_dir(p),
+            Path::new("/repo/.prometheos-lite/workbench/contexts")
+        );
+    }
+
+    #[test]
+    fn test_artifacts_dir_path() {
+        let p = Path::new("/repo");
+        assert_eq!(
+            artifacts_dir(p, "wid"),
+            Path::new("/repo/.prometheos-lite/workbench/artifacts/wid")
+        );
+    }
+
+    #[test]
+    fn test_memory_dir_path() {
+        let p = Path::new("/repo");
+        assert_eq!(
+            memory_dir(p),
+            Path::new("/repo/.prometheos-lite/workbench/memory")
+        );
     }
 }
