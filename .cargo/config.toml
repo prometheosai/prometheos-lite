@@ -1,0 +1,4 @@
+[build]
+jobs = 1
+incremental = true
+target-dir = ".cargo-target"
