@@ -1,0 +1,70 @@
+{
+  "version": "1",
+  "name": "Code Generation Flow",
+  "description": "A flow that plans, generates, reviews code, writes files, and logs to memory",
+  "start_node": "planner",
+  "nodes": [
+    {
+      "id": "planner",
+      "node_type": "planner",
+      "config": {
+        "retries": 2,
+        "retry_delay_ms": 1000
+      }
+    },
+    {
+      "id": "coder",
+      "node_type": "coder",
+      "config": {
+        "retries": 2,
+        "retry_delay_ms": 1000
+      }
+    },
+    {
+      "id": "reviewer",
+      "node_type": "reviewer",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "file_writer",
+      "node_type": "file_writer",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "memory_write",
+      "node_type": "memory_write",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "planner",
+      "action": "continue",
+      "to": "coder"
+    },
+    {
+      "from": "coder",
+      "action": "continue",
+      "to": "reviewer"
+    },
+    {
+      "from": "reviewer",
+      "action": "continue",
+      "to": "file_writer"
+    },
+    {
+      "from": "file_writer",
+      "action": "continue",
+      "to": "memory_write"
+    }
+  ]
+}
