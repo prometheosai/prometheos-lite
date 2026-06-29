@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use serde_json;
 use std::path::PathBuf;
 
 use prometheos_lite::repo_workbench;
@@ -30,6 +31,9 @@ enum RepoWorkbenchSubcommand {
         /// Optional title. Defaults to a short title derived from the goal.
         #[arg(long)]
         title: Option<String>,
+        /// Output JSON for machine-readable consumption
+        #[arg(long)]
+        json: bool,
     },
     /// Run the read-only risky-code review workflow
     Run {
@@ -83,21 +87,36 @@ impl RepoWorkbenchCommand {
                 goal,
                 mode,
                 title,
+                json,
             } => {
                 let context =
                     repo_workbench::create_repo_workbench_context(&repo, &goal, &mode, title)?;
 
-                println!("Created Repo Workbench WorkContext");
-                println!("  ID: {}", context.id);
-                println!("  Title: {}", context.title);
-                println!("  Repo: {}", context.repo_path.display());
-                println!("  Mode: {}", context.mode);
-                println!("  Project type: {}", context.repo_summary.project_type);
-                println!(
-                    "  Candidate files: {}",
-                    context.repo_summary.candidate_files.len()
-                );
-                println!("  Next: prometheos repo run {}", context.id);
+                if json {
+                    let output = serde_json::json!({
+                        "work_id": context.id,
+                        "title": context.title,
+                        "repo": context.repo_path.display().to_string(),
+                        "mode": context.mode,
+                        "status": context.status,
+                        "project_type": context.repo_summary.project_type,
+                        "candidate_files": context.repo_summary.candidate_files.len(),
+                        "next": format!("prometheos repo run {}", context.id),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!("Created Repo Workbench WorkContext");
+                    println!("  ID: {}", context.id);
+                    println!("  Title: {}", context.title);
+                    println!("  Repo: {}", context.repo_path.display());
+                    println!("  Mode: {}", context.mode);
+                    println!("  Project type: {}", context.repo_summary.project_type);
+                    println!(
+                        "  Candidate files: {}",
+                        context.repo_summary.candidate_files.len()
+                    );
+                    println!("  Next: prometheos repo run {}", context.id);
+                }
             }
             RepoWorkbenchSubcommand::Run { id } => {
                 let mut context = repo_workbench::load_context(&id)?;

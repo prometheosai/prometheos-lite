@@ -102,6 +102,8 @@ pub fn create_repo_workbench_context(
 
     save_context(&context)?;
     write_memory(&context, &[])?;
+    // Register in cwd-level index for cross-directory discovery
+    let _ = register_context(&id, &repo_path);
 
     Ok(context)
 }
@@ -154,47 +156,164 @@ pub fn run_repo_workbench_context(context: &mut WorkbenchContext) -> Result<()> 
     Ok(())
 }
 
+/// Look up a context file path by searching ancestors and the local registry.
+fn resolve_context_path(id: &str) -> Option<PathBuf> {
+    let filename = format!("{}.json", id);
+
+    // 1. Check registry (cwd-level index of work_id -> repo_path)
+    if let Some(path) = resolve_from_registry(id)
+        && path.exists()
+    {
+        return Some(path);
+    }
+
+    // 2. Walk parent directories for a local .prometheos-lite/workbench/contexts/
+    let cwd = std::env::current_dir().ok()?;
+    for ancestor in cwd.ancestors() {
+        let candidate = ancestor
+            .join(".prometheos-lite")
+            .join("workbench")
+            .join("contexts")
+            .join(&filename);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Read the cwd-level registry mapping work_id -> absolute repo path.
+fn resolve_from_registry(id: &str) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let registry_path = cwd
+        .join(".prometheos-lite")
+        .join("workbench")
+        .join("registry.json");
+    let json = fs::read_to_string(registry_path).ok()?;
+    let registry: std::collections::HashMap<String, String> = serde_json::from_str(&json).ok()?;
+    let repo_path_str = registry.get(id)?;
+    let path = Path::new(repo_path_str)
+        .join(".prometheos-lite")
+        .join("workbench")
+        .join("contexts")
+        .join(format!("{}.json", id));
+    Some(path)
+}
+
+/// Record the work_id -> repo_path mapping in the cwd-level registry.
+fn register_context(id: &str, repo_path: &Path) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let registry_dir = cwd.join(".prometheos-lite").join("workbench");
+    let registry_path = registry_dir.join("registry.json");
+
+    fs::create_dir_all(&registry_dir)?;
+
+    let mut registry: std::collections::HashMap<String, String> = if registry_path.exists() {
+        let json = fs::read_to_string(&registry_path)?;
+        serde_json::from_str(&json).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    registry.insert(id.to_string(), repo_path.to_string_lossy().to_string());
+    fs::write(&registry_path, serde_json::to_string_pretty(&registry)?)?;
+    Ok(())
+}
+
 pub fn load_context(id: &str) -> Result<WorkbenchContext> {
-    let repo_path = normalize_repo_path(Path::new("."))?;
-    let path = contexts_dir(&repo_path).join(format!("{}.json", id));
-    let json = fs::read_to_string(&path)
-        .with_context(|| format!("WorkContext `{}` not found at {}", id, path.display()))?;
+    let path = resolve_context_path(id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "WorkContext `{}` not found. Searched registry and parent directories from {} for `.prometheos-lite/workbench/contexts/`",
+            id,
+            std::env::current_dir().unwrap_or_default().display()
+        )
+    })?;
+    let json =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     let context = serde_json::from_str(&json)?;
     Ok(context)
 }
 
 pub fn find_context_by_artifact(artifact_id: &str) -> Result<WorkbenchContext> {
-    let repo_path = normalize_repo_path(Path::new("."))?;
-    let dir = contexts_dir(&repo_path);
-    for entry in fs::read_dir(&dir)
-        .with_context(|| format!("Context directory not found: {}", dir.display()))?
+    let cwd = std::env::current_dir()?;
+
+    // Search cwd-level registry first
+    let registry_path = cwd
+        .join(".prometheos-lite")
+        .join("workbench")
+        .join("registry.json");
+    if let Ok(json) = fs::read_to_string(&registry_path)
+        && let Ok(registry) =
+            serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
     {
-        let entry = entry?;
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+        for repo_path_str in registry.values() {
+            let dir = Path::new(repo_path_str)
+                .join(".prometheos-lite")
+                .join("workbench")
+                .join("contexts");
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let json = match fs::read_to_string(entry.path()) {
+                        Ok(j) => j,
+                        _ => continue,
+                    };
+                    let context: WorkbenchContext = match serde_json::from_str(&json) {
+                        Ok(c) => c,
+                        _ => continue,
+                    };
+                    if context
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.id == artifact_id)
+                    {
+                        return Ok(context);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: walk parent directories for local contexts/ dirs
+    for ancestor in cwd.ancestors() {
+        let dir = ancestor
+            .join(".prometheos-lite")
+            .join("workbench")
+            .join("contexts");
+        if !dir.is_dir() {
             continue;
         }
-        let json = fs::read_to_string(entry.path())?;
-        let context: WorkbenchContext = serde_json::from_str(&json)?;
-        if context
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.id == artifact_id)
-        {
-            return Ok(context);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let json = match fs::read_to_string(entry.path()) {
+                Ok(j) => j,
+                _ => continue,
+            };
+            let context: WorkbenchContext = match serde_json::from_str(&json) {
+                Ok(c) => c,
+                _ => continue,
+            };
+            if context
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == artifact_id)
+            {
+                return Ok(context);
+            }
         }
     }
     anyhow::bail!(
-        "Artifact `{}` not found in current repo workbench store",
+        "Artifact `{}` not found in any repo workbench store",
         artifact_id
     )
 }
 
 pub fn repo_workbench_context_exists(id: &str) -> bool {
-    let Ok(repo_path) = normalize_repo_path(Path::new(".")) else {
-        return false;
-    };
-    let path = contexts_dir(&repo_path).join(format!("{}.json", id));
-    path.exists()
+    resolve_context_path(id).is_some()
 }
 
 pub fn get_artifacts(context: &WorkbenchContext) -> &[ArtifactRef] {
