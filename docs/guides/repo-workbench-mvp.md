@@ -6,6 +6,21 @@ The MVP is intentionally small, local-first, and file-backed. It does not mutate
 
 ## Command Surface
 
+The Repo Workbench MVP supports two command surfaces:
+
+### Product-facing path (preferred)
+
+```bash
+prometheos work create --repo . --goal "Find risky code and suggest safe improvements" --mode review
+prometheos work run <work_id>
+prometheos work artifacts <work_id>
+prometheos work approve <artifact_id>
+prometheos work memory show <work_id>
+prometheos work continue <work_id>
+```
+
+### Legacy/direct path
+
 ```bash
 prometheos repo create --repo . --goal "Find risky code and suggest safe improvements" --mode review
 prometheos repo run <work_id>
@@ -22,7 +37,29 @@ prometheos repo continue <work_id>
 prometheos repo-workbench status <work_id>
 ```
 
+Both surfaces call the same implementation. The `work` path is the product-facing interface; `repo` remains available for backward compatibility.
+
 ## Golden Path
+
+```bash
+# Product-facing path
+cargo run -- work create \
+  --repo . \
+  --goal "Find risky code and suggest safe improvements" \
+  --mode review
+
+cargo run -- work run <work_id>
+
+cargo run -- work artifacts <work_id>
+
+cargo run -- work approve <artifact_id>
+
+cargo run -- work memory show <work_id>
+
+cargo run -- work continue <work_id>
+```
+
+### Legacy path (same implementation)
 
 ```bash
 cargo run -- repo create \

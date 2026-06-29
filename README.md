@@ -205,6 +205,25 @@ let artifact = execution_service
 
 ### 7. Repo Workbench MVP Quickstart
 
+The Repo Workbench can be accessed through two command surfaces:
+
+**Product-facing path (preferred):**
+
+```bash
+cargo run -- work create \
+  --repo . \
+  --goal "Find risky code and suggest safe improvements" \
+  --mode review
+
+cargo run -- work run <work_id>
+cargo run -- work artifacts <work_id>
+cargo run -- work approve <artifact_id>
+cargo run -- work memory show <work_id>
+cargo run -- work continue <work_id>
+```
+
+**Legacy path (same implementation):**
+
 ```bash
 cargo run -- repo create \
   --repo . \
@@ -218,7 +237,7 @@ cargo run -- repo memory show <work_id>
 cargo run -- repo continue <work_id>
 ```
 
-The Repo Workbench is a local-first, file-backed MVP that scans a repository for risky code patterns, generates a risk report and suggested patch plan, requires explicit approval, and persists memory for continuation.
+Both surfaces share the same implementation. The Repo Workbench is a local-first, file-backed MVP that scans a repository for risky code patterns, generates a risk report and suggested patch plan, requires explicit approval, and persists memory for continuation.
 
 See [docs/guides/repo-workbench-mvp.md](docs/guides/repo-workbench-mvp.md) for the full guide.
 

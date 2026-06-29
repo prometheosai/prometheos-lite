@@ -1,13 +1,21 @@
 //! WorkContext CLI commands
+//!
+//! This module supports two paths:
+//! - `work create --repo ...` delegates to the Repo Workbench MVP (file-backed).
+//! - `work create` (without --repo) uses the standard database-backed WorkContextService.
+//! - `work run`, `work artifacts`, `work continue`, `work memory show` detect Repo Workbench
+//!   context IDs by checking the file-backed store and delegate accordingly.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use prometheos_lite::db::Db;
 use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
+use prometheos_lite::repo_workbench;
 use prometheos_lite::work::{
     ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
     evolution_engine::EvolutionEngine,
@@ -26,13 +34,20 @@ pub struct WorkCommand {
 enum WorkSubcommand {
     /// Create a new WorkContext
     Create {
-        /// Title for the work context
-        title: String,
+        /// Title for the work context (required unless --repo is used)
+        title: Option<String>,
         /// Domain of work (software, business, marketing, personal, creative, research, operations, general)
         #[arg(short, long, default_value = "general")]
         domain: String,
         /// Goal description
+        #[arg(short, long)]
         goal: String,
+        /// Repository root to analyze (delegates to Repo Workbench when set)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Work mode for Repo Workbench (used with --repo)
+        #[arg(long, default_value = "review")]
+        mode: String,
     },
     /// List all WorkContexts
     List,
@@ -77,6 +92,19 @@ enum WorkSubcommand {
         /// New status (draft, in_progress, awaiting_approval, completed, blocked)
         status: String,
     },
+    /// Approve a staged artifact (delegates to Repo Workbench). Records approval only; does not write repo files.
+    Approve {
+        /// Artifact ID
+        artifact_id: String,
+        /// Optional WorkContext ID. If omitted, the current repo store is searched.
+        #[arg(long)]
+        work_id: Option<String>,
+    },
+    /// Inspect persisted Repo Workbench memory
+    Memory {
+        #[command(subcommand)]
+        command: MemorySubcommand,
+    },
     /// Show persisted harness token/cost metrics
     Cost {
         /// WorkContext ID
@@ -99,6 +127,15 @@ enum WorkSubcommand {
     Harness {
         #[command(subcommand)]
         command: HarnessSubcommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemorySubcommand {
+    /// Show memory for a Repo Workbench context
+    Show {
+        /// WorkContext ID
+        id: String,
     },
 }
 
@@ -189,7 +226,29 @@ impl WorkCommand {
                 title,
                 domain,
                 goal,
+                repo,
+                mode,
             } => {
+                if let Some(repo) = repo {
+                    let context =
+                        repo_workbench::create_repo_workbench_context(&repo, &goal, &mode, title)?;
+
+                    println!("Created Repo Workbench WorkContext");
+                    println!("  ID: {}", context.id);
+                    println!("  Title: {}", context.title);
+                    println!("  Repo: {}", context.repo_path.display());
+                    println!("  Mode: {}", context.mode);
+                    println!("  Project type: {}", context.repo_summary.project_type);
+                    println!(
+                        "  Candidate files: {}",
+                        context.repo_summary.candidate_files.len()
+                    );
+                    println!("  Next: prometheos work run {}", context.id);
+                    return Ok(());
+                }
+
+                let title = title
+                    .ok_or_else(|| anyhow::anyhow!("Title is required when --repo is not set"))?;
                 let domain = match domain.to_lowercase().as_str() {
                     "software" => WorkDomain::Software,
                     "business" => WorkDomain::Business,
@@ -251,6 +310,26 @@ impl WorkCommand {
                 }
             }
             WorkSubcommand::Artifacts { id } => {
+                if repo_workbench::repo_workbench_context_exists(&id) {
+                    let context = repo_workbench::load_context(&id)?;
+                    println!("Repo Workbench artifacts for {}:", context.id);
+                    if context.artifacts.is_empty() {
+                        println!(
+                            "  No artifacts yet. Run `prometheos work run {}` first.",
+                            context.id
+                        );
+                    }
+                    for artifact in repo_workbench::get_artifacts(&context) {
+                        println!("  {}", artifact.id);
+                        println!("    Title: {}", artifact.title);
+                        println!("    Kind: {}", artifact.kind);
+                        println!("    Status: {}", artifact.status);
+                        println!("    Requires approval: {}", artifact.requires_approval);
+                        println!("    Path: {}", artifact.path.display());
+                    }
+                    return Ok(());
+                }
+
                 let context = work_context_service
                     .get_context(&id)?
                     .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
@@ -288,6 +367,20 @@ impl WorkCommand {
                 println!("  Phase: {:?}", context.current_phase);
             }
             WorkSubcommand::Continue { id } => {
+                if repo_workbench::repo_workbench_context_exists(&id) {
+                    let context = repo_workbench::load_context(&id)?;
+                    println!("Continuing Repo Workbench WorkContext");
+                    repo_workbench::print_status(&context);
+                    println!();
+                    println!("Memory:");
+                    println!("{}", repo_workbench::load_memory(&context)?);
+                    if let Some(next) = &context.next_action {
+                        println!();
+                        println!("Recommended next action: {}", next);
+                    }
+                    return Ok(());
+                }
+
                 let context = work_orchestrator.continue_context(id).await?;
 
                 println!("Continued WorkContext:");
@@ -300,6 +393,35 @@ impl WorkCommand {
                 max_iterations,
                 max_runtime_ms,
             } => {
+                if repo_workbench::repo_workbench_context_exists(&id) {
+                    let mut context = repo_workbench::load_context(&id)?;
+                    repo_workbench::run_repo_workbench_context(&mut context)?;
+
+                    let risk_report = context.artifacts.iter().find(|a| a.kind == "risk-report");
+                    let patch_artifact = context
+                        .artifacts
+                        .iter()
+                        .find(|a| a.kind == "suggested-patch");
+
+                    println!("Repo Workbench run complete");
+                    println!("  WorkContext: {}", context.id);
+                    println!("  Status: {}", context.status);
+                    println!(
+                        "  Files considered: {}",
+                        context.repo_summary.candidate_files.len()
+                    );
+                    if let Some(report) = risk_report {
+                        println!("  Risk report: {}", report.path.display());
+                    }
+                    if let Some(patch) = patch_artifact {
+                        println!("  Suggested patch plan: {}", patch.path.display());
+                    }
+                    if let Some(next) = &context.next_action {
+                        println!("  Next: {}", next);
+                    }
+                    return Ok(());
+                }
+
                 let limits = ExecutionLimits::default()
                     .with_max_iterations(max_iterations.unwrap_or(10))
                     .with_max_runtime_ms(max_runtime_ms.unwrap_or(300_000));
@@ -334,6 +456,30 @@ impl WorkCommand {
 
                 println!("Updated WorkContext status to {:?}", new_status);
             }
+            WorkSubcommand::Approve {
+                artifact_id,
+                work_id,
+            } => {
+                let mut context = if let Some(ref work_id) = work_id {
+                    repo_workbench::load_context(work_id)?
+                } else {
+                    repo_workbench::find_context_by_artifact(&artifact_id)?
+                };
+
+                repo_workbench::approve_artifact(&mut context, &artifact_id)?;
+
+                println!("Approval recorded");
+                println!("  WorkContext: {}", context.id);
+                println!("  Artifact: {}", artifact_id);
+                println!("  Safety: no repository source files were modified");
+                println!("  Next: prometheos work continue {}", context.id);
+            }
+            WorkSubcommand::Memory { command } => match command {
+                MemorySubcommand::Show { id } => {
+                    let context = repo_workbench::load_context(&id)?;
+                    println!("{}", repo_workbench::load_memory(&context)?);
+                }
+            },
             WorkSubcommand::Cost { id } => {
                 let runs = work_context_service.list_harness_run_metrics(&id)?;
                 println!(
