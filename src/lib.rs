@@ -11,6 +11,7 @@ pub mod llm;
 pub mod logger;
 pub mod personality;
 pub mod queue;
+pub mod repo_workbench;
 pub mod runtime_policy;
 pub mod tools;
 pub mod utils;
