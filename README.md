@@ -203,43 +203,23 @@ let artifact = execution_service
     .await?;
 ```
 
-### 7. Repo Workbench MVP Quickstart
+### 7. Zero-to-First-Value
 
-The Repo Workbench can be accessed through two command surfaces:
-
-**Product-facing path (preferred):**
+Run PrometheOS Lite against the included risky Rust fixture:
 
 ```bash
 cargo run -- work create \
-  --repo . \
+  --repo fixtures/repo-workbench/rust-risky \
   --goal "Find risky code and suggest safe improvements" \
   --mode review
 
 cargo run -- work run <work_id>
 cargo run -- work artifacts <work_id>
-cargo run -- work approve <artifact_id>
 cargo run -- work memory show <work_id>
 cargo run -- work continue <work_id>
 ```
 
-**Legacy path (same implementation):**
-
-```bash
-cargo run -- repo create \
-  --repo . \
-  --goal "Find risky code and suggest safe improvements" \
-  --mode review
-
-cargo run -- repo run <work_id>
-cargo run -- repo artifacts <work_id>
-cargo run -- repo approve <artifact_id>
-cargo run -- repo memory show <work_id>
-cargo run -- repo continue <work_id>
-```
-
-Both surfaces share the same implementation. The Repo Workbench is a local-first, file-backed MVP that scans a repository for risky code patterns, generates a risk report and suggested patch plan, requires explicit approval, and persists memory for continuation.
-
-See [docs/guides/repo-workbench-mvp.md](docs/guides/repo-workbench-mvp.md) for the full guide.
+Full guide with expected output, cleanup, and debugging: [docs/guides/zero-to-first-value.md](docs/guides/zero-to-first-value.md).
 
 ---
 
