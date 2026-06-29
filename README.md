@@ -4,6 +4,27 @@
 
 PrometheOS Lite v1.2 is a Rust-based, local-first system for orchestrating AI agents through a flow-centric architecture. It provides powerful execution capabilities including parallel flows, self-reflection loops, batch processing, debugging, policy enforcement, rate limiting, and WorkContext lifecycle management.
 
+## Install locally
+
+```bash
+git clone https://github.com/prometheosai/prometheos-lite.git
+cd prometheos-lite
+cargo install --path .
+prometheos --version
+```
+
+Then run the first-value workflow against the included fixture:
+
+```bash
+prometheos work create \
+  --repo fixtures/repo-workbench/rust-risky \
+  --goal "Find risky code and suggest safe improvements" \
+  --mode review \
+  --json
+```
+
+See [docs/guides/install.md](docs/guides/install.md) and [docs/guides/zero-to-first-value.md](docs/guides/zero-to-first-value.md).
+
 ---
 
 ## ⚡ Features

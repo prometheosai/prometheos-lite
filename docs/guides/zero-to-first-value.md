@@ -13,8 +13,16 @@ Reach a useful result in under 5 minutes.
 ```bash
 git clone https://github.com/prometheosai/prometheos-lite
 cd prometheos-lite
+cargo install --path .
+```
+
+Or build without installing:
+
+```bash
 cargo build
 ```
+
+See [docs/guides/install.md](install.md) for full installation options.
 
 ## Run against the included fixture
 

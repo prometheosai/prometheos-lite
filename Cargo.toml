@@ -60,6 +60,10 @@ dotenv = "0.15"
 tempfile = "3"
 axum-test = "15.0"
 
+[[bin]]
+name = "prometheos"
+path = "src/main.rs"
+
 [features]
 default = []
 legacy = []  # Enable legacy agent/core modules for backward compatibility
