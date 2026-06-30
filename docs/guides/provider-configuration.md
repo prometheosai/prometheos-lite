@@ -1,6 +1,6 @@
 # Provider Configuration
 
-PrometheOS Lite supports multiple LLM providers through an OpenAI-compatible provider abstraction. All providers share a common `LlmClient` HTTP client that talks to OpenAI-compatible chat completion endpoints (`/v1/chat/completions`).
+PrometheOS Lite provides a provider abstraction layer for LLM configuration. All provider types wrap an `OpenAiProvider` that uses a common `LlmClient` HTTP client talking to OpenAI-compatible chat completion endpoints (`/v1/chat/completions`). Only use provider types with endpoints that actually support this format.
 
 ## How it works
 
@@ -72,7 +72,7 @@ Default provider. Requires an API key via `OPENROUTER_API_KEY`.
 
 ### Ollama (local)
 
-Ollama serves an OpenAI-compatible endpoint at `http://localhost:11434/v1`. No API key needed.
+Ollama exposes an OpenAI-compatible API under `/v1`. Configure `base_url` as `http://localhost:11434`; PrometheOS Lite appends `/v1/chat/completions`.
 
 ```json
 {
@@ -113,18 +113,11 @@ LM Studio provider metadata marks `local: true`.
 
 ### Anthropic
 
-Anthropic's API supports the OpenAI-compatible chat completions format.
+Anthropic is represented as a provider type in the configuration model.
 
-```json
-{
-  "name": "anthropic_default",
-  "provider_type": "anthropic",
-  "enabled": true,
-  "base_url": "https://api.anthropic.com",
-  "model": "claude-3-5-sonnet-20241022",
-  "api_key_env": "ANTHROPIC_API_KEY"
-}
-```
+Only use this configuration directly if the configured endpoint supports the OpenAI-compatible `/v1/chat/completions` format expected by `LlmClient`.
+
+If Anthropic requires its native Messages API, a provider-specific adapter is required before direct Anthropic support can be claimed.
 
 ### Generic OpenAI-compatible
 
@@ -201,6 +194,14 @@ Defaults:
 - `embedding_url`: `http://localhost:11434` (Ollama default)
 - `embedding_dimension`: 1536
 - `embedding_model`: `""` (empty — model is selected by the endpoint)
+
+## Current support vs compatibility target
+
+This guide documents provider configuration paths available through the existing provider abstraction.
+
+The Repo Workbench golden path does not invoke a model today.
+
+Provider configuration applies to flows that explicitly call LLM providers. Future work should add provider smoke tests, model metadata in WorkContexts/artifacts, and explicit Ollama/Ornith compatibility validation.
 
 ## Notes
 
