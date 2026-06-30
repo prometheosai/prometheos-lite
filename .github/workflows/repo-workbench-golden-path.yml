@@ -39,7 +39,7 @@ jobs:
             --repo "$FIXTURE" \
             --goal "$GOAL" \
             --mode review \
-            --json 2>&1)
+            --json 2>/dev/null)
           echo "$CREATE_OUTPUT"
 
           WORK_ID=$(echo "$CREATE_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['work_id'])")
