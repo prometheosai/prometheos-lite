@@ -1,0 +1,17 @@
+version: "1.0"
+name: "Code Generation Benchmark"
+description: "Code generation flow for benchmarking"
+
+nodes:
+  - id: "coder"
+    node_type: "coder"
+    config:
+      model: "gpt-4"
+      max_iterations: 3
+
+transitions:
+  - from: "coder"
+    action: "complete"
+    to: "end"
+
+start_node: "coder"
