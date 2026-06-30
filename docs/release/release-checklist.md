@@ -17,6 +17,9 @@
 - [ ] `docs/guides/install.md` is accurate
 - [ ] `docs/guides/zero-to-first-value.md` is accurate
 - [ ] Safety model is documented
+- [ ] `docs/release/alpha-notes.md` is accurate
+- [ ] demo transcript is accurate
+- [ ] README links to alpha notes
 
 ## Safety
 

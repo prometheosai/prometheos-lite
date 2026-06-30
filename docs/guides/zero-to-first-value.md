@@ -173,6 +173,8 @@ All Repo Workbench state is written to:
 
 All paths are relative to the repository root passed via `--repo`.
 
+For the current alpha scope and safety model overview, see [Alpha Notes](../release/alpha-notes.md). For a demo transcript, see [Repo Workbench Demo](../demo/repo-workbench-transcript.md).
+
 ## Safety model
 
 - `work run` reads source files and writes artifacts under `.prometheos-lite/workbench/`.
