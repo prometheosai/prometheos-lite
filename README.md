@@ -1,10 +1,28 @@
-# 🧠 PrometheOS Lite
+# PrometheOS Lite
 
-**Flow-centric AI agent orchestration system.**
+PrometheOS Lite is a local AI workbench for safe autonomous software workflows.
 
-PrometheOS Lite v1.2 is a Rust-based, local-first system for orchestrating AI agents through a flow-centric architecture. It provides powerful execution capabilities including parallel flows, self-reflection loops, batch processing, debugging, policy enforcement, rate limiting, and WorkContext lifecycle management.
+It scans a repository, creates a WorkContext, generates review artifacts, records approval decisions, and remembers the session so work can continue later.
 
-## Install locally
+> Alpha status: PrometheOS Lite currently focuses on the Repo Workbench golden path. It is local-first, file-backed, and intentionally conservative: it analyzes and produces artifacts, but does not apply patches automatically.
+
+## What works today
+
+- Install the `prometheos` CLI locally.
+- Run `prometheos work ...` against a repository.
+- Create a file-backed WorkContext.
+- Scan candidate files.
+- Detect risky code patterns.
+- Generate a risk report artifact.
+- Generate a suggested patch plan artifact.
+- Record approval decisions.
+- Show memory for a WorkContext.
+- Continue a previous WorkContext.
+- Run the golden path in CI.
+
+## Quick start
+
+Install:
 
 ```bash
 git clone https://github.com/prometheosai/prometheos-lite.git
@@ -13,7 +31,7 @@ cargo install --path .
 prometheos --version
 ```
 
-Then run the first-value workflow against the included fixture:
+First-value command:
 
 ```bash
 prometheos work create \
@@ -23,228 +41,64 @@ prometheos work create \
   --json
 ```
 
-See [docs/guides/install.md](docs/guides/install.md) and [docs/guides/zero-to-first-value.md](docs/guides/zero-to-first-value.md).
+Then:
+
+```bash
+prometheos work run <work_id>
+prometheos work artifacts <work_id>
+prometheos work memory show <work_id>
+prometheos work continue <work_id>
+```
+
+See:
+
+- [Install guide](docs/guides/install.md)
+- [Zero-to-first-value guide](docs/guides/zero-to-first-value.md)
+- [Repo Workbench MVP guide](docs/guides/repo-workbench-mvp.md)
+
+## Safety model
+
+PrometheOS Lite is intentionally conservative.
+
+- `work run` reads source files and writes artifacts/memory under `.prometheos-lite/workbench/`.
+- `work approve` records approval only.
+- It does not modify repository source files during analysis.
+- It does not apply patches automatically.
+- The golden path CI verifies that fixture source files are not modified.
+
+## What this is not yet
+
+PrometheOS Lite is not yet:
+
+- a full autonomous coding agent,
+- a patch application system,
+- a cloud control plane,
+- a plugin marketplace,
+- a Brain/Mnemosyne integration,
+- a team workspace product,
+- a trading/SATI workflow,
+- a voice/UI product.
+
+## Architecture direction
+
+PrometheOS Lite is the local-first runtime and product wedge.
+
+The current axis is:
+
+```text
+prometheos work
+  → Repo Workbench
+  → WorkContext
+  → artifacts
+  → memory
+  → continuation
+```
+
+Future layers such as Mnemosyne and Brain should plug into this axis rather than creating separate user-facing universes.
 
 ---
 
-## ⚡ Features
-
-### Flow-Centric Architecture
-- **Flow Engine**: Execute complex workflows with nodes, transitions, and state management
-- **Flow Builder DSL**: Simplified API for constructing flows with builder pattern
-- **Nested Flows**: Compose flows within flows for hierarchical orchestration
-
-### WorkContext Management (V1.2)
-- **Lifecycle Management**: Track work through phases (Intake, Planning, Execution, Review, Finalization)
-- **Autonomy Levels**: Configure Chat, Autonomous, or Review modes for different work styles
-- **Approval Policies**: Auto, ManualAll, or RequireForSideEffects for control over execution
-- **Artifact Tracking**: Automatically capture and manage outputs from flow execution
-- **Domain Profiles**: Pre-configured templates for different work domains (Software, Business, Marketing, etc.)
-- **Guardrails**: Built-in safety checks for blocked contexts and approval requirements
-
-### Harness Spine (V1.2.5)
-- **WorkOrchestrator**: Central execution loop with hard stop contracts (max iterations, runtime, tool calls, cost)
-- **PlaybookResolver**: Intelligent playbook selection based on domain matching and usage history
-- **Persistent Work Execution**: WorkContext as default execution path for all operations
-- **Intent Routing**: CODING_TASK and APPROVAL intents route to WorkOrchestrator
-- **CLI Commands**: `work submit`, `work continue`, `work run` for orchestration
-- **API Endpoints**: REST endpoints for intent submission, context continuation, and bounded execution
-
-### Advanced Execution
-- **Parallel Flows**: Execute multiple flows concurrently with configurable concurrency limits
-- **Self-Reflection Loops**: Loop nodes with reflection functions for iterative improvement
-- **Batch Processing**: Process iterable inputs with progress tracking callbacks
-
-### Developer Experience
-- **CLI Runner**: Execute flows from JSON files with input data
-- **WorkContext CLI**: Create, list, show, and continue WorkContexts from the command line
-- **Template Management**: Install and manage domain profile templates
-- **Debug Mode**: Step-by-step execution with state snapshots and breakpoints
-- **Logging & Tracing**: Structured logs and event timeline for observability
-
-### Safety & Control
-- **Policy Hooks**: Pre/post validation with constitution-policy enforcement
-- **Tool Sandbox**: Permission model for command execution with capability checking
-- **Rate Limiting**: Token budgeting and execution guardrails
-
-### Intelligence
-- **Model Router**: Provider abstraction with fallback chains
-- **Tool Runtime**: Tool trait with sandbox profiles and process isolation
-- **LLM Utilities**: Unified interface with streaming and retry logic
-
-### Memory
-- **SQLite Storage**: Persistent memories with embeddings
-- **Semantic Retrieval**: Context-aware memory access
-- **Flow Integration**: ContextLoaderNode and MemoryWriteNode
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/prometheosai/prometheos-lite
-cd prometheos-lite
-```
-
-### 2. Install dependencies
-
-```bash
-cargo build
-```
-
-### 3. Configure
-
-Create a `prometheos.config.json` file:
-
-```json
-{
-  "provider": "openrouter",
-  "base_url": "https://openrouter.ai/api",
-  "model": "meta-llama/llama-3.3-8b-instruct:free",
-  "llm_routing": {
-    "billing_source": "openrouter_user",
-    "providers": [
-      {
-        "name": "openrouter_fast",
-        "provider_type": "openrouter",
-        "enabled": true,
-        "base_url": "https://openrouter.ai/api",
-        "model": "meta-llama/llama-3.3-8b-instruct:free",
-        "api_key_env": "OPENROUTER_API_KEY"
-      },
-      {
-        "name": "openrouter_balanced",
-        "provider_type": "openrouter",
-        "enabled": true,
-        "base_url": "https://openrouter.ai/api",
-        "model": "mistralai/mistral-7b-instruct:free",
-        "api_key_env": "OPENROUTER_API_KEY"
-      }
-    ],
-    "mode_chains": {
-      "fast": ["openrouter_fast", "openrouter_balanced"],
-      "balanced": ["openrouter_balanced", "openrouter_fast"],
-      "deep": ["openrouter_balanced"],
-      "coding": ["openrouter_balanced"]
-    }
-  }
-}
-```
-
-### 4. Run a flow
-
-```bash
-cargo run -- flow path/to/flow.json --input '{"key": "value"}'
-```
-
-### 5. Example Flow
-
-Create a simple flow file `my_flow.json`:
-
-```json
-{
-  "name": "my_flow",
-  "description": "A simple example flow",
-  "start_node": "node1",
-  "nodes": [
-    {
-      "id": "node1",
-      "node_type": "placeholder",
-      "config": null
-    }
-  ],
-  "transitions": []
-}
-```
-
-### 6. WorkContext Examples (V1.2)
-
-#### Create a WorkContext
-
-```bash
-prometheos work create --title "Build REST API" --domain software --goal "Create a REST API for user management"
-```
-
-#### List WorkContexts
-
-```bash
-prometheos work list
-```
-
-#### Show WorkContext Details
-
-```bash
-prometheos work show <context-id>
-```
-
-#### Continue a WorkContext
-
-```bash
-prometheos work continue <context-id>
-```
-
-#### Manage Templates
-
-```bash
-# Install default domain profiles
-prometheos templates install
-
-# List available templates
-prometheos templates list
-
-# Show template details
-prometheos templates show "Software Development"
-```
-
-#### Programmatic Usage
-
-```rust
-use prometheos_lite::work::{WorkContextService, types::WorkDomain};
-use std::sync::Arc;
-
-let db = Db::new("prometheos.db")?;
-let work_context_service = WorkContextService::new(Arc::new(db));
-
-// Create a software development context
-let context = work_context_service.create_context(
-    "user-123".to_string(),
-    "Build REST API".to_string(),
-    WorkDomain::Software,
-    "Create a REST API for user management".to_string(),
-)?;
-
-// Update phase
-work_context_service.update_phase(&mut context, WorkPhase::Planning)?;
-
-// Execute a flow in context
-let artifact = execution_service
-    .execute_flow_in_context(&mut context, "planning.flow.yaml")
-    .await?;
-```
-
-### 7. Zero-to-First-Value
-
-Run PrometheOS Lite against the included risky Rust fixture:
-
-```bash
-cargo run -- work create \
-  --repo fixtures/repo-workbench/rust-risky \
-  --goal "Find risky code and suggest safe improvements" \
-  --mode review
-
-cargo run -- work run <work_id>
-cargo run -- work artifacts <work_id>
-cargo run -- work memory show <work_id>
-cargo run -- work continue <work_id>
-```
-
-Full guide with expected output, cleanup, and debugging: [docs/guides/zero-to-first-value.md](docs/guides/zero-to-first-value.md).
-
----
-
-## 🧠 Architecture
+## Architecture
 
 ### Flow-Centric Design
 
@@ -267,7 +121,7 @@ Flow
 
 ---
 
-## 📦 Project Structure
+## Project Structure
 
 ```text
 /src
@@ -291,7 +145,7 @@ Flow
 
 ---
 
-## 🔌 Model Support
+## Model Support
 
 Compatible with:
 
@@ -302,7 +156,7 @@ Compatible with:
 
 ---
 
-## 🧑‍💻 Contributing
+## Contributing
 
 We welcome contributions.
 
@@ -323,46 +177,7 @@ cargo test
 
 ---
 
-## 📌 Migration from v1.1
-
-The v1.2 release introduces WorkContext lifecycle management. The v1.1 flow-centric architecture remains fully functional.
-
-### New Features in V1.2
-
-- **WorkContext**: Track work through phases with lifecycle management
-- **Autonomy Levels**: Configure Chat, Autonomous, or Review modes
-- **Approval Policies**: Control execution with approval requirements
-- **Artifact Tracking**: Automatically capture flow outputs
-- **Domain Profiles**: Pre-configured templates for different work domains
-- **Guardrails**: Built-in safety checks for blocked contexts
-
-### Migration Steps
-
-No breaking changes. V1.2 is fully additive:
-1. Existing flows continue to work without modification
-2. Optionally integrate WorkContext for lifecycle tracking
-3. Use new CLI commands for WorkContext management
-
-See `docs/v1.2-operation.md` for detailed V1.2 documentation.
-
----
-
-## ⚠️ Disclaimer
-
-This tool generates code automatically.
-Always review outputs before using in production.
-
----
-
-## 🔗 PrometheOS
-
-PrometheOS Lite is part of the PrometheOS ecosystem.
-
-GitHub: [https://github.com/orgs/prometheosai](https://github.com/orgs/prometheosai)
-
----
-
-## 📚 Documentation Layout
+## Documentation Layout
 
 Project documentation is organized under `/docs`:
 
