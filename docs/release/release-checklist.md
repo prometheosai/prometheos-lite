@@ -21,6 +21,8 @@
 - [ ] `docs/release/alpha-notes.md` is accurate
 - [ ] demo transcript is accurate
 - [ ] README links to alpha notes
+- [ ] Local model compatibility docs are accurate
+- [ ] No unsupported model integration is claimed
 
 ## Safety
 
