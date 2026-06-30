@@ -96,6 +96,8 @@ prometheos work
 
 Future layers such as Mnemosyne and Brain should plug into this axis rather than creating separate user-facing universes.
 
+PrometheOS Lite is model-agnostic by design. Future local model support should allow coding models served through runtimes such as Ollama to plug into the `prometheos work` axis without changing the safety model. See [Local Model Compatibility](docs/guides/local-model-compatibility.md).
+
 ---
 
 ## Architecture
@@ -184,4 +186,5 @@ Project documentation is organized under `/docs`:
 - `docs/prd` - Product requirements and roadmap docs
 - `docs/operations` - Project operations and management setup
 - `docs/guides` - Contributor and usage guides
+- `docs/research` - Research notes and compatibility analysis
 - `docs/architecture` - Technical design references

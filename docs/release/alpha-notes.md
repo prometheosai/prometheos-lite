@@ -85,6 +85,14 @@ Then follow:
 - [Zero-to-First-Value guide](../guides/zero-to-first-value.md)
 - [Repo Workbench guide](../guides/repo-workbench-mvp.md)
 
+## Model compatibility direction
+
+The alpha workflow does not depend on a specific coding model.
+
+PrometheOS Lite is intended to remain model-agnostic: local and hosted models should eventually plug into the WorkContext workflow while preserving reviewable artifacts, approval gates, memory, and continuation.
+
+See [Local Model Compatibility](../guides/local-model-compatibility.md).
+
 ## Next milestones
 
 - Add demo screenshots or GIF.
