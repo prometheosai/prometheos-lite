@@ -1,0 +1,130 @@
+version: "1.0"
+name: "software_dev"
+description: "Software development flow with repo inspection, planning, implementation, patching, testing, and review"
+
+inputs:
+  task:
+    type: string
+    description: "The development task to complete"
+    required: true
+  file_path:
+    type: string
+    description: "The file path to modify"
+    required: true
+
+outputs:
+  plan:
+    type: string
+    description: "The development plan"
+  unified_diff:
+    type: string
+    description: "The unified diff to apply"
+  patch_result:
+    type: object
+    description: "Patch application result"
+  test_results:
+    type: object
+    description: "Test execution results"
+  review:
+    type: string
+    description: "Code review feedback"
+
+nodes:
+  - id: inspect_repo
+    type: tool
+    tool: list_tree
+    config:
+      root: ""
+      depth: 3
+    outputs:
+      repo_structure:
+        from: result
+
+  - id: read_context
+    type: tool
+    tool: read_file
+    inputs:
+      path:
+        from: input.file_path
+    outputs:
+      file_content:
+        from: result
+
+  - id: plan
+    type: planner
+    inputs:
+      task:
+        from: input.task
+      repo_structure:
+        from: inspect_repo.repo_structure
+      context:
+        from: read_context.file_content
+    outputs:
+      plan:
+        from: result
+
+  - id: implement
+    type: coder
+    inputs:
+      task:
+        from: input.task
+      plan:
+        from: plan.plan
+      context:
+        from: read_context.file_content
+    outputs:
+      unified_diff:
+        from: result
+
+  - id: apply_patch
+    type: tool
+    tool: patch_file
+    inputs:
+      path:
+        from: input.file_path
+      diff:
+        from: implement.unified_diff
+    outputs:
+      patch_result:
+        from: result
+
+  - id: run_tests
+    type: tool
+    tool: run_tests
+    config:
+      cwd: "."
+    outputs:
+      test_results:
+        from: result
+
+  - id: review
+    type: reviewer
+    inputs:
+      unified_diff:
+        from: implement.unified_diff
+      test_results:
+        from: run_tests.test_results
+      plan:
+        from: plan.plan
+    outputs:
+      review:
+        from: result
+
+transitions:
+  - from: inspect_repo
+    to: read_context
+
+  - from: read_context
+    to: plan
+
+  - from: plan
+    to: implement
+
+  - from: implement
+    to: apply_patch
+
+  - from: apply_patch
+    to: run_tests
+
+  - from: run_tests
+    to: review
