@@ -4,7 +4,7 @@ PrometheOS Lite is a local AI workbench for safe autonomous software workflows.
 
 It scans a repository, creates a WorkContext, generates review artifacts, records approval decisions, and remembers the session so work can continue later.
 
-> Alpha status: PrometheOS Lite currently focuses on the Repo Workbench golden path. It is local-first, file-backed, and intentionally conservative: it analyzes and produces artifacts, but does not apply patches automatically.
+> Alpha status: PrometheOS Lite currently focuses on the Repo Workbench golden path. It is local-first, file-backed, and intentionally conservative: it analyzes and produces artifacts, but does not apply patches automatically. For the current alpha scope, see [Alpha Notes](docs/release/alpha-notes.md).
 
 ## What works today
 
