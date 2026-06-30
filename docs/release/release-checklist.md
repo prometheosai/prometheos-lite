@@ -10,6 +10,7 @@
 - [ ] `cargo install --path . --force`
 - [ ] `prometheos --version`
 - [ ] First-value workflow runs from installed binary against `fixtures/repo-workbench/rust-risky`
+- [ ] Linux install smoke CI passes
 
 ## Documentation
 
