@@ -288,3 +288,43 @@ async fn test_model_router_stream_metadata() {
     assert_eq!(res.fallback_count, 1);
     assert_eq!(res.attempted_path.len(), 2);
 }
+
+use crate::llm::LlmClient;
+
+#[test]
+fn test_ollama_provider_metadata_is_local() {
+    let client = LlmClient::new("http://localhost:11434", "llama3.2").unwrap();
+    let provider = super::OllamaProvider::new(client);
+    let meta = provider.metadata();
+    assert_eq!(meta.kind, ProviderKind::Ollama);
+    assert!(meta.local);
+    assert!(meta.supports_streaming);
+}
+
+#[test]
+fn test_lmstudio_provider_metadata_is_local() {
+    let client = LlmClient::new("http://localhost:1234", "local-model").unwrap();
+    let provider = super::LmStudioProvider::new(client);
+    let meta = provider.metadata();
+    assert_eq!(meta.kind, ProviderKind::LmStudio);
+    assert!(meta.local);
+    assert!(meta.supports_streaming);
+}
+
+#[test]
+fn test_openrouter_provider_metadata_is_not_local() {
+    let client = LlmClient::new("https://openrouter.ai/api", "some-model").unwrap();
+    let provider = super::OpenRouterProvider::new(client);
+    let meta = provider.metadata();
+    assert_eq!(meta.kind, ProviderKind::OpenRouter);
+    assert!(!meta.local);
+}
+
+#[test]
+fn test_openai_provider_metadata_is_not_local() {
+    let client = LlmClient::new("https://api.openai.com", "gpt-4").unwrap();
+    let provider = super::OpenAiProvider::new(client).with_name("test".to_string());
+    let meta = provider.metadata();
+    assert_eq!(meta.kind, ProviderKind::OpenAi);
+    assert!(!meta.local);
+}
