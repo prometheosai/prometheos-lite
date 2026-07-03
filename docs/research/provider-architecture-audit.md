@@ -120,16 +120,10 @@ PrometheOS Lite has a complete multi-provider LLM abstraction layer that is not 
 
 ## Recommendation
 
-The next PR should be a **provider configuration guide** (`docs/guides/provider-configuration.md`) that documents:
+The next PRs after this audit should be:
 
-- How to configure OpenRouter (current default)
-- How to configure Ollama (including Ornith)
-- How to configure LM Studio
-- How to configure OpenAI-compatible endpoints
-- Environment variables reference
-- Config file reference
-- How the provider selection and failover work
-
-This requires no code changes. It closes the documentation gap for local model support while the alpha golden path remains deterministic, model-agnostic, and safe.
+1. **Provider configuration guide** (`docs/guides/provider-configuration.md`) — documents how to configure all provider types. No code changes. (Completed: PR #44)
+2. **Provider config validation tests** — tests that provider config parsing and routing behavior work as documented. No network calls. (Completed: PR #45)
+3. **Artifact provenance metadata** — add explicit provenance/metadata to Repo Workbench artifacts showing whether a model was invoked. (Completed: PR #46)
 
 After the docs PR, a follow-up could add optional `--model` / `--provider` flags to `prometheos work run` for model-augmented analysis, but only after the alpha release is stable and the deterministic path is proven.

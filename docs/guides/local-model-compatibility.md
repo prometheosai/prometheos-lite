@@ -38,6 +38,8 @@ The current Repo Workbench MVP does not require a model to reach first value. It
 
 PrometheOS Lite already supports OpenAI-compatible endpoints through provider configuration, including local providers such as LM Studio and Ollama. These are available for flows that invoke a model, but the golden path does not depend on them.
 
+Repo Workbench artifacts include provenance metadata. In the current alpha path, artifacts are produced by deterministic static analysis and do not invoke a model.
+
 ## Target compatibility path
 
 Future local model compatibility should look like:

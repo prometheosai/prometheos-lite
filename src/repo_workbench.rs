@@ -41,6 +41,37 @@ pub struct FileSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactProvenance {
+    pub generator: String,
+    pub generation_mode: String,
+    pub model_invoked: bool,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub provider_kind: Option<String>,
+    pub local_provider: Option<bool>,
+    pub work_id: String,
+    pub artifact_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ArtifactProvenance {
+    pub fn deterministic(work_id: &str, artifact_type: &str) -> Self {
+        Self {
+            generator: "repo_workbench".to_string(),
+            generation_mode: "deterministic_static_analysis".to_string(),
+            model_invoked: false,
+            provider: None,
+            model: None,
+            provider_kind: None,
+            local_provider: None,
+            work_id: work_id.to_string(),
+            artifact_type: artifact_type.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub id: String,
     pub kind: String,
@@ -49,6 +80,7 @@ pub struct ArtifactRef {
     pub status: String,
     pub requires_approval: bool,
     pub created_at: DateTime<Utc>,
+    pub provenance: ArtifactProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,6 +667,12 @@ fn looks_like_hardcoded_secret(lower: &str) -> bool {
 fn render_risk_report(context: &WorkbenchContext, findings: &[RiskFinding]) -> String {
     let mut out = String::new();
     out.push_str("# Risk Review\n\n");
+    out.push_str("## Provenance\n\n");
+    out.push_str("- Generator: Repo Workbench\n");
+    out.push_str("- Generation mode: deterministic static analysis\n");
+    out.push_str("- Model invoked: no\n");
+    out.push_str("- Provider: none\n");
+    out.push_str("- Model: none\n\n");
     out.push_str("## Summary\n\n");
     out.push_str(&format!(
         "PrometheOS Lite reviewed `{}` and found {} risk finding(s) across {} candidate file(s).\n\n",
@@ -673,6 +711,12 @@ fn render_patch_suggestions(context: &WorkbenchContext, findings: &[RiskFinding]
     let mut out = String::new();
     out.push_str("# Suggested Patch Plan\n\n");
     out.push_str("> Safety note: this MVP artifact is a staged suggestion only. No repository files were modified.\n\n");
+    out.push_str("## Provenance\n\n");
+    out.push_str("- Generator: Repo Workbench\n");
+    out.push_str("- Generation mode: deterministic static analysis\n");
+    out.push_str("- Model invoked: no\n");
+    out.push_str("- Provider: none\n");
+    out.push_str("- Model: none\n\n");
     out.push_str(&format!("WorkContext: `{}`\n\n", context.id));
 
     if findings.is_empty() {
@@ -712,6 +756,7 @@ fn write_artifact(
     let filename = format!("{}-{}.md", kind, &id[..8]);
     let path = dir.join(filename);
     fs::write(&path, content)?;
+    let now = Utc::now();
     Ok(ArtifactRef {
         id,
         kind: kind.to_string(),
@@ -719,7 +764,19 @@ fn write_artifact(
         path,
         status: status.to_string(),
         requires_approval,
-        created_at: Utc::now(),
+        created_at: now,
+        provenance: ArtifactProvenance {
+            generator: "repo_workbench".to_string(),
+            generation_mode: "deterministic_static_analysis".to_string(),
+            model_invoked: false,
+            provider: None,
+            model: None,
+            provider_kind: None,
+            local_provider: None,
+            work_id: context.id.clone(),
+            artifact_type: kind.to_string(),
+            created_at: now,
+        },
     })
 }
 
@@ -819,6 +876,38 @@ mod tests {
             artifacts: Vec::new(),
             decisions: Vec::new(),
             next_action: None,
+        }
+    }
+
+    fn make_artifact_ref(
+        id: &str,
+        kind: &str,
+        title: &str,
+        path: &str,
+        status: &str,
+        requires_approval: bool,
+    ) -> ArtifactRef {
+        let now = Utc::now();
+        ArtifactRef {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            path: PathBuf::from(path),
+            status: status.to_string(),
+            requires_approval,
+            created_at: now,
+            provenance: ArtifactProvenance {
+                generator: "repo_workbench".to_string(),
+                generation_mode: "deterministic_static_analysis".to_string(),
+                model_invoked: false,
+                provider: None,
+                model: None,
+                provider_kind: None,
+                local_provider: None,
+                work_id: "test-id".to_string(),
+                artifact_type: kind.to_string(),
+                created_at: now,
+            },
         }
     }
 
@@ -1132,6 +1221,18 @@ mod tests {
         }];
         let report = render_risk_report(&context, &findings);
         assert!(report.contains("# Risk Review"), "should have title");
+        assert!(
+            report.contains("## Provenance"),
+            "should have provenance section"
+        );
+        assert!(
+            report.contains("Model invoked: no"),
+            "should state no model"
+        );
+        assert!(
+            report.contains("deterministic"),
+            "should reference deterministic analysis"
+        );
         assert!(report.contains("F-001"), "should contain finding ID");
         assert!(report.contains("Potential panic"), "should contain summary");
     }
@@ -1167,6 +1268,11 @@ mod tests {
             patch.contains("# Suggested Patch Plan"),
             "should have title"
         );
+        assert!(
+            patch.contains("## Provenance"),
+            "should have provenance section"
+        );
+        assert!(patch.contains("Model invoked: no"), "should state no model");
         assert!(patch.contains("F-001"), "should contain finding ID");
         assert!(patch.contains("Approval"), "should mention approval");
     }
@@ -1224,24 +1330,8 @@ mod tests {
     #[test]
     fn test_upsert_artifact_replaces_by_kind() {
         let mut context = make_context(Path::new("/tmp"));
-        let a1 = ArtifactRef {
-            id: "id-1".to_string(),
-            kind: "risk-report".to_string(),
-            title: "Old".to_string(),
-            path: PathBuf::from("/tmp/a.md"),
-            status: "ready".to_string(),
-            requires_approval: false,
-            created_at: Utc::now(),
-        };
-        let a2 = ArtifactRef {
-            id: "id-2".to_string(),
-            kind: "risk-report".to_string(),
-            title: "New".to_string(),
-            path: PathBuf::from("/tmp/b.md"),
-            status: "ready".to_string(),
-            requires_approval: false,
-            created_at: Utc::now(),
-        };
+        let a1 = make_artifact_ref("id-1", "risk-report", "Old", "/tmp/a.md", "ready", false);
+        let a2 = make_artifact_ref("id-2", "risk-report", "New", "/tmp/b.md", "ready", false);
         context.artifacts.push(a1);
         upsert_artifact(&mut context, a2);
         assert_eq!(
@@ -1258,24 +1348,15 @@ mod tests {
     #[test]
     fn test_upsert_artifact_appends_different_kind() {
         let mut context = make_context(Path::new("/tmp"));
-        let a1 = ArtifactRef {
-            id: "id-1".to_string(),
-            kind: "risk-report".to_string(),
-            title: "Report".to_string(),
-            path: PathBuf::from("/tmp/a.md"),
-            status: "ready".to_string(),
-            requires_approval: false,
-            created_at: Utc::now(),
-        };
-        let a2 = ArtifactRef {
-            id: "id-2".to_string(),
-            kind: "suggested-patch".to_string(),
-            title: "Patch".to_string(),
-            path: PathBuf::from("/tmp/b.md"),
-            status: "awaiting_approval".to_string(),
-            requires_approval: true,
-            created_at: Utc::now(),
-        };
+        let a1 = make_artifact_ref("id-1", "risk-report", "Report", "/tmp/a.md", "ready", false);
+        let a2 = make_artifact_ref(
+            "id-2",
+            "suggested-patch",
+            "Patch",
+            "/tmp/b.md",
+            "awaiting_approval",
+            true,
+        );
         context.artifacts.push(a1);
         upsert_artifact(&mut context, a2);
         assert_eq!(
@@ -1295,6 +1376,7 @@ mod tests {
         context.goal = "Find issues".to_string();
         context.status = "awaiting_approval".to_string();
         context.next_action = Some("Approve the patch".to_string());
+        let now = Utc::now();
         context.artifacts.push(ArtifactRef {
             id: "art-1".to_string(),
             kind: "risk-report".to_string(),
@@ -1302,7 +1384,19 @@ mod tests {
             path: PathBuf::from("report.md"),
             status: "ready".to_string(),
             requires_approval: false,
-            created_at: Utc::now(),
+            created_at: now,
+            provenance: ArtifactProvenance {
+                generator: "repo_workbench".to_string(),
+                generation_mode: "deterministic_static_analysis".to_string(),
+                model_invoked: false,
+                provider: None,
+                model: None,
+                provider_kind: None,
+                local_provider: None,
+                work_id: "mem-test-id".to_string(),
+                artifact_type: "risk-report".to_string(),
+                created_at: now,
+            },
         });
 
         write_memory(&context, &[]).unwrap();
@@ -1360,6 +1454,7 @@ mod tests {
         let dir = temp_repo();
         let mut context = make_context(dir.path());
         let artifact_id = "approve-test-id".to_string();
+        let now = Utc::now();
         context.artifacts.push(ArtifactRef {
             id: artifact_id.clone(),
             kind: "suggested-patch".to_string(),
@@ -1367,7 +1462,19 @@ mod tests {
             path: PathBuf::from("patch.md"),
             status: "awaiting_approval".to_string(),
             requires_approval: true,
-            created_at: Utc::now(),
+            created_at: now,
+            provenance: ArtifactProvenance {
+                generator: "repo_workbench".to_string(),
+                generation_mode: "deterministic_static_analysis".to_string(),
+                model_invoked: false,
+                provider: None,
+                model: None,
+                provider_kind: None,
+                local_provider: None,
+                work_id: "test-id".to_string(),
+                artifact_type: "suggested-patch".to_string(),
+                created_at: now,
+            },
         });
 
         let artifact = context
@@ -1479,5 +1586,76 @@ mod tests {
             memory_dir(p),
             Path::new("/repo/.prometheos-lite/workbench/memory")
         );
+    }
+
+    // ── provenance ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_write_artifact_includes_provenance() {
+        let dir = temp_repo();
+        let context = make_context(dir.path());
+        let artifact = write_artifact(
+            &context,
+            "risk-report",
+            "Test Report",
+            "ready",
+            false,
+            "# Report",
+        )
+        .unwrap();
+        assert_eq!(artifact.provenance.generator, "repo_workbench");
+        assert_eq!(
+            artifact.provenance.generation_mode,
+            "deterministic_static_analysis"
+        );
+        assert!(!artifact.provenance.model_invoked);
+        assert!(artifact.provenance.provider.is_none());
+        assert!(artifact.provenance.model.is_none());
+        assert_eq!(artifact.provenance.work_id, "test-id");
+        assert_eq!(artifact.provenance.artifact_type, "risk-report");
+    }
+
+    #[test]
+    fn test_artifact_provenance_deterministic_constructor() {
+        let provenance = ArtifactProvenance::deterministic("test-work", "risk-report");
+        assert_eq!(provenance.generator, "repo_workbench");
+        assert!(!provenance.model_invoked);
+        assert!(provenance.provider.is_none());
+        assert!(provenance.model.is_none());
+        assert_eq!(provenance.work_id, "test-work");
+        assert_eq!(provenance.artifact_type, "risk-report");
+    }
+
+    #[test]
+    fn test_provenance_is_serialized_in_artifact_ref() {
+        let now = Utc::now();
+        let artifact = ArtifactRef {
+            id: "test-id".to_string(),
+            kind: "risk-report".to_string(),
+            title: "Test".to_string(),
+            path: PathBuf::from("/tmp/test.md"),
+            status: "ready".to_string(),
+            requires_approval: false,
+            created_at: now,
+            provenance: ArtifactProvenance {
+                generator: "repo_workbench".to_string(),
+                generation_mode: "deterministic_static_analysis".to_string(),
+                model_invoked: false,
+                provider: None,
+                model: None,
+                provider_kind: None,
+                local_provider: None,
+                work_id: "wid".to_string(),
+                artifact_type: "risk-report".to_string(),
+                created_at: now,
+            },
+        };
+        let json = serde_json::to_string(&artifact).unwrap();
+        assert!(json.contains("provenance"));
+        assert!(json.contains("deterministic_static_analysis"));
+        assert!(json.contains("\"model_invoked\":false"));
+        let deserialized: ArtifactRef = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.provenance.model_invoked);
+        assert!(deserialized.provenance.provider.is_none());
     }
 }
