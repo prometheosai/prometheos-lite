@@ -1,24 +1,28 @@
 # PrometheOS Lite
 
-PrometheOS Lite is a local AI workbench for safe autonomous software workflows.
+PrometheOS Lite is a local-first AI workbench for safe autonomous software workflows.
 
-It scans a repository, creates a WorkContext, generates review artifacts, records approval decisions, and remembers the session so work can continue later.
+Its stable alpha surface is Repo Workbench: a conservative CLI workflow that scans repositories, generates review artifacts, records approval decisions, preserves memory, and continues work later without modifying source files.
 
-> Alpha status: PrometheOS Lite currently focuses on the Repo Workbench golden path. It is local-first, file-backed, and intentionally conservative: it analyzes and produces artifacts, but does not apply patches automatically. For the current alpha scope, see [Alpha Notes](docs/release/alpha-notes.md).
+Under the hood, PrometheOS Lite is evolving into a broader runtime for agentic software work, with flow orchestration, provider routing, harness validation, API server surfaces, and frontend experiments.
 
-## What works today
+> Alpha status: the supported alpha path is `prometheos work`. Experimental surfaces exist in the repo but are not yet promised as stable product surfaces. See the [Product Surface Inventory](docs/guides/product-surface-inventory.md) for the full classification.
 
-- Install the `prometheos` CLI locally.
-- Run `prometheos work ...` against a repository.
-- Create a file-backed WorkContext.
-- Scan candidate files.
-- Detect risky code patterns.
-- Generate a risk report artifact.
-- Generate a suggested patch plan artifact.
-- Record approval decisions.
-- Show memory for a WorkContext.
-- Continue a previous WorkContext.
-- Run the golden path in CI.
+## Stable alpha surface
+
+- `prometheos work` — Repo Workbench CRUD, artifacts, memory, continue, approve
+- Repo Workbench deterministic static analysis (tree-sitter, no model required)
+- WorkContext creation, run, and continuation
+- Risk report and suggested patch plan artifacts
+- Approval recording
+- Artifact provenance (model invoked/provider/model metadata)
+- Provider routing (OpenRouter-first with mode-aware chains)
+- LLM client (OpenAI-compatible, multi-provider)
+- Provider configuration docs and tests
+- Mock OpenAI-compatible provider integration tests
+- Optional ignored/manual local endpoint smoke test
+- Linux install smoke CI
+- Golden path CI
 
 ## Quick start
 
@@ -67,6 +71,55 @@ PrometheOS Lite is intentionally conservative.
 - It does not apply patches automatically.
 - The golden path CI verifies that fixture source files are not modified.
 
+## Architecture at a glance
+
+```
+prometheos work
+  → Repo Workbench
+  → WorkContext
+  → deterministic analysis
+  → artifacts + provenance
+  → memory
+  → continuation
+```
+
+PrometheOS Lite:
+
+```
+PrometheOS Lite
+├── Stable alpha
+│   └── Repo Workbench CLI
+├── Experimental
+│   ├── Flow runtime
+│   ├── API server
+│   ├── Harness engine
+│   ├── Frontend
+│   └── Memory system
+├── Internal
+│   ├── SQLite repositories
+│   ├── Provider routing
+│   ├── Configuration
+│   └── Observability
+└── Future
+    ├── Brain
+    ├── Mnemosyne
+    ├── Cloud/team control plane
+    └── Full autonomous coding
+```
+
+## Experimental surfaces
+
+PrometheOS Lite contains several experimental surfaces that exist in the codebase but are not part of the stable alpha promise:
+
+- **Flow execution engine** — DAG-based node orchestration with prep/exec/post lifecycle, transitions, and shared state
+- **API server** (`prometheos serve`) — Axum-based HTTP server
+- **Harness engine** — Full harness lifecycle (run, inspect, dry-run, apply, rollback)
+- **Frontend** — Web UI surface
+- **Memory system** — SQLite-backed with embedding/vector search, scoring, and summarization
+- **Additional CLI commands** — `flow`, `harness`, `templates`, `diagnostics`, `bench`, `guardrail`
+
+These surfaces may change significantly. They are not alpha-promised.
+
 ## What this is not yet
 
 PrometheOS Lite is not yet:
@@ -78,73 +131,20 @@ PrometheOS Lite is not yet:
 - a Brain/Mnemosyne integration,
 - a team workspace product,
 - a trading/SATI workflow,
-- a voice/UI product.
+- a voice/UI product,
+- a stable frontend product,
+- a benchmark-claiming model product.
 
-## Architecture direction
+## Documentation
 
-PrometheOS Lite is the local-first runtime and product wedge.
-
-The current axis is:
-
-```text
-prometheos work
-  → Repo Workbench
-  → WorkContext
-  → artifacts
-  → memory
-  → continuation
-```
-
-Future layers such as Mnemosyne and Brain should plug into this axis rather than creating separate user-facing universes.
-
-PrometheOS Lite is model-agnostic by design. Future local model support should allow coding models served through runtimes such as Ollama to plug into the `prometheos work` axis without changing the safety model. See [Local Model Compatibility](docs/guides/local-model-compatibility.md).
-
----
-
-## Architecture
-
-### Flow-Centric Design
-
-```text
-Flow
-├── Nodes (execution units)
-│   ├── prep() - prepare input from state
-│   ├── exec() - execute with input
-│   └── post() - post-process with output
-├── Transitions (node → action → node)
-└── SharedState (input, context, working, output, meta)
-```
-
-### Key Concepts
-
-- **Node**: Atomic execution unit with prep, exec, post lifecycle
-- **Flow**: Directed graph of nodes with transitions
-- **SharedState**: Explicit state management across nodes
-- **Action**: Output from post() that determines next node
-
----
-
-## Project Structure
-
-```text
-/src
-  /cli        → CLI entrypoint and flow runner
-  /flow       → Flow-centric architecture
-    /flow.rs          → Flow engine and builder
-    /flow_types.rs    → Specialized flow types (parallel, batch, etc.)
-    /intelligence.rs  → Model router, tool runtime, LLM utilities
-    /memory.rs        → SQLite storage and semantic retrieval
-    /debug.rs         → Debug mode with breakpoints
-    /tracing.rs       → Logging and event timeline
-    /policy.rs        → Policy hooks and validation
-    /rate_limit.rs    → Token budgeting and guardrails
-  /agents     → Legacy agent interfaces (deprecated)
-  /core       → Legacy orchestration (deprecated)
-  /llm        → Model client (OpenAI-compatible, multi-provider)
-  /fs         → File parsing & writing
-  /logger     → Streaming logs
-  /config     → Configuration loader
-```
+- [Install guide](docs/guides/install.md)
+- [Zero-to-first-value guide](docs/guides/zero-to-first-value.md)
+- [Repo Workbench MVP guide](docs/guides/repo-workbench-mvp.md)
+- [Product Surface Inventory](docs/guides/product-surface-inventory.md)
+- [Provider configuration guide](docs/guides/provider-configuration.md)
+- [Ollama and Ornith compatibility guide](docs/guides/ollama-ornith-compatibility.md)
+- Architecture audit: [Provider architecture audit](docs/research/provider-architecture-audit.md)
+- [Alpha release notes](docs/release/v1.6.1-alpha.1.md)
 
 ---
 
