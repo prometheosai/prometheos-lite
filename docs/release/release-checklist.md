@@ -51,3 +51,17 @@
 - [ ] Push git tag
 - [ ] Write release notes summarizing changes
 - [ ] Verify CI workflow runs against the tag
+
+## v1.6.1-alpha.1 manual release checklist
+
+- [ ] `main` is green
+- [ ] CI passes
+- [ ] Linux Install Smoke passes
+- [ ] Repo Workbench Golden Path passes
+- [ ] `cargo install --path . --force` verified
+- [ ] `prometheos --version` verified
+- [ ] first-value workflow verified
+- [ ] generated artifacts include provenance
+- [ ] release notes reviewed
+- [ ] GitHub Release draft reviewed
+- [ ] tag created only after approval
