@@ -36,11 +36,11 @@ async fn local_openai_compatible_endpoint_smoke_test() {
 
     match result {
         Ok(text) => {
-            assert!(
-                !text.is_empty(),
-                "model returned an empty response"
+            assert!(!text.is_empty(), "model returned an empty response");
+            eprintln!(
+                "[integration] local endpoint smoke test passed — response length: {}",
+                text.len()
             );
-            eprintln!("[integration] local endpoint smoke test passed — response length: {}", text.len());
         }
         Err(e) => {
             panic!(
