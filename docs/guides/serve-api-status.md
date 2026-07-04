@@ -94,6 +94,8 @@ The frontend uses:
 
 The frontend is an **experimental** web UI surface. It is not the stable alpha entrypoint. The stable alpha path remains the CLI.
 
+See the [Frontend Alpha Status](docs/guides/frontend-alpha-status.md) guide for the full decision.
+
 ## Relationship to Repo Workbench
 
 Repo Workbench (`prometheos work`) does not require the API server.

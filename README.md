@@ -144,6 +144,7 @@ PrometheOS Lite is not yet:
 - [Provider configuration guide](docs/guides/provider-configuration.md)
 - [Ollama and Ornith compatibility guide](docs/guides/ollama-ornith-compatibility.md)
 - [`prometheos serve` / API server status](docs/guides/serve-api-status.md)
+- [Frontend alpha status](docs/guides/frontend-alpha-status.md)
 - Architecture audit: [Provider architecture audit](docs/research/provider-architecture-audit.md)
 - [Alpha release notes](docs/release/v1.6.1-alpha.1.md)
 
