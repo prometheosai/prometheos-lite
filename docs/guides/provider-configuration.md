@@ -201,7 +201,7 @@ This guide documents provider configuration paths available through the existing
 
 The Repo Workbench golden path does not invoke a model today.
 
-Provider configuration applies to flows that explicitly call LLM providers. Future work should add provider smoke tests, model metadata in WorkContexts/artifacts, and explicit Ollama/Ornith compatibility validation.
+Provider configuration applies to flows that explicitly call LLM providers. See also the [Ollama and Ornith compatibility guide](ollama-ornith-compatibility.md) for local model setup.
 
 ## Notes
 

@@ -55,6 +55,7 @@ See:
 - [Install guide](docs/guides/install.md)
 - [Zero-to-first-value guide](docs/guides/zero-to-first-value.md)
 - [Repo Workbench MVP guide](docs/guides/repo-workbench-mvp.md)
+- [Ollama and Ornith compatibility guide](docs/guides/ollama-ornith-compatibility.md)
 
 ## Safety model
 

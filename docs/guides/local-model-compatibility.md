@@ -87,3 +87,5 @@ The alpha does not yet promise:
 - Mnemosyne memory backend
 - cloud orchestration
 - model training
+
+See also the [Ollama and Ornith compatibility guide](ollama-ornith-compatibility.md) for step-by-step local model setup and validation.
