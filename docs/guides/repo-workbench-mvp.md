@@ -102,6 +102,17 @@ The MVP never writes changes into the target repository source files.
 
 This keeps the first shipped loop safe while proving the product shape.
 
+## Artifact Provenance
+
+Repo Workbench artifacts include provenance metadata that records how each artifact was produced:
+
+- **Generator:** `repo_workbench`
+- **Generation mode:** `deterministic_static_analysis`
+- **Model invoked:** `false`
+- **Provider/model fields:** `null` (no model was used)
+
+In the current alpha path, all artifacts are produced by deterministic static analysis. Provenance metadata is included in both the structured `ArtifactRef` records and the rendered markdown output on disk.
+
 ## Current Risk Heuristics
 
 The first scanner checks common risky patterns, including:
