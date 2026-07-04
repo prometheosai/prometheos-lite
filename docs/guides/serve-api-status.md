@@ -117,7 +117,7 @@ Current stable alpha guarantees remain:
 ## Limitations
 
 - Not part of stable alpha golden path.
-- No full API E2E smoke test yet.
+- A minimal API smoke test verifies safe endpoints (`/health`, `/runtime/stack`). Broader API route coverage remains experimental.
 - Frontend is not stable alpha.
 - Routes may change.
 - No authentication/authorization middleware — user identity is a query parameter.
@@ -128,4 +128,4 @@ Current stable alpha guarantees remain:
 
 ## Next step
 
-The next recommended PR should be an API server smoke test that starts the server on a random port and verifies a small set of safe endpoints.
+Now that a minimal API smoke test exists, the next step is adding broader API route coverage.
