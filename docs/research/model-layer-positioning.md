@@ -133,7 +133,7 @@ Example tasks:
 
 Do not claim public benchmark performance.
 
-The autonomous execution loop should not be evaluated for promotion until this validation plan has produced real evidence.
+The autonomous execution loop should not be evaluated for promotion until this validation plan has produced real evidence. See [Autonomous Loop Graduation Criteria](autonomous-loop-graduation-criteria.md).
 
 ## Near-term implementation path
 

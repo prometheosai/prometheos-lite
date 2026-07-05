@@ -148,6 +148,7 @@ PrometheOS Lite is not yet:
 - [`prometheos serve` / API server status](docs/guides/serve-api-status.md)
 - [Frontend alpha status](docs/guides/frontend-alpha-status.md)
 - [Model-layer positioning](docs/research/model-layer-positioning.md)
+- [Autonomous loop graduation criteria](docs/research/autonomous-loop-graduation-criteria.md)
 - Architecture audit: [Provider architecture audit](docs/research/provider-architecture-audit.md)
 - [Alpha release notes](docs/release/v1.6.1-alpha.1.md)
 

@@ -76,7 +76,7 @@ Every identifiable surface in PrometheOS Lite, classified by maturity.
 
 | Surface | Status | Notes |
 |---|---|---|
-| Execution loop | internal | Main harness driver |
+| Execution loop | internal | Main harness driver. Autonomous execution remains experimental — graduation is blocked pending the [autonomous loop graduation criteria](../research/autonomous-loop-graduation-criteria.md). |
 | Patch provider | experimental | LLM/heuristic patch generation |
 | Patch applier | internal | Rollback-safe patch apply |
 | Validation system | internal | Validation with cache, diffing, timeouts |
