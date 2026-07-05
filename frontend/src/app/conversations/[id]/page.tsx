@@ -3,10 +3,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { Send, ArrowLeft, Clock, FileText, Loader2, Moon, Sun } from 'lucide-react';
 import { getMessages, runFlow, connectWebSocket, type Message, type FlowEvent } from '@/lib/api';
-import { useRouter } from 'next/navigation';
+import { useRouter, useParams } from 'next/navigation';
 
-export default function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
-  const p = params as unknown as { id: string };
+export default function ConversationPage() {
+  const { id } = useParams<{ id: string }>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
@@ -25,7 +25,7 @@ export default function ConversationPage({ params }: { params: Promise<{ id: str
         wsRef.current.close();
       }
     };
-  }, [p.id]);
+  }, [id]);
 
   useEffect(() => {
     scrollToBottom();
@@ -37,7 +37,7 @@ export default function ConversationPage({ params }: { params: Promise<{ id: str
 
   const loadMessages = async () => {
     try {
-      const data = await getMessages(p.id);
+      const data = await getMessages(id);
       setMessages(data);
     } catch (error) {
       console.error('Failed to load messages:', error);
@@ -59,7 +59,7 @@ export default function ConversationPage({ params }: { params: Promise<{ id: str
     // Add user message immediately to the UI
     const tempUserMessage: Message = {
       id: `temp-${Date.now()}`,
-      conversation_id: p.id,
+      conversation_id: id,
       role: 'user',
       content: userMessage,
       created_at: new Date().toISOString(),
@@ -68,7 +68,7 @@ export default function ConversationPage({ params }: { params: Promise<{ id: str
 
     try {
       // Run flow which saves the message and starts execution
-      const flowRun = await runFlow(p.id, userMessage);
+      const flowRun = await runFlow(id, userMessage);
 
       // Connect WebSocket for live updates
       const ws = connectWebSocket(flowRun.id, (event) => {
@@ -85,7 +85,7 @@ export default function ConversationPage({ params }: { params: Promise<{ id: str
           setRunning(false);
           const assistantMessage: Message = {
             id: `assistant-${Date.now()}`,
-            conversation_id: p.id,
+            conversation_id: id,
             role: 'assistant',
             content: event.data.data,
             created_at: new Date().toISOString(),
