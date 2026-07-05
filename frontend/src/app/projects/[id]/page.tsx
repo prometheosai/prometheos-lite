@@ -5,7 +5,8 @@ import { Plus, MessageSquare, ArrowLeft } from 'lucide-react';
 import { getConversations, createConversation, type Conversation } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 
-export default function ProjectPage({ params }: { params: { id: string } }) {
+export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
+  const p = params as unknown as { id: string };
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [newConversationTitle, setNewConversationTitle] = useState('');
   const [loading, setLoading] = useState(true);
@@ -13,11 +14,11 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     loadConversations();
-  }, [params.id]);
+  }, [p.id]);
 
   const loadConversations = async () => {
     try {
-      const data = await getConversations(params.id);
+      const data = await getConversations(p.id);
       setConversations(data);
     } catch (error) {
       console.error('Failed to load conversations:', error);
@@ -31,7 +32,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     if (!newConversationTitle.trim()) return;
 
     try {
-      const conversation = await createConversation(params.id, newConversationTitle);
+      const conversation = await createConversation(p.id, newConversationTitle);
       setConversations([...conversations, conversation]);
       setNewConversationTitle('');
     } catch (error) {
