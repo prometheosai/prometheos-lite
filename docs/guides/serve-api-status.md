@@ -117,7 +117,9 @@ Current stable alpha guarantees remain:
 ## Limitations
 
 - Not part of stable alpha golden path.
-- A minimal API smoke test verifies safe endpoints (`/health`, `/runtime/stack`). Broader API route coverage remains experimental.
+- A minimal API smoke test verifies `/health` and `/runtime/stack`.
+- An assembled router smoke test verifies those safe endpoints are wired through the API router used by `prometheos serve`.
+- Broader API route coverage remains experimental.
 - Frontend is not stable alpha.
 - Routes may change.
 - No authentication/authorization middleware — user identity is a query parameter.
@@ -128,4 +130,4 @@ Current stable alpha guarantees remain:
 
 ## Next step
 
-Now that a minimal API smoke test exists, the next step is adding broader API route coverage.
+Now that handler-level and assembled-router smoke tests exist for safe endpoints, the next step is adding broader API route coverage.
