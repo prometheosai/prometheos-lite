@@ -74,7 +74,7 @@ Returns configured provider, primary model, fallback models, and embedding model
 | `POST /conversations/:id/run` | experimental | Runs flow execution; sends WebSocket events. Indirect integration coverage. |
 | `GET /ws/runs/:id` | experimental | WebSocket upgrade for streaming execution events. No test. |
 | `GET /work-contexts`, `POST /work-contexts`, `POST /work-contexts/submit-intent`, `GET /work-contexts/:id`, `POST /work-contexts/:id/status`, `GET /work-contexts/:id/artifacts`, `POST /work-contexts/:id/continue`, `POST /work-contexts/:id/run-until-complete` | experimental | Work context lifecycle. 12 ownership/validation integration tests. |
-| `GET /work-contexts/:id/harness/run`, `/harness/evidence`, `/harness/patches`, `/harness/validation`, `/harness/review`, `/harness/risk`, `/harness/completion` | experimental | Harness views — read-only result access. Ownership-enforced. |
+| `GET /work-contexts/:id/harness/run`, `/harness/evidence`, `/harness/patches`, `/harness/validation`, `/harness/review`, `/harness/risk`, `/harness/completion` | experimental | Harness views — read-only result access. Ownership-enforced. Harness/autonomous execution surfaces remain experimental and are governed by the [autonomous loop graduation criteria](../research/autonomous-loop-graduation-criteria.md). |
 | `GET /work-contexts/:id/work-quality`, `/work-cost`, `/traces`, `/traces/:run_id` | experimental | Quality, cost, and trace metadata endpoints. |
 | `GET /control-panel/stats`, `/metrics`, `/skills`, `/evolutions`, `/job-queue/stats` | experimental | Internal monitoring surfaces. No tests. |
 
