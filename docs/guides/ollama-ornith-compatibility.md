@@ -74,6 +74,8 @@ PrometheOS Lite appends `/v1/chat/completions` through the OpenAI-compatible cli
 }
 ```
 
+See also the [Ornith manual validation guide](ornith-manual-validation.md) for step-by-step manual validation instructions.
+
 ## Provenance
 
 When model-backed flows are used in the future, artifacts should record provider and model metadata.
