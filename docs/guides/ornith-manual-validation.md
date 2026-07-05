@@ -103,6 +103,33 @@ A passing test does not mean:
 * PrometheOS Lite is the workbench that records context, provenance, approvals, artifacts, and verification paths.
 * This guide validates compatibility, not product superiority.
 
+## Boundary: autonomous execution loop is not part of this validation
+
+This guide validates manual Ornith endpoint compatibility only.
+
+It does not promote the autonomous execution loop.
+
+PrometheOS Lite currently distinguishes between:
+
+- the stable alpha path: `prometheos work`, which is read-only and produces review artifacts
+- experimental harness execution paths, which may evaluate, dry-run, checkpoint, rollback, and apply patches depending on mode and policy
+
+The autonomous execution loop must not be promoted until a separate graduation decision exists.
+
+At minimum, that future decision should require:
+
+- the model validation plan in `docs/research/model-layer-positioning.md` has been run
+- manual Ornith/local endpoint validation has produced real results
+- harness value has been compared against direct model usage
+- a small internal benchmark slice exists
+- minimality enforcement is wired into the real execution path and tested
+- escalation behavior is documented and tested
+- plan-locking / scope-locking exists and is tested
+- rollback/checkpoint behavior is covered by tests
+- docs clearly distinguish read-only review, assisted patching, and autonomous patching
+
+Until then, the autonomous loop remains experimental.
+
 ## Next steps after manual validation
 
 If the manual validation passes, future PRs can add:

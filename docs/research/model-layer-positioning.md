@@ -133,6 +133,8 @@ Example tasks:
 
 Do not claim public benchmark performance.
 
+The autonomous execution loop should not be evaluated for promotion until this validation plan has produced real evidence.
+
 ## Near-term implementation path
 
 Recommended future PRs:
