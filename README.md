@@ -60,6 +60,7 @@ See:
 - [Zero-to-first-value guide](docs/guides/zero-to-first-value.md)
 - [Repo Workbench MVP guide](docs/guides/repo-workbench-mvp.md)
 - [Ollama and Ornith compatibility guide](docs/guides/ollama-ornith-compatibility.md)
+- [Ornith manual validation guide](docs/guides/ornith-manual-validation.md)
 
 ## Safety model
 
@@ -143,6 +144,7 @@ PrometheOS Lite is not yet:
 - [Product Surface Inventory](docs/guides/product-surface-inventory.md)
 - [Provider configuration guide](docs/guides/provider-configuration.md)
 - [Ollama and Ornith compatibility guide](docs/guides/ollama-ornith-compatibility.md)
+- [Ornith manual validation guide](docs/guides/ornith-manual-validation.md)
 - [`prometheos serve` / API server status](docs/guides/serve-api-status.md)
 - [Frontend alpha status](docs/guides/frontend-alpha-status.md)
 - [Model-layer positioning](docs/research/model-layer-positioning.md)

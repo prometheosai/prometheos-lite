@@ -85,7 +85,7 @@ Three phases for testing whether PrometheOS Lite adds value on top of Ornith.
 
 ### Phase 1: Manual local endpoint validation
 
-Use the existing manual local endpoint path.
+Use the existing manual local endpoint path. See the [Ornith manual validation guide](../guides/ornith-manual-validation.md) for step-by-step instructions.
 
 Target examples:
 
@@ -132,6 +132,8 @@ Example tasks:
 - failing unit test repair fixture
 
 Do not claim public benchmark performance.
+
+The autonomous execution loop should not be evaluated for promotion until this validation plan has produced real evidence.
 
 ## Near-term implementation path
 
