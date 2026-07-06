@@ -27,7 +27,7 @@ See `QUEUE.md`.
 | Task 1 | 383dcc8 | `.github/workflows/frontend-ci.yml`, `PROGRESS.md`, `docs/guides/frontend-alpha-status.md` | `npm run lint` — exit 0, 3 warnings | Lint enabled in CI. 3 pre-existing warnings documented. |
 | Task 2 | 0a31a14 | `docs/guides/frontend-smoke-strategy.md`, `PROGRESS.md` | Rust baseline pass | Docs-first design. Defines 4-level strategy. No implementation. |
 | Task 3 | 105a0c8 | `docs/guides/frontend-api-compatibility-plan.md`, `PROGRESS.md` | Rust baseline pass | Defines phased approach: Rust integration tests first, full-stack smoke future. |
-| Task 4 | c74538e | `PROGRESS.md`, `HANDOFF.md` | Full verification bundle | Final handoff and next-loop recommendation. |
+| Task 4 | 7d00e03 | `PROGRESS.md`, `HANDOFF.md` | Full verification bundle | Final handoff and next-loop recommendation. |
 
 ## Current task
 
@@ -39,7 +39,7 @@ None.
 
 ## Verification evidence
 
-All commands run against branch head `c74538e`:
+All commands run against branch head `7d00e03`:
 
 | Command | Result |
 |---|---|

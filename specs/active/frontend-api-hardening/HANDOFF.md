@@ -46,7 +46,7 @@ Queue complete. All 4 tasks executed under Epic Completion Mode.
 
 ## Verification run
 
-All commands run against branch head `c74538e`:
+All commands run against branch head `7d00e03`:
 
 | Command | Result |
 |---|---|
