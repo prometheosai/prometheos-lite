@@ -46,19 +46,20 @@ Queue complete. All 4 tasks executed under Epic Completion Mode.
 
 ## Verification run
 
-Each task was verified:
+All commands run against branch head `c74538e`:
 
-| Task | Verification | Result |
-|---|---|---|
-| Task 1 | `npm run lint`, `npm run build`, `cargo fmt --check`, `cargo check` | Passed |
-| Task 2 | `cargo fmt --check`, `cargo check`, `npm run build` | Passed |
-| Task 3 | `cargo fmt --check`, `cargo check`, `npm run build` | Passed |
-| Task 4 | `cargo fmt --check`, `cargo check` | Passed (pending) |
+| Command | Result |
+|---|---|
+| `cargo fmt --check` | Passed |
+| `cargo check` | Passed |
+| `cargo test` | 600+ passed, 0 failed |
+| `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
+| `cd frontend && npm ci` | Passed |
+| `cd frontend && npm run lint` | Passed (exit 0, 3 warnings) |
+| `cd frontend && npm run build` | Passed |
 
 ## What was not run
 
-- `cargo test` — no Rust code changed across all 4 tasks.
-- `cargo clippy` — no Rust code changed.
 - Frontend smoke/E2E implementation — not in scope (design only).
 - Frontend/API compatibility implementation — not in scope (plan only).
 

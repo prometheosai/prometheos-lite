@@ -27,7 +27,7 @@ See `QUEUE.md`.
 | Task 1 | 383dcc8 | `.github/workflows/frontend-ci.yml`, `PROGRESS.md`, `docs/guides/frontend-alpha-status.md` | `npm run lint` — exit 0, 3 warnings | Lint enabled in CI. 3 pre-existing warnings documented. |
 | Task 2 | 0a31a14 | `docs/guides/frontend-smoke-strategy.md`, `PROGRESS.md` | Rust baseline pass | Docs-first design. Defines 4-level strategy. No implementation. |
 | Task 3 | 105a0c8 | `docs/guides/frontend-api-compatibility-plan.md`, `PROGRESS.md` | Rust baseline pass | Defines phased approach: Rust integration tests first, full-stack smoke future. |
-| Task 4 | pending | `PROGRESS.md`, `HANDOFF.md` | Rust baseline pass | Final handoff and next-loop recommendation. |
+| Task 4 | c74538e | `PROGRESS.md`, `HANDOFF.md` | Full verification bundle | Final handoff and next-loop recommendation. |
 
 ## Current task
 
@@ -39,13 +39,23 @@ None.
 
 ## Verification evidence
 
-Task 1 — `npm run lint` exit 0. 3 warnings:
+All commands run against branch head `c74538e`:
+
+| Command | Result |
+|---|---|
+| `cargo fmt --check` | Passed |
+| `cargo check` | Passed |
+| `cargo test` | 600+ passed, 0 failed |
+| `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
+| `cd frontend && npm ci` | Passed |
+| `cd frontend && npm run lint` | Passed (exit 0, 3 warnings) |
+| `cd frontend && npm run build` | Passed |
+
+Lint warnings (3 pre-existing, non-blocking, no errors):
 - `react-hooks/exhaustive-deps` in `conversations/[id]/page.tsx:28`
 - `react-hooks/exhaustive-deps` in `projects/[id]/page.tsx:17`
 - `@next/next/no-img-element` in `profile-modal.tsx:680`
 - `next lint` deprecation notice (Next.js 15.5, informational only)
-
-All warnings are pre-existing and non-blocking. No errors.
 
 ## Stop / continue decision
 
