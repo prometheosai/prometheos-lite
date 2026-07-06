@@ -6,7 +6,7 @@ Epic Completion Mode
 
 ## Status
 
-Queue created. Execution not started.
+Task 1 complete. Continuing to Task 2.
 
 ## Approved scope
 
@@ -14,7 +14,7 @@ See `QUEUE.md`.
 
 ## Current queue
 
-- [ ] Task 1 — Frontend lint/typecheck decision
+- [x] Task 1 — Frontend lint/typecheck decision
 - [ ] Task 2 — Minimal frontend smoke/E2E design
 - [ ] Task 3 — Frontend/API compatibility smoke plan
 - [ ] Task 4 — Queue handoff and next-loop recommendation
@@ -23,11 +23,12 @@ See `QUEUE.md`.
 
 | Task | Commit | Files | Verification | Notes |
 |---|---|---|---|---|
-| Queue creation | TBD | `QUEUE.md`, `PROGRESS.md`, `HANDOFF.md` | Pending PR #63 verification | Active queue created, not executed |
+| Queue creation | 5e007d86 | `QUEUE.md`, `PROGRESS.md`, `HANDOFF.md` | PR #63 verified | Active queue created, not executed |
+| Task 1 | pending | `.github/workflows/frontend-ci.yml`, `PROGRESS.md` | `npm run lint` — exit 0, 3 warnings | Lint enabled in CI. 3 pre-existing warnings documented. |
 
 ## Current task
 
-Queue creation.
+Task 2 — Minimal frontend smoke/E2E design.
 
 ## Blockers
 
@@ -35,14 +36,18 @@ None.
 
 ## Verification evidence
 
-Pending PR #63 verification.
+Task 1 — `npm run lint` exit 0. 3 warnings:
+- `react-hooks/exhaustive-deps` in `conversations/[id]/page.tsx:28`
+- `react-hooks/exhaustive-deps` in `projects/[id]/page.tsx:17`
+- `@next/next/no-img-element` in `profile-modal.tsx:680`
+- `next lint` deprecation notice (Next.js 15.5, informational only)
+
+All warnings are pre-existing and non-blocking. No errors.
 
 ## Stop / continue decision
 
-Stop after PR #63.
-
-Epic Completion Mode execution begins only after this queue is merged and explicitly invoked.
+Continue to Task 2 after PR for Task 1 merges.
 
 ## Next recommended action
 
-After PR #63 merges, run the queue under Epic Completion Mode starting with Task 1.
+Execute Task 2 — Minimal frontend smoke/E2E design.

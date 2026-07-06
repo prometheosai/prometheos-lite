@@ -102,7 +102,7 @@ It should not be removed.
 It should not be promoted to stable alpha until at least:
 
 - [x] Frontend build is verified in CI (PR #60).
-- [ ] Lint/typecheck pass in CI.
+- [x] Lint/typecheck pass in CI (PR #64).
 - [ ] At least one smoke or E2E test is enforced.
 - [ ] API server compatibility is covered by smoke tests.
 - [ ] README and alpha docs are updated accordingly.
