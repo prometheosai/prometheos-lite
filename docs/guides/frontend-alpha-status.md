@@ -45,6 +45,8 @@ The default configuration is:
 | Frontend dev server | `http://localhost:3001` | Started via `npm run dev` |
 | WebSocket | `ws://127.0.0.1:3000/ws/runs/:id` | Hardcoded in `src/lib/api.ts` |
 
+For a focused walkthrough, see the [Local Frontend Demo](local-frontend-demo.md) guide.
+
 To run both locally:
 
 ```bash
@@ -109,4 +111,4 @@ It should not be promoted to stable alpha until at least:
 
 - Add frontend lint/typecheck CI.
 - Add minimal frontend smoke/E2E test.
-- Document local frontend demo once CI proves it.
+- Add frontend/API compatibility smoke once route coverage is stronger.

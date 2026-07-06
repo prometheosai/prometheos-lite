@@ -94,6 +94,8 @@ The frontend uses:
 
 The frontend is an **experimental** web UI surface. It is not the stable alpha entrypoint. The stable alpha path remains the CLI.
 
+For the local two-terminal walkthrough, see the [Local Frontend Demo](local-frontend-demo.md) guide.
+
 See the [Frontend Alpha Status](frontend-alpha-status.md) guide for the full decision.
 
 ## Relationship to Repo Workbench
