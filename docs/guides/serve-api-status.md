@@ -116,6 +116,8 @@ Current stable alpha guarantees remain:
 - artifacts are reviewable
 - provenance records whether a model was invoked
 
+Operational agent workflow is governed by the [Loop Engineering Protocol](../LOOP_ENGINEERING.md).
+
 ## Limitations
 
 - Not part of stable alpha golden path.

@@ -107,6 +107,8 @@ It should not be promoted to stable alpha until at least:
 - [ ] API server compatibility is covered by smoke tests.
 - [ ] README and alpha docs are updated accordingly.
 
+Operational agent workflow is governed by the [Loop Engineering Protocol](../LOOP_ENGINEERING.md).
+
 ## Next recommended PRs
 
 - Add frontend lint/typecheck CI.
