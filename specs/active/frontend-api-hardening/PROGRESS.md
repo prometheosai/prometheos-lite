@@ -6,7 +6,7 @@ Epic Completion Mode
 
 ## Status
 
-Task 1 complete. Continuing to Task 2.
+Task 2 complete. Continuing to Task 3.
 
 ## Approved scope
 
@@ -15,7 +15,7 @@ See `QUEUE.md`.
 ## Current queue
 
 - [x] Task 1 — Frontend lint/typecheck decision
-- [ ] Task 2 — Minimal frontend smoke/E2E design
+- [x] Task 2 — Minimal frontend smoke/E2E design
 - [ ] Task 3 — Frontend/API compatibility smoke plan
 - [ ] Task 4 — Queue handoff and next-loop recommendation
 
@@ -24,11 +24,12 @@ See `QUEUE.md`.
 | Task | Commit | Files | Verification | Notes |
 |---|---|---|---|---|
 | Queue creation | 5e007d86 | `QUEUE.md`, `PROGRESS.md`, `HANDOFF.md` | PR #63 verified | Active queue created, not executed |
-| Task 1 | pending | `.github/workflows/frontend-ci.yml`, `PROGRESS.md` | `npm run lint` — exit 0, 3 warnings | Lint enabled in CI. 3 pre-existing warnings documented. |
+| Task 1 | 383dcc8 | `.github/workflows/frontend-ci.yml`, `PROGRESS.md`, `docs/guides/frontend-alpha-status.md` | `npm run lint` — exit 0, 3 warnings | Lint enabled in CI. 3 pre-existing warnings documented. |
+| Task 2 | pending | `docs/guides/frontend-smoke-strategy.md`, `PROGRESS.md` | Rust baseline pass | Docs-first design. Defines 4-level strategy. No implementation. |
 
 ## Current task
 
-Task 2 — Minimal frontend smoke/E2E design.
+Task 3 — Frontend/API compatibility smoke plan.
 
 ## Blockers
 
@@ -50,4 +51,4 @@ Continue to Task 2 after PR for Task 1 merges.
 
 ## Next recommended action
 
-Execute Task 2 — Minimal frontend smoke/E2E design.
+Execute Task 3 — Frontend/API compatibility smoke plan.
