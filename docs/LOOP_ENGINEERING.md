@@ -158,15 +158,15 @@ Do not promote. Only work on it under explicit scope and with the autonomous loo
 
 ## Related files
 
-- [Agent Protocol](specs/loop-engineering/AGENT_PROTOCOL.md) — detailed agent instructions
-- [Safety Gates](specs/loop-engineering/SAFETY_GATES.md) — hard blockers and soft warnings
-- [PR Template](specs/loop-engineering/PR_TEMPLATE.md) — required PR body format
-- [Handoff Template](specs/loop-engineering/HANDOFF_TEMPLATE.md) — handoff report format
-- [Progress Schema](specs/loop-engineering/PROGRESS_SCHEMA.md) — progress tracking format
-- [Task Queue Template](specs/loop-engineering/TASK_QUEUE_TEMPLATE.md) — queue definition format
-- [Comment Templates](specs/loop-engineering/COMMENT_TEMPLATES.md) — standardized issue/PR comments
+- [Agent Protocol](../specs/loop-engineering/AGENT_PROTOCOL.md) — detailed agent instructions
+- [Safety Gates](../specs/loop-engineering/SAFETY_GATES.md) — hard blockers and soft warnings
+- [PR Template](../specs/loop-engineering/PR_TEMPLATE.md) — required PR body format
+- [Handoff Template](../specs/loop-engineering/HANDOFF_TEMPLATE.md) — handoff report format
+- [Progress Schema](../specs/loop-engineering/PROGRESS_SCHEMA.md) — progress tracking format
+- [Task Queue Template](../specs/loop-engineering/TASK_QUEUE_TEMPLATE.md) — queue definition format
+- [Comment Templates](../specs/loop-engineering/COMMENT_TEMPLATES.md) — standardized issue/PR comments
 
 ## See also
 
 - [Product Surface Inventory](guides/product-surface-inventory.md)
-- [Autonomous Loop Graduation Criteria](../research/autonomous-loop-graduation-criteria.md)
+- [Autonomous Loop Graduation Criteria](research/autonomous-loop-graduation-criteria.md)
