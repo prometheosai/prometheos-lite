@@ -147,6 +147,7 @@ PrometheOS Lite is not yet:
 - [Ornith manual validation guide](docs/guides/ornith-manual-validation.md)
 - [`prometheos serve` / API server status](docs/guides/serve-api-status.md)
 - [Frontend alpha status](docs/guides/frontend-alpha-status.md)
+- [Local frontend demo](docs/guides/local-frontend-demo.md)
 - [Model-layer positioning](docs/research/model-layer-positioning.md)
 - [Autonomous loop graduation criteria](docs/research/autonomous-loop-graduation-criteria.md)
 - Architecture audit: [Provider architecture audit](docs/research/provider-architecture-audit.md)
