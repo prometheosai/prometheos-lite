@@ -1,0 +1,135 @@
+name: Repo Workbench Golden Path
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  golden-path:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Run Repo Workbench golden path
+        run: |
+          set -euo pipefail
+
+          FIXTURE="fixtures/repo-workbench/rust-risky"
+          GOAL="Find risky code and suggest safe improvements"
+
+          # 1. Create work context and capture work_id from JSON
+          echo "=== Step 1: create work context ==="
+          CREATE_OUTPUT=$(cargo run -- work create \
+            --repo "$FIXTURE" \
+            --goal "$GOAL" \
+            --mode review \
+            --json 2>/dev/null)
+          echo "$CREATE_OUTPUT"
+
+          WORK_ID=$(echo "$CREATE_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['work_id'])")
+          echo "Work ID: $WORK_ID"
+
+          # 2. Run analysis
+          echo ""
+          echo "=== Step 2: run analysis ==="
+          cargo run -- work run "$WORK_ID"
+
+          # 3. List artifacts
+          echo ""
+          echo "=== Step 3: list artifacts ==="
+          cargo run -- work artifacts "$WORK_ID"
+
+          # 4. Show memory
+          echo ""
+          echo "=== Step 4: show memory ==="
+          cargo run -- work memory show "$WORK_ID"
+
+          # 5. Continue
+          echo ""
+          echo "=== Step 5: continue context ==="
+          cargo run -- work continue "$WORK_ID"
+
+      - name: Validate artifacts created
+        run: |
+          set -euo pipefail
+
+          FIXTURE="fixtures/repo-workbench/rust-risky"
+          STORE_ROOT="$FIXTURE/.prometheos-lite/workbench"
+
+          echo "=== Validating artifacts ==="
+
+          # Artifacts directory must exist with content
+          if [ -d "$STORE_ROOT/artifacts" ] && [ "$(find "$STORE_ROOT/artifacts" -type f -name '*.md' 2>/dev/null | wc -l)" -ge 1 ]; then
+            echo "PASS: artifacts directory contains markdown files"
+          else
+            echo "FAIL: no artifact files found under $STORE_ROOT/artifacts/"
+            exit 1
+          fi
+
+          # Memory file must exist (exact name unknown, check for any .md in memory/)
+          if [ -d "$STORE_ROOT/memory" ] && [ "$(find "$STORE_ROOT/memory" -type f -name '*.md' 2>/dev/null | wc -l)" -ge 1 ]; then
+            echo "PASS: memory directory contains markdown files"
+          else
+            echo "FAIL: no memory files found under $STORE_ROOT/memory/"
+            exit 1
+          fi
+
+          # Context file must exist
+          if [ -d "$STORE_ROOT/contexts" ] && [ "$(find "$STORE_ROOT/contexts" -type f -name '*.json' 2>/dev/null | wc -l)" -ge 1 ]; then
+            echo "PASS: contexts directory contains JSON files"
+          else
+            echo "FAIL: no context files found under $STORE_ROOT/contexts/"
+            exit 1
+          fi
+
+          echo ""
+          echo "All artifact validations passed."
+
+      - name: Verify no source files were modified
+        run: |
+          set -euo pipefail
+
+          FIXTURE="fixtures/repo-workbench/rust-risky"
+
+          echo "=== Checking fixture source modifications ==="
+
+          # Only .prometheos-lite/ changes are allowed; everything else is a violation
+          CHANGES=$(git status --short "$FIXTURE" 2>/dev/null || true)
+
+          if [ -z "$CHANGES" ]; then
+            echo "PASS: no source files were modified"
+          else
+            # Filter out only .prometheos-lite/ entries
+            SOURCE_CHANGES=$(echo "$CHANGES" | { grep -v '\.prometheos-lite/' || true; })
+            if [ -z "$SOURCE_CHANGES" ]; then
+              echo "PASS: only .prometheos-lite/ workbench state was written"
+              echo "Changes (all expected):"
+              echo "$CHANGES"
+            else
+              echo "FAIL: source files were modified:"
+              echo "$SOURCE_CHANGES"
+              exit 1
+            fi
+          fi
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
