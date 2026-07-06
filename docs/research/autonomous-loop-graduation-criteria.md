@@ -95,6 +95,8 @@ Docs must clearly say what each mode can and cannot do.
 
 No docs may imply "runs while I sleep" until the above criteria are met.
 
+Operational agent workflow is governed by the [Loop Engineering Protocol](../LOOP_ENGINEERING.md).
+
 ## What this does not claim
 
 This document does not claim:

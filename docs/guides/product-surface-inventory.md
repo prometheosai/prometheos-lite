@@ -173,6 +173,8 @@ Every identifiable surface in PrometheOS Lite, classified by maturity.
 | Automatic patch application | future | Listed as explicitly not included |
 | Full autonomous coding | future | Listed as explicitly not included |
 
+Operational agent workflow is governed by the [Loop Engineering Protocol](../LOOP_ENGINEERING.md).
+
 ## Gap analysis
 
 Surfaces that exist in the repo but have no alpha-level documentation or CI:
