@@ -18,7 +18,7 @@ Decision: present, documented, not stable alpha.
 
 ## Why it is not stable alpha yet
 
-- Frontend CI is not part of the required release gate yet.
+- Frontend CI (build & typecheck) is now gated on PRs via `.github/workflows/frontend-ci.yml`.
 - Playwright/E2E coverage is not enforced in CI yet.
 - Frontend/API integration is not part of the stable alpha golden path.
 - The stable alpha release can be used entirely through the CLI.
@@ -82,12 +82,12 @@ Safe to rely on for alpha:
 - Provenance
 - Local file-backed workbench state
 - Documented provider configuration
+- Frontend build & typecheck (enforced in CI via `.github/workflows/frontend-ci.yml`)
 
 Not safe to rely on yet:
 
 - Frontend UI flows
 - Frontend/API route compatibility
-- Frontend build stability
 - Visual regression coverage
 - Production deployment behavior
 
@@ -99,15 +99,14 @@ It should not be removed.
 
 It should not be promoted to stable alpha until at least:
 
-- Frontend build is verified in CI.
-- Lint/typecheck pass in CI.
-- At least one smoke or E2E test is enforced.
-- API server compatibility is covered by smoke tests.
-- README and alpha docs are updated accordingly.
+- [x] Frontend build is verified in CI (PR #60).
+- [ ] Lint/typecheck pass in CI.
+- [ ] At least one smoke or E2E test is enforced.
+- [ ] API server compatibility is covered by smoke tests.
+- [ ] README and alpha docs are updated accordingly.
 
 ## Next recommended PRs
 
-- Add frontend build/typecheck CI.
-- Add API server smoke test.
+- Add frontend lint/typecheck CI.
 - Add minimal frontend smoke/E2E test.
 - Document local frontend demo once CI proves it.

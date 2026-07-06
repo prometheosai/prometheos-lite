@@ -3,9 +3,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { Send, ArrowLeft, Clock, FileText, Loader2, Moon, Sun } from 'lucide-react';
 import { getMessages, runFlow, connectWebSocket, type Message, type FlowEvent } from '@/lib/api';
-import { useRouter } from 'next/navigation';
+import { useRouter, useParams } from 'next/navigation';
 
-export default function ConversationPage({ params }: { params: { id: string } }) {
+export default function ConversationPage() {
+  const { id } = useParams<{ id: string }>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
@@ -24,7 +25,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
         wsRef.current.close();
       }
     };
-  }, [params.id]);
+  }, [id]);
 
   useEffect(() => {
     scrollToBottom();
@@ -36,7 +37,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
 
   const loadMessages = async () => {
     try {
-      const data = await getMessages(params.id);
+      const data = await getMessages(id);
       setMessages(data);
     } catch (error) {
       console.error('Failed to load messages:', error);
@@ -58,7 +59,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
     // Add user message immediately to the UI
     const tempUserMessage: Message = {
       id: `temp-${Date.now()}`,
-      conversation_id: params.id,
+      conversation_id: id,
       role: 'user',
       content: userMessage,
       created_at: new Date().toISOString(),
@@ -67,7 +68,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
 
     try {
       // Run flow which saves the message and starts execution
-      const flowRun = await runFlow(params.id, userMessage);
+      const flowRun = await runFlow(id, userMessage);
 
       // Connect WebSocket for live updates
       const ws = connectWebSocket(flowRun.id, (event) => {
@@ -84,7 +85,7 @@ export default function ConversationPage({ params }: { params: { id: string } })
           setRunning(false);
           const assistantMessage: Message = {
             id: `assistant-${Date.now()}`,
-            conversation_id: params.id,
+            conversation_id: id,
             role: 'assistant',
             content: event.data.data,
             created_at: new Date().toISOString(),
