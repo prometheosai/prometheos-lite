@@ -166,6 +166,18 @@ Do not promote. Only work on it under explicit scope and with the autonomous loo
 - [Task Queue Template](../specs/loop-engineering/TASK_QUEUE_TEMPLATE.md) — queue definition format
 - [Comment Templates](../specs/loop-engineering/COMMENT_TEMPLATES.md) — standardized issue/PR comments
 
+## Active queues
+
+Active queues live under:
+
+```text
+specs/active/
+```
+
+The first active queue is:
+
+* [Frontend/API Experimental Surface Hardening](../specs/active/frontend-api-hardening/QUEUE.md)
+
 ## See also
 
 - [Product Surface Inventory](guides/product-surface-inventory.md)
