@@ -24,6 +24,14 @@ This directory contains the specification files for the PrometheOS Lite Loop Eng
 6. Use `HANDOFF_TEMPLATE.md` when handing off between agents or tasks.
 7. Use `COMMENT_TEMPLATES.md` for standardized issue/PR communication.
 
+## Active queues
+
+Active loop queues live under `specs/active/`.
+
+Current queues:
+
+- [Frontend/API Experimental Surface Hardening](../active/frontend-api-hardening/QUEUE.md)
+
 ## Design principles
 
 - Spec-driven delivery: the repository is the source of truth.
