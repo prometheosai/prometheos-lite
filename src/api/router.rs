@@ -19,7 +19,7 @@ use crate::api::flow_runs::run_flow;
 use crate::api::health::{health_check, runtime_stack};
 use crate::api::messages::{create_message, get_messages};
 use crate::api::playbooks::{create_playbook, get_playbook, list_playbooks, update_playbook};
-use crate::api::projects::{create_project, get_projects};
+use crate::api::projects::{create_project, get_project, get_projects};
 use crate::api::websocket::websocket_handler;
 use crate::api::work_contexts::{
     continue_work_context, create_work_context, get_harness_completion, get_harness_evidence,
@@ -49,6 +49,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_check))
         .route("/runtime/stack", get(runtime_stack))
         .route("/projects", get(get_projects).post(create_project))
+        .route("/projects/:id", get(get_project))
         .route("/projects/:id/conversations", get(get_conversations))
         .route("/conversations", post(create_conversation))
         .route("/conversations/:id/messages", get(get_messages))
