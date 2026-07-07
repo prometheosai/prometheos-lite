@@ -1,0 +1,66 @@
+# Frontend/API Experimental Surface Hardening Progress
+
+## Mode
+
+Epic Completion Mode
+
+## Status
+
+Queue complete. All 4 tasks executed.
+
+## Approved scope
+
+See `QUEUE.md`.
+
+## Current queue
+
+- [x] Task 1 — Frontend lint/typecheck decision
+- [x] Task 2 — Minimal frontend smoke/E2E design
+- [x] Task 3 — Frontend/API compatibility smoke plan
+- [x] Task 4 — Queue handoff and next-loop recommendation
+
+## Completed tasks
+
+| Task | Commit | Files | Verification | Notes |
+|---|---|---|---|---|
+| Queue creation | 5e007d86 | `QUEUE.md`, `PROGRESS.md`, `HANDOFF.md` | PR #63 verified | Active queue created, not executed |
+| Task 1 | 383dcc8 | `.github/workflows/frontend-ci.yml`, `PROGRESS.md`, `docs/guides/frontend-alpha-status.md` | `npm run lint` — exit 0, 3 warnings | Lint enabled in CI. 3 pre-existing warnings documented. |
+| Task 2 | 0a31a14 | `docs/guides/frontend-smoke-strategy.md`, `PROGRESS.md` | Rust baseline pass | Docs-first design. Defines 4-level strategy. No implementation. |
+| Task 3 | 105a0c8 | `docs/guides/frontend-api-compatibility-plan.md`, `PROGRESS.md` | Rust baseline pass | Defines phased approach: Rust integration tests first, full-stack smoke future. |
+| Task 4 | 7d00e03 | `PROGRESS.md`, `HANDOFF.md` | Full verification bundle | Final handoff and next-loop recommendation. |
+
+## Current task
+
+None. Queue complete.
+
+## Blockers
+
+None.
+
+## Verification evidence
+
+All commands run against branch head `7d00e03`:
+
+| Command | Result |
+|---|---|
+| `cargo fmt --check` | Passed |
+| `cargo check` | Passed |
+| `cargo test` | 600+ passed, 0 failed |
+| `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
+| `cd frontend && npm ci` | Passed |
+| `cd frontend && npm run lint` | Passed (exit 0, 3 warnings) |
+| `cd frontend && npm run build` | Passed |
+
+Lint warnings (3 pre-existing, non-blocking, no errors):
+- `react-hooks/exhaustive-deps` in `conversations/[id]/page.tsx:28`
+- `react-hooks/exhaustive-deps` in `projects/[id]/page.tsx:17`
+- `@next/next/no-img-element` in `profile-modal.tsx:680`
+- `next lint` deprecation notice (Next.js 15.5, informational only)
+
+## Stop / continue decision
+
+Stop. Queue complete. Create final PR.
+
+## Next recommended action
+
+Review and merge this PR. Then begin the next queue or continue with frontend/API smoke implementation as recommended in HANDOFF.md.
