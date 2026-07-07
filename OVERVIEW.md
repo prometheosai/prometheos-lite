@@ -1,6 +1,28 @@
 ## Executive Overview
 
-PrometheOS Lite is a Rust-based, local-first AI agent orchestration CLI centered on a new flow runtime. Its current architecture exposes both a modern `flow` system and deprecated legacy `agents` / `core` modules, because apparently even clean rewrites need a haunted basement. The README describes the project as a "Flow-centric AI agent orchestration system" with flow execution, nested flows, parallel flows, self-reflection loops, batch processing, debugging, policy hooks, sandboxed tools, rate limiting, model routing, and SQLite-backed memory in `README.md`.
+PrometheOS Lite is a local-first AI workbench. Its stable alpha surface is `prometheos work` (Repo Workbench): a conservative CLI workflow that scans repositories, generates review artifacts, records approval decisions, preserves memory, and continues work later without modifying source files.
+
+The repository also contains experimental surfaces — a flow runtime, an API server (`prometheos serve`), a harness engine, and a frontend — plus deprecated legacy `agents` / `core` modules. These are not part of the alpha promise and may change. The maturity of every surface is classified in [Product Surface Inventory](docs/guides/product-surface-inventory.md).
+
+This document is the internal architecture reference. For product framing, read in this order:
+
+- `README.md` — the public product front door (what the product is, the stable alpha surface, and what it is not yet).
+- `AGENTS.md` — the agent operating contract (rules every coding agent must follow before modifying the repo).
+- `docs/guides/product-surface-inventory.md` — the single source of truth for surface maturity (stable alpha / experimental / internal / deprecated / future).
+
+### Product surface & maturity
+
+| Tier | Surfaces |
+| --- | --- |
+| **Stable alpha** | `prometheos work` (Repo Workbench): CRUD, artifacts, memory, continue, approve; deterministic tree-sitter analysis; provider routing; LLM client; artifact provenance; golden-path CI. `prometheos repo-workbench` is an alias / historical surface for the same golden path. |
+| **Experimental** | flow runtime, API server (`prometheos serve`), harness engine, frontend, memory system, and additional CLI commands (`flow`, `harness`, `templates`, `diagnostics`, `bench`, `guardrail`). |
+| **Future / not alpha** | Brain, Mnemosyne integration, cloud/team control plane, plugin marketplace, benchmark claims, autonomous/automatic coding claims. |
+
+These boundaries are enforced by `AGENTS.md` (no frontend / API / autonomous promotion) and recorded in the Product Surface Inventory. Do not describe experimental or future surfaces as part of the alpha product. The architecture reference below covers the experimental flow runtime and supporting modules; treat them as out of alpha scope unless the inventory says otherwise.
+
+### Architecture reference (experimental flow runtime)
+
+The remainder of this document is the internal architecture reference for the experimental `flow` runtime and supporting modules. It is not the alpha product description.
 
 Primary capabilities:
 
