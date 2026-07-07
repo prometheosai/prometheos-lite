@@ -35,6 +35,7 @@ Active loop queues live under `specs/active/`.
 Current queues:
 
 - [Frontend/API Experimental Surface Hardening](../active/frontend-api-hardening/QUEUE.md)
+- [Frontend/API Smoke Implementation](../active/frontend-api-smoke-implementation/QUEUE.md)
 
 ## Design principles
 
