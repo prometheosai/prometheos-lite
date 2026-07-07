@@ -28,7 +28,7 @@ GitHub PR automation reviews diffs and posts comments.
 - No merges.
 - No issue-to-PR.
 
-See [ReviewOnly GitHub flow](../guides/prometheos-reviewonly-github-flow.md) for detailed behavior.
+See [ReviewOnly GitHub flow](../../docs/guides/prometheos-reviewonly-github-flow.md) for detailed behavior.
 
 ## Level 2 — Assisted Draft PR
 
@@ -56,4 +56,4 @@ PrometheOS can run from a self-hosted GitHub runner or local machine.
 
 **Blocked.** Only allowed after autonomous-loop graduation criteria are met.
 
-See [Autonomous loop graduation criteria](../research/autonomous-loop-graduation-criteria.md).
+See [Autonomous loop graduation criteria](../../docs/research/autonomous-loop-graduation-criteria.md).
