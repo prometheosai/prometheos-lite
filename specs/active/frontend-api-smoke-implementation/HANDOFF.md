@@ -41,7 +41,22 @@ Queue complete. All 3 tasks executed under Epic Completion Mode.
 
 ## Verification run
 
-Not yet run against final PR head. To be confirmed when CI executes.
+All commands run against PR head [`c5988d41bdad3feda413c1a20b58acb181eba513`](https://github.com/prometheosai/prometheos-lite/tree/c5988d41bdad3feda413c1a20b58acb181eba513):
+
+| Command | Result |
+|---|---|
+| `cargo fmt --check` | passed |
+| `cargo check` | passed |
+| `cargo test` | passed, 55 tests |
+| `cargo clippy --all-targets --all-features -- -D warnings` | passed |
+| `cd frontend && npm ci` | passed |
+| `cd frontend && npm run lint` | passed |
+| `cd frontend && npm run build` | passed |
+
+### Scope notes
+
+- **Budget:** 7 files, +395/-25. Exceeds default 5-file / 200-line preference but within approved queue scope (Rust API tests + frontend smoke CI).
+- **API boundary:** `GET /projects/:id` and `POST /projects → 201 Created` are narrow additions required by the approved project CRUD smoke path. This PR does not promote the API server to stable alpha and does not claim API stability.
 
 ## What was not run
 
