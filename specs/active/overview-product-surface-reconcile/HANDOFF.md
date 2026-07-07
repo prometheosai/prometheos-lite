@@ -57,7 +57,7 @@ None encountered.
 
 ## Next queue recommendation
 
-The next queue should follow the #67 handoff recommendation rather than continuing doc reframining:
+The next queue should follow the #67 handoff recommendation rather than continuing doc reframing:
 
 - **Phase 2 — Full-stack compatibility smoke** (primary): build the Rust binary, start `prometheos serve`, and verify end-to-end routes as described in the frontend/API compatibility plan.
 - Secondary candidates already listed in the #67 handoff:
