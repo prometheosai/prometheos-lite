@@ -178,6 +178,14 @@ The first active queue is:
 
 * [Frontend/API Experimental Surface Hardening](../specs/active/frontend-api-hardening/QUEUE.md)
 
+## Agent instructions and automation levels
+
+Coding agents should read [AGENTS.md](../AGENTS.md) before modifying the repository.
+
+GitHub automation levels are defined in [GitHub Automation Levels](../specs/loop-engineering/GITHUB_AUTOMATION_LEVELS.md).
+
+Agent budgets are defined in [Agent Budgets](../specs/loop-engineering/AGENT_BUDGETS.md).
+
 ## See also
 
 - [Product Surface Inventory](guides/product-surface-inventory.md)

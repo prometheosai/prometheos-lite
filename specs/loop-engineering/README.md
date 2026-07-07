@@ -7,12 +7,16 @@ This directory contains the specification files for the PrometheOS Lite Loop Eng
 | File | Purpose |
 |---|---|
 | `AGENT_PROTOCOL.md` | Detailed agent protocol with lifecycle, roles, and operating modes |
+| `AGENT_BUDGETS.md` | Default budgets, path controls, and escalation rules |
+| `GITHUB_AUTOMATION_LEVELS.md` | Automation ladder from manual queue to autonomous patch |
 | `SAFETY_GATES.md` | Hard blockers and soft warnings specific to PrometheOS Lite |
 | `PR_TEMPLATE.md` | Required PR body format for loop-engineering PRs |
 | `HANDOFF_TEMPLATE.md` | Handoff report format for agent transitions |
 | `PROGRESS_SCHEMA.md` | Progress tracking schema for Epic Completion Mode |
 | `TASK_QUEUE_TEMPLATE.md` | Queue definition format for approved task sequences |
 | `COMMENT_TEMPLATES.md` | Standardized GitHub comment templates for loop operations |
+
+The root instruction file is [AGENTS.md](../../AGENTS.md) — coding agents should read it before working in this repository.
 
 ## How to use
 

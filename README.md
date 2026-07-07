@@ -151,6 +151,8 @@ PrometheOS Lite is not yet:
 - [Model-layer positioning](docs/research/model-layer-positioning.md)
 - [Autonomous loop graduation criteria](docs/research/autonomous-loop-graduation-criteria.md)
 - Architecture audit: [Provider architecture audit](docs/research/provider-architecture-audit.md)
+- [Agent instructions](AGENTS.md) — root instructions for coding agents working in this repo
+- [PrometheOS ReviewOnly GitHub flow](docs/guides/prometheos-reviewonly-github-flow.md) — planned read-only PR review automation
 - [Loop Engineering Protocol](docs/LOOP_ENGINEERING.md) — operating protocol for agent-assisted development
 - [Alpha release notes](docs/release/v1.6.1-alpha.1.md)
 
