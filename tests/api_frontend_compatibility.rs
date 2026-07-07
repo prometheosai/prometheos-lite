@@ -1,5 +1,5 @@
-use axum::http::Method;
 use axum::body::Body;
+use axum::http::Method;
 use axum::http::Request;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -57,7 +57,11 @@ async fn project_crud_create_and_list() {
         )
         .await
         .unwrap();
-    assert_eq!(create_resp.status(), 201, "POST /projects should return 201");
+    assert_eq!(
+        create_resp.status(),
+        201,
+        "POST /projects should return 201"
+    );
 
     let list_resp = app
         .clone()
@@ -77,7 +81,7 @@ async fn project_crud_create_and_list() {
     let projects: Vec<Value> = serde_json::from_slice(&body_bytes).unwrap();
     assert!(!projects.is_empty(), "should have at least one project");
     assert_eq!(projects[0]["name"], "smoke-test-project");
-    assert!(projects[0]["id"].as_str().unwrap().len() > 0);
+    assert!(!projects[0]["id"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -109,13 +113,17 @@ async fn project_crud_create_and_get_by_id() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/projects/{}", project_id))
+                .uri(format!("/projects/{}", project_id))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(get_resp.status(), 200, "GET /projects/:id should return 200");
+    assert_eq!(
+        get_resp.status(),
+        200,
+        "GET /projects/:id should return 200"
+    );
 
     let body_bytes = axum::body::to_bytes(get_resp.into_body(), 1024 * 16)
         .await
@@ -140,7 +148,11 @@ async fn project_crud_get_nonexistent_returns_404() {
         )
         .await
         .unwrap();
-    assert_eq!(get_resp.status(), 404, "GET /projects/:id for nonexistent should return 404");
+    assert_eq!(
+        get_resp.status(),
+        404,
+        "GET /projects/:id for nonexistent should return 404"
+    );
 }
 
 #[tokio::test]
@@ -182,7 +194,10 @@ async fn project_crud_multiple_projects() {
     let projects: Vec<Value> = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(projects.len(), 3, "should have three projects");
 
-    let names: Vec<&str> = projects.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = projects
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"project-a"));
     assert!(names.contains(&"project-b"));
     assert!(names.contains(&"project-c"));
