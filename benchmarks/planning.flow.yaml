@@ -1,0 +1,17 @@
+version: "1.0"
+name: "Planning Benchmark"
+description: "Task planning flow for benchmarking"
+
+nodes:
+  - id: "planner"
+    node_type: "planner"
+    config:
+      model: "gpt-4"
+      max_steps: 5
+
+transitions:
+  - from: "planner"
+    action: "complete"
+    to: "end"
+
+start_node: "planner"
