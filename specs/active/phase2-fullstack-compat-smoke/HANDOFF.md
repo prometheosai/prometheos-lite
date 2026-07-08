@@ -2,62 +2,66 @@
 
 ## Current state
 
-Queue defined, not executed. This PR (`#69`) registers the Phase 2 full-stack compatibility smoke queue under `specs/active/phase2-fullstack-compat-smoke/`. Execution is a separate Epic Completion run to be approved after merge.
+Queue executed. All 3 tasks complete. PR #71 is open for human review. This is the first implementation PR reviewed by the now-live ReviewOnly bot — a real test of the new operating model.
 
 ## Completed work
 
-### Queue definition (this PR)
+### Task 1 — Full-stack smoke script (`scripts/fullstack-smoke.sh`)
 
-- Created `specs/active/phase2-fullstack-compat-smoke/QUEUE.md` defining three tasks:
-  - Task 1 — Full-stack smoke script (build binary, start `prometheos serve`, `curl` health + project CRUD, teardown).
-  - Task 2 — CI integration for the full-stack smoke (separate job after the Rust build).
-  - Task 3 — Queue handoff and next-loop recommendation.
-- Created `PROGRESS.md` and this `HANDOFF.md`.
+- Bash script, no npm deps, no Playwright, uses only `curl`, `cargo`, and shell built-ins.
+- Builds the `prometheos` binary, starts `prometheos serve` in an isolated temp dir (config copied so the repo tree stays clean), polls `GET /health` until ready, then verifies the project CRUD cycle over real HTTP: `POST /projects` → 201, `GET /projects` → 200 (name present), `GET /projects/:id` → 200 (name present).
+- Always tears down the server and temp dir via `trap`, exits non-zero on any failure.
+- Locally verified end-to-end via Git Bash: `FULLSTACK SMOKE PASSED`.
 
-**Files:** `specs/active/phase2-fullstack-compat-smoke/QUEUE.md`, `PROGRESS.md`, `HANDOFF.md`
+### Task 2 — CI integration (`.github/workflows/ci.yml`)
+
+- Added a separate `fullstack-smoke` job (ubuntu-latest) that checks out, installs Rust, uses the existing cargo cache, and runs `bash scripts/fullstack-smoke.sh`.
+- Kept separate from the `rust-checks` matrix so a full-stack environment issue does not block core Rust checks. No existing CI weakened.
+
+### Task 3 — Queue handoff (this file + `PROGRESS.md`)
+
+- Finalized progress and wrote this handoff.
+
+**Files:** `scripts/fullstack-smoke.sh`, `.github/workflows/ci.yml`, `specs/active/phase2-fullstack-compat-smoke/PROGRESS.md`, `specs/active/phase2-fullstack-compat-smoke/HANDOFF.md`
 
 ## Verification run
 
-Docs-only change. No Rust or frontend behavior changed, so no `cargo` / `npm` build was required by `docs/LOOP_ENGINEERING.md` (docs-only rule).
-
-Cross-checked the queue scope against source-of-truth docs:
-
-| Queue claim | Source match |
+| Command | Result |
 |---|---|
-| Phase 2 builds binary, starts `prometheos serve`, curls frontend-reachable routes | `frontend-api-compatibility-plan.md` Phase 2 section |
-| Routes verified: health + project CRUD | matches Phase 1 routes in `tests/api_frontend_compatibility.rs` and compatibility plan Step 1–2 |
-| No Playwright / no new deps / no frontend source change | matches `frontend-smoke-strategy.md` (Level 4 excluded) and plan "what this does NOT do" |
-| API server / frontend remain experimental | `docs/guides/product-surface-inventory.md` (serve = experimental, frontend = experimental) |
+| `bash scripts/fullstack-smoke.sh` | PASSED |
+| `cargo fmt --check` | passed (no Rust changed) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | passed (no Rust changed) |
+| `cargo test` | unaffected (no Rust behavior changed) |
+
+The new `fullstack-smoke` CI job runs on this PR as live proof. ReviewOnly also posts a report on this PR.
 
 ## What was not run
 
-- Task 1–3 were not executed; this PR defines the queue only.
-- No `cargo build` / `prometheos serve` / `curl` smoke was run.
-- No `npm` / frontend build was run.
-- No CI job was added (that is Task 2 of the execution run).
+- Model/flow execution paths (intentionally out of scope; the smoke is data-only).
+- Frontend server / browser (Level 3 API connectivity smoke is a separate future queue).
+- WebSocket, auth, conversation/message CRUD beyond project CRUD (Phase 2 scope per compatibility plan).
 
 ## Blockers
 
-None encountered.
+None. `prometheos serve` boots offline; the smoke exercises only health + project CRUD, which work without a provider.
 
-## Risks
+## Risks / findings
 
-- Low. This is a planning PR. The main execution risk (flagged in Task 1 stop conditions) is that `prometheos serve` startup in CI may need specific config or a writable DB path; the execution queue must report that as a real finding rather than masking it. This is noted in the queue, not resolved here.
+- **Startup warning (benign):** `prometheos serve` logs `WARN ... OpenRouter provider has no API key set in env 'OPENROUTER_API_KEY'` at boot. This is non-fatal — model calls fail only at request time, and the smoke does not invoke models. Reported here per the explicit instruction not to mask server bootstrap behavior. No duct-taping was applied; the smoke simply does not depend on a model.
+- The smoke script hardcodes an isolated port (`3100`) and an isolated temp work dir, so it will not collide with a default `prometheos serve` on `3000` nor pollute the repo with `prometheos.db`.
+- If `prometheos serve` ever changes its config requirements or port flags, the script will fail clearly (the readiness poll detects early exit and dumps the server log). That is intended — it should surface real wiring regressions, not hide them.
 
-## Next queue recommendation
+## Next task
 
-After merge, execute the queue under Epic Completion Mode:
-
-- **Primary:** Task 1 (full-stack smoke script) → Task 2 (CI job) → Task 3 (handoff).
-- Secondary candidates for a later queue (not part of this one):
-  - **Level 3 API connectivity smoke** — verify the frontend can reach the API server (separate from Phase 2 route smoke; see `frontend-smoke-strategy.md` Level 3).
-  - **ReviewOnly GitHub Action implementation** — the read-only PR review Action (Level 1 of the automation ladder), now that `AGENTS.md` house rules exist.
-  - **Loop structure validator** — validate `QUEUE.md` / `PROGRESS.md` / `HANDOFF.md` structure.
+None in this PR. After merge:
+- Level 3 API connectivity smoke (frontend reaches API server) — separate PR.
+- Loop structure validator (validate QUEUE/PROGRESS/HANDOFF structure) — separate PR.
+- LLM-powered ReviewOnly only after deterministic v0 is proven stable — separate PR, explicit approval.
 
 ## Stop reason
 
-Queue defined, not executed. Handoff documents the definition only; execution is a separate approved run.
+Queue complete. All 3 tasks executed and verified.
 
 ## Confidence
 
-High. Scope contained, no boundary violations, no dependencies, no behavior changed, and queue scope matches the compatibility plan Phase 2 and smoke strategy.
+High. Scope contained, no boundary violations, no dependencies, no runtime/API behavior changes, and the smoke is verified live (local run + CI self-trigger). The bot reviewer gets to watch another robot try `curl`.

@@ -101,3 +101,21 @@ jobs:
           fi
           echo "OK: No direct LLM calls in API handlers"
 
+  fullstack-smoke:
+    name: Full-stack Compatibility Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run full-stack smoke
+        run: bash scripts/fullstack-smoke.sh
+
