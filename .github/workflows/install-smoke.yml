@@ -1,0 +1,90 @@
+name: Linux Install Smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install binary
+        run: cargo install --path . --force
+
+      - name: Verify binary
+        run: |
+          set -euo pipefail
+          prometheos --version
+          prometheos --help
+
+      - name: Run first-value golden path from installed binary
+        run: |
+          set -euo pipefail
+
+          FIXTURE="fixtures/repo-workbench/rust-risky"
+          GOAL="Find risky code and suggest safe improvements"
+
+          echo "=== Step 1: create work context ==="
+          CREATE_OUTPUT=$(prometheos work create \
+            --repo "$FIXTURE" \
+            --goal "$GOAL" \
+            --mode review \
+            --json 2>&1)
+          echo "$CREATE_OUTPUT"
+
+          WORK_ID=$(echo "$CREATE_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['work_id'])")
+          echo "Work ID: $WORK_ID"
+
+          echo ""
+          echo "=== Step 2: run analysis ==="
+          prometheos work run "$WORK_ID"
+
+          echo ""
+          echo "=== Step 3: list artifacts ==="
+          prometheos work artifacts "$WORK_ID"
+
+          echo ""
+          echo "=== Step 4: show memory ==="
+          prometheos work memory show "$WORK_ID"
+
+          echo ""
+          echo "=== Step 5: continue context ==="
+          prometheos work continue "$WORK_ID"
+
+      - name: Validate no source files were modified
+        run: |
+          set -euo pipefail
+
+          echo "=== Checking fixture source modifications ==="
+
+          CHANGES=$(git status --short fixtures/ 2>/dev/null || true)
+
+          if [ -z "$CHANGES" ]; then
+            echo "PASS: no source files were modified"
+          else
+            SOURCE_CHANGES=$(echo "$CHANGES" | { grep -v '\.prometheos-lite/' || true; })
+            if [ -z "$SOURCE_CHANGES" ]; then
+              echo "PASS: only .prometheos-lite/ workbench state was written"
+              echo "Changes (all expected):"
+              echo "$CHANGES"
+            else
+              echo "FAIL: source files were modified:"
+              echo "$SOURCE_CHANGES"
+              exit 1
+            fi
+          fi
