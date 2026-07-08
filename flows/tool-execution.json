@@ -1,0 +1,31 @@
+{
+  "version": "1",
+  "name": "Tool Execution Flow",
+  "description": "A flow that executes a command-line tool and processes the output",
+  "start_node": "tool_runner",
+  "nodes": [
+    {
+      "id": "tool_runner",
+      "node_type": "tool",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    },
+    {
+      "id": "file_writer",
+      "node_type": "file_writer",
+      "config": {
+        "retries": 1,
+        "retry_delay_ms": 500
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "tool_runner",
+      "action": "continue",
+      "to": "file_writer"
+    }
+  ]
+}
