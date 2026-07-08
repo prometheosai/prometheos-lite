@@ -6,27 +6,29 @@ Epic Completion Mode
 
 ## Status
 
-Queue defined. Not yet executed. This PR defines the queue; execution is a separate approved run.
+Queue executed. All 3 tasks complete. PR open for human review.
 
 ## Approved scope
 
-See `QUEUE.md`.
+See `QUEUE.md` (Phase 2 full-stack compatibility smoke).
 
 ## Current queue
 
-- [ ] Task 1 — Full-stack smoke script
-- [ ] Task 2 — CI integration for full-stack smoke
-- [ ] Task 3 — Queue handoff and next-loop recommendation
+- [x] Task 1 — Full-stack smoke script
+- [x] Task 2 — CI integration for full-stack smoke
+- [x] Task 3 — Queue handoff and next-loop recommendation
 
 ## Completed tasks
 
 | Task | Commit | Files | Verification | Notes |
 |---|---|---|---|---|
-| Queue definition | (this PR) | `QUEUE.md`, `PROGRESS.md`, `HANDOFF.md` | docs-only | Phase 2 full-stack compatibility smoke queue defined, not executed |
+| Task 1 | (this PR) | `scripts/fullstack-smoke.sh` | script run locally via Git Bash: build → boot → health → project CRUD → teardown, PASSED | Builds `prometheos` binary, runs `prometheos serve` on an isolated port, curls `/health` + project CRUD |
+| Task 2 | (this PR) | `.github/workflows/ci.yml` | new job runs the script; Rust baseline unchanged | Separate `fullstack-smoke` job, does not block core Rust checks |
+| Task 3 | (this PR) | `PROGRESS.md`, `HANDOFF.md` | docs-only | Queue handoff + next-loop recommendation |
 
 ## Current task
 
-None. Queue defined, awaiting execution approval.
+None. Queue complete.
 
 ## Blockers
 
@@ -34,25 +36,28 @@ None.
 
 ## Scope notes
 
-This is a planning/queue-definition PR only. It adds no runtime behavior, no dependencies, and does not touch `OVERVIEW.md`, `README.md`, `AGENTS.md`, or any source file. It defines the Phase 2 follow-on to #67 (Phase 1 project CRUD integration tests) and the `frontend-api-compatibility-plan.md` Phase 2 section.
+- No Playwright, no npm deps, no frontend source changes, no API promotion, no API semantics changes, no model/provider behavior, no autonomous execution, no Brain/Mnemosyne claims, no CI weakening.
+- The smoke runs the real binary + server bootstrap (build, config load, port bind, route registration) and asserts the same project CRUD contract as Phase 1's in-memory tests.
+- `prometheos serve` was found to boot offline (no provider API key required at startup); only `GET /health` and project CRUD are exercised, which are data-only. Startup logs benign warnings about missing `OPENROUTER_API_KEY` (model calls only fail at request time, not at boot).
+- Budget: 2 files changed (`scripts/fullstack-smoke.sh`, `.github/workflows/ci.yml`), within the default 5-file preference.
 
 ## Verification evidence
 
-Docs-only. No `cargo` / `npm` commands required; no Rust or frontend behavior changed.
-
-Cross-checked the queue scope against source-of-truth docs:
-
-| Queue claim | Source match |
+| Command | Result |
 |---|---|
-| Phase 2 builds binary, starts `prometheos serve`, curls frontend-reachable routes | `frontend-api-compatibility-plan.md` Phase 2 section |
-| Routes verified: health + project CRUD | matches Phase 1 routes in `tests/api_frontend_compatibility.rs` and compatibility plan Step 1–2 |
-| No Playwright / no new deps / no frontend source change | matches `frontend-smoke-strategy.md` (Level 4 excluded) and plan "what this does NOT do" |
-| API server / frontend remain experimental | `docs/guides/product-surface-inventory.md` (serve = experimental, frontend = experimental) |
+| `bash scripts/fullstack-smoke.sh` | PASSED (build → boot → `/health` 200 → `POST /projects` 201 → `GET /projects` 200 → `GET /projects/:id` 200 → teardown) |
+| `cargo fmt --check` | passed (no Rust changed) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | passed (no Rust changed) |
+| `cargo test` | unchanged; no Rust behavior changed |
+| CI (self-trigger) | the new `fullstack-smoke` job runs on this PR; ReviewOnly also posts a report |
 
 ## Stop / continue decision
 
-Stop. Queue defined. Execution is a separate Epic Completion run to be approved after merge.
+Stop. Queue complete. Create PR for human review.
 
 ## Next recommended action
 
-Merge this PR to register the queue. Then execute under Epic Completion Mode in a follow-up PR (head into Task 1).
+Merge after CI green and human review. Next queue candidates (per handoff):
+- Level 3 API connectivity smoke (frontend reaches API server).
+- Loop structure validator.
+- (ReviewOnly v0 is already live; LLM-powered ReviewOnly only after deterministic v0 is proven stable.)
