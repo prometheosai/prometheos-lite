@@ -2,38 +2,45 @@
 // PrometheOS ReviewOnly v0 — deterministic, read-only PR reviewer.
 //
 // No external models. No file edits. No commits. No merges.
-// Reads PR metadata + diff and the repo's agent/safety docs, then posts one
-// structured ReviewOnly report comment.
+// Reads PR metadata + diff and posts one structured ReviewOnly report comment.
 //
-// Designed to run inside GitHub Actions with `gh` available and
-// `pull-requests: write` permission for posting the comment only.
+// Runs inside GitHub Actions with `gh` available and `pull-requests: write`
+// permission for posting the comment only.
+//
+// Safety: all `gh` calls use execFileSync with an argv array (no shell
+// interpolation), and report bodies are passed through stdin via `--input -`.
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const PR = process.env.PR_NUMBER;
+const REPO = process.env.REPO; // owner/repo
 const GH_TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 
-function gh(args, input) {
+// argv-array form: never goes through a shell, so diff/filename/report content
+// cannot be interpreted as shell syntax.
+function gh(argv, input) {
   const opts = { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] };
   if (input !== undefined) opts.input = input;
-  return execSync(`gh ${args}`, opts).toString();
+  return execFileSync("gh", argv, opts).toString();
 }
 
-// ---- helpers ---------------------------------------------------------------
-
-function runGhJson(args) {
-  return JSON.parse(gh(args));
+function runGhJson(argv) {
+  return JSON.parse(gh(argv));
 }
 
 function getPrData() {
-  return runGhJson(
-    `pr view ${PR} --json number,title,body,additions,deletions,changedFiles,files,baseRefName,headRefName,state,url`,
-  );
+  return runGhJson([
+    "pr",
+    "view",
+    String(PR),
+    "--json",
+    "number,title,body,additions,deletions,changedFiles,files,baseRefName,headRefName,state,url",
+  ]);
 }
 
 function getDiff() {
   try {
-    return gh(`pr diff ${PR}`);
+    return gh(["pr", "diff", String(PR)]);
   } catch {
     return "";
   }
@@ -41,8 +48,7 @@ function getDiff() {
 
 function getCiStatus() {
   try {
-    const out = gh(`pr checks ${PR} --json name,state,conclusion 2>/dev/null`);
-    const arr = JSON.parse(out);
+    const arr = JSON.parse(gh(["pr", "checks", String(PR), "--json", "name,state,conclusion"]));
     if (!Array.isArray(arr) || arr.length === 0) return "unavailable";
     return arr
       .map((c) => `${c.name}: ${c.state}${c.conclusion ? " (" + c.conclusion + ")" : ""}`)
@@ -52,7 +58,7 @@ function getCiStatus() {
   }
 }
 
-// ---- analysis --------------------------------------------------------------
+// ---- analysis helpers ------------------------------------------------------
 
 const DEPENDENCY_FILES = [
   "cargo.toml",
@@ -92,8 +98,9 @@ const SECRET_RE = [
   /github_pat_[A-Za-z0-9_]{20,}/,
 ];
 
-const PROMOTION_RE = /(promote|now stable|is now stable|stable alpha|promoted to stable|alpha-promised|alpha promised)/i;
 const EXPERIMENTAL_SURFACE_RE = /(frontend|api server|api_server|autonomous|brain|mnemosyne|plugin marketplace|cloud\/team|control plane)/i;
+const AFFIRM_PROMO_RE = /(is (now )?stable alpha|stable alpha|promoted (to |into )?(stable|alpha)|alpha[- ]?promised|now part of stable alpha|becomes stable|is now stable|part of (the )?stable alpha|promote .{0,40} to stable)/i;
+const NEGATION_RE = /\b(no|not|never|without|does not|doesn't|avoid|avoided|unpromoted|not part of stable alpha|future|not alpha|experimental)\b/i;
 const BENCHMARK_RE = /(benchmark|outperform|sota|state-of-the-art|beats|surpass|better than \w+ by)/i;
 const EVIDENCE_RE = /(verified|evidence|cargo test|cargo clippy|npm run build|npm ci|validation|ran the checks)/i;
 
@@ -115,6 +122,26 @@ function basename(p) {
   return p.split("/").pop().toLowerCase();
 }
 
+// Promotion/overclaim: require AFFIRMATIVE promotion language. Negated
+// safety-boundary phrasing ("No frontend promotion", "experimental", "future /
+// not alpha") is exempt. Uncertain matches downgrade to Warning.
+function classifyPromotion(text) {
+  let blocker = false;
+  let warning = false;
+  for (const line of text.split("\n")) {
+    if (!EXPERIMENTAL_SURFACE_RE.test(line)) continue;
+    if (NEGATION_RE.test(line)) continue; // safety-boundary language, ignore
+    if (AFFIRM_PROMO_RE.test(line)) {
+      blocker = true;
+    } else if (/(stable alpha|promot|alpha)/i.test(line)) {
+      warning = true;
+    }
+  }
+  if (blocker) return "blocker";
+  if (warning) return "warning";
+  return null;
+}
+
 function analyze(pr, diff) {
   const findings = { Blockers: [], Warnings: [], Suggestions: [], Questions: [] };
   const add = (sev, text) => findings[sev].push(text);
@@ -129,12 +156,19 @@ function analyze(pr, diff) {
   const netLines = (pr.additions || 0) - (pr.deletions || 0);
   const body = pr.body || "";
 
+  // Touched-area classification.
+  const srcTouched =
+    files.some((f) => /^src\//i.test(f.path)) ||
+    files.some((f) => /^cargo\.(toml|lock)$/i.test(f.path));
+  const frontendTouched = files.some((f) => /^frontend\//i.test(f.path));
+  const workflowTouched = files.some((f) => /^\.github\//i.test(f.path));
+  const docsTouched = files.some((f) => /^docs\//i.test(f.path) || /\.md$/i.test(f.path));
+  const scriptTouched = files.some((f) => /^scripts\//i.test(f.path) || /\.mjs$/i.test(f.path));
+  const experimentalTouched = files.filter((f) => EXPERIMENTAL_PATH_PATTERNS.some((re) => re.test(f.path)));
+
   // --- blockers ------------------------------------------------------------
 
-  const depFiles = files.filter((f) =>
-    DEPENDENCY_FILES.includes(basename(f.path)) ||
-    /\.(csproj|toml|lock|gradle)$/i.test(f.path) && DEPENDENCY_FILES.some((d) => f.path.toLowerCase().endsWith(d)),
-  );
+  const depFiles = files.filter((f) => DEPENDENCY_FILES.includes(basename(f.path)));
   if (depFiles.length > 0) {
     add(
       "Blockers",
@@ -143,8 +177,7 @@ function analyze(pr, diff) {
     );
   }
 
-  const workflowFiles = files.filter((f) => /^\.github\//i.test(f.path));
-  if (workflowFiles.length > 0) {
+  if (workflowTouched) {
     const removed = removedLines(diff).join("\n").toLowerCase();
     const weakened =
       /cargo test/.test(removed) ||
@@ -154,16 +187,18 @@ function analyze(pr, diff) {
     if (weakened) {
       add(
         "Blockers",
-        `CI/workflow files changed and required checks appear removed: ${workflowFiles
+        `CI/workflow files changed and required checks appear removed (${files
+          .filter((f) => /^\.github\//i.test(f.path))
           .map((f) => f.path)
-          .join(", ")}. Possible CI weakening (SAFETY_GATES hard blocker).`,
+          .join(", ")}). Possible CI weakening (SAFETY_GATES hard blocker).`,
       );
     } else {
       add(
         "Warnings",
-        `CI/workflow files changed: ${workflowFiles
+        `CI/workflow files changed (${files
+          .filter((f) => /^\.github\//i.test(f.path))
           .map((f) => f.path)
-          .join(", ")}. Verify CI was not weakened (no check removed).`,
+          .join(", ")}). Verify CI was not weakened (no check removed).`,
       );
     }
   }
@@ -191,16 +226,20 @@ function analyze(pr, diff) {
     add("Blockers", `Source-of-truth conflict markers detected in diff (${conflictMarkers.length} line(s)).`);
   }
 
-  // promotion / overclaim (blocker if explicit promotion phrasing)
   const promotionScope = body + "\n" + addedLines(diff).join("\n");
-  if (PROMOTION_RE.test(promotionScope) && EXPERIMENTAL_SURFACE_RE.test(promotionScope)) {
+  const promo = classifyPromotion(promotionScope);
+  if (promo === "blocker") {
     add(
       "Blockers",
-      `Possible promotion/overclaim of an experimental surface to stable alpha. PR text or diff mentions stable alpha together with an experimental surface (frontend/API/autonomous/Brain/Mnemosyne). Per AGENTS.md rules, no frontend/API/autonomous promotion.`,
+      `Possible promotion/overclaim of an experimental surface to stable alpha. PR text or diff contains affirmative promotion language for an experimental surface (frontend/API/autonomous/Brain/Mnemosyne). Per AGENTS.md rules, no frontend/API/autonomous promotion.`,
+    );
+  } else if (promo === "warning") {
+    add(
+      "Warnings",
+      `Mentions an experimental surface together with promotion/stable-alpha language. Confirm this is not a promotion claim (negated safety-boundary language is exempt).`,
     );
   }
 
-  // benchmark claims without evidence
   if (BENCHMARK_RE.test(promotionScope) && !EVIDENCE_RE.test(promotionScope)) {
     add(
       "Blockers",
@@ -217,9 +256,6 @@ function analyze(pr, diff) {
     add("Warnings", `Net lines changed (${netLines}) exceed the default 200-line budget. Prefer small PRs.`);
   }
 
-  const experimentalTouched = files.filter((f) =>
-    EXPERIMENTAL_PATH_PATTERNS.some((re) => re.test(f.path)),
-  );
   if (experimentalTouched.length > 0) {
     add(
       "Warnings",
@@ -229,15 +265,11 @@ function analyze(pr, diff) {
     );
   }
 
-  const isDocsOnlyClaim =
-    /^docs:/i.test(pr.title || "") || /docs-only/i.test(body);
-  const runtimeTouched = files.some(
-    (f) => /^src\//i.test(f.path) || /^frontend\//i.test(f.path) || /^\.github\//i.test(f.path),
-  );
-  if (isDocsOnlyClaim && runtimeTouched) {
+  const isDocsOnlyClaim = /^docs:/i.test(pr.title || "") || /docs-only/i.test(body);
+  if (isDocsOnlyClaim && (srcTouched || frontendTouched || workflowTouched || scriptTouched)) {
     add(
       "Warnings",
-      `PR claims docs-only but touches runtime/API/frontend/workflow files. Verification must cover the changed area.`,
+      `PR claims docs-only but touches non-docs files (src/frontend/workflow/scripts). Verification must cover the changed area.`,
     );
   }
 
@@ -250,13 +282,21 @@ function analyze(pr, diff) {
   if (/npm (run )?build/i.test(body)) claimedChecks.push("npm run build");
   if (/npm (run )?lint/i.test(body)) claimedChecks.push("npm run lint");
   if (/npm ci/i.test(body)) claimedChecks.push("npm ci");
+  if (/node --check/i.test(body)) claimedChecks.push("node --check");
+  if (/reviewonly action|self-trigger|self trigger/i.test(body)) claimedChecks.push("ReviewOnly action self-trigger");
+  if (/ci (green|pass)|all ci workflows are green|ci workflows are green/i.test(body)) claimedChecks.push("CI green");
 
   const missingChecks = [];
-  if (runtimeTouched && !claimedChecks.some((c) => /cargo/i.test(c))) {
-    missingChecks.push("Rust baseline (cargo fmt/check/test/clippy) not referenced for touched src code");
+  if (srcTouched && !claimedChecks.some((c) => /cargo/i.test(c))) {
+    missingChecks.push("Rust baseline (cargo fmt/check/test/clippy) not referenced for touched src/Cargo code");
   }
-  if (experimentalTouched.some((f) => /^frontend\//i.test(f.path)) && !claimedChecks.some((c) => /npm/i.test(c))) {
+  if (frontendTouched && !claimedChecks.some((c) => /npm/i.test(c))) {
     missingChecks.push("Frontend build/lint not referenced for touched frontend code");
+  }
+  if ((workflowTouched || scriptTouched) && !claimedChecks.some((c) => /node --check|self-trigger|ci/i.test(c))) {
+    missingChecks.push(
+      "For workflow/script changes, expected evidence is `node --check`, ReviewOnly action self-trigger, and CI green",
+    );
   }
   if (missingChecks.length > 0) {
     add("Warnings", `Missing verification evidence: ${missingChecks.join("; ")}.`);
@@ -264,21 +304,36 @@ function analyze(pr, diff) {
 
   // --- suggestions / questions ---------------------------------------------
 
-  if (experimentalTouched.length === 0 && runtimeTouched === false && fileCount <= 5 && netLines <= 200) {
+  if (!srcTouched && !frontendTouched && fileCount <= 5 && netLines <= 200) {
     add("Suggestions", "Scope is small and within budget. Good.");
   }
   if (!body || body.trim().length < 40) {
     add("Questions", "PR body is thin. Include Summary, Safety boundary, and Verification sections per PR_TEMPLATE.md.");
   }
 
-  return { findings, fileCount, netLines, claimedChecks, missingChecks, experimentalTouched };
+  return {
+    findings,
+    fileCount,
+    netLines,
+    claimedChecks,
+    missingChecks,
+    experimentalTouched,
+    srcTouched,
+    frontendTouched,
+    workflowTouched,
+    docsTouched,
+    scriptTouched,
+  };
 }
 
 // ---- report ----------------------------------------------------------------
 
-function buildReport(pr, analysis, ciStatus) {
-  const { findings, fileCount, netLines, claimedChecks, missingChecks, experimentalTouched } = analysis;
-  const budget = fileCount <= 5 && netLines <= 200 ? "within default budget (<=5 files, <=200 net lines)" : "OVER BUDGET (>5 files or >200 net lines)";
+function buildReport(pr, a, ciStatus) {
+  const { findings, fileCount, netLines, claimedChecks, missingChecks, experimentalTouched } = a;
+  const budget =
+    fileCount <= 5 && netLines <= 200
+      ? "within default budget (<=5 files, <=200 net lines)"
+      : "OVER BUDGET (>5 files or >200 net lines)";
 
   const lines = [];
   lines.push("## PrometheOS ReviewOnly Report");
@@ -289,7 +344,9 @@ function buildReport(pr, analysis, ciStatus) {
   lines.push(`- Files reviewed: ${fileCount}`);
   lines.push(`- Lines changed: +${pr.additions || 0} / -${pr.deletions || 0} (net ${netLines})`);
   lines.push(`- Budget status: ${budget}`);
-  lines.push(`- Risky path categories touched: ${experimentalTouched.length > 0 ? experimentalTouched.map((f) => f.path).join(", ") : "none"}`);
+  lines.push(
+    `- Risky path categories touched: ${experimentalTouched.length > 0 ? experimentalTouched.map((f) => f.path).join(", ") : "none"}`,
+  );
   lines.push("");
   lines.push("Findings:");
   for (const sev of ["Blockers", "Warnings", "Suggestions", "Questions"]) {
@@ -307,11 +364,27 @@ function buildReport(pr, analysis, ciStatus) {
   lines.push(`- CI status: ${ciStatus}`);
   lines.push("");
   lines.push("Product boundary check:");
-  const stableAlphaImpact =
-    analysis.experimentalTouched.length === 0 && !/^src\//i.test("") ? "none detected" : "see experimental surface findings";
-  lines.push(`- Stable alpha: ${findings.Blockers.some((b) => /stable alpha/i.test(b)) ? "BLOCKER — possible stable alpha scope change" : "no direct change detected"}`);
-  lines.push(`- Experimental surfaces: ${experimentalTouched.length > 0 ? "touched (must stay experimental)" : "none touched"}`);
-  lines.push(`- Overclaim risk: ${findings.Blockers.some((b) => /overclaim|promotion/i.test(b)) ? "HIGH — possible promotion/overclaim" : "low"}`);
+  lines.push(
+    `- Stable alpha: ${
+      findings.Blockers.some((b) => /stable alpha/i.test(b))
+        ? "BLOCKER — possible stable alpha scope change"
+        : a.srcTouched
+          ? "src/Cargo touched — verify no stable-alpha behavior change"
+          : "no direct change detected"
+    }`,
+  );
+  lines.push(
+    `- Experimental surfaces: ${experimentalTouched.length > 0 ? "touched (must stay experimental)" : "none touched"}`,
+  );
+  lines.push(
+    `- Overclaim risk: ${
+      findings.Blockers.some((b) => /overclaim|promotion/i.test(b))
+        ? "HIGH — possible promotion/overclaim"
+        : findings.Warnings.some((w) => /promotion|stable.alpha/i.test(w))
+          ? "MEDIUM — review promotion language"
+          : "low"
+    }`,
+  );
   lines.push("");
   lines.push("Recommendation:");
   lines.push("- Wait for CI to be green before merge.");
@@ -321,15 +394,17 @@ function buildReport(pr, analysis, ciStatus) {
   }
   lines.push("");
   lines.push("---");
-  lines.push("_Deterministic ReviewOnly v0. No model invoked. Comments only; no commits, no branch writes, no merge._");
+  lines.push(
+    "_Deterministic ReviewOnly v0. No model invoked. Comments only; no commits, no branch writes, no merge._",
+  );
   return lines.join("\n");
 }
 
-// ---- post (with dedupe) ----------------------------------------------------
+// ---- post (argv-safe, body via stdin) -------------------------------------
 
 function findExistingComment() {
   try {
-    const comments = JSON.parse(gh(`api repos/${process.env.REPO}/issues/${PR}/comments?per_page=100`));
+    const comments = JSON.parse(gh(["api", `repos/${REPO}/issues/${PR}/comments?per_page=100`]));
     const marker = "## PrometheOS ReviewOnly Report";
     for (const c of comments) {
       if ((c.user?.login || "").includes("bot") && (c.body || "").includes(marker)) {
@@ -343,13 +418,25 @@ function findExistingComment() {
 }
 
 function postReport(report) {
+  const payload = JSON.stringify({ body: report });
   const existing = findExistingComment();
   if (existing) {
-    gh(`api -X PATCH repos/${process.env.REPO}/issues/comments/${existing} -f body=${JSON.stringify(report)}`);
+    gh(["api", "-X", "PATCH", `repos/${REPO}/issues/comments/${existing}`, "--input", "-"], payload);
     return "updated";
   }
-  gh(`pr comment ${PR} --body ${JSON.stringify(report)}`);
+  gh(["api", `repos/${REPO}/issues/${PR}/comments`, "--input", "-"], payload);
   return "created";
+}
+
+function postError(msg) {
+  try {
+    const payload = JSON.stringify({
+      body: `## PrometheOS ReviewOnly Report\n\nMode: ReviewOnly\n\nFindings:\n- Warnings: ${msg}\n\nRecommendation:\n- Human review required.`,
+    });
+    gh(["api", `repos/${REPO}/issues/${PR}/comments`, "--input", "-"], payload);
+  } catch {
+    /* never block CI */
+  }
 }
 
 // ---- main ------------------------------------------------------------------
@@ -362,17 +449,12 @@ try {
   const pr = getPrData();
   const diff = getDiff();
   const ciStatus = getCiStatus();
-  const analysis = analyze(pr, diff);
-  const report = buildReport(pr, analysis, ciStatus);
+  const a = analyze(pr, diff);
+  const report = buildReport(pr, a, ciStatus);
   const action = postReport(report);
   console.log(`ReviewOnly report ${action} for PR #${PR}.`);
   process.exit(0);
 } catch (err) {
-  const msg = `ReviewOnly v0 encountered an internal error: ${err && err.message ? err.message : String(err)}`;
-  try {
-    gh(`pr comment ${PR} --body ${JSON.stringify("## PrometheOS ReviewOnly Report\n\nMode: ReviewOnly\n\nFindings:\n- Warnings: " + msg + "\n\nRecommendation:\n- Human review required.")}`);
-  } catch {
-    /* give up silently; never block CI */
-  }
+  postError(`ReviewOnly v0 encountered an internal error: ${err && err.message ? err.message : String(err)}`);
   process.exit(0);
 }

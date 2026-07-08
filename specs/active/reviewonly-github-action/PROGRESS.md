@@ -39,9 +39,23 @@ None.
 
 - No model is invoked. v0 is fully deterministic.
 - Permissions are `contents: read`, `pull-requests: write` only. No branch writes, no merge, no commits.
+- All `gh` calls use `execFileSync` with an argv array (no shell interpolation); report bodies are passed via stdin (`--input -`). Diff, filename, and report content can no longer reach a shell.
 - The script exits 0 even on internal error so it never blocks CI; failures surface as a warning comment.
 - This is Level 1 (ReviewOnly) automation. It does not approve or merge PRs.
 - #69 (Phase 2 full-stack smoke queue) remains a registered backlog queue; this PR does not execute it.
+
+## Patch notes (self-trigger feedback)
+
+The first live ReviewOnly report on this PR exposed issues that were patched before merge:
+
+1. **Unsafe shell command construction** — `execSync(\`gh ${args}\`)` replaced with `execFileSync("gh", argv, ...)`. Report bodies now go through stdin, not shell arguments.
+2. **Overclaim heuristic false-flagged safety language** — the original regex blocked PRs mentioning experimental surfaces alongside "stable alpha" anywhere, which caught normal safety-boundary text ("No frontend / API / autonomous promotion"). The new `classifyPromotion` requires *affirmative* promotion language and exempts negated safety-boundary phrases ("no", "not", "experimental", "future / not alpha"); uncertain matches downgrade to Warning.
+3. **Wrong verification classification for workflow/script changes** — `.github/` was previously treated as "touched src code", inventing a missing Rust-baseline warning. Touched areas are now split (`srcTouched`, `frontendTouched`, `workflowTouched`, `docsTouched`, `scriptTouched`); Rust baseline is required only when `src/**` / `Cargo.*` / Rust workflows change, while workflow/script changes expect `node --check` + action self-trigger + CI green.
+4. **Claimed-check detection** now recognizes `node --check`, "ReviewOnly action self-trigger", and "CI green".
+
+## Budget note
+
+This PR is 5 files, +557 / -5. That exceeds the default 200-line preference. It is accepted because this is the first bounded implementation of Level 1 automation (workflow + script + docs + progress/handoff). Escalated per AGENTS.md minimality budget guidance.
 
 ## Verification evidence
 

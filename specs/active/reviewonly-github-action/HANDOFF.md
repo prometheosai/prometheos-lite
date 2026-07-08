@@ -2,7 +2,7 @@
 
 ## Current state
 
-Implementation complete. PR #70 is open for human review. The deterministic ReviewOnly v0 automation is implemented and self-tests by running on its own PR.
+Implementation complete and patched. PR #70 is open for human review. The deterministic ReviewOnly v0 automation is implemented and self-tests by running on its own PR.
 
 ## Completed work
 
@@ -15,9 +15,11 @@ Implementation complete. PR #70 is open for human review. The deterministic Revi
 ### Script — `scripts/reviewonly/reviewonly.mjs`
 
 - Deterministic, no external models, no npm dependencies.
-- Reads PR metadata + diff via `gh`.
-- Blocker-level checks: dependency files changed without approval, CI/workflow weakening, secrets/credentials, source-of-truth conflict markers, promotion/overclaim of experimental surfaces to stable alpha, benchmark claims without evidence.
-- Warning-level checks: >5 files, >200 net lines, runtime/API/frontend/harness paths touched, missing verification for touched area, docs-only claim with runtime files changed.
+- Reads PR metadata + diff via `gh`, using `execFileSync("gh", argv, ...)` (argv array, no shell interpolation). Report bodies are passed through stdin (`--input -`).
+- Blocker-level checks: dependency files changed without approval, CI/workflow weakening, secrets/credentials, source-of-truth conflict markers, *affirmative* promotion/overclaim of experimental surfaces to stable alpha, benchmark claims without evidence.
+- Warning-level checks: >5 files, >200 net lines, runtime/API/frontend/harness paths touched, missing verification for touched area (classified by touched area), docs-only claim with non-docs files changed.
+- Promotion heuristic requires affirmative promotion language and exempts negated safety-boundary phrasing ("no", "not", "experimental", "future / not alpha"); uncertain matches downgrade to Warning.
+- Verification classification splits touched areas (`srcTouched`, `frontendTouched`, `workflowTouched`, `docsTouched`, `scriptTouched`); Rust baseline is required only for `src/**` / `Cargo.*` / Rust workflows, while workflow/script changes expect `node --check` + action self-trigger + CI green.
 - Produces one structured `## PrometheOS ReviewOnly Report` comment, deduped across pushes (edits the prior bot comment instead of stacking new ones).
 - Always exits 0 so it never blocks CI; internal errors surface as a warning comment.
 
@@ -49,12 +51,12 @@ No `cargo` / `npm` build required (GitHub Action + dependency-free Node script +
 
 ## Blockers
 
-None encountered.
+None in the final (patched) implementation. The first live self-trigger reported a false-positive blocker: the original overclaim heuristic matched normal safety-boundary language ("No frontend / API / autonomous promotion"). This was caught before merge and fixed by `classifyPromotion`, which requires affirmative promotion wording and exempts negated safety-boundary phrases. See `PROGRESS.md` patch notes.
 
 ## Risks
 
 - The bot posts on every PR opened/synchronize/reopened. Comment volume is bounded by dedupe (it edits its own prior comment). If `gh` permissions or the token change, the script degrades to a warning comment and still exits 0.
-- Promotion/overclaim and benchmark detection are keyword heuristics, not semantic analysis; they may produce false positives. They are flagged for human review, not auto-blocking the merge (the action cannot merge regardless).
+- Promotion/overclaim and benchmark detection are keyword heuristics, not semantic analysis; they may produce false positives. Affirmative-language requirements and negation exemptions reduce noise, but the checks are flagged for human review, not auto-blocking the merge (the action cannot merge regardless).
 - v0 does not call models, so it cannot catch subtle logic issues a human reviewer would. It is a first-pass governance speedup, not a replacement for human review (per the ReviewOnly spec).
 
 ## Next task
