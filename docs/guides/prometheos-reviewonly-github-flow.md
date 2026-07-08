@@ -1,17 +1,20 @@
 # PrometheOS ReviewOnly — Planned GitHub Automation Flow
 
-This document describes the future ReviewOnly GitHub automation flow.
+This document describes the ReviewOnly GitHub automation flow.
 
 ReviewOnly is the PrometheOS-native equivalent of Claude Code's automatic PR review mode. It provides read-only diff review via a GitHub Action that posts structured review comments.
 
-This is a **planned design**. No automation has been implemented yet.
+## Implementation status
+
+- **v0 (implemented):** deterministic, read-only reviewer. No external models are invoked. It runs as `.github/workflows/prometheos-reviewonly.yml` and uses `scripts/reviewonly/reviewonly.mjs` to inspect the PR metadata/diff and post one structured ReviewOnly report comment.
+- No LLM-powered review yet. The deterministic v0 is the first automation step so the governance layer can be proven before any model or provider dependency is introduced.
 
 ## Level 1: ReviewOnly
 
 | Property       | Value                                    |
-|----------------|------------------------------------------|
-| Trigger        | `pull_request` opened/synchronize        |
-| Permissions    | read-only diff review, comments only     |
+| -------------- | ---------------------------------------- |
+| Trigger        | `pull_request` opened/synchronize/reopened |
+| Permissions    | `contents: read`, `pull-requests: write` |
 | Writes         | review comments only                     |
 | No commits     | yes                                      |
 | No branch writes | yes                                    |
@@ -19,6 +22,16 @@ This is a **planned design**. No automation has been implemented yet.
 | No issue-to-PR | yes                                      |
 | No dependency changes | yes                              |
 | No code modification | yes                              |
+| Model invoked  | no (v0 is deterministic)                 |
+
+### v0 implementation
+
+- Workflow: `.github/workflows/prometheos-reviewonly.yml`
+- Script: `scripts/reviewonly/reviewonly.mjs` (Node, no npm package, no model)
+- Behavior: reads PR metadata + diff, reads repo agent/safety docs, produces one structured ReviewOnly report comment (deduped across pushes), and exits 0 so it never blocks CI.
+- Blocker-level checks: dependency files changed without approval, CI/workflow weakening, secrets/credentials, conflict markers, promotion/overclaim of experimental surfaces, benchmark claims without evidence.
+- Warning-level checks: >5 files, >200 net lines, runtime/API/frontend paths touched, missing verification for the touched area, docs-only claim with runtime files changed.
+- The bot posts a normal comment; it does **not** open a formal blocking review, commit, write branches, or merge.
 
 ## Reviewer behavior
 
