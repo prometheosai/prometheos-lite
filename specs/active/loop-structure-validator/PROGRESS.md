@@ -48,4 +48,4 @@ Continue. Queue approved; execute on a follow-up Epic Completion branch.
 
 ## Next recommended action
 
-After merge: open the execution PR (#73) implementing `scripts/loop-structure-validator.sh`, self-test against current active queues, then add the CI job and hand off.
+After merge: open the execution PR (next available number; implementation, not this queue) implementing `scripts/loop-structure-validator.sh`, self-test against current active queues, then add the CI job and hand off.

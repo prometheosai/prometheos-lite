@@ -43,7 +43,7 @@ None. The active-queue pattern and templates already exist; the validator only e
 
 ## Next task
 
-None in this PR. After merge, #73 executes:
+None in this PR. After merge, the follow-up implementation PR executes:
 - Task 1: implement `scripts/loop-structure-validator.sh`.
 - Task 2: self-test and conform existing active queues.
 - Task 3: CI job + handoff.
