@@ -26,7 +26,7 @@ This queue is the definition only. Execution is a separate Epic Completion run a
 
 ## Budget note
 
-3 files, +307/-0. Exceeds the 200-line preference, accepted because this PR defines the canonical validator rules and required heading set. Execution remains separate in a follow-up implementation PR.
+3 files, +313/-0. Exceeds the 200-line preference, accepted because this PR defines the canonical validator rules and required heading set. Execution remains separate in a follow-up implementation PR.
 
 ## Source of truth
 
