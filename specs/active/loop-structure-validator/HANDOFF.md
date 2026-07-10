@@ -2,7 +2,7 @@
 
 ## Current state
 
-Queue approved and defined. Not yet executed. This PR is the queue/specs PR only; the implementation is a separate follow-up PR (#73) per the established loop pattern (queue first, execute second).
+Queue approved and defined. Not yet executed. This PR is the queue/specs PR only; the implementation is a separate follow-up implementation PR per the established loop pattern (queue first, execute second).
 
 ## Completed work
 
@@ -23,13 +23,13 @@ Queue approved and defined. Not yet executed. This PR is the queue/specs PR only
 | `cargo check` | not applicable (no Rust changed) |
 | `cargo test` | not applicable (no Rust changed) |
 | `cargo clippy --all-targets --all-features -- -D warnings` | not applicable (no Rust changed) |
-| `bash scripts/loop-structure-validator.sh` | pending (script authored in #73) |
+| `bash scripts/loop-structure-validator.sh` | pending (script authored in the follow-up implementation PR) |
 
 ## What was not run
 
-- The validator script itself (implemented in #73).
-- The self-test against existing active queues (#73, Task 2).
-- CI integration (#73, Task 3).
+- The validator script itself (implemented in the follow-up implementation PR).
+- The self-test against existing active queues (follow-up implementation PR, Task 2).
+- CI integration (follow-up implementation PR, Task 3).
 - Runtime/product behavior changes (intentionally out of scope).
 
 ## Blockers
@@ -38,8 +38,8 @@ None. The active-queue pattern and templates already exist; the validator only e
 
 ## Risks / findings
 
-- Some existing active queues may not yet carry every canonical heading (e.g., heading naming drift such as `Risks` vs `Risks / findings`). Task 2 of #73 brings them into conformance and records exactly which were touched.
-- The all-caps `BLOCKER` marker convention for invariant B is chosen to avoid false positives from ordinary prose containing the word "blocker". This convention must be documented in #73 so future handoffs use it deliberately.
+- Some existing active queues may not yet carry every canonical heading (e.g., heading naming drift such as `Risks` vs `Risks / findings`). Task 2 of the follow-up implementation PR brings them into conformance and records exactly which were touched.
+- The all-caps `BLOCKER` marker convention for invariant B is chosen to avoid false positives from ordinary prose containing the word "blocker". This convention must be documented in the follow-up implementation PR so future handoffs use it deliberately.
 
 ## Next task
 
@@ -50,7 +50,7 @@ None in this PR. After merge, the follow-up implementation PR executes:
 
 ## Stop reason
 
-Queue definition complete. Handing off for separate execution PR (#73) per loop protocol.
+Queue definition complete. Handing off for separate follow-up implementation PR per loop protocol.
 
 ## Confidence
 
