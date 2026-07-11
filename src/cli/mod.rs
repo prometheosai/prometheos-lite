@@ -35,6 +35,8 @@ enum Commands {
     RepoWorkbench(commands::repo_workbench::RepoWorkbenchCommand),
     /// Manage domain templates
     Templates(commands::templates::TemplatesCommand),
+    /// Approval-controlled patch workflow: propose -> dry-run -> approve -> apply -> report
+    Workflow(commands::workflow::WorkflowCommand),
     /// Run provider/system/validation diagnostics
     Diagnostics(commands::diagnostics::DiagnosticsArgs),
 }
@@ -50,6 +52,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Work(cmd) => cmd.execute().await,
         Commands::RepoWorkbench(cmd) => cmd.execute().await,
         Commands::Templates(cmd) => cmd.execute().await,
+        Commands::Workflow(cmd) => cmd.execute().await,
         Commands::Diagnostics(args) => {
             commands::diagnostics::handle_diagnostics_command(args).await
         }

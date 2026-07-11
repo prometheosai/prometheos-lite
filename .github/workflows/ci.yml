@@ -119,3 +119,21 @@ jobs:
       - name: Run full-stack smoke
         run: bash scripts/fullstack-smoke.sh
 
+  approval-controlled-patch-smoke:
+    name: Approval-Controlled Patch Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run approval-controlled patch workflow smoke
+        run: bash scripts/approval-controlled-patch-smoke.sh
+
