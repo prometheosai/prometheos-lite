@@ -8,3 +8,4 @@ pub mod repo_workbench;
 pub mod serve;
 pub mod templates;
 pub mod work;
+pub mod workflow;

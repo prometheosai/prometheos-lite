@@ -16,6 +16,7 @@ pub mod runtime_policy;
 pub mod tools;
 pub mod utils;
 pub mod work;
+pub mod workflow;
 
 // Legacy modules - deprecated in favor of flow-centric architecture
 // Use the "legacy" feature flag to enable these for backward compatibility
