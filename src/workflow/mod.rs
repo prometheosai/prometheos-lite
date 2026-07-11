@@ -40,6 +40,14 @@ impl AuthorityLevel {
     pub fn can_apply(self) -> bool {
         matches!(self, AuthorityLevel::Assist | AuthorityLevel::Execute)
     }
+
+    /// `Propose`/`Assist`/`Execute` may run an isolated dry-run. `Review` may not.
+    pub fn can_dry_run(self) -> bool {
+        matches!(
+            self,
+            AuthorityLevel::Propose | AuthorityLevel::Assist | AuthorityLevel::Execute
+        )
+    }
 }
 
 impl FromStr for AuthorityLevel {
@@ -217,6 +225,64 @@ fn scope_violations(scope: &ScopeContract, files: &[String]) -> Vec<String> {
     violations
 }
 
+/// Recompute the patch hash and diff metadata from the stored patch and ensure they
+/// match the recorded values. This catches accidental corruption and straightforward
+/// artifact tampering. It is NOT a cryptographic guarantee against a privileged local
+/// attacker, who can rewrite the whole artifact; remote/team approval will eventually
+/// need signed or server-held records.
+fn verify_proposal_integrity(proposal: &ProposalArtifact) -> Result<(Vec<String>, usize, usize)> {
+    let actual_hash = hash_str(&proposal.patch);
+    if actual_hash != proposal.patch_hash {
+        bail!("proposal integrity failure: patch content does not match stored hash");
+    }
+    let (files, added, removed) = analyze_diff(&proposal.patch);
+    if files != proposal.changed_files
+        || added != proposal.added_lines
+        || removed != proposal.removed_lines
+    {
+        bail!("proposal integrity failure: patch metadata does not match patch content");
+    }
+    Ok((files, added, removed))
+}
+
+/// Reject patch forms the narrow parser does not fully model (binary, renames, mode-only).
+/// New/deleted text files (handled via `/dev/null` headers) are allowed.
+fn reject_unsupported_patch(patch: &str) -> Result<()> {
+    let markers = [
+        "GIT binary patch",
+        "Binary files",
+        "rename from",
+        "rename to",
+        "similarity index",
+        "dissimilarity index",
+        "old mode",
+        "new mode",
+    ];
+    for m in markers {
+        if patch.contains(m) {
+            bail!(
+                "unsupported patch form rejected (contains '{m}'); only unified text diffs are supported"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// True if a local branch reference exists. `run_git` treats a nonzero exit as an error,
+/// so this is the non-panicking way to test existence.
+fn git_ref_exists(repo: &Path, branch: &str) -> bool {
+    run_git(
+        repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
 fn workflow_dir(repo: &Path, id: &str) -> PathBuf {
     repo.join(".prometheos").join("workflow").join(id)
 }
@@ -263,6 +329,7 @@ pub fn propose(
     if !is_git_repo(repo) {
         bail!("not a git repository: {}", repo.display());
     }
+    reject_unsupported_patch(patch)?;
     let base_sha = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
     let patch_hash = hash_str(patch);
     let (changed_files, added, removed) = analyze_diff(patch);
@@ -323,6 +390,9 @@ pub fn propose(
 /// apply, optionally run a validation command, then remove the worktree.
 pub fn dry_run(repo: &Path, id: &str, validation: Option<&str>) -> Result<bool> {
     let mut proposal = load_proposal(repo, id)?;
+    if !proposal.authority.can_dry_run() {
+        bail!("authority '{}' cannot run a dry-run", proposal.authority);
+    }
     let wt_root = std::env::temp_dir().join(format!("prometheos-dry-run-{id}"));
     // Clean any stale state for this path, then prune orphaned worktree registrations.
     let _ = run_git(
@@ -393,9 +463,14 @@ pub fn dry_run(repo: &Path, id: &str, validation: Option<&str>) -> Result<bool> 
     }
 }
 
-/// Record explicit approval. The supplied patch hash must match the proposal.
+/// Record explicit approval. The supplied patch hash must match the proposal, the
+/// proposal must pass an isolated dry-run first, and artifact integrity is verified.
 pub fn approve(repo: &Path, id: &str, patch_hash: &str, approver: &str) -> Result<()> {
     let mut proposal = load_proposal(repo, id)?;
+    verify_proposal_integrity(&proposal)?;
+    if proposal.dry_run_passed != Some(true) {
+        bail!("approval blocked: proposal has not passed an isolated dry-run");
+    }
     if proposal.patch_hash != patch_hash {
         bail!(
             "approval patch hash mismatch: approved={patch_hash} proposal={}",
@@ -411,9 +486,18 @@ pub fn approve(repo: &Path, id: &str, patch_hash: &str, approver: &str) -> Resul
     Ok(())
 }
 
-/// Apply the approved patch to the user's tree. Refuses on dirty trees, requires a
-/// matching approval, enforces scope, creates a checkpoint branch, and rolls back on
-/// validation failure when requested.
+/// Apply the approved patch to the user's tree.
+///
+/// Enforces, in order: artifact integrity, a successful isolated dry-run, single-use,
+/// current HEAD == proposal `base_sha`, a non-existent checkpoint branch, scope against
+/// the *actual* patch, and a clean working tree (ignoring this workflow's own
+/// `.prometheos/` metadata). On validation failure it rolls back by reverse-applying and
+/// reports honestly; the checkpoint branch is preserved as recovery evidence.
+///
+/// Validation commands run through `sh -c` with the CLI process's OS permissions. They
+/// are NOT sandboxed (no process/network/secrets isolation). Remote or model-generated
+/// validation commands must never be executed automatically; future policy needs
+/// allowlisted command templates.
 pub fn apply(
     repo: &Path,
     id: &str,
@@ -422,6 +506,16 @@ pub fn apply(
     rollback_on_failure: bool,
 ) -> Result<()> {
     let mut proposal = load_proposal(repo, id)?;
+
+    let (actual_files, _, _) = verify_proposal_integrity(&proposal)?;
+
+    if proposal.dry_run_passed != Some(true) {
+        bail!("apply blocked: proposal has not passed an isolated dry-run");
+    }
+
+    if proposal.applied == Some(true) {
+        bail!("apply blocked: this proposal has already been applied");
+    }
 
     if !proposal.authority.can_apply() {
         bail!(
@@ -437,8 +531,19 @@ pub fn apply(
         bail!("apply blocked: approval/patch hash mismatch");
     }
 
-    // Re-check scope in case the artifact was tampered with.
-    let violations = scope_violations(&proposal.scope, &proposal.changed_files);
+    // Require the repository to be at the same commit the proposal was validated against.
+    let current_head = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
+    if current_head != proposal.base_sha {
+        bail!(
+            "apply blocked: repository HEAD changed since proposal; expected {}, found {}. \
+             Create a new proposal or re-run against the current base.",
+            proposal.base_sha,
+            current_head
+        );
+    }
+
+    // Scope is enforced against the actual patch, not the stored file list.
+    let violations = scope_violations(&proposal.scope, &actual_files);
     if !violations.is_empty() {
         bail!(
             "apply blocked: scope violation\n- {}",
@@ -457,10 +562,12 @@ pub fn apply(
         bail!("apply blocked: repository has uncommitted changes; stash or commit first");
     }
 
-    let before_head = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
+    // Preserve a checkpoint branch at the pre-apply HEAD as recovery evidence.
     let checkpoint_branch = format!("prometheos/checkpoint-{id}");
-    // Record checkpoint pointer (does not move HEAD).
-    run_git(repo, &["branch", &checkpoint_branch, &before_head])
+    if git_ref_exists(repo, &checkpoint_branch) {
+        bail!("apply blocked: checkpoint branch already exists: {checkpoint_branch}");
+    }
+    run_git(repo, &["branch", &checkpoint_branch, &current_head])
         .context("failed to create checkpoint branch")?;
 
     let patch_file = std::env::temp_dir().join(format!("prometheos-apply-{id}.patch"));
@@ -483,20 +590,35 @@ pub fn apply(
         Ok(())
     })();
 
-    if let Err(e) = apply_result {
+    if let Err(apply_error) = apply_result {
         if rollback_on_failure {
-            // Reverse the applied patch to restore the working tree.
-            let _ = run_git(repo, &["apply", "-R", patch_file.to_str().unwrap()]);
-            let _ = run_git(repo, &["branch", "-D", &checkpoint_branch]);
+            let rollback_result = run_git(repo, &["apply", "-R", patch_file.to_str().unwrap()]);
             proposal.applied = Some(false);
             save_proposal(repo, &proposal)?;
-            return Err(e.context("apply failed; rolled back working tree"));
+            match rollback_result {
+                Ok(_) => {
+                    return Err(
+                        apply_error.context("apply failed; working tree successfully rolled back")
+                    );
+                }
+                Err(rollback_error) => {
+                    return Err(anyhow::anyhow!(
+                        "apply failed and rollback also failed.\n\
+                         Apply error: {apply_error:#}\n\
+                         Rollback error: {rollback_error:#}\n\
+                         Checkpoint preserved at {checkpoint_branch}"
+                    ));
+                }
+            }
         }
         proposal.applied = Some(false);
         save_proposal(repo, &proposal)?;
-        return Err(e.context("apply failed; working tree left modified (rollback disabled)"));
+        return Err(
+            apply_error.context("apply failed; working tree left modified (rollback disabled)")
+        );
     }
 
+    // Checkpoint branch is intentionally preserved as recovery evidence.
     proposal.applied = Some(true);
     save_proposal(repo, &proposal)?;
     Ok(())
@@ -521,6 +643,79 @@ pub fn is_git_repo(repo: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Build a temp git repo with one committed file (a boundary bug to fix).
+    fn temp_repo() -> (TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git(&repo, &["init"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("src/calc.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
+        )
+        .unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (dir, repo, base)
+    }
+
+    fn patch_for(file: &str, old: &str, new: &str) -> String {
+        format!("--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-{old}\n+{new}\n")
+    }
+
+    fn good_patch() -> String {
+        patch_for(
+            "src/calc.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a - b }",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+        )
+    }
+
+    fn phash(patch: &str) -> String {
+        hash_str(patch)
+    }
+
+    fn propose_ok(repo: &Path, authority: AuthorityLevel) -> String {
+        propose(
+            repo,
+            "fix",
+            authority,
+            &good_patch(),
+            &["src/**".to_string()],
+            &[],
+            false,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    // --- existing structural tests ---
 
     #[test]
     fn parses_diff_metadata() {
@@ -567,5 +762,366 @@ mod tests {
             max_lines_changed: None,
         };
         assert!(scope_violations(&scope, &["src/foo.rs".into()]).is_empty());
+    }
+
+    // --- gate tests ---
+
+    #[test]
+    fn apply_rejects_without_approval() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn approve_rejects_without_dry_run() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        // No dry-run ran, so approval must be refused.
+        assert!(approve(&repo, &id, &phash(&good_patch()), "op").is_err());
+    }
+
+    #[test]
+    fn apply_rejects_without_dry_run() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        // The public API cannot reach "approved but no passing dry-run", so craft the
+        // persisted artifact to exercise the apply-time dry-run gate directly.
+        let mut proposal = load_proposal(&repo, &id).unwrap();
+        proposal.approved = Some(ApprovalRecord {
+            approver: "op".into(),
+            approved_at: now_iso(),
+            patch_hash: phash(&good_patch()),
+        });
+        proposal.dry_run_passed = None;
+        save_proposal(&repo, &proposal).unwrap();
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn apply_rejects_after_failed_dry_run() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        // Validation fails during dry-run -> dry_run_passed == false.
+        assert!(dry_run(&repo, &id, Some("grep -q 'NOPE' src/calc.rs")).is_err());
+        assert!(approve(&repo, &id, &phash(&good_patch()), "op").is_err());
+    }
+
+    #[test]
+    fn apply_rejects_after_head_changed() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Move HEAD away from the validated base.
+        std::fs::write(repo.join("unrelated.rs"), "fn u() {}\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "move head"]);
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn approval_wrong_hash_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        assert!(approve(&repo, &id, "deadbeef", "op").is_err());
+    }
+
+    #[test]
+    fn stored_patch_tamper_after_approval_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Edit the stored patch but leave the recorded hash unchanged -> integrity fails.
+        let path = repo
+            .join(".prometheos")
+            .join("workflow")
+            .join(&id)
+            .join("proposal.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["patch"] = serde_json::Value::String(patch_for(
+            "src/calc.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a - b }",
+            "pub fn add(a: i32, b: i32) -> i32 { a * b }",
+        ));
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn stored_metadata_tamper_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        let path = repo
+            .join(".prometheos")
+            .join("workflow")
+            .join(&id)
+            .join("proposal.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["changed_files"] = serde_json::Value::Array(vec![]);
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn path_outside_allowed_scope_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let patch = patch_for("other/x.rs", "old", "new");
+        let res = propose(
+            &repo,
+            "fix",
+            AuthorityLevel::Assist,
+            &patch,
+            &["src/**".to_string()],
+            &[],
+            false,
+            None,
+            None,
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn forbidden_overrides_allowed_parent() {
+        let (_d, repo, _base) = temp_repo();
+        let patch = patch_for("src/secrets/k.rs", "old", "new");
+        let res = propose(
+            &repo,
+            "fix",
+            AuthorityLevel::Assist,
+            &patch,
+            &["src/**".to_string()],
+            &["src/secrets/".to_string()],
+            false,
+            None,
+            None,
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn dependency_rejected_unless_allowed() {
+        let (_d, repo, _base) = temp_repo();
+        let patch = patch_for("Cargo.toml", "version = \"0.1\"", "version = \"0.2\"");
+        assert!(
+            propose(
+                &repo,
+                "fix",
+                AuthorityLevel::Assist,
+                &patch,
+                &[],
+                &[],
+                false,
+                None,
+                None
+            )
+            .is_err()
+        );
+        // Allowed: proposal succeeds.
+        assert!(
+            propose(
+                &repo,
+                "fix",
+                AuthorityLevel::Assist,
+                &patch,
+                &[],
+                &[],
+                true,
+                None,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn file_budget_enforced() {
+        let (_d, repo, _base) = temp_repo();
+        // Zero files allowed but the patch touches one.
+        assert!(
+            propose(
+                &repo,
+                "fix",
+                AuthorityLevel::Assist,
+                &good_patch(),
+                &["src/**".to_string()],
+                &[],
+                false,
+                Some(0),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn line_budget_enforced() {
+        let (_d, repo, _base) = temp_repo();
+        assert!(
+            propose(
+                &repo,
+                "fix",
+                AuthorityLevel::Assist,
+                &good_patch(),
+                &["src/**".to_string()],
+                &[],
+                false,
+                None,
+                Some(0),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dirty_tree_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Untracked user change (not under .prometheos).
+        std::fs::write(repo.join("scratch.rs"), "fn s() {}\n").unwrap();
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn prometheos_metadata_not_dirty() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Only .prometheos/ is untracked; apply must not treat it as dirty.
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_ok());
+    }
+
+    #[test]
+    fn validation_failure_rolls_back_and_preserves_checkpoint() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Apply a different patch whose validation (grep 'a + b') fails.
+        let bad_patch = patch_for(
+            "src/calc.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a - b }",
+            "pub fn add(a: i32, b: i32) -> i32 { a * b }",
+        );
+        let bad_id = propose(
+            &repo,
+            "change",
+            AuthorityLevel::Assist,
+            &bad_patch,
+            &["src/**".to_string()],
+            &[],
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        // Dry-run validation passes (the patch produces `a * b`); apply validation fails.
+        dry_run(&repo, &bad_id, Some("grep -q 'a \\* b' src/calc.rs")).unwrap();
+        approve(&repo, &bad_id, &phash(&bad_patch), "op").unwrap();
+        assert!(
+            apply(
+                &repo,
+                &bad_id,
+                &phash(&bad_patch),
+                Some("grep -q 'a + b' src/calc.rs"),
+                true
+            )
+            .is_err()
+        );
+        // Tree reverted to original buggy form.
+        let content = std::fs::read_to_string(repo.join("src/calc.rs")).unwrap();
+        assert!(
+            content.contains("a - b"),
+            "tree was not rolled back: {content}"
+        );
+        // Checkpoint branch preserved as recovery evidence.
+        assert!(git_ref_exists(
+            &repo,
+            &format!("prometheos/checkpoint-{bad_id}")
+        ));
+    }
+
+    #[test]
+    fn rollback_failure_reported_and_checkpoint_preserved() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Validation command fails (to trigger rollback) but mutates the changed line
+        // so that reverse-apply can no longer match, forcing a rollback failure.
+        let result = apply(
+            &repo,
+            &id,
+            &phash(&good_patch()),
+            Some("sed -i 's/a + b/a + b EXTRA/' src/calc.rs; false"),
+            true,
+        );
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("rollback also failed"),
+            "expected honest rollback-failure report, got: {msg}"
+        );
+        // Checkpoint must remain when rollback fails (do not delete recovery data).
+        assert!(git_ref_exists(
+            &repo,
+            &format!("prometheos/checkpoint-{id}")
+        ));
+    }
+
+    #[test]
+    fn reapply_already_applied_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_ok());
+        // Second application of the same proposal is refused.
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+        // And the checkpoint branch remains.
+        assert!(git_ref_exists(
+            &repo,
+            &format!("prometheos/checkpoint-{id}")
+        ));
+    }
+
+    #[test]
+    fn propose_authority_cannot_apply() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Propose);
+        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // Propose authority cannot apply.
+        assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
+    }
+
+    #[test]
+    fn unsupported_patch_rejected() {
+        let (_d, repo, _base) = temp_repo();
+        let binary = "--- a/img.png\n+++ b/img.png\nGIT binary patch\nliteral 0\nH4sIAAAAAAAA\n";
+        assert!(
+            propose(
+                &repo,
+                "fix",
+                AuthorityLevel::Assist,
+                binary,
+                &["src/**".to_string()],
+                &[],
+                false,
+                None,
+                None,
+            )
+            .is_err()
+        );
     }
 }

@@ -90,6 +90,34 @@ echo "   tree patched (good)"
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm "applied fix via approval-controlled workflow"
 
+echo "== 5.5 approval before dry-run is refused =="
+PATCHX="$WORK/revert.patch"
+cat > "$PATCHX" <<'EOF'
+--- a/src/calc.rs
++++ b/src/calc.rs
+@@ -1 +1 @@
+-pub fn add(a: i32, b: i32) -> i32 { a + b }
++pub fn add(a: i32, b: i32) -> i32 { a - b }
+EOF
+PHASHX="$(sha256sum "$PATCHX" | cut -d' ' -f1)"
+IDX="$("$BIN" workflow propose --repo "$REPO" --goal "revert" --authority assist --patch "$PATCHX" --allowed "src/**")"
+if "$BIN" workflow approve --repo "$REPO" "$IDX" --patch-hash "$PHASHX" 2>/dev/null; then
+  echo "FAIL: approval succeeded before dry-run"; exit 1
+fi
+echo "   refused (good)"
+
+echo "== 5.6 apply after HEAD moved is refused =="
+"$BIN" workflow dry-run --repo "$REPO" "$IDX" --validate "grep -q 'a - b' src/calc.rs"
+"$BIN" workflow approve --repo "$REPO" "$IDX" --patch-hash "$PHASHX"
+# Move the repository HEAD away from the validated base.
+echo "// unrelated committed change" >> src/lib.rs
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm "move repository head"
+if "$BIN" workflow apply --repo "$REPO" "$IDX" --patch-hash "$PHASHX" 2>/dev/null; then
+  echo "FAIL: stale proposal applied after HEAD changed"; exit 1
+fi
+echo "   refused (good)"
+
 echo "== 6. rollback restores tree on validation failure =="
 PATCH2="$WORK/break.patch"
 cat > "$PATCH2" <<'EOF'
