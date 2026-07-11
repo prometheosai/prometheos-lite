@@ -137,3 +137,24 @@ jobs:
       - name: Run approval-controlled patch workflow smoke
         run: bash scripts/approval-controlled-patch-smoke.sh
 
+  governed-provider-proposal-smoke:
+    name: Governed Provider-Proposal Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run governed provider-proposal smoke (offline, mock provider)
+        run: bash scripts/provider-governed-proposal-smoke.sh
+
+      - name: Provider governance tests
+        run: cargo test --test provider_governed_proposal_tests --quiet
+
