@@ -15,7 +15,7 @@ use prometheos_lite::config::AppConfig;
 use prometheos_lite::harness::patch_provider::{
     MockProposalMode, MockProposalProvider, PatchProvider, PatchProviderContext, ProviderRegistry,
 };
-use prometheos_lite::workflow::{self, AuthorityLevel, GenerateScope, ProviderRouteInfo};
+use prometheos_lite::workflow::{self, AuthorityLevel, GenerateScope, ProviderRouteInfo, sanitize_provider_route};
 
 /// Map a string (e.g. from `PROMETHEOS_MOCK_MODE`) to a mock provider mode.
 fn provider_mode_from_str(s: &str) -> MockProposalMode {
@@ -267,7 +267,7 @@ impl WorkflowCommand {
                         let registry = ProviderRegistry::from_config(&config)?;
                         let route = ProviderRouteInfo {
                             model: Some(config.model.clone()),
-                            route: Some(config.base_url.clone()),
+                            route: sanitize_provider_route(&config.base_url),
                         };
                         (Box::new(registry), Some(route))
                     };

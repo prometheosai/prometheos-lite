@@ -2459,6 +2459,12 @@ pub enum MockProposalMode {
     Traversal,
     /// Return a candidate whose patch is a malformed/unsupported diff.
     Malformed,
+    /// Return a candidate whose patch is plain text, not a unified diff.
+    PlainText,
+    /// Create a Windows drive-absolute file (`C:\...`).
+    WindowsDrive,
+    /// Create a UNC-path file (`\\server\share\...`).
+    Unc,
     /// Return a candidate with no edits (empty patch).
     Empty,
     /// Fail generation entirely (no artifact should be created).
@@ -2505,6 +2511,20 @@ impl PatchProvider for MockProposalProvider {
             MockProposalMode::Malformed => vec![EditOperation::UnifiedDiff(UnifiedDiffEdit {
                 diff: "--- a/x\n+++ b/x\nGIT binary patch\nliteral 0\nH4sIAAAAAAAA\n".to_string(),
                 target_file: None,
+            })],
+            MockProposalMode::PlainText => vec![EditOperation::UnifiedDiff(UnifiedDiffEdit {
+                diff: "this is a note, not a unified diff".to_string(),
+                target_file: None,
+            })],
+            MockProposalMode::WindowsDrive => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("C:\\windows\\system32\\evil.dll"),
+                content: "bad\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Unc => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("\\\\server\\share\\evil.dll"),
+                content: "bad\n".to_string(),
+                executable: None,
             })],
             MockProposalMode::Safe => vec![EditOperation::CreateFile(CreateFileEdit {
                 file: PathBuf::from("src/generated_patch.rs"),
