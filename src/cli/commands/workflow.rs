@@ -15,7 +15,9 @@ use prometheos_lite::config::AppConfig;
 use prometheos_lite::harness::patch_provider::{
     MockProposalMode, MockProposalProvider, PatchProvider, PatchProviderContext, ProviderRegistry,
 };
-use prometheos_lite::workflow::{self, AuthorityLevel, GenerateScope, ProviderRouteInfo, sanitize_provider_route};
+use prometheos_lite::workflow::{
+    self, AuthorityLevel, GenerateScope, ProviderRouteInfo, sanitize_provider_route,
+};
 
 /// Map a string (e.g. from `PROMETHEOS_MOCK_MODE`) to a mock provider mode.
 fn provider_mode_from_str(s: &str) -> MockProposalMode {
