@@ -240,6 +240,26 @@ Move PrometheOS Lite from hardcoded identity replies toward a runtime that is Op
   - API/DB checks produced stored assistant responses that identified as PrometheOS Lite and enumerated the live tools with examples
 - Verified that all Copilot-started terminals were terminated and that no remaining `prometheos-lite`, `cargo`, or `rustc` processes were running at the end of the session.
 
+## Pilot status (Task 1 Attempt 2 — governed patch pilot)
+
+Recorded separately from the runtime/identity work above; see
+`docs/research/governed-patch-pilot.md` for the canonical log.
+
+- **Attempt 1** (`pilot/task1-result.json`): infrastructure-blocked — missing
+  `OPENROUTER_API_KEY` and the double-`/v1` URL bug (PR #82 fixed the latter).
+- **Stub verification** (`pilot/governance-integration-verification.json`):
+  governed path confirmed end-to-end on `memchr`; explicitly **not**
+  pilot-qualified (no live model reasoning exercised).
+- **Attempt 2** (`pilot/task1-attempt2-report.json`): pilot-qualified Ollama
+  local-model baseline (`qwen2.5-coder:7b`), executed **exactly once**. The
+  provider responded but produced no usable governed edits (output did not match
+  the supported edit schema; production markdown fallback disabled). No
+  parser/prompt/model/config tuning was performed before recording.
+- **Disposition:** honest model-output compatibility failure; kept in the pilot
+  dataset, not counted as a successful task. memchr tree restored to `bce7df7`,
+  no source changes remain. `proposal_generated: false`; dry-run/approval/apply
+  not reached; cost $0.
+
 ## Failed Attempts
 - Attempt: `cd /d e:\Projects\PrometheOS-Lite && cargo run -- serve`
 - Result: PowerShell parser error

@@ -1,6 +1,9 @@
 # Milestone: Governed Patch Pilot
 
-**Status:** planned — blocked on a live configured provider in this environment.
+**Status:** Partially executed. Attempt 1 was infrastructure-blocked; the
+governed path was verified end-to-end against a deterministic stub; Attempt 2
+ran a real local model (Ollama + `qwen2.5-coder:7b`) exactly once and produced
+an honest model-output compatibility failure (no tuning performed).
 
 **Purpose:** Stop building platform foundations and prove PrometheOS Lite on
 real repositories. The product already has the full governed path:
@@ -140,3 +143,73 @@ JSON-schema edits, confirming the governed workflow routes real provider
 output correctly. To run the 10 real tasks, configure a provider (or point
 `PROMETHEOS_BASE_URL` at a local model server) and supply the first
 "repository you barely know."
+
+## Recorded pilot runs (Task 1)
+
+Artifacts live under `C:\Users\Diego\AppData\Local\Temp\opencode\pilot\`.
+Attempt 1 is preserved, Attempt 2 is recorded **exactly once** and must not be
+re-run or tuned around.
+
+### Attempt 1 — infrastructure-blocked (not pilot-qualified)
+
+- Provider: `openrouter`, model: `anthropic/claude-sonnet-4`, authority: `assist`.
+- Outcome: `BLOCKED / FAILED FIRST ATTEMPT`.
+- Two independent blockers:
+  1. `OPENROUTER_API_KEY` absent from the environment (paid credential not
+     obtainable in session).
+  2. `LlmClient` appends `/v1/chat/completions` to `base_url`, so a base_url of
+     `https://openrouter.ai/api/v1` produced a malformed double-`/v1` URL →
+     HTTP 404. (Fixed by PR #82: base_url should be `https://openrouter.ai/api`,
+     no trailing `/v1`.)
+- No patch generated; the governed workflow was not exercised on the repo.
+- `proposal_generated: false`, `provider_cost_usd: 0.0`.
+- Evidence: `task1-result.json`.
+
+### Stub verification — governance plumbing (not pilot-qualified)
+
+- Deterministic stub OpenAI-compatible server returning valid JSON-schema edits
+  (`create_file` of a regression test).
+- Repository: `BurntSushi/memchr` (the "repository you barely know" target).
+- `proposal_generated: true`, `dry_run_passed: true`, `approved: true`,
+  `applied: true`, `validation_passed: true`, `files_changed: 1`, `lines: 6`.
+- `pilot_qualified: false` — the stub stands in for a live model, so model
+  reasoning (repo understanding, coverage detection, no-op willingness) is NOT
+  exercised. This is **not** Pilot Task 1.
+- Also confirms PR #82 URL normalization end-to-end (`/api/v1/chat/completions`,
+  not `/api/v1/v1/...`).
+- Evidence: `governance-integration-verification.json`.
+
+### Attempt 2 — pilot-qualified Ollama local-model baseline (executed once)
+
+- Provider: `ollama`, model: `qwen2.5-coder:7b`, `base_url: http://localhost:11434/v1`.
+- Config: `pilot/run/prometheos.config.json`
+  (`{ "provider": "openai", "model": "qwen2.5-coder:7b", "base_url": "http://localhost:11434/v1" }`);
+  `api_key` left unset (correct for Ollama). Model pulled and loaded on a local
+  GTX 1070 (4.36 GiB, Q4_K).
+- Authority: `assist`; allowed `src/**`, `tests/**`; forbidden `.github/**`,
+  `Cargo.toml`, `Cargo.lock`; `--max-files 2`, `--max-lines 80`,
+  `--validate "cargo test"`.
+- Goal: add the smallest nonredundant regression test for a match at the final
+  valid haystack position in `memmem`, without modifying implementation unless
+  a defect is exposed.
+- Outcome: `provider_produced_no_usable_candidate`.
+  - The provider **responded**, but its output did not match the supported edit
+    schema: a fenced ```` ```json ```` block whose edits used an unsupported
+    type `"file"` (supported: `search_replace` / `whole_file` / `create_file` /
+    `delete_file`) and targeted a C file rather than Rust.
+  - With the markdown/edit-block fallback disabled in production config,
+    `LlmPatchProvider`'s strict schema parsing recovered zero usable edits.
+- `proposal_generated: false`; dry-run, approval, and apply **not reached**;
+  `provider_cost_usd: 0.0`; `pilot_qualified: true`.
+- **No parser, prompt, model, or configuration tuning was performed before
+  recording the result.** This is a legitimate pilot data point: a 7B local
+  model rarely emits the exact JSON-schema edits the governed path requires.
+- Classification recorded: `task: 1, attempt: 2, pilot_qualified: true,
+  provider: ollama, model: qwen2.5-coder:7b, provider_cost_usd: 0.0,
+  comparison_note: "Local-model baseline; not directly equivalent in capability
+  to Claude Sonnet"`.
+- Evidence: `task1-attempt2-report.json`.
+- **Disposition:** Close Task 1 Attempt 2 as an honest model-output
+  compatibility failure. Do **not** count it as a successful task, but keep it
+  in the pilot dataset. The memchr tree was restored to its pilot base
+  (`bce7df7`) and the stub test file reverted; no source changes remain.
