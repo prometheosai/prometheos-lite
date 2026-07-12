@@ -402,7 +402,7 @@ impl KnowledgeCacheManager {
         let caches = self.caches.read().await;
         let mut total_cleaned = 0;
 
-        for (_task_id, cache) in caches.iter() {
+        for cache in caches.values() {
             let keys = cache.keys(CacheScope::Task).await;
             let now = cache.now();
 
