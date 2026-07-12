@@ -1,0 +1,17 @@
+{
+  "model": "qwen2.5-coder:7b",
+  "parser_result": "zero usable edits",
+  "fallback_enabled": false,
+  "output_format_observed": "markdown_edit_blocks",
+  "expected_format": "structured edit schema",
+  "source": "Task 1 Attempt 2",
+  "is_reconstruction": true,
+  "label": "RECONSTRUCTION — NOT the original Attempt 2 raw bytes",
+  "capture_note": "The original Attempt 2 raw model bytes were NOT persisted by the prior session; only a prose description existed. This fixture is a RECONSTRUCTION: a fresh, real capture produced by sending the exact production LlmPatchProvider prompt (patch_provider.rs:1811) plus the Task 1 goal to qwen2.5-coder:7b at temperature 0.0. This fixture is a FRESH, real capture produced by sending the exact production LlmPatchProvider prompt (patch_provider.rs:1811) plus the Task 1 goal to qwen2.5-coder:7b at temperature 0.0. It is reproducible and demonstrates the same production outcome (zero usable edits) via a DIFFERENT but related path: the model emitted the ```edit``` (FILE/SEARCH/REPLACE) format the prompt requests, yet production parse_edits_from_response rejects it because the markdown/edit-block fallback is #[cfg(test)]-gated and disabled in production builds. This also exposes a prompt/parser mismatch: the production prompt asks for ```edit``` blocks while the production parser only accepts strict JSON.",
+  "reproduction": {
+    "endpoint": "http://localhost:11434/api/generate",
+    "model": "qwen2.5-coder:7b",
+    "temperature": 0.0,
+    "prompt_template": "You are a coding assistant. Generate edits to complete this task.\n\nTask: {task}\nRequirements: {requirements}\n\nGenerate edits using the format:\n```edit\nFILE: path/to/file.rs\nSEARCH:\n<content to find>\nREPLACE:\n<new content>\n```"
+  }
+}

@@ -806,7 +806,9 @@ impl ProviderRegistry {
     /// Use this when you have an LLM client configured and want full generation capabilities.
     pub fn with_llm_provider(client: crate::llm::LlmClient, model: String) -> anyhow::Result<Self> {
         let mut aggregate = AggregatePatchProvider::new();
-        aggregate.add_provider(Box::new(LlmPatchProvider::new(client, model)));
+        aggregate.add_provider(Box::new(LlmPatchProvider::with_fallback_mode(
+            client, model,
+        )));
         aggregate.add_provider(Box::new(HeuristicPatchProvider::new()));
 
         Ok(Self { aggregate })
@@ -1536,8 +1538,11 @@ impl LlmPatchProvider {
         }
     }
 
-    /// P0-FIX: Create with strict mode disabled (for tests/compatibility only)
-    #[cfg(test)]
+    /// Create with strict mode disabled, enabling the narrow, explicitly
+    /// validated fenced ```edit``` fallback in addition to the canonical JSON
+    /// schema. Use this for production LLM generation so local models that emit
+    /// the ```edit``` format can still produce candidates. The fallback rejects
+    /// prose, malformed blocks, and unsafe paths; it is not a permissive parser.
     pub fn with_fallback_mode(client: crate::llm::LlmClient, model: String) -> Self {
         Self {
             client,
@@ -1598,7 +1603,7 @@ impl LlmPatchProvider {
     }
 
     fn parse_edits_from_response(&self, response: &str) -> Vec<EditOperation> {
-        // P0-FIX: Try strict JSON schema parsing first (always attempted)
+        // Canonical format first: strict JSON schema.
         if let Some(json) = Self::parse_json_schema_response(response) {
             let mut edits = Vec::new();
             if let Some(edits_array) = json.get("edits").and_then(|v| v.as_array()) {
@@ -1613,97 +1618,128 @@ impl LlmPatchProvider {
             }
         }
 
-        // P0-FIX: If strict mode enabled, do NOT fall back to markdown parsing
-        if self.strict_mode {
-            tracing::warn!(
-                "P0: Strict JSON schema parsing failed and strict_mode is enabled. Rejecting provider response with {} characters.",
-                response.len()
-            );
+        // Narrow, explicitly validated fallback for fenced ```edit``` blocks.
+        // Only attempted when not in strict mode. It accepts ONE exact grammar
+        // (FILE/SEARCH/REPLACE or FILE/CONTENT) and rejects everything else:
+        // prose, malformed blocks, unsafe paths, or ambiguous mixed output.
+        if !self.strict_mode {
+            let fallback = self.parse_edit_block(response);
+            if !fallback.is_empty() {
+                return fallback;
+            }
+        }
+
+        tracing::warn!(
+            "No usable edits parsed from provider response ({} characters).",
+            response.len()
+        );
+        Vec::new()
+    }
+
+    /// Strict single-grammar parser for fenced ```edit``` blocks.
+    ///
+    /// Accepts exactly one of:
+    /// ```edit
+    /// FILE: <relative path>
+    /// SEARCH:
+    /// <search lines>
+    /// REPLACE:
+    /// <replace lines>
+    /// ```
+    /// or the whole-file variant (`FILE:` / `CONTENT:`). Rejects everything else:
+    /// prose outside the fence, malformed blocks, absolute/UNC/drive/`..` paths,
+    /// mixed/ambiguous output, or unsupported operations. This is intentionally
+    /// non-permissive: it is not a prose-rummaging parser.
+    fn parse_edit_block(&self, response: &str) -> Vec<EditOperation> {
+        let trimmed = response.trim();
+
+        // Must open with a single ```edit fence.
+        let open_len = if trimmed.starts_with("```edit") {
+            "```edit".len()
+        } else if trimmed.starts_with("``` edit") {
+            "``` edit".len()
+        } else {
+            return Vec::new();
+        };
+        let after_open = match trimmed[open_len..].strip_prefix('\n') {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        // Must close with a single ``` and have nothing after it.
+        let close = match after_open.rfind("```") {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        if !after_open[close + 3..].trim().is_empty() {
+            return Vec::new();
+        }
+        let body = after_open[..close].trim();
+
+        let lines: Vec<&str> = body.lines().collect();
+        if lines.is_empty() || !lines[0].starts_with("FILE:") {
+            return Vec::new();
+        }
+        let file_path = lines[0].strip_prefix("FILE:").unwrap_or("").trim();
+        if !is_safe_relative_path(file_path) {
             return Vec::new();
         }
 
-        // P0-FIX: Markdown fallback only allowed in non-strict mode (tests/compatibility)
-        #[cfg(test)]
-        {
-            tracing::info!("P0: Attempting markdown fallback parsing (test mode only)");
-            self.parse_markdown_fallback(response)
+        let mut mode: Option<&str> = None;
+        let mut search = String::new();
+        let mut replace = String::new();
+        let mut content = String::new();
+        let mut saw_section = false;
+        for line in &lines[1..] {
+            if line.starts_with("SEARCH:") {
+                mode = Some("search");
+                saw_section = true;
+            } else if line.starts_with("REPLACE:") {
+                mode = Some("replace");
+                saw_section = true;
+            } else if line.starts_with("CONTENT:") {
+                mode = Some("content");
+                saw_section = true;
+            } else if let Some(m) = mode {
+                let target = match m {
+                    "search" => &mut search,
+                    "replace" => &mut replace,
+                    "content" => &mut content,
+                    _ => &mut search,
+                };
+                if !target.is_empty() {
+                    target.push('\n');
+                }
+                target.push_str(line);
+            } else {
+                // Text before any section marker => not the exact grammar.
+                return Vec::new();
+            }
         }
-        #[cfg(not(test))]
-        {
-            tracing::warn!(
-                "P0: Markdown fallback disabled in production builds. Use LlmPatchProvider::with_fallback_mode() for compatibility."
-            );
+        if !saw_section {
+            return Vec::new();
+        }
+
+        use crate::harness::edit_protocol::{SearchReplaceEdit, WholeFileEdit};
+        if !search.is_empty() || !replace.is_empty() {
+            if search.is_empty() {
+                return Vec::new();
+            }
+            vec![EditOperation::SearchReplace(SearchReplaceEdit {
+                file: std::path::PathBuf::from(file_path),
+                search,
+                replace,
+                replace_all: Some(false),
+                context_lines: Some(3),
+            })]
+        } else if !content.is_empty() {
+            vec![EditOperation::WholeFile(WholeFileEdit {
+                file: std::path::PathBuf::from(file_path),
+                content,
+            })]
+        } else {
             Vec::new()
         }
-    }
-
-    /// P0-FIX: Legacy markdown parsing - test/gated use only
-    #[cfg(test)]
-    fn parse_markdown_fallback(&self, response: &str) -> Vec<EditOperation> {
-        let mut edits = Vec::new();
-
-        // Parse search/replace blocks
-        // Format: ```edit
-        // FILE: path/to/file.rs
-        // SEARCH:
-        // <search content>
-        // REPLACE:
-        // <replace content>
-        // ```
-        let lines: Vec<&str> = response.lines().collect();
-        let mut i = 0;
-
-        while i < lines.len() {
-            if lines[i].contains("```edit") || lines[i].contains("```") {
-                // Look for FILE: marker
-                if i + 1 < lines.len() && lines[i + 1].starts_with("FILE:") {
-                    let file_line = lines[i + 1];
-                    let file_path = file_line.strip_prefix("FILE:").unwrap_or("").trim();
-
-                    // Look for SEARCH: and REPLACE: sections
-                    let mut search_content = String::new();
-                    let mut replace_content = String::new();
-                    let mut in_search = false;
-                    let mut in_replace = false;
-
-                    i += 2;
-                    while i < lines.len() && !lines[i].contains("```") {
-                        if lines[i].starts_with("SEARCH:") {
-                            in_search = true;
-                            in_replace = false;
-                        } else if lines[i].starts_with("REPLACE:") {
-                            in_search = false;
-                            in_replace = true;
-                        } else if in_search {
-                            if !search_content.is_empty() {
-                                search_content.push('\n');
-                            }
-                            search_content.push_str(lines[i]);
-                        } else if in_replace {
-                            if !replace_content.is_empty() {
-                                replace_content.push('\n');
-                            }
-                            replace_content.push_str(lines[i]);
-                        }
-                        i += 1;
-                    }
-
-                    if !file_path.is_empty() && !search_content.is_empty() {
-                        use crate::harness::edit_protocol::SearchReplaceEdit;
-                        edits.push(EditOperation::SearchReplace(SearchReplaceEdit {
-                            file: std::path::PathBuf::from(file_path),
-                            search: search_content,
-                            replace: replace_content,
-                            replace_all: Some(false),
-                            context_lines: Some(3),
-                        }));
-                    }
-                }
-            }
-            i += 1;
-        }
-
-        edits
     }
 
     /// Parse JSON schema response for edits
@@ -1810,14 +1846,25 @@ impl PatchProvider for LlmPatchProvider {
             "You are a coding assistant. Generate edits to complete this task.\n\n\
             Task: {}\n\
             Requirements: {:?}\n\n\
-            Generate edits using the format:\n\
-            ```edit\n\
-            FILE: path/to/file.rs\n\
-            SEARCH:\n\
-            <content to find>\n\
-            REPLACE:\n\
-            <new content>\n\
-            ```",
+            Respond with a SINGLE JSON object and nothing else. Do not write any \
+            prose, explanations, or markdown outside the JSON object.\n\n\
+            Use exactly this schema:\n\
+            ```json\n\
+            {{\n\
+              \"edits\": [\n\
+                {{\"type\": \"search_replace\", \"file\": \"path/to/file.rs\", \"search\": \"exact text to find\", \"replace\": \"replacement text\"}},\n\
+                {{\"type\": \"whole_file\", \"file\": \"path/to/file.rs\", \"content\": \"full new file content\"}},\n\
+                {{\"type\": \"create_file\", \"file\": \"path/to/file.rs\", \"content\": \"file content\", \"executable\": false}},\n\
+                {{\"type\": \"delete_file\", \"file\": \"path/to/file.rs\"}}\n\
+              ],\n\
+              \"reasoning\": \"explanation of the changes\",\n\
+              \"confidence\": 85\n\
+            }}\n\
+            ```\n\
+            Rules:\n\
+            - Use only repository-relative paths (no absolute paths, no `..`, no drive letters).\n\
+            - Only emit edits you are confident about.\n\
+            - Do not emit any text outside the JSON object.",
             request.context.task, request.context.requirements
         );
 
@@ -1897,6 +1944,31 @@ impl PatchProvider for LlmPatchProvider {
             typical_latency_ms: 5000,
         }
     }
+}
+
+/// Reject absolute paths, Windows drive letters, UNC shares, URL schemes, and
+/// `..` traversal. Only safe repository-relative paths are accepted by the
+/// strict ```edit``` fallback.
+fn is_safe_relative_path(p: &str) -> bool {
+    if p.is_empty() {
+        return false;
+    }
+    if p.starts_with('/') || p.starts_with('\\') {
+        return false;
+    }
+    if p.contains(":\\") || p.contains("://") {
+        return false;
+    }
+    if p.starts_with("\\\\") {
+        return false;
+    }
+    let normalized = p.replace('\\', "/");
+    for seg in normalized.split('/') {
+        if seg == ".." {
+            return false;
+        }
+    }
+    true
 }
 
 // Helper functions for new providers
@@ -2584,5 +2656,115 @@ impl PatchProvider for MockProposalProvider {
             supported_operations: vec!["create_file".to_string()],
             typical_latency_ms: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::edit_protocol::EditOperation;
+    use crate::llm::LlmClient;
+
+    fn strict_provider() -> LlmPatchProvider {
+        LlmPatchProvider::new(
+            LlmClient::new("http://localhost", "test-model").unwrap(),
+            "test-model".to_string(),
+        )
+    }
+
+    fn fallback_provider() -> LlmPatchProvider {
+        LlmPatchProvider::with_fallback_mode(
+            LlmClient::new("http://localhost", "test-model").unwrap(),
+            "test-model".to_string(),
+        )
+    }
+
+    const VALID_JSON: &str = r#"{"edits":[{"type":"search_replace","file":"src/foo.rs","search":"a","replace":"b"}],"reasoning":"x","confidence":80}"#;
+
+    const VALID_EDIT_BLOCK: &str = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nREPLACE:\nb\n```";
+
+    #[test]
+    fn valid_strict_json_parses() {
+        let p = strict_provider();
+        let edits = p.parse_edits_from_response(VALID_JSON);
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits[0], EditOperation::SearchReplace(_)));
+    }
+
+    #[test]
+    fn valid_fenced_edit_fallback_parses() {
+        let p = fallback_provider();
+        let edits = p.parse_edits_from_response(VALID_EDIT_BLOCK);
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits[0], EditOperation::SearchReplace(_)));
+    }
+
+    #[test]
+    fn prose_only_rejected() {
+        let p = fallback_provider();
+        let edits = p.parse_edits_from_response(
+            "I think we should add a regression test but I cannot produce a patch.",
+        );
+        assert!(edits.is_empty(), "prose-only must be rejected");
+    }
+
+    #[test]
+    fn bad_paths_rejected() {
+        let p = fallback_provider();
+        let dangerous = [
+            "/etc/passwd",
+            "../../escape.rs",
+            "..\\secrets\\x.rs",
+            "C:\\windows\\x.rs",
+            "\\\\server\\share\\x.rs",
+            "http://example.com/x.rs",
+        ];
+        for path in dangerous {
+            let block = format!("```edit\nFILE: {}\nSEARCH:\na\nREPLACE:\nb\n```", path);
+            let edits = p.parse_edits_from_response(&block);
+            assert!(edits.is_empty(), "unsafe path must be rejected: {}", path);
+        }
+    }
+
+    #[test]
+    fn mixed_json_prose_rejected() {
+        let p = fallback_provider();
+        let resp = "Here is the patch:\n```json\n{\"edits\":[{\"type\":\"search_replace\",\"file\":\"src/foo.rs\",\"search\":\"a\",\"replace\":\"b\"}]}\n```\nLet me know if you need more.";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(edits.is_empty(), "mixed JSON+prose must be rejected");
+    }
+
+    #[test]
+    fn malformed_edit_block_rejected() {
+        let p = fallback_provider();
+        let cases = [
+            "```edit\nSEARCH:\na\n```",
+            "```edit\nFILE: src/foo.rs\nSome prose in the middle\nSEARCH:\na\nREPLACE:\nb\n```",
+            "```edit\nFILE: src/foo.rs\nSEARCH:\na\nREPLACE:\nb\n``` extra trailing text",
+            "```edit\nFILE: src/foo.rs\nFOO:\na\n```",
+        ];
+        for c in cases {
+            let edits = p.parse_edits_from_response(c);
+            assert!(
+                edits.is_empty(),
+                "malformed block must be rejected: {:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruction_capture_rejected_as_mixed() {
+        let p = fallback_provider();
+        let response = include_str!(
+            "../../docs/research/fixtures/task1-attempt2-reconstruction-ollama-response.txt"
+        );
+        // The reconstruction is prose followed by a valid ```edit block (mixed),
+        // so the strict parser must reject it rather than rummage through prose.
+        let edits = p.parse_edits_from_response(response);
+        assert!(
+            edits.is_empty(),
+            "reconstruction (mixed prose+block) must be rejected by the strict parser"
+        );
     }
 }
