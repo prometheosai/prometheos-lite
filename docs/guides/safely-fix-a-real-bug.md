@@ -30,14 +30,14 @@ the current directory and optional environment overrides:
 {
   "provider": "openai",
   "model": "your-model-name",
-  "base_url": "https://openrouter.ai/api"
+  "base_url": "https://openrouter.ai/api/v1"
 }
 ```
 
 Environment overrides (optional):
 
 ```bash
-export PROMETHEOS_BASE_URL="https://openrouter.ai/api"
+export PROMETHEOS_BASE_URL="https://openrouter.ai/api/v1"
 export PROMETHEOS_MODEL="your-model-name"
 ```
 
