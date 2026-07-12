@@ -427,10 +427,20 @@ async fn windows_drive_path_rejected() {
     let (_d, repo) = temp_repo();
     let provider = MockProposalProvider::with_mode(MockProposalMode::WindowsDrive);
     let r = workflow::generate_proposal(
-        &repo, "g", AuthorityLevel::Assist, &provider, ctx("g"), &safe_scope(), None, None,
+        &repo,
+        "g",
+        AuthorityLevel::Assist,
+        &provider,
+        ctx("g"),
+        &safe_scope(),
+        None,
+        None,
     )
     .await;
-    assert!(r.is_err(), "Windows drive path must be rejected on every platform");
+    assert!(
+        r.is_err(),
+        "Windows drive path must be rejected on every platform"
+    );
 }
 
 // 16. UNC provider paths are rejected (even on Linux CI)
@@ -439,7 +449,14 @@ async fn unc_path_rejected() {
     let (_d, repo) = temp_repo();
     let provider = MockProposalProvider::with_mode(MockProposalMode::Unc);
     let r = workflow::generate_proposal(
-        &repo, "g", AuthorityLevel::Assist, &provider, ctx("g"), &safe_scope(), None, None,
+        &repo,
+        "g",
+        AuthorityLevel::Assist,
+        &provider,
+        ctx("g"),
+        &safe_scope(),
+        None,
+        None,
     )
     .await;
     assert!(r.is_err(), "UNC path must be rejected on every platform");
@@ -451,7 +468,14 @@ async fn plain_text_rejected_before_artifact() {
     let (_d, repo) = temp_repo();
     let provider = MockProposalProvider::with_mode(MockProposalMode::PlainText);
     let r = workflow::generate_proposal(
-        &repo, "g", AuthorityLevel::Assist, &provider, ctx("g"), &safe_scope(), None, None,
+        &repo,
+        "g",
+        AuthorityLevel::Assist,
+        &provider,
+        ctx("g"),
+        &safe_scope(),
+        None,
+        None,
     )
     .await;
     assert!(r.is_err(), "plain text must not be persisted as a proposal");
@@ -471,7 +495,14 @@ async fn secret_bearing_route_is_sanitized() {
         route: Some("https://sk-SECRETKEY123@api.example.com/v1/models?key=zzz#frag".to_string()),
     };
     let res = workflow::generate_proposal(
-        &repo, "g", AuthorityLevel::Assist, &provider, ctx("g"), &safe_scope(), Some(route), None,
+        &repo,
+        "g",
+        AuthorityLevel::Assist,
+        &provider,
+        ctx("g"),
+        &safe_scope(),
+        Some(route),
+        None,
     )
     .await
     .expect("generate should succeed");
@@ -482,12 +513,21 @@ async fn secret_bearing_route_is_sanitized() {
         .as_str()
         .expect("route present")
         .to_string();
-    assert_eq!(route_json, "https://api.example.com", "route must be scheme://host only");
-    assert!(!route_json.contains("sk-SECRETKEY123"), "userinfo secret must be stripped");
+    assert_eq!(
+        route_json, "https://api.example.com",
+        "route must be scheme://host only"
+    );
+    assert!(
+        !route_json.contains("sk-SECRETKEY123"),
+        "userinfo secret must be stripped"
+    );
     assert!(!route_json.contains("/v1"), "path must be stripped");
     assert!(!route_json.contains("key=zzz"), "query must be stripped");
     assert!(!route_json.contains("#frag"), "fragment must be stripped");
-    assert!(!report.to_lowercase().contains("sk-secretkey123"), "no secret anywhere in report");
+    assert!(
+        !report.to_lowercase().contains("sk-secretkey123"),
+        "no secret anywhere in report"
+    );
 }
 
 // 19. sanitize_provider_route keeps only scheme://host[:port]
@@ -512,16 +552,19 @@ async fn report_exposes_lifecycle_evidence() {
     let res = generate_safe(&repo).await;
     workflow::dry_run(&repo, &res.id, Some("true")).expect("dry-run should pass");
     workflow::approve(&repo, &res.id, &res.patch_hash, "op").expect("approve should pass");
-    workflow::apply(&repo, &res.id, &res.patch_hash, Some("true"), true).expect("apply should pass");
+    workflow::apply(&repo, &res.id, &res.patch_hash, Some("true"), true)
+        .expect("apply should pass");
 
     let report = workflow::report(&repo, &res.id).expect("report should succeed");
     let value: serde_json::Value = serde_json::from_str(&report).expect("valid json");
     assert_eq!(value["dry_run_validation"], "true");
     assert_eq!(value["apply_validation"], "true");
-    assert!(value["checkpoint_ref"]
-        .as_str()
-        .unwrap_or("")
-        .starts_with("prometheos/checkpoint-"));
+    assert!(
+        value["checkpoint_ref"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("prometheos/checkpoint-")
+    );
     assert_eq!(value["rollback_status"], "clean");
     assert_eq!(value["applied"], true);
 }
@@ -535,22 +578,18 @@ async fn rollback_outcome_recorded() {
     workflow::approve(&repo, &res.id, &res.patch_hash, "op").expect("approve should pass");
 
     // Apply with a validation command that fails -> must roll back and record status.
-    let applied = workflow::apply(
-        &repo,
-        &res.id,
-        &res.patch_hash,
-        Some("false"),
-        true,
-    );
+    let applied = workflow::apply(&repo, &res.id, &res.patch_hash, Some("false"), true);
     assert!(applied.is_err(), "apply must fail validation and roll back");
 
     let report = workflow::report(&repo, &res.id).expect("report should succeed");
     let value: serde_json::Value = serde_json::from_str(&report).expect("valid json");
     assert_eq!(value["rollback_status"], "rolled_back");
-    assert!(value["checkpoint_ref"]
-        .as_str()
-        .unwrap_or("")
-        .starts_with("prometheos/checkpoint-"));
+    assert!(
+        value["checkpoint_ref"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("prometheos/checkpoint-")
+    );
     // Tree reverted to original (no generated file).
     assert!(!repo.join("src/generated_patch.rs").exists());
 }

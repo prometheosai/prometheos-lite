@@ -8,6 +8,22 @@ use reqwest::Client;
 use super::types::{ChatCompletionRequest, ChatCompletionResponse};
 use crate::config::AppConfig;
 
+/// Normalize an OpenAI-compatible base URL into the chat completions endpoint.
+///
+/// Accepts the conventional `/v1`-suffixed base (e.g. `https://openrouter.ai/api/v1`)
+/// as well as a legacy base without `/v1` (e.g. `https://openrouter.ai/api`). Any
+/// query string or fragment is dropped: chat endpoints authenticate via the
+/// `Authorization` header, not the URL.
+fn chat_completions_url(base_url: &str) -> String {
+    let without_query = base_url.split(['?', '#']).next().unwrap_or(base_url);
+    let base = without_query.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmClient {
     http: Client,
@@ -59,9 +75,7 @@ impl LlmClient {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
-            let mut request_builder = self
-                .http
-                .post(format!("{}/v1/chat/completions", self.base_url));
+            let mut request_builder = self.http.post(chat_completions_url(&self.base_url));
             if let Some(api_key) = self.api_key.as_deref() {
                 request_builder = request_builder.bearer_auth(api_key);
             }
@@ -126,9 +140,7 @@ impl LlmClient {
             stream: true,
         };
 
-        let mut request_builder = self
-            .http
-            .post(format!("{}/v1/chat/completions", self.base_url));
+        let mut request_builder = self.http.post(chat_completions_url(&self.base_url));
         if let Some(api_key) = self.api_key.as_deref() {
             request_builder = request_builder.bearer_auth(api_key);
         }
@@ -168,5 +180,60 @@ impl LlmClient {
         }
 
         Ok(full_content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_chat_completions_endpoint() {
+        let cases = [
+            (
+                "https://openrouter.ai/api/v1",
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+            (
+                "https://openrouter.ai/api/v1/",
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+            (
+                "https://openrouter.ai/api",
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+            (
+                "https://api.openai.com/v1",
+                "https://api.openai.com/v1/chat/completions",
+            ),
+            (
+                "http://localhost:1234/v1",
+                "http://localhost:1234/v1/chat/completions",
+            ),
+            (
+                "http://localhost:11434",
+                "http://localhost:11434/v1/chat/completions",
+            ),
+        ];
+
+        for (base, expected) in cases {
+            assert_eq!(chat_completions_url(base), expected, "base = {base}");
+        }
+    }
+
+    #[test]
+    fn drops_query_string_and_fragment() {
+        assert_eq!(
+            chat_completions_url("https://example.com/v1?token=x"),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://example.com/v1#frag"),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://example.com/api?token=x"),
+            "https://example.com/api/v1/chat/completions"
+        );
     }
 }
