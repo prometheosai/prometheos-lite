@@ -859,6 +859,10 @@ impl ProviderRegistry {
             );
         }
 
+        // Authenticate with the OpenRouter API key when set (the env var the
+        // rest of the codebase uses for OpenRouter-compatible providers).
+        let api_key = std::env::var("OPENROUTER_API_KEY").ok();
+
         // Create LLM client from config
         let client = crate::llm::LlmClient::new(&config.base_url, &config.model)
             .map_err(|e| {
@@ -868,7 +872,8 @@ impl ProviderRegistry {
                     Provider: {}\n                    Model: {}\n                    Base URL: {}\n\n                    Error: {}\n\n                    To fix this issue:\n\n                    1. Check that the base URL is correct and accessible\n                    2. Verify the model name matches what the provider supports\n                    3. Ensure the LLM server is running\n                    4. Check network connectivity and firewall settings\n                    5. For local models, verify the server is started with the correct model\n\n                    Example working configurations:\n                    - LM Studio: http://localhost:1234/v1\n                    - Ollama: http://localhost:11434\n                    - OpenAI: https://api.openai.com/v1\n                    ",
                     config.provider, config.model, config.base_url, e
                 )
-            })?;
+            })?
+            .with_api_key(api_key);
 
         Self::with_llm_provider(client, config.model.clone())
     }
