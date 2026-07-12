@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::harness::{
-    edit_protocol::{CreateFileEdit, EditOperation, SearchReplaceEdit, WholeFileEdit},
+    edit_protocol::{
+        CreateFileEdit, EditOperation, SearchReplaceEdit, UnifiedDiffEdit, WholeFileEdit,
+    },
     failure::{FailureDetails, FailureKind},
     repo_intelligence::RepoMap,
     review::ReviewIssue,
@@ -2425,5 +2427,157 @@ impl DeterministicPatchProvider {
         }
 
         Ok(with_imports)
+    }
+}
+
+/// Deterministic mock `PatchProvider` used for tests and offline CI.
+///
+/// This is a *mock implementation of the existing `PatchProvider` trait* (not a
+/// second provider abstraction). It emits fixed, controllable edits so the
+/// governed workflow can be exercised end to end without any network or model
+/// access. Construct it with [`MockProposalProvider::safe`] for the happy path,
+/// or [`MockProposalProvider::with_mode`] to exercise a specific negative case.
+pub struct MockProposalProvider {
+    mode: MockProposalMode,
+}
+
+/// Operating modes for [`MockProposalProvider`], covering the happy path and the
+/// hostile/negative cases the governed workflow must reject.
+#[derive(Debug, Clone, Copy)]
+pub enum MockProposalMode {
+    /// Create a new in-scope file (`src/generated_patch.rs`).
+    Safe,
+    /// Create a file outside the allowed scope (`other/x.rs`).
+    OutOfScope,
+    /// Create a file under a forbidden prefix (`src/secrets/k.rs`).
+    Forbidden,
+    /// Create a dependency manifest (`Cargo.toml`).
+    Dependency,
+    /// Create an absolute-path file (`/etc/passwd`).
+    Absolute,
+    /// Create a file using `..` traversal (`src/../escape.rs`).
+    Traversal,
+    /// Return a candidate whose patch is a malformed/unsupported diff.
+    Malformed,
+    /// Return a candidate whose patch is plain text, not a unified diff.
+    PlainText,
+    /// Create a Windows drive-absolute file (`C:\...`).
+    WindowsDrive,
+    /// Create a UNC-path file (`\\server\share\...`).
+    Unc,
+    /// Return a candidate with no edits (empty patch).
+    Empty,
+    /// Fail generation entirely (no artifact should be created).
+    Failing,
+}
+
+impl MockProposalProvider {
+    /// Create the happy-path mock provider (in-scope file creation).
+    pub fn safe() -> Self {
+        Self {
+            mode: MockProposalMode::Safe,
+        }
+    }
+
+    /// Create the mock provider in a specific mode.
+    pub fn with_mode(mode: MockProposalMode) -> Self {
+        Self { mode }
+    }
+}
+
+fn build_candidate(edits: Vec<EditOperation>, strategy: &str) -> ProviderCandidate {
+    ProviderCandidate {
+        edits,
+        source: "mock".to_string(),
+        strategy: strategy.to_string(),
+        confidence: 100,
+        reasoning: "deterministic mock provider".to_string(),
+        estimated_risk: RiskEstimate::Low,
+    }
+}
+
+#[async_trait]
+impl PatchProvider for MockProposalProvider {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    async fn generate(&self, _request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        let edits = match self.mode {
+            MockProposalMode::Failing => {
+                anyhow::bail!("mock provider failure (injected)");
+            }
+            MockProposalMode::Empty => vec![],
+            MockProposalMode::Malformed => vec![EditOperation::UnifiedDiff(UnifiedDiffEdit {
+                diff: "--- a/x\n+++ b/x\nGIT binary patch\nliteral 0\nH4sIAAAAAAAA\n".to_string(),
+                target_file: None,
+            })],
+            MockProposalMode::PlainText => vec![EditOperation::UnifiedDiff(UnifiedDiffEdit {
+                diff: "this is a note, not a unified diff".to_string(),
+                target_file: None,
+            })],
+            MockProposalMode::WindowsDrive => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("C:\\windows\\system32\\evil.dll"),
+                content: "bad\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Unc => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("\\\\server\\share\\evil.dll"),
+                content: "bad\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Safe => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("src/generated_patch.rs"),
+                content: "pub fn generated() -> u32 {\n    1\n}\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::OutOfScope => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("other/x.rs"),
+                content: "pub fn x() {}\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Forbidden => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("src/secrets/k.rs"),
+                content: "secret\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Dependency => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("Cargo.toml"),
+                content: "version = \"0.2\"\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Absolute => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("/etc/passwd"),
+                content: "root:x:0:0:root:/root:/bin/sh\n".to_string(),
+                executable: None,
+            })],
+            MockProposalMode::Traversal => vec![EditOperation::CreateFile(CreateFileEdit {
+                file: PathBuf::from("src/../escape.rs"),
+                content: "pub fn escape() {}\n".to_string(),
+                executable: None,
+            })],
+        };
+
+        let candidates = if edits.is_empty() {
+            vec![]
+        } else {
+            vec![build_candidate(edits, "deterministic")]
+        };
+
+        Ok(GenerateResponse {
+            candidates,
+            generation_time_ms: 0,
+            provider_notes: Some(format!("mock provider mode: {:?}", self.mode)),
+        })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: false,
+            max_candidates: 1,
+            supported_operations: vec!["create_file".to_string()],
+            typical_latency_ms: 0,
+        }
     }
 }

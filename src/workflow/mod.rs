@@ -22,6 +22,9 @@ use std::process::Command;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::harness::edit_protocol::{EditOperation, SearchReplaceEdit};
+use crate::harness::patch_provider::{GenerateRequest, PatchProvider, PatchProviderContext};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorityLevel {
@@ -120,6 +123,62 @@ pub struct ProposalArtifact {
     pub approved: Option<ApprovalRecord>,
     pub dry_run_passed: Option<bool>,
     pub applied: Option<bool>,
+    /// Optional validation command recorded at generation time; used when a later
+    /// `dry-run`/`apply` does not supply its own.
+    #[serde(default)]
+    pub validation_command: Option<String>,
+    /// Provider provenance for proposals generated through a `PatchProvider`.
+    #[serde(default)]
+    pub provider_provenance: Option<ProviderProvenance>,
+    /// Validation command actually used during the isolated dry-run (if any).
+    #[serde(default)]
+    pub dry_run_validation: Option<String>,
+    /// Validation command actually used during apply (if any).
+    #[serde(default)]
+    pub apply_validation: Option<String>,
+    /// Checkpoint branch created before apply (recovery evidence).
+    #[serde(default)]
+    pub checkpoint_ref: Option<String>,
+    /// Rollback outcome after a failed apply validation: "clean", "rolled_back",
+    /// or "rollback_failed".
+    #[serde(default)]
+    pub rollback_status: Option<String>,
+}
+
+/// Provider provenance recorded with a governed proposal.
+///
+/// This answers *which* provider produced the patch, under *what* route/model, and
+/// binds the patch to its inputs and scope. It is deliberately free of any secret:
+/// no API key, authorization header, or token is ever persisted here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProvenance {
+    /// Provider implementation name (e.g. "mock", "llm", "deterministic").
+    pub implementation: String,
+    /// Configured model name, when known (not a secret).
+    pub model: Option<String>,
+    /// Configured route/endpoint (e.g. base URL), when known (not a secret).
+    pub route: Option<String>,
+    /// Generation timestamp (RFC3339).
+    pub generated_at: String,
+    /// Work/trace identifier when available.
+    pub work_id: Option<String>,
+    /// Digest of the prompt/input (goal + requirements), not raw configuration.
+    pub input_digest: String,
+    /// Internally computed patch hash (mirrors `ProposalArtifact.patch_hash`).
+    pub patch_hash: String,
+    /// Base commit SHA the proposal was validated against.
+    pub base_sha: String,
+    /// Digest of the scope contract the proposal was validated against.
+    pub scope_digest: String,
+}
+
+/// Route/identity metadata used only to populate non-secret `ProviderProvenance`.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRouteInfo {
+    /// Configured model name (not a secret).
+    pub model: Option<String>,
+    /// Configured route/endpoint (e.g. base URL), not a secret.
+    pub route: Option<String>,
 }
 
 /// Run `git` in `repo` and return stdout, failing on non-zero exit.
@@ -315,6 +374,10 @@ fn now_iso() -> String {
 
 /// Propose a patch. Validates scope immediately and persists a proposal artifact.
 /// Returns the workflow id.
+///
+/// This is the stable entry point used by the `workflow propose` CLI command and by
+/// tests. Provider-generated proposals should call [`generate_proposal`] (which routes
+/// through this same gating path) so that no parallel proposal path is introduced.
 pub fn propose(
     repo: &Path,
     goal: &str,
@@ -326,10 +389,42 @@ pub fn propose(
     max_files_changed: Option<usize>,
     max_lines_changed: Option<usize>,
 ) -> Result<String> {
+    propose_with_meta(
+        repo,
+        goal,
+        authority,
+        patch,
+        allowed_paths,
+        forbidden_paths,
+        allow_dependency_changes,
+        max_files_changed,
+        max_lines_changed,
+        None,
+        None,
+    )
+}
+
+/// Internal proposal constructor that accepts optional validation command and
+/// provider provenance. All gating lives here so the public `propose` and the
+/// provider-backed `generate_proposal` share identical behavior.
+fn propose_with_meta(
+    repo: &Path,
+    goal: &str,
+    authority: AuthorityLevel,
+    patch: &str,
+    allowed_paths: &[String],
+    forbidden_paths: &[String],
+    allow_dependency_changes: bool,
+    max_files_changed: Option<usize>,
+    max_lines_changed: Option<usize>,
+    validation_command: Option<String>,
+    provider_provenance: Option<ProviderProvenance>,
+) -> Result<String> {
     if !is_git_repo(repo) {
         bail!("not a git repository: {}", repo.display());
     }
     reject_unsupported_patch(patch)?;
+    require_unified_diff(patch)?;
     let base_sha = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
     let patch_hash = hash_str(patch);
     let (changed_files, added, removed) = analyze_diff(patch);
@@ -381,9 +476,400 @@ pub fn propose(
         approved: None,
         dry_run_passed: None,
         applied: None,
+        validation_command,
+        provider_provenance,
+        dry_run_validation: None,
+        apply_validation: None,
+        checkpoint_ref: None,
+        rollback_status: None,
     };
     save_proposal(repo, &proposal)?;
     Ok(id)
+}
+
+// ---------------------------------------------------------------------------
+// Provider-backed proposal generation (#78)
+//
+// A `PatchProvider` generates candidate edits. Those edits are rendered into a
+// unified diff and treated as *hostile* input (absolute/traversal rejection,
+// scope, unsupported-form, budget). The patch is then routed through
+// `propose_with_meta`, so every #77 gate (integrity, dry-run, approval-hash,
+// base-SHA, checkpoint, rollback) applies unchanged. No parallel proposal path
+// and no model invocation lives here.
+// ---------------------------------------------------------------------------
+
+/// Scope contract for a provider-backed generation request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GenerateScope {
+    pub allowed_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
+    pub allow_dependency_changes: bool,
+    pub max_files_changed: Option<usize>,
+    pub max_lines_changed: Option<usize>,
+}
+
+/// Result of a provider-backed generation request.
+#[derive(Debug, Clone)]
+pub struct GenerateResult {
+    pub id: String,
+    pub patch: String,
+    pub patch_hash: String,
+}
+
+/// Run `git` and return stdout, tolerating exit code 1 (which `git diff
+/// --no-index` uses to signal "files differ"). Other non-zero exits fail.
+fn run_git_capture(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .context("failed to execute git")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if output.status.success() || output.status.code() == Some(1) {
+        Ok(stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git {} failed: {}", args.join(" "), stderr.trim())
+    }
+}
+
+/// True if `path` is absolute, a Windows drive path, a UNC path, or contains
+/// `..` traversal. Detected on *every* platform so a Linux CI runner still
+/// rejects Windows-shaped hostile paths (`C:\...`, `\\server\share`).
+fn is_hostile_path(path: &str) -> bool {
+    if path.is_empty() || path == "/dev/null" {
+        return false;
+    }
+    // Absolute on the current platform (handles Windows drive + UNC on Windows,
+    // and `/...` on Unix).
+    if Path::new(path).is_absolute() {
+        return true;
+    }
+    // Unix absolute.
+    if path.starts_with('/') {
+        return true;
+    }
+    // Windows drive letter on any platform, e.g. `C:\foo` or `C:foo`.
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return true;
+    }
+    // UNC / double-slash escapes, e.g. `\\server\share` or `//server/share`.
+    if path.starts_with("\\\\") || path.starts_with("//") {
+        return true;
+    }
+    // Parent-directory traversal.
+    if path.split('/').any(|c| c == "..") {
+        return true;
+    }
+    false
+}
+
+/// Reject any patch path that escapes the repository: absolute paths (unix
+/// `/...`, Windows drive/UNC) or `..` traversal. `/dev/null` is always allowed.
+fn validate_patch_paths(repo: &Path, patch: &str) -> Result<()> {
+    for line in patch.lines() {
+        let path = match line
+            .strip_prefix("+++ b/")
+            .or_else(|| line.strip_prefix("--- a/"))
+        {
+            Some(rest) => rest.trim(),
+            None => continue,
+        };
+        if is_hostile_path(path) {
+            bail!("rejected patch path is absolute or escapes the repo: {path}");
+        }
+        if path != "/dev/null" && !repo.join(path).starts_with(repo) {
+            bail!("rejected patch path escapes the repo: {path}");
+        }
+    }
+    Ok(())
+}
+
+/// Normalize a provider-supplied file path to a repo-relative path, rejecting
+/// anything absolute, a Windows drive/UNC path, or traversing outside the
+/// repository. First hostile-input gate applied to provider output.
+fn sanitize_repo_relative(file: &Path) -> Result<PathBuf> {
+    if is_hostile_path(&file.to_string_lossy()) {
+        bail!(
+            "rejected provider file path is absolute or escapes the repo: {}",
+            file.display()
+        );
+    }
+    if file.as_os_str().is_empty() {
+        bail!("rejected empty provider file path");
+    }
+    Ok(file.to_path_buf())
+}
+
+/// Reject a patch that is not a real unified diff (plain text or otherwise
+/// malformed) *before* any proposal artifact is created.
+fn require_unified_diff(patch: &str) -> Result<()> {
+    let has_hunk = patch.contains("@@");
+    let has_header = patch.contains("--- ") || patch.contains("+++ ");
+    if !(has_hunk && has_header) {
+        bail!("rejected patch is not a unified diff (missing hunk/header markers)");
+    }
+    Ok(())
+}
+
+/// Sanitize a provider route/endpoint for provenance: keep only
+/// `scheme://host[:port]`, stripping any userinfo (the secret-bearing part),
+/// path, query, and fragment. Returns `None` if the URL has no scheme/host.
+pub fn sanitize_provider_route(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.is_empty() {
+        return None;
+    }
+    // Drop any userinfo (e.g. `sk-abc@`) before the host.
+    let after_userinfo = match rest.rfind('@') {
+        Some(idx) => &rest[idx + 1..],
+        None => rest,
+    };
+    // Keep only authority; drop /path, ?query, #fragment.
+    let authority = after_userinfo
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_userinfo);
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{}://{}", scheme, authority))
+}
+
+/// Render a single provider edit into a unified-diff fragment. The edit's file
+/// path is validated as hostile input first.
+fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
+    match edit {
+        EditOperation::UnifiedDiff(u) => {
+            validate_patch_paths(repo, &u.diff)?;
+            Ok(u.diff.clone())
+        }
+        EditOperation::CreateFile(c) => {
+            let rel = sanitize_repo_relative(&c.file)?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            render_two_sides(&rel_str, None, Some(&c.content))
+        }
+        EditOperation::DeleteFile(d) => {
+            let rel = sanitize_repo_relative(&d.file)?;
+            let old = std::fs::read_to_string(repo.join(&rel)).with_context(|| {
+                format!(
+                    "provider targets missing file for deletion: {}",
+                    rel.display()
+                )
+            })?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            render_two_sides(&rel_str, Some(&old), None)
+        }
+        EditOperation::WholeFile(w) => {
+            let rel = sanitize_repo_relative(&w.file)?;
+            let old = std::fs::read_to_string(repo.join(&rel)).unwrap_or_default();
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            render_two_sides(&rel_str, Some(&old), Some(&w.content))
+        }
+        EditOperation::SearchReplace(sr) => {
+            let rel = sanitize_repo_relative(&sr.file)?;
+            let old = std::fs::read_to_string(repo.join(&rel))
+                .with_context(|| format!("provider targets missing file: {}", rel.display()))?;
+            let new = apply_search_replace(&old, sr)?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            render_two_sides(&rel_str, Some(&old), Some(&new))
+        }
+        EditOperation::RenameFile(_) => {
+            bail!("rename edits are not supported by the governed proposal path")
+        }
+    }
+}
+
+/// Run `git diff --no-index` between two optional sides (`/dev/null` when `None`)
+/// and normalize the header paths to repo-relative `a/<rel>` / `b/<rel>`.
+fn render_two_sides(rel_str: &str, old: Option<&str>, new: Option<&str>) -> Result<String> {
+    let tmp = std::env::temp_dir().join(format!("prometheos-render-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).context("failed to create temp dir for diff")?;
+    let result = (|| -> Result<String> {
+        let old_arg = match old {
+            Some(text) => {
+                let p = tmp.join("o").join(rel_str);
+                std::fs::create_dir_all(p.parent().unwrap())
+                    .context("failed to create temp old file")?;
+                std::fs::write(&p, text).context("failed to write temp old file")?;
+                format!("o/{rel_str}")
+            }
+            None => "/dev/null".to_string(),
+        };
+        let new_arg = match new {
+            Some(text) => {
+                let p = tmp.join("n").join(rel_str);
+                std::fs::create_dir_all(p.parent().unwrap())
+                    .context("failed to create temp new file")?;
+                std::fs::write(&p, text).context("failed to write temp new file")?;
+                format!("n/{rel_str}")
+            }
+            None => "/dev/null".to_string(),
+        };
+        let raw = run_git_capture(
+            &tmp,
+            &["diff", "--no-index", "--no-color", &old_arg, &new_arg],
+        )?;
+        Ok(rewrite_diff_header(&raw))
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+/// Normalize `git diff --no-index` headers (`a/o/<rel>` / `b/n/<rel>`) to
+/// `a/<rel>` / `b/<rel>` and force forward slashes.
+fn rewrite_diff_header(raw: &str) -> String {
+    raw.replace("a/o/", "a/")
+        .replace("b/n/", "b/")
+        .replace('\\', "/")
+}
+
+/// Apply a provider `SearchReplace` edit to file text. An empty search prepends
+/// the replacement; otherwise the first occurrence must match.
+fn apply_search_replace(old: &str, sr: &SearchReplaceEdit) -> Result<String> {
+    if sr.search.is_empty() {
+        if sr.replace.is_empty() {
+            return Ok(old.to_string());
+        }
+        let prefix = if sr.replace.ends_with('\n') {
+            sr.replace.clone()
+        } else {
+            format!("{}\n", sr.replace)
+        };
+        return Ok(format!("{prefix}{old}"));
+    }
+    if sr.replace_all == Some(true) {
+        if !old.contains(&sr.search) {
+            bail!("provider search text not found: {}", ellipsize(&sr.search));
+        }
+        return Ok(old.replace(&sr.search, &sr.replace));
+    }
+    match old.split_once(&sr.search) {
+        Some((before, after)) => Ok(format!("{before}{}{after}", sr.replace)),
+        None => bail!("provider search text not found: {}", ellipsize(&sr.search)),
+    }
+}
+
+fn ellipsize(s: &str) -> String {
+    let t = s.trim();
+    if t.len() > 40 {
+        format!("{}…", &t[..40])
+    } else {
+        t.to_string()
+    }
+}
+
+/// Render provider edits into a single unified diff, treating the result as
+/// hostile input (empty-patch rejection handled here).
+fn render_edits_to_patch(repo: &Path, edits: &[EditOperation]) -> Result<String> {
+    if edits.is_empty() {
+        bail!("provider produced no edits");
+    }
+    let mut out = String::new();
+    for edit in edits {
+        let frag = render_single_edit(repo, edit)?;
+        if frag.trim().is_empty() {
+            continue;
+        }
+        out.push_str(&frag);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    if out.trim().is_empty() {
+        bail!("provider produced an empty patch");
+    }
+    Ok(out)
+}
+
+/// Generate a governed proposal through a `PatchProvider`.
+///
+/// The provider's candidate edits are rendered into a unified diff and treated
+/// as hostile input. The patch is then routed through [`propose_with_meta`], so
+/// every #77 gate (integrity, dry-run, approval-hash, base-SHA, checkpoint,
+/// rollback) applies unchanged. No model is invoked directly from this module.
+pub async fn generate_proposal(
+    repo: &Path,
+    goal: &str,
+    authority: AuthorityLevel,
+    provider: &dyn PatchProvider,
+    context: PatchProviderContext,
+    scope: &GenerateScope,
+    route_info: Option<ProviderRouteInfo>,
+    validation_command: Option<String>,
+) -> Result<GenerateResult> {
+    if authority == AuthorityLevel::Review {
+        bail!("review authority cannot generate a source-modifying patch");
+    }
+
+    let response = provider
+        .generate(GenerateRequest {
+            context: context.clone(),
+            preferred_strategies: vec![],
+        })
+        .await?;
+
+    let candidate = response
+        .candidates
+        .into_iter()
+        .find(|c| !c.edits.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("provider produced no usable candidate"))?;
+
+    // Never trust provider-supplied metadata; derive the patch from the edits.
+    let patch = render_edits_to_patch(repo, &candidate.edits)?;
+
+    // Hostile-input gate on the rendered patch (absolute paths, traversal).
+    validate_patch_paths(repo, &patch)?;
+    // Reject plain text / malformed patches before any artifact is created.
+    require_unified_diff(&patch)?;
+
+    let patch_hash = hash_str(&patch);
+
+    // Build non-secret provenance. The patch hash, base SHA and scope digest are
+    // all derived internally; no key, token, or header is ever persisted.
+    let input_digest = hash_str(&format!(
+        "{}\n{}",
+        context.task,
+        context.requirements.join("\n")
+    ));
+    let scope_digest = hash_str(&serde_json::to_string(&scope).unwrap_or_default());
+    let provenance = ProviderProvenance {
+        implementation: provider.name().to_string(),
+        model: route_info.as_ref().and_then(|r| r.model.clone()),
+        // Persist only a sanitized scheme://host[:port]; never raw credentials.
+        route: route_info
+            .as_ref()
+            .and_then(|r| r.route.as_ref())
+            .and_then(|u| sanitize_provider_route(u)),
+        generated_at: now_iso(),
+        work_id: None,
+        input_digest,
+        patch_hash: patch_hash.clone(),
+        base_sha: run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string(),
+        scope_digest,
+    };
+
+    let id = propose_with_meta(
+        repo,
+        goal,
+        authority,
+        &patch,
+        &scope.allowed_paths,
+        &scope.forbidden_paths,
+        scope.allow_dependency_changes,
+        scope.max_files_changed,
+        scope.max_lines_changed,
+        validation_command,
+        Some(provenance),
+    )?;
+
+    Ok(GenerateResult {
+        id,
+        patch,
+        patch_hash,
+    })
 }
 
 /// Run an isolated dry-run in a detached Git worktree: validate with `git apply --check`,
@@ -393,6 +879,8 @@ pub fn dry_run(repo: &Path, id: &str, validation: Option<&str>) -> Result<bool> 
     if !proposal.authority.can_dry_run() {
         bail!("authority '{}' cannot run a dry-run", proposal.authority);
     }
+    let validation = validation.or(proposal.validation_command.as_deref());
+    proposal.dry_run_validation = validation.map(|s| s.to_string());
     let wt_root = std::env::temp_dir().join(format!("prometheos-dry-run-{id}"));
     // Clean any stale state for this path, then prune orphaned worktree registrations.
     let _ = run_git(
@@ -509,6 +997,9 @@ pub fn apply(
 
     let (actual_files, _, _) = verify_proposal_integrity(&proposal)?;
 
+    let validation = validation.or(proposal.validation_command.as_deref());
+    proposal.apply_validation = validation.map(|s| s.to_string());
+
     if proposal.dry_run_passed != Some(true) {
         bail!("apply blocked: proposal has not passed an isolated dry-run");
     }
@@ -569,6 +1060,7 @@ pub fn apply(
     }
     run_git(repo, &["branch", &checkpoint_branch, &current_head])
         .context("failed to create checkpoint branch")?;
+    proposal.checkpoint_ref = Some(checkpoint_branch.clone());
 
     let patch_file = std::env::temp_dir().join(format!("prometheos-apply-{id}.patch"));
     std::fs::write(&patch_file, &proposal.patch).context("failed to write patch file")?;
@@ -594,6 +1086,7 @@ pub fn apply(
         if rollback_on_failure {
             let rollback_result = run_git(repo, &["apply", "-R", patch_file.to_str().unwrap()]);
             proposal.applied = Some(false);
+            proposal.rollback_status = Some("rolled_back".to_string());
             save_proposal(repo, &proposal)?;
             match rollback_result {
                 Ok(_) => {
@@ -602,6 +1095,8 @@ pub fn apply(
                     );
                 }
                 Err(rollback_error) => {
+                    proposal.rollback_status = Some("rollback_failed".to_string());
+                    save_proposal(repo, &proposal)?;
                     return Err(anyhow::anyhow!(
                         "apply failed and rollback also failed.\n\
                          Apply error: {apply_error:#}\n\
@@ -612,6 +1107,7 @@ pub fn apply(
             }
         }
         proposal.applied = Some(false);
+        proposal.rollback_status = Some("disabled".to_string());
         save_proposal(repo, &proposal)?;
         return Err(
             apply_error.context("apply failed; working tree left modified (rollback disabled)")
@@ -620,6 +1116,7 @@ pub fn apply(
 
     // Checkpoint branch is intentionally preserved as recovery evidence.
     proposal.applied = Some(true);
+    proposal.rollback_status = Some("clean".to_string());
     save_proposal(repo, &proposal)?;
     Ok(())
 }

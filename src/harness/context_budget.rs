@@ -553,7 +553,7 @@ impl ContextBudget {
         }
 
         // Calculate averages
-        for (_, total) in avg_usage.iter_mut() {
+        for total in avg_usage.values_mut() {
             *total /= usage_history.len();
         }
 
