@@ -36,6 +36,7 @@ prometheos-output/
 .prometheos/checkpoints/
 .prometheos/runs.db-wal
 .prometheos/runs.db-shm
+.prometheos/diagnostics/
 
 # Repo Workbench local state (MVP)
 .prometheos-lite/workbench/
