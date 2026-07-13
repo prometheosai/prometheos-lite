@@ -1649,24 +1649,32 @@ impl LlmPatchProvider {
     /// or the whole-file variant (`FILE:` / `CONTENT:`). Rejects everything else:
     /// prose outside the fence, malformed blocks, absolute/UNC/drive/`..` paths,
     /// mixed/ambiguous output, or unsupported operations. This is intentionally
-    /// non-permissive: it is not a prose-rummaging parser.
+    /// non-permissive: it is not a prose-rummaging parser. It enforces one exact
+    /// grammar using a state machine (see validation below) and rejects every
+    /// deviation: nested/embedded/multiple fences, prose outside the block,
+    /// malformed or reversed markers, repeated markers, inline text on marker
+    /// lines, multiple files, and unsafe paths.
     fn parse_edit_block(&self, response: &str) -> Vec<EditOperation> {
         let trimmed = response.trim();
 
-        // Must open with a single ```edit fence.
+        // Exactly one opening ```edit fence and one closing ``` fence.
+        // No other triple-backtick sequence is allowed (no nested/embedded
+        // fences), and nothing except whitespace may appear outside the block.
+        if !trimmed.starts_with("```edit") && !trimmed.starts_with("``` edit") {
+            return Vec::new();
+        }
+        if trimmed.matches("```").count() != 2 {
+            return Vec::new();
+        }
         let open_len = if trimmed.starts_with("```edit") {
             "```edit".len()
-        } else if trimmed.starts_with("``` edit") {
-            "``` edit".len()
         } else {
-            return Vec::new();
+            "``` edit".len()
         };
         let after_open = match trimmed[open_len..].strip_prefix('\n') {
             Some(s) => s,
             None => return Vec::new(),
         };
-
-        // Must close with a single ``` and have nothing after it.
         let close = match after_open.rfind("```") {
             Some(i) => i,
             None => return Vec::new(),
@@ -1676,65 +1684,104 @@ impl LlmPatchProvider {
         }
         let body = after_open[..close].trim();
 
-        let lines: Vec<&str> = body.lines().collect();
-        if lines.is_empty() || !lines[0].starts_with("FILE:") {
+        // Normalize CRLF and split into lines.
+        let lines: Vec<&str> = body
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
+        if lines.is_empty() || !lines[0].trim().starts_with("FILE:") {
             return Vec::new();
         }
-        let file_path = lines[0].strip_prefix("FILE:").unwrap_or("").trim();
-        if !is_safe_relative_path(file_path) {
+        let file_token = lines[0].trim().strip_prefix("FILE:").unwrap_or("").trim();
+        if file_token.is_empty() || file_token.split_whitespace().count() != 1 {
+            return Vec::new();
+        }
+        if !is_safe_relative_path(file_token) {
             return Vec::new();
         }
 
-        let mut mode: Option<&str> = None;
+        // Strict single-grammar state machine. Exactly one of:
+        //   FILE / SEARCH / REPLACE   or   FILE / CONTENT
+        #[derive(PartialEq)]
+        enum Mode {
+            None,
+            Search,
+            Replace,
+            Content,
+        }
+        let mut mode = Mode::None;
+        let mut markers: Vec<&'static str> = Vec::new();
         let mut search = String::new();
         let mut replace = String::new();
         let mut content = String::new();
-        let mut saw_section = false;
+
         for line in &lines[1..] {
-            if line.starts_with("SEARCH:") {
-                mode = Some("search");
-                saw_section = true;
-            } else if line.starts_with("REPLACE:") {
-                mode = Some("replace");
-                saw_section = true;
-            } else if line.starts_with("CONTENT:") {
-                mode = Some("content");
-                saw_section = true;
-            } else if let Some(m) = mode {
-                let target = match m {
-                    "search" => &mut search,
-                    "replace" => &mut replace,
-                    "content" => &mut content,
-                    _ => &mut search,
+            let marker = line.trim();
+            if marker == "SEARCH:" {
+                if mode != Mode::None {
+                    return Vec::new();
+                }
+                mode = Mode::Search;
+                markers.push("SEARCH");
+            } else if marker == "REPLACE:" {
+                if mode == Mode::None {
+                    return Vec::new();
+                }
+                mode = Mode::Replace;
+                markers.push("REPLACE");
+            } else if marker == "CONTENT:" {
+                if mode != Mode::None {
+                    return Vec::new();
+                }
+                mode = Mode::Content;
+                markers.push("CONTENT");
+            } else if marker.starts_with("FILE:") {
+                // A second FILE line means multiple blocks in one fence.
+                return Vec::new();
+            } else if marker.starts_with("SEARCH:")
+                || marker.starts_with("REPLACE:")
+                || marker.starts_with("CONTENT:")
+            {
+                // Inline text on a marker line => not the exact grammar.
+                return Vec::new();
+            } else if mode == Mode::None {
+                // Prose before any section marker.
+                return Vec::new();
+            } else {
+                let target = match mode {
+                    Mode::Search => &mut search,
+                    Mode::Replace => &mut replace,
+                    Mode::Content => &mut content,
+                    Mode::None => &mut search,
                 };
                 if !target.is_empty() {
                     target.push('\n');
                 }
                 target.push_str(line);
-            } else {
-                // Text before any section marker => not the exact grammar.
-                return Vec::new();
             }
         }
-        if !saw_section {
-            return Vec::new();
-        }
 
-        use crate::harness::edit_protocol::{SearchReplaceEdit, WholeFileEdit};
-        if !search.is_empty() || !replace.is_empty() {
+        // Accept exactly one of the two grammars.
+        if markers == vec!["SEARCH", "REPLACE"] {
             if search.is_empty() {
                 return Vec::new();
             }
+            // Empty REPLACE is allowed (deletion).
             vec![EditOperation::SearchReplace(SearchReplaceEdit {
-                file: std::path::PathBuf::from(file_path),
+                file: std::path::PathBuf::from(file_token),
                 search,
                 replace,
                 replace_all: Some(false),
                 context_lines: Some(3),
             })]
-        } else if !content.is_empty() {
+        } else if markers == vec!["CONTENT"] {
+            // Empty CONTENT is rejected: ambiguous (use delete_file explicitly),
+            // keeping the grammar unambiguous.
+            if content.is_empty() {
+                return Vec::new();
+            }
             vec![EditOperation::WholeFile(WholeFileEdit {
-                file: std::path::PathBuf::from(file_path),
+                file: std::path::PathBuf::from(file_token),
                 content,
             })]
         } else {
@@ -2766,5 +2813,119 @@ mod tests {
             edits.is_empty(),
             "reconstruction (mixed prose+block) must be rejected by the strict parser"
         );
+    }
+
+    #[test]
+    fn reject_mixed_content_and_search_replace() {
+        let p = fallback_provider();
+        // FILE/SEARCH then CONTENT is neither grammar: reject.
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nCONTENT:\nb\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(
+            edits.is_empty(),
+            "mixed CONTENT + SEARCH/REPLACE must be rejected"
+        );
+    }
+
+    #[test]
+    fn reject_replace_before_search() {
+        let p = fallback_provider();
+        // REPLACE before SEARCH violates the exact grammar: reject.
+        let resp = "```edit\nFILE: src/foo.rs\nREPLACE:\nb\nSEARCH:\na\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(edits.is_empty(), "REPLACE before SEARCH must be rejected");
+    }
+
+    #[test]
+    fn reject_repeated_search_marker() {
+        let p = fallback_provider();
+        // A second SEARCH marker is ambiguous: reject.
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nSEARCH:\nb\nREPLACE:\nc\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(edits.is_empty(), "repeated SEARCH marker must be rejected");
+    }
+
+    #[test]
+    fn reject_repeated_replace_marker() {
+        let p = fallback_provider();
+        // A second REPLACE marker is ambiguous: reject.
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nREPLACE:\nb\nREPLACE:\nc\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(edits.is_empty(), "repeated REPLACE marker must be rejected");
+    }
+
+    #[test]
+    fn reject_inline_text_on_marker_line() {
+        let p = fallback_provider();
+        // Inline text after a marker colon is not the exact grammar: reject.
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH: unexpected inline text\na\nREPLACE:\nb\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(
+            edits.is_empty(),
+            "inline text on marker line must be rejected"
+        );
+    }
+
+    #[test]
+    fn reject_multiple_edit_blocks() {
+        let p = fallback_provider();
+        // Two fenced edit blocks in one response: reject (exactly one block allowed).
+        let resp = "```edit\nFILE: src/foo.rs\nCONTENT:\nx\n```\n\n```edit\nFILE: src/bar.rs\nCONTENT:\ny\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(edits.is_empty(), "multiple edit blocks must be rejected");
+    }
+
+    #[test]
+    fn rejects_nested_or_multiple_fences() {
+        let p = fallback_provider();
+        let response = r#"```edit
+FILE: src/lib.rs
+CONTENT:
+fn x() {}
+
+```edit
+FILE: src/other.rs
+CONTENT:
+fn y() {}
+```"#;
+
+        assert!(
+            p.parse_edits_from_response(response).is_empty(),
+            "nested/multiple fences must be rejected"
+        );
+    }
+
+    #[test]
+    fn reject_embedded_fence_in_content() {
+        let p = fallback_provider();
+        // A triple-backtick sequence inside CONTENT is a nested fence: reject.
+        let resp = "```edit\nFILE: src/foo.rs\nCONTENT:\n```rust\nfn x() {}\n```\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(
+            edits.is_empty(),
+            "embedded fence inside CONTENT must be rejected"
+        );
+    }
+
+    #[test]
+    fn allow_empty_replace_for_deletion() {
+        let p = fallback_provider();
+        // Empty REPLACE is an intentional deletion and is accepted.
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nREPLACE:\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert_eq!(edits.len(), 1, "empty REPLACE (deletion) must be accepted");
+        match &edits[0] {
+            EditOperation::SearchReplace(sr) => assert_eq!(sr.replace, ""),
+            _ => panic!("expected a SearchReplace edit"),
+        }
+    }
+
+    #[test]
+    fn empty_content_rejected() {
+        let p = fallback_provider();
+        // Empty CONTENT is ambiguous (use delete_file explicitly): reject.
+        let resp = "```edit\nFILE: src/foo.rs\nCONTENT:\n```";
+        let edits = p.parse_edits_from_response(resp);
+        assert!(edits.is_empty(), "empty CONTENT must be rejected");
     }
 }
