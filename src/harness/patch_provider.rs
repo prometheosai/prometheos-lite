@@ -1520,6 +1520,55 @@ impl PatchProvider for TemplatePatchProvider {
     }
 }
 
+/// Machine-readable reasons a provider response was rejected during parsing.
+///
+/// These are the exact values emitted in [`ProviderParseDiagnostics`]`::rejection_reason`.
+/// They let operators distinguish *why* output was unusable instead of treating
+/// every failure as an opaque black box.
+pub const REJECT_EMPTY_RESPONSE: &str = "empty_response";
+pub const REJECT_JSON_PARSE_FAILED: &str = "json_parse_failed";
+pub const REJECT_JSON_SCHEMA_INVALID: &str = "json_schema_invalid";
+pub const REJECT_UNSUPPORTED_EDIT_OPERATION: &str = "unsupported_edit_operation";
+pub const REJECT_EDIT_FENCE_MISSING: &str = "edit_fence_missing";
+pub const REJECT_MULTIPLE_EDIT_BLOCKS: &str = "multiple_edit_blocks";
+pub const REJECT_PROSE_OUTSIDE_FENCE: &str = "prose_outside_fence";
+pub const REJECT_MALFORMED_MARKER_ORDER: &str = "malformed_marker_order";
+pub const REJECT_UNSAFE_PATH: &str = "unsafe_path";
+pub const REJECT_EMPTY_REQUIRED_SECTION: &str = "empty_required_section";
+pub const REJECT_MIXED_OR_AMBIGUOUS_FORMAT: &str = "mixed_or_ambiguous_format";
+pub const REJECT_NO_USABLE_EDITS: &str = "no_usable_edits";
+
+/// Structured, content-free diagnostics for a single provider parse attempt.
+///
+/// Persisted by default (hash + structured fields only). Raw model output is
+/// never included unless `PROMETHEOS_CAPTURE_PROVIDER_RESPONSE` is set, in which
+/// case it is written separately under `.prometheos/diagnostics/` with obvious
+/// secrets redacted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderParseDiagnostics {
+    /// Whether any non-empty response was received from the provider.
+    pub provider_response_received: bool,
+    /// Length in bytes of the raw response.
+    pub response_length: usize,
+    /// Whether the response looked like canonical JSON (a parseable JSON object).
+    pub canonical_json_detected: bool,
+    /// Whether the response opened with an ```edit fence.
+    pub edit_fence_detected: bool,
+    /// Which parse route was attempted/selected: `canonical_json` or
+    /// `edit_block_fallback`.
+    pub parse_route_attempted: String,
+    /// Machine-readable rejection reason (one of the `REJECT_*` constants), or
+    /// empty when edits were successfully recovered.
+    pub rejection_reason: String,
+    /// Number of usable edits recovered from the response.
+    pub usable_edit_count: usize,
+    /// SHA-256 of the raw response, used as the diagnostics file name and for
+    /// correlation.
+    pub response_sha256: String,
+    /// Whether the raw response was persisted (only when capture is enabled).
+    pub raw_response_persisted: bool,
+}
+
 /// LLM-based patch provider for intelligent edit generation
 pub struct LlmPatchProvider {
     client: crate::llm::LlmClient,
@@ -1602,38 +1651,106 @@ impl LlmPatchProvider {
         prompt
     }
 
-    fn parse_edits_from_response(&self, response: &str) -> Vec<EditOperation> {
-        // Canonical format first: strict JSON schema.
+    /// Parse provider output into edits and attach structured diagnostics.
+    ///
+    /// This is the single source of truth for both `parse_edits_from_response`
+    /// (used by tests and the repair path) and the live `generate` path. It
+    /// performs no I/O; the caller persists the diagnostics so tests and repair
+    /// stay side-effect free.
+    fn parse_edits_with_diagnostics(
+        &self,
+        response: &str,
+    ) -> (Vec<EditOperation>, ProviderParseDiagnostics) {
+        let response_received = !response.trim().is_empty();
+        let response_length = response.len();
+        let response_sha256 = sha256_hex(response);
+        let trimmed = response.trim();
+
+        let mut diag = ProviderParseDiagnostics {
+            provider_response_received: response_received,
+            response_length,
+            canonical_json_detected: false,
+            edit_fence_detected: trimmed.starts_with("```edit") || trimmed.starts_with("``` edit"),
+            parse_route_attempted: if self.strict_mode {
+                "canonical_json".to_string()
+            } else {
+                "edit_block_fallback".to_string()
+            },
+            rejection_reason: String::new(),
+            usable_edit_count: 0,
+            response_sha256: response_sha256.clone(),
+            raw_response_persisted: false,
+        };
+
+        // Route 1: canonical JSON schema.
         if let Some(json) = Self::parse_json_schema_response(response) {
-            let mut edits = Vec::new();
-            if let Some(edits_array) = json.get("edits").and_then(|v| v.as_array()) {
-                for edit_json in edits_array {
-                    if let Some(edit) = Self::json_to_edit_operation(edit_json) {
-                        edits.push(edit);
+            diag.canonical_json_detected = true;
+            let (edits, reason) = Self::json_edits_with_reason(&json);
+            if !edits.is_empty() {
+                diag.usable_edit_count = edits.len();
+                diag.parse_route_attempted = "canonical_json".to_string();
+                return (edits, diag);
+            }
+            if diag.rejection_reason.is_empty() {
+                diag.rejection_reason = reason.to_string();
+            }
+        } else if !response_received {
+            diag.rejection_reason = REJECT_EMPTY_RESPONSE.to_string();
+        } else {
+            diag.rejection_reason = REJECT_JSON_PARSE_FAILED.to_string();
+        }
+
+        // Route 2: fenced ```edit``` fallback (only when not strict).
+        if !self.strict_mode {
+            diag.parse_route_attempted = "edit_block_fallback".to_string();
+            match self.parse_edit_block(response) {
+                Ok(edits) if !edits.is_empty() => {
+                    diag.usable_edit_count = edits.len();
+                    diag.rejection_reason.clear();
+                    return (edits, diag);
+                }
+                Ok(_) => {
+                    if diag.rejection_reason.is_empty() {
+                        diag.rejection_reason = REJECT_EMPTY_REQUIRED_SECTION.to_string();
                     }
                 }
-                if !edits.is_empty() {
-                    return edits;
+                Err(reason) => {
+                    diag.rejection_reason = reason.to_string();
                 }
             }
         }
 
-        // Narrow, explicitly validated fallback for fenced ```edit``` blocks.
-        // Only attempted when not in strict mode. It accepts ONE exact grammar
-        // (FILE/SEARCH/REPLACE or FILE/CONTENT) and rejects everything else:
-        // prose, malformed blocks, unsafe paths, or ambiguous mixed output.
-        if !self.strict_mode {
-            let fallback = self.parse_edit_block(response);
-            if !fallback.is_empty() {
-                return fallback;
-            }
+        if diag.rejection_reason.is_empty() {
+            diag.rejection_reason = REJECT_NO_USABLE_EDITS.to_string();
         }
 
-        tracing::warn!(
-            "No usable edits parsed from provider response ({} characters).",
-            response.len()
-        );
-        Vec::new()
+        (Vec::new(), diag)
+    }
+
+    /// Convenience wrapper returning only the edits (no diagnostics side channel).
+    /// Used by tests and the repair path; intentionally performs no persistence.
+    fn parse_edits_from_response(&self, response: &str) -> Vec<EditOperation> {
+        self.parse_edits_with_diagnostics(response).0
+    }
+
+    /// Extract edits from a parsed JSON schema value, returning a rejection
+    /// reason when no usable edit could be derived.
+    fn json_edits_with_reason(json: &serde_json::Value) -> (Vec<EditOperation>, &'static str) {
+        let edits_array = match json.get("edits").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => return (Vec::new(), REJECT_JSON_SCHEMA_INVALID),
+        };
+        let mut edits = Vec::new();
+        for edit_json in edits_array {
+            if let Some(edit) = Self::json_to_edit_operation(edit_json) {
+                edits.push(edit);
+            }
+        }
+        if edits.is_empty() {
+            (Vec::new(), REJECT_JSON_SCHEMA_INVALID)
+        } else {
+            (edits, "")
+        }
     }
 
     /// Strict single-grammar parser for fenced ```edit``` blocks.
@@ -1654,17 +1771,23 @@ impl LlmPatchProvider {
     /// deviation: nested/embedded/multiple fences, prose outside the block,
     /// malformed or reversed markers, repeated markers, inline text on marker
     /// lines, multiple files, and unsafe paths.
-    fn parse_edit_block(&self, response: &str) -> Vec<EditOperation> {
+    /// Strict single-grammar parser for fenced ```edit``` blocks.
+    ///
+    /// Returns `Ok(edits)` on a recognized grammar, or `Err(reason)` where
+    /// `reason` is one of the `REJECT_*` constants. The rejection reason is the
+    /// machine-readable signal that lets callers record *why* provider output
+    /// was rejected instead of treating every failure as an opaque black box.
+    fn parse_edit_block(&self, response: &str) -> Result<Vec<EditOperation>, &'static str> {
         let trimmed = response.trim();
 
         // Exactly one opening ```edit fence and one closing ``` fence.
         // No other triple-backtick sequence is allowed (no nested/embedded
         // fences), and nothing except whitespace may appear outside the block.
         if !trimmed.starts_with("```edit") && !trimmed.starts_with("``` edit") {
-            return Vec::new();
+            return Err(REJECT_EDIT_FENCE_MISSING);
         }
         if trimmed.matches("```").count() != 2 {
-            return Vec::new();
+            return Err(REJECT_MULTIPLE_EDIT_BLOCKS);
         }
         let open_len = if trimmed.starts_with("```edit") {
             "```edit".len()
@@ -1673,14 +1796,14 @@ impl LlmPatchProvider {
         };
         let after_open = match trimmed[open_len..].strip_prefix('\n') {
             Some(s) => s,
-            None => return Vec::new(),
+            None => return Err(REJECT_EDIT_FENCE_MISSING),
         };
         let close = match after_open.rfind("```") {
             Some(i) => i,
-            None => return Vec::new(),
+            None => return Err(REJECT_EDIT_FENCE_MISSING),
         };
         if !after_open[close + 3..].trim().is_empty() {
-            return Vec::new();
+            return Err(REJECT_PROSE_OUTSIDE_FENCE);
         }
         let body = after_open[..close].trim();
 
@@ -1690,14 +1813,14 @@ impl LlmPatchProvider {
             .map(|l| l.strip_suffix('\r').unwrap_or(l))
             .collect();
         if lines.is_empty() || !lines[0].trim().starts_with("FILE:") {
-            return Vec::new();
+            return Err(REJECT_MIXED_OR_AMBIGUOUS_FORMAT);
         }
         let file_token = lines[0].trim().strip_prefix("FILE:").unwrap_or("").trim();
         if file_token.is_empty() || file_token.split_whitespace().count() != 1 {
-            return Vec::new();
+            return Err(REJECT_MALFORMED_MARKER_ORDER);
         }
         if !is_safe_relative_path(file_token) {
-            return Vec::new();
+            return Err(REJECT_UNSAFE_PATH);
         }
 
         // Strict single-grammar state machine. Exactly one of:
@@ -1719,34 +1842,34 @@ impl LlmPatchProvider {
             let marker = line.trim();
             if marker == "SEARCH:" {
                 if mode != Mode::None {
-                    return Vec::new();
+                    return Err(REJECT_MALFORMED_MARKER_ORDER);
                 }
                 mode = Mode::Search;
                 markers.push("SEARCH");
             } else if marker == "REPLACE:" {
                 if mode == Mode::None {
-                    return Vec::new();
+                    return Err(REJECT_MALFORMED_MARKER_ORDER);
                 }
                 mode = Mode::Replace;
                 markers.push("REPLACE");
             } else if marker == "CONTENT:" {
                 if mode != Mode::None {
-                    return Vec::new();
+                    return Err(REJECT_MALFORMED_MARKER_ORDER);
                 }
                 mode = Mode::Content;
                 markers.push("CONTENT");
             } else if marker.starts_with("FILE:") {
                 // A second FILE line means multiple blocks in one fence.
-                return Vec::new();
+                return Err(REJECT_MULTIPLE_EDIT_BLOCKS);
             } else if marker.starts_with("SEARCH:")
                 || marker.starts_with("REPLACE:")
                 || marker.starts_with("CONTENT:")
             {
                 // Inline text on a marker line => not the exact grammar.
-                return Vec::new();
+                return Err(REJECT_MALFORMED_MARKER_ORDER);
             } else if mode == Mode::None {
                 // Prose before any section marker.
-                return Vec::new();
+                return Err(REJECT_PROSE_OUTSIDE_FENCE);
             } else {
                 let target = match mode {
                     Mode::Search => &mut search,
@@ -1764,28 +1887,28 @@ impl LlmPatchProvider {
         // Accept exactly one of the two grammars.
         if markers == vec!["SEARCH", "REPLACE"] {
             if search.is_empty() {
-                return Vec::new();
+                return Err(REJECT_EMPTY_REQUIRED_SECTION);
             }
             // Empty REPLACE is allowed (deletion).
-            vec![EditOperation::SearchReplace(SearchReplaceEdit {
+            Ok(vec![EditOperation::SearchReplace(SearchReplaceEdit {
                 file: std::path::PathBuf::from(file_token),
                 search,
                 replace,
                 replace_all: Some(false),
                 context_lines: Some(3),
-            })]
+            })])
         } else if markers == vec!["CONTENT"] {
             // Empty CONTENT is rejected: ambiguous (use delete_file explicitly),
             // keeping the grammar unambiguous.
             if content.is_empty() {
-                return Vec::new();
+                return Err(REJECT_EMPTY_REQUIRED_SECTION);
             }
-            vec![EditOperation::WholeFile(WholeFileEdit {
+            Ok(vec![EditOperation::WholeFile(WholeFileEdit {
                 file: std::path::PathBuf::from(file_token),
                 content,
-            })]
+            })])
         } else {
-            Vec::new()
+            Err(REJECT_MIXED_OR_AMBIGUOUS_FORMAT)
         }
     }
 
@@ -1917,7 +2040,13 @@ impl PatchProvider for LlmPatchProvider {
 
         match self.client.generate(&prompt).await {
             Ok(response) => {
-                let edits = self.parse_edits_from_response(&response);
+                let (edits, mut diag) = self.parse_edits_with_diagnostics(&response);
+                let capture = std::env::var_os("PROMETHEOS_CAPTURE_PROVIDER_RESPONSE").is_some();
+                diag.raw_response_persisted = capture;
+                persist_provider_parse_diagnostics(
+                    &diag,
+                    if capture { Some(&response) } else { None },
+                );
                 let candidates = if edits.is_empty() {
                     vec![]
                 } else {
@@ -1934,7 +2063,10 @@ impl PatchProvider for LlmPatchProvider {
                 Ok(GenerateResponse {
                     candidates,
                     generation_time_ms: start.elapsed().as_millis() as u64,
-                    provider_notes: Some(format!("Model: {}", self.model)),
+                    provider_notes: Some(format!(
+                        "Model: {}; response_sha256: {}",
+                        self.model, diag.response_sha256
+                    )),
                 })
             }
             Err(e) => {
@@ -2016,6 +2148,86 @@ fn is_safe_relative_path(p: &str) -> bool {
         }
     }
     true
+}
+
+/// SHA-256 hex digest of a string, used to name diagnostics files and to
+/// correlate a proposal with its parse diagnostics without storing content.
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let out = hasher.finalize();
+    let mut hex = String::with_capacity(out.len() * 2);
+    for b in out {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    hex
+}
+
+/// Redact obvious credentials and authorization material from a raw response
+/// before it is ever written to disk. Best-effort pattern matching only.
+fn redact_secrets(s: &str) -> String {
+    let patterns: &[(&str, &str)] = &[
+        (r"sk-[A-Za-z0-9]{8,}", "sk-***REDACTED***"),
+        (r"Bearer\s+[A-Za-z0-9._-]+", "Bearer ***REDACTED***"),
+        (r"(?i)api[_-]?key[=:]\S+", "api_key=***REDACTED***"),
+        (r"(?i)authorization:\s*\S+", "Authorization: ***REDACTED***"),
+    ];
+    let mut out = s.to_string();
+    for (pat, repl) in patterns {
+        if let Ok(re) = regex::Regex::new(pat) {
+            out = re.replace_all(&out, *repl).into_owned();
+        }
+    }
+    out
+}
+
+/// Restrict a diagnostics file's permissions where the platform supports it.
+/// On Unix, the file is made readable/writable only by the owner. On Windows
+/// the ACL story is left to the OS; this is a best-effort, supported-only step.
+fn restrict_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(mut perms) = std::fs::metadata(path).map(|m| m.permissions()) {
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Persist structured parse diagnostics under `.prometheos/diagnostics/`.
+///
+/// The structured JSON (hash + fields, no raw content) is always written.
+/// When `raw` is `Some`, the redacted raw response is written alongside it.
+/// All failures are swallowed: diagnostics are best-effort observability, never
+/// a reason to fail the surrounding workflow.
+fn persist_provider_parse_diagnostics(diag: &ProviderParseDiagnostics, raw: Option<&str>) {
+    let base = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let dir = base.join(".prometheos").join("diagnostics");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let sha = &diag.response_sha256;
+    if let Ok(json) = serde_json::to_string_pretty(diag) {
+        let json_path = dir.join(format!("{}.json", sha));
+        let _ = std::fs::write(&json_path, json);
+        restrict_permissions(&json_path);
+    }
+
+    if let Some(raw) = raw {
+        let raw_path = dir.join(format!("{}.response.txt", sha));
+        let _ = std::fs::write(&raw_path, redact_secrets(raw));
+        restrict_permissions(&raw_path);
+    }
 }
 
 // Helper functions for new providers
@@ -2927,5 +3139,39 @@ fn y() {}
         let resp = "```edit\nFILE: src/foo.rs\nCONTENT:\n```";
         let edits = p.parse_edits_from_response(resp);
         assert!(edits.is_empty(), "empty CONTENT must be rejected");
+    }
+
+    #[test]
+    fn diagnostics_record_rejection_reason() {
+        let p = fallback_provider();
+        // Prose outside the fence is the exact Attempt 3 failure class:
+        // the model responded, but the parser recovered zero usable edits and
+        // could not explain why. The structured diagnostics must capture that.
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nREPLACE:\nb\n```\nHere is the patch.";
+        let (edits, diag) = p.parse_edits_with_diagnostics(resp);
+        assert!(
+            edits.is_empty(),
+            "block with trailing prose must be rejected"
+        );
+        assert!(diag.provider_response_received);
+        assert!(diag.edit_fence_detected);
+        assert_eq!(diag.usable_edit_count, 0);
+        assert_eq!(diag.rejection_reason, "prose_outside_fence");
+        assert_eq!(diag.parse_route_attempted, "edit_block_fallback");
+        assert!(!diag.response_sha256.is_empty());
+        assert!(!diag.raw_response_persisted);
+    }
+
+    #[test]
+    fn diagnostics_record_success() {
+        let p = fallback_provider();
+        let resp = "```edit\nFILE: src/foo.rs\nSEARCH:\na\nREPLACE:\nb\n```";
+        let (edits, diag) = p.parse_edits_with_diagnostics(resp);
+        assert_eq!(edits.len(), 1, "valid block must parse");
+        assert_eq!(diag.usable_edit_count, 1);
+        assert!(
+            diag.rejection_reason.is_empty(),
+            "success has no rejection reason"
+        );
     }
 }
