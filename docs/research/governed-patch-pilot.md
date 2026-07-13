@@ -159,8 +159,9 @@ re-run or tuned around.
      obtainable in session).
   2. `LlmClient` appends `/v1/chat/completions` to `base_url`, so a base_url of
      `https://openrouter.ai/api/v1` produced a malformed double-`/v1` URL →
-     HTTP 404. (Fixed by PR #82: base_url should be `https://openrouter.ai/api`,
-     no trailing `/v1`.)
+     HTTP 404. (Fixed by PR #82, which normalizes OpenAI-compatible endpoints so
+     a conventional base URL such as `https://openrouter.ai/api/v1` does not
+     produce a duplicate `/v1`.)
 - No patch generated; the governed workflow was not exercised on the repo.
 - `proposal_generated: false`, `provider_cost_usd: 0.0`.
 - Evidence: `task1-result.json`.
