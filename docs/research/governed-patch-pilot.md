@@ -258,3 +258,41 @@ re-run or tuned around.
   run (kept alongside this canonical log; the canonical record above is
   self-contained and does not require it).
 
+### Attempt 4 — diagnostic classification after observability fix (executed once)
+
+- **Pilot-qualified:** true
+- **Purpose:** diagnostic classification after observability fix (issue #86 / PR #87).
+- **Retry-for-success:** false. Same repository (`memchr`), commit (`bce7df7`),
+  goal, model (`qwen2.5-coder:7b`), endpoint (`http://localhost:11434/v1`),
+  scope, validation, and authority as Attempts 2–3. The only change was enabling
+  `PROMETHEOS_CAPTURE_PROVIDER_RESPONSE=1`.
+- **Raw capture enabled:** true.
+- Outcome: `provider_produced_no_usable_candidate`. `proposal_generated: false`;
+  dry-run, approval, and apply **not reached**; `repository mutation: none`;
+  `cost: $0`.
+- **Classification (from structured diagnostics only):**
+  - `rejection_reason`: `edit_fence_missing`
+  - `parse_route_attempted`: `edit_block_fallback`
+  - `canonical_json_detected`: false
+  - `edit_fence_detected`: false
+  - `response_length`: 424
+  - `response_sha256`: `cab7c3bb46ce05d09a4ac35ab31724f53cdbff331045b3280d7d7eb8f70a861e`
+  - `usable_edit_count`: 0
+  - `raw_response_persisted`: true
+- **Interpretation:** the production parser now *explains* the rejection. The
+  model responded with a ```json-fenced block whose JSON was malformed (an
+  invalid `"content:` key), so the canonical JSON route failed to parse it and
+  the fenced ```edit``` fallback did not apply (no ```edit fence present). Hence
+  `edit_fence_missing` via the `edit_block_fallback` route. This is the same
+  zero-usable-edits family as Attempt 3, now **classified** rather than opaque.
+- Canonical evidence: `.prometheos/diagnostics/cab7c3bb46ce05d09a4ac35ab31724f53cdbff331045b3280d7d7eb8f70a861e.json`
+  (structured) and `.response.txt` (raw, captured locally). The raw response was
+  manually verified to contain **no** credentials, API keys, or authorization
+  material; it is kept local per the capture policy and is not required to read
+  the structured classification above.
+- **Disposition:** Valid pilot data point, not a success. Attempt 4 closes the
+  loop opened by Attempt 3: the experiment is now honest — the system can state
+  *why* it refused the model output (`edit_fence_missing`). No prompt, parser,
+  model, config, or temperature change was made after observing the response, and
+  no second call was issued.
+
