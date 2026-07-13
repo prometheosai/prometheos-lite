@@ -3,7 +3,12 @@
 **Status:** Partially executed. Attempt 1 was infrastructure-blocked; the
 governed path was verified end-to-end against a deterministic stub; Attempt 2
 ran a real local model (Ollama + `qwen2.5-coder:7b`) exactly once and produced
-an honest model-output compatibility failure (no tuning performed).
+an honest model-output compatibility failure (no tuning performed). Attempt 3
+re-ran the same model/goal/repo after the prompt/parser compatibility fix and
+again produced zero usable edits; the **exact rejection subtype is unknown**
+because production observability did not preserve or safely expose the raw
+response or the parser rejection reason. An observability fix (issue #86, PR
+#87) was merged to make future attempts classifiable.
 
 **Purpose:** Stop building platform foundations and prove PrometheOS Lite on
 real repositories. The product already has the full governed path:
@@ -210,7 +215,46 @@ re-run or tuned around.
   comparison_note: "Local-model baseline; not directly equivalent in capability
   to Claude Sonnet"`.
 - Evidence: `task1-attempt2-report.json`.
-- **Disposition:** Close Task 1 Attempt 2 as an honest model-output
-  compatibility failure. Do **not** count it as a successful task, but keep it
-  in the pilot dataset. The memchr tree was restored to its pilot base
-  (`bce7df7`) and the stub test file reverted; no source changes remain.
+ - **Disposition:** Close Task 1 Attempt 2 as an honest model-output
+   compatibility failure. Do **not** count it as a successful task, but keep it
+   in the pilot dataset. The memchr tree was restored to its pilot base
+   (`bce7df7`) and the stub test file reverted; no source changes remain.
+
+### Attempt 3 — same-model re-run after prompt/parser compatibility fix (executed once)
+
+- **Pilot-qualified:** true
+- Provider: `ollama`, model: `qwen2.5-coder:7b`, `base_url: http://localhost:11434/v1`
+  (conventional `/v1` form; PR #82 normalization applies).
+- Authority: `assist`; allowed `src/**`, `tests/**`; forbidden `.github/**`,
+  `Cargo.toml`, `Cargo.lock`; `--max-files 2`, `--max-lines 80`,
+  `--validate "cargo test"`; `--provider config`.
+- Same repository (`memchr`) and commit (`bce7df7`) as Attempt 2; same goal;
+  no prompt, model, temperature, or configuration changes; no retries.
+- Purpose: same-model evaluation after the prompt/parser compatibility fix
+  (PR #84 hardened the fenced ```edit``` fallback grammar; the production
+  `LlmPatchProvider` now enables that fallback).
+- Result category: **`unclassified_parser_rejection`** (also recorded as
+  **`zero_usable_edits_reason_unknown`**).
+- Outcome: `provider_produced_no_usable_candidate`.
+- `proposal_generated: false`; dry-run, approval, and apply **not reached**;
+  `repository mutation: none`; `cost: $0`.
+- **Raw provider response: not captured.** The model responded (this was not a
+  timeout or model-connection failure), but the production parser recovered
+  zero usable edits.
+- **Detailed rejection classification: unknown.** Reason: production
+  observability did not preserve or safely expose the raw response or the
+  parser rejection reason. The system can refuse model output but could not
+  audit *how* it refused it.
+- Repo tree left clean at the pilot base (`bce7df7`); no artifact, report, or
+  patch persisted.
+- **Disposition:** This is a valid pilot data point, not a success. The unknown
+  rejection subtype is itself a finding — see issue #86 / PR #87, which add
+  structured, content-free parse diagnostics (`rejection_reason`,
+  `response_sha256`, etc.) persisted by default, with the raw response saved
+  only behind `PROMETHEOS_CAPTURE_PROVIDER_RESPONSE=1`. Attempt 4 is reserved
+  to **classify** this zero-edit outcome using those diagnostics, not to retry
+  for success.
+- Supporting evidence: standalone `task1-attempt3-record.md` retained from the
+  run (kept alongside this canonical log; the canonical record above is
+  self-contained and does not require it).
+
