@@ -296,3 +296,72 @@ re-run or tuned around.
   model, config, or temperature change was made after observing the response, and
   no second call was issued.
 
+## Task 4 — distinct repository, same 14B configuration
+
+**Design:** same model/config as the earlier `qwen2.5-coder:14b` run
+(`ollama`, `http://localhost:11434/v1`), with all governance/scope/authority
+settings unchanged, on a **distinct** repository to test whether the 14B's
+partial schema conformance repeats across codebases while progressing toward the
+five-repository pilot requirement.
+
+### Diagnostics precedence fix (context for this run)
+
+Before Task 4, issue **#90** identified that `rejection_reason` reported the
+fallback's `edit_fence_missing` even when the canonical-JSON route had already
+failed with a richer reason. A narrow observability fix (no change to accepted
+formats, prompt, or parser acceptance) now persists
+`primary_route` / `primary_rejection_reason` / `fallback_route` /
+`fallback_rejection_reason` / `final_outcome` and applies terminal-reason
+precedence: (1) recognized JSON invalid schema/ops, (2) recognized edit block
+invalid grammar, (3) no supported format. Task 4 is the first run observed under
+corrected diagnostics. Unit tests added and `cargo fmt/check/test/clippy` green.
+
+### Task 4 Attempt 1 — pilot-qualified, executed once
+
+- **Pilot-qualified:** true
+- **Repository:** `dtolnay/itoa`, branch `master`, commit
+  `1577ed901354d0d7448ac162328f9dbf5183124c` (tiny, mature, conventional
+  `#[test]`s — a distinct repository from the earlier `memchr` run).
+- **Provider:** `ollama`, model `qwen2.5-coder:14b`, `base_url: http://localhost:11434/v1`
+  (unchanged 14B configuration).
+- **Authority:** `assist`; allowed `src/**`, `tests/**`; forbidden `.github/**`,
+  `Cargo.toml`, `Cargo.lock`; `--max-files 2`, `--max-lines 80`,
+  `--validate "cargo test"`; `--provider config`.
+- **Goal:** analogous boundary-regression-test task scoped to integer-to-string
+  formatting (value at/near a type limit).
+- **Outcome:** `provider_produced_no_usable_candidate`.
+- `proposal_generated: false`; dry-run, approval, and apply **not reached**;
+  `repository mutation: none` (itoa tree clean at `1577ed9`); `cost: $0`.
+- **Classification (corrected structured diagnostics):**
+  - `provider_response_received`: true
+  - `canonical_json_detected`: **true**
+  - `edit_fence_detected`: false
+  - `parse_route_attempted`: `edit_block_fallback`
+  - `rejection_reason`: **`json_schema_invalid`**  ← now correct (was masked as `edit_fence_missing` pre-#90)
+  - `primary_route`: `canonical_json`
+  - `primary_rejection_reason`: `json_schema_invalid`
+  - `fallback_route`: `edit_block_fallback`
+  - `fallback_rejection_reason`: `edit_fence_missing`
+  - `usable_edit_count`: 0
+  - `final_outcome`: `no_usable_edits`
+  - `response_sha256`: `5b1a55ead7d81a18a15f5d8a669753931e503f5ad196c86c1db966eded045121`
+  - `raw_response_persisted`: false
+- **Interpretation:** the 14B emitted recognizable canonical JSON but still
+  failed edit-schema usability (`json_schema_invalid`). The corrected diagnostics
+  now make the staged failure explicit instead of collapsing it to
+  `edit_fence_missing`.
+- **Disposition:** Valid pilot data point, not a success. Attempted exactly once;
+  no parser/prompt/config/temperature change before/after, and no second call.
+  Structured diagnostics persisted at
+  `pilot/run/.prometheos/diagnostics/5b1a55ead7d81a18a15f5d8a669753931e503f5ad196c86c1db966eded045121.json`.
+
+### Task 4 — consolidated outcome
+
+```text
+Outcome: unsuccessful
+Primary reason: local model emitted canonical JSON but no usable supported edit set
+Governance result: safe rejection, no repository mutation
+Controlled variable: repository under unchanged 14B config
+Remaining failure attributable to system: no
+```
+
