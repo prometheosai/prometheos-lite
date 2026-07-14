@@ -1567,6 +1567,19 @@ pub struct ProviderParseDiagnostics {
     pub response_sha256: String,
     /// Whether the raw response was persisted (only when capture is enabled).
     pub raw_response_persisted: bool,
+    /// First parse route evaluated (`canonical_json` once JSON was recognized,
+    /// otherwise `empty_response`/`json_parse_failed` when no JSON was seen).
+    pub primary_route: String,
+    /// Rejection reason from the canonical-JSON route when it recognized a
+    /// supported format but produced no usable edits. Preserved even if the
+    /// fallback route also fails, so richer evidence is never overwritten.
+    pub primary_rejection_reason: String,
+    /// Fallback parse route evaluated (`edit_block_fallback`), if any.
+    pub fallback_route: String,
+    /// Rejection reason from the fenced edit-block fallback route.
+    pub fallback_rejection_reason: String,
+    /// Terminal outcome: `usable_edits` or `no_usable_edits`.
+    pub final_outcome: String,
 }
 
 /// LLM-based patch provider for intelligent edit generation
@@ -1680,49 +1693,79 @@ impl LlmPatchProvider {
             usable_edit_count: 0,
             response_sha256: response_sha256.clone(),
             raw_response_persisted: false,
+            primary_route: String::new(),
+            primary_rejection_reason: String::new(),
+            fallback_route: String::new(),
+            fallback_rejection_reason: String::new(),
+            final_outcome: String::new(),
         };
 
-        // Route 1: canonical JSON schema.
+        // Route 1: canonical JSON schema. This is the *primary* route. When it
+        // recognizes JSON but yields no usable edits, its rejection reason is the
+        // richest evidence and MUST be preserved even if the fallback route
+        // also fails. The fallback must not overwrite it.
         if let Some(json) = Self::parse_json_schema_response(response) {
             diag.canonical_json_detected = true;
+            diag.primary_route = "canonical_json".to_string();
             let (edits, reason) = Self::json_edits_with_reason(&json);
             if !edits.is_empty() {
                 diag.usable_edit_count = edits.len();
                 diag.parse_route_attempted = "canonical_json".to_string();
+                diag.primary_rejection_reason = String::new();
+                diag.final_outcome = "usable_edits".to_string();
                 return (edits, diag);
             }
-            if diag.rejection_reason.is_empty() {
-                diag.rejection_reason = reason.to_string();
-            }
+            // Recognized JSON but no usable edits: keep the primary reason.
+            diag.primary_rejection_reason = reason.to_string();
         } else if !response_received {
-            diag.rejection_reason = REJECT_EMPTY_RESPONSE.to_string();
+            diag.primary_rejection_reason = REJECT_EMPTY_RESPONSE.to_string();
         } else {
-            diag.rejection_reason = REJECT_JSON_PARSE_FAILED.to_string();
+            diag.primary_rejection_reason = REJECT_JSON_PARSE_FAILED.to_string();
         }
 
-        // Route 2: fenced ```edit``` fallback (only when not strict).
+        // Route 2: fenced ```edit``` fallback (only when not strict). This is
+        // secondary. It records its own rejection reason but must NOT overwrite a
+        // richer primary-route rejection reason already captured above.
         if !self.strict_mode {
-            diag.parse_route_attempted = "edit_block_fallback".to_string();
+            diag.fallback_route = "edit_block_fallback".to_string();
             match self.parse_edit_block(response) {
                 Ok(edits) if !edits.is_empty() => {
                     diag.usable_edit_count = edits.len();
-                    diag.rejection_reason.clear();
+                    diag.fallback_rejection_reason = String::new();
+                    diag.rejection_reason = String::new();
+                    diag.final_outcome = "usable_edits".to_string();
                     return (edits, diag);
                 }
                 Ok(_) => {
-                    if diag.rejection_reason.is_empty() {
-                        diag.rejection_reason = REJECT_EMPTY_REQUIRED_SECTION.to_string();
-                    }
+                    diag.fallback_rejection_reason = REJECT_EMPTY_REQUIRED_SECTION.to_string();
                 }
                 Err(reason) => {
-                    diag.rejection_reason = reason.to_string();
+                    diag.fallback_rejection_reason = reason.to_string();
                 }
             }
         }
 
+        // Terminal reason precedence (richest evidence wins):
+        //   1. recognized JSON but invalid schema/operations (primary);
+        //   2. recognized edit block but invalid grammar (fallback);
+        //   3. no supported format detected (primary or fallback).
+        // The fallback must never mask a primary-route diagnosis, and a
+        // recognized-but-invalid edit block outranks a mere "no format" result.
+        if diag.rejection_reason.is_empty() {
+            if diag.canonical_json_detected {
+                diag.rejection_reason = diag.primary_rejection_reason.clone();
+            } else if diag.edit_fence_detected {
+                diag.rejection_reason = diag.fallback_rejection_reason.clone();
+            } else if !diag.primary_rejection_reason.is_empty() {
+                diag.rejection_reason = diag.primary_rejection_reason.clone();
+            } else {
+                diag.rejection_reason = diag.fallback_rejection_reason.clone();
+            }
+        }
         if diag.rejection_reason.is_empty() {
             diag.rejection_reason = REJECT_NO_USABLE_EDITS.to_string();
         }
+        diag.final_outcome = "no_usable_edits".to_string();
 
         (Vec::new(), diag)
     }
@@ -3173,5 +3216,39 @@ fn y() {}
             diag.rejection_reason.is_empty(),
             "success has no rejection reason"
         );
+    }
+
+    #[test]
+    fn diagnostics_primary_reason_not_overwritten_by_fallback() {
+        let p = fallback_provider();
+        // Canonical JSON is recognized but carries no usable edits; the fallback
+        // route also fails (no edit fence). The terminal rejection_reason must
+        // reflect the richer primary route, not the fallback's edit_fence_missing.
+        let resp = r#"{"edits": []}"#;
+        let (_edits, diag) = p.parse_edits_with_diagnostics(resp);
+        assert!(diag.canonical_json_detected);
+        assert!(!diag.edit_fence_detected);
+        assert_eq!(diag.primary_route, "canonical_json");
+        assert_eq!(diag.primary_rejection_reason, "json_schema_invalid");
+        assert_eq!(diag.fallback_route, "edit_block_fallback");
+        assert_eq!(diag.fallback_rejection_reason, "edit_fence_missing");
+        assert_eq!(diag.rejection_reason, "json_schema_invalid");
+        assert_eq!(diag.final_outcome, "no_usable_edits");
+        assert_eq!(diag.usable_edit_count, 0);
+    }
+
+    #[test]
+    fn diagnostics_no_format_detected_falls_through_to_fallback() {
+        let p = fallback_provider();
+        // Neither JSON nor an edit fence: primary = json_parse_failed, fallback =
+        // edit_fence_missing; terminal reason follows fallback (no richer primary).
+        let resp = "The model produced only prose with no structured edits.";
+        let (_edits, diag) = p.parse_edits_with_diagnostics(resp);
+        assert!(!diag.canonical_json_detected);
+        assert!(!diag.edit_fence_detected);
+        assert_eq!(diag.primary_rejection_reason, "json_parse_failed");
+        assert_eq!(diag.fallback_rejection_reason, "edit_fence_missing");
+        assert_eq!(diag.rejection_reason, "json_parse_failed");
+        assert_eq!(diag.final_outcome, "no_usable_edits");
     }
 }
