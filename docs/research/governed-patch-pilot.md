@@ -410,15 +410,63 @@ repository or parser defect. Re-run the preflight once Ollama is live with
 the recorded configuration and no config changes. Do not count this preflight as
 a Task 5 attempt.
 
+## Task 5 Attempt 1 — pilot-qualified, executed once
+
+- **Pilot-qualified:** true (provider preflight returned `ready`; `qwen2.5-coder:14b`
+  responded to a probe completion).
+- **Repository:** `dtolnay/ryu`, branch `master`, commit
+  `22a692e0b27d9ca74231a475eb690a9446ed44af` (fourth distinct repository; tiny,
+  mature float-to-string library — different maintainer/codebase from
+  `memchr`/`byteorder`/`itoa`).
+- **Provider:** `ollama`, model `qwen2.5-coder:14b`, `base_url: http://localhost:11434/v1`
+  (unchanged from Task 4).
+- **Authority:** `assist`; allowed `src/**`, `tests/**`; forbidden `.github/**`,
+  `Cargo.toml`, `Cargo.lock`; `--max-files 2`, `--max-lines 80`,
+  `--validate "cargo test"`; `--provider config`.
+- **Goal:** add the smallest nonredundant regression test verifying ryu formats a
+  boundary floating-point value (e.g. `f64::MAX` or the smallest positive normal
+  `f64`) to its expected shortest decimal string, touching only test files.
+- **Outcome:** `provider_produced_no_usable_candidate` (hard harness rejection of a
+  malformed model edit).
+- `proposal_generated: false`; dry-run, approval, and apply **not reached**;
+  `repository mutation: none` (ryu tree clean at `22a692e`); `cost: $0`.
+- **Classification (reconstructed from the harness error + source path; the
+  structured-diagnostics artifact was NOT persisted — see note below):**
+  - `provider_response_received`: true
+  - `canonical_json_detected`: true (model emitted recognizable canonical JSON; an
+    edit operation was parsed)
+  - edit type emitted: `search_replace` targeting `tests/ryu_formatting_tests.rs`
+  - `rejection_reason`: `provider targets missing file: tests/ryu_formatting_tests.rs`
+    (the model proposed a `search_replace` on a **non-existent** file — it should
+    have used `create_file` to add the new test file)
+  - `usable_edit_count`: 0
+  - `final_outcome`: `no_usable_edits`
+- **Interpretation:** the 14B again engaged the canonical-JSON schema (consistent
+  with Tasks 3–4) but emitted an edit operation incompatible with its target: a
+  `search_replace` against a file that does not exist in the repo. The governed
+  path (`src/workflow/mod.rs:674`) correctly refused to render it and left the tree
+  clean. This is the same partial-schema-conformance signature — recognizable JSON,
+  unusable edit set — now surfacing as a wrong-operation error rather than a
+  schema-invalid one. Not infrastructure, not a repository or parser defect: the
+  model emitted a structurally valid but semantically unusable edit operation.
+- **Observability gap found:** the rejection occurred during edit *rendering*
+  (`render_single_edit`), which short-circuited before the structured-diagnostics
+  persistence path (#90/#91) could write a `.prometheos/diagnostics/<sha256>.json`
+  artifact. No diagnostics JSON was persisted for this run; the reason is only
+  available from process stderr. The repository was correctly left unmutated.
+- **Disposition:** Valid pilot data point, not a success. Attempted exactly once;
+  no parser/prompt/config/temperature change after observing the result, and no
+  second call.
+
 ## Pilot metrics (to date)
 
 ```text
-Real tasks attempted: 4
+Real tasks attempted: 5
 Successful tasks: 0
-Diagnosable rejections: 4
+Diagnosable rejections: 5
 Silent scope violations: 0
 Unsafe mutations: 0
-Repositories exercised: 3
+Repositories exercised: 4
 Rollback demonstrations: 1
 Infrastructure-blocked preflights: 1
 ``````
