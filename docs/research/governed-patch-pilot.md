@@ -365,3 +365,61 @@ Controlled variable: repository under unchanged 14B config
 Remaining failure attributable to system: no
 ```
 
+## Task 5 — provider preflight (infrastructure-blocked, not pilot-qualified)
+
+**Design:** same controlled variable as Task 4 (model `qwen2.5-coder:14b`, all
+governance/scope/authority settings unchanged) on a **fourth, distinct**
+repository (`dtolnay/ryu`) to continue the five-repository pilot requirement.
+This entry is the **provider preflight only**; it is deliberately *not* Task 5
+Attempt 1. The attempt never started because the provider gate failed first.
+
+- Target repository: `dtolnay/ryu`, branch `master`, pinned commit
+  `22a692e0b27d9ca74231a475eb690a9446ed44af` (cloned and pinned before any run;
+  tree clean, no mutations).
+- Provider preflight: `POST http://localhost:11434/v1/chat/completions` with
+  `qwen2.5-coder:14b` → **connection refused** (`Impossível conectar-se ao
+  servidor remoto`). Ollama is not running/reachable at the configured endpoint.
+- Raw capture: off (`PROMETHEOS_CAPTURE_PROVIDER_RESPONSE` unset). Structured
+  diagnostics: on (default).
+- **No `workflow generate` was issued.** The go-ahead condition (provider
+  preflight returns `ready`) is not satisfied, so no model call occurred.
+- `pilot_qualified`: false (infrastructure-blocked, identical class to Task 1
+  Attempt 1 and Task 2 preflight). `proposal_generated: false`; repository
+  mutation: none; `cost: $0`.
+
+### Classification
+
+- Task: 5 (preflight)
+- Pilot-qualified: false
+- Workflow generate issued: false
+- Outcome: infrastructure_blocked
+- Reason: Ollama endpoint unreachable at localhost:11434
+- Proposal generated: false
+- Repository mutation: none
+- Cost: $0
+- Target repository: `dtolnay/ryu` @ `22a692e0b27d9ca74231a475eb690a9446ed44af`,
+  prepared and clean; no model call occurred.
+
+### Disposition
+
+Blocked, not failed. The target repository was prepared and verified clean, but
+the run was gated before any model invocation by the unreachable Ollama endpoint.
+This is an infrastructure condition, **not** model performance and **not** a
+repository or parser defect. Re-run the preflight once Ollama is live with
+`qwen2.5-coder:14b` pulled; then execute **Task 5 Attempt 1** exactly once with
+the recorded configuration and no config changes. Do not count this preflight as
+a Task 5 attempt.
+
+## Pilot metrics (to date)
+
+```text
+Real tasks attempted: 4
+Successful tasks: 0
+Diagnosable rejections: 4
+Silent scope violations: 0
+Unsafe mutations: 0
+Repositories exercised: 3
+Rollback demonstrations: 1
+Infrastructure-blocked preflights: 1
+``````
+
