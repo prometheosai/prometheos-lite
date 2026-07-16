@@ -638,8 +638,54 @@ pub fn sanitize_provider_route(url: &str) -> Option<String> {
     Some(format!("{}://{}", scheme, authority))
 }
 
+/// Structured, content-free record of an edit-rendering rejection.
+///
+/// Persisted under `.prometheos/diagnostics/` so render-time rejections become
+/// observability evidence instead of being lost to stderr. No raw model response
+/// is required: the parsed operation and the render failure are sufficient. This
+/// intentionally does not reinterpret the model's intent (e.g. a `search_replace`
+/// on a missing file is recorded and rejected, never silently rewritten into a
+/// `create_file`).
+#[derive(Debug, serde::Serialize)]
+struct RenderRejectionRecord {
+    stage: &'static str,
+    outcome: &'static str,
+    rejection_reason: &'static str,
+    operation: &'static str,
+    path: String,
+    proposal_generated: bool,
+    repository_mutated: bool,
+}
+
+/// Base directory for render-time diagnostics, mirroring the parse-stage
+/// persistence convention (`.prometheos/diagnostics` under the current dir).
+fn render_diagnostics_base() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Persist a render-time rejection record under `<base>/.prometheos/diagnostics/`.
+///
+/// The file name is a stable hash of the operation + path (no raw response is
+/// needed). All failures are swallowed: diagnostics are best-effort observability,
+/// never a reason to fail the surrounding workflow.
+fn persist_render_rejection(base: &Path, record: &RenderRejectionRecord) {
+    let dir = base.join(".prometheos").join("diagnostics");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let id = hash_str(&format!("render:{}:{}", record.operation, record.path));
+    if let Ok(json) = serde_json::to_string_pretty(record) {
+        let _ = std::fs::write(dir.join(format!("{}.json", id)), json);
+    }
+}
+
 /// Render a single provider edit into a unified-diff fragment. The edit's file
 /// path is validated as hostile input first.
+///
+/// Semantic rejections (e.g. `search_replace` against a missing file, `create_file`
+/// against an existing file, search text not found/ambiguous) persist a structured
+/// [`RenderRejectionRecord`] before returning an error, so the governed path's
+/// rejection is captured as evidence rather than lost to stderr.
 fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
     match edit {
         EditOperation::UnifiedDiff(u) => {
@@ -649,18 +695,44 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
         EditOperation::CreateFile(c) => {
             let rel = sanitize_repo_relative(&c.file)?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if repo.join(&rel).exists() {
+                persist_render_rejection(
+                    &render_diagnostics_base(),
+                    &RenderRejectionRecord {
+                        stage: "edit_rendering",
+                        outcome: "rejected",
+                        rejection_reason: "create_target_exists",
+                        operation: "create_file",
+                        path: rel_str.clone(),
+                        proposal_generated: false,
+                        repository_mutated: false,
+                    },
+                );
+                bail!("provider targets existing file for creation: {}", rel_str);
+            }
             render_two_sides(&rel_str, None, Some(&c.content))
         }
         EditOperation::DeleteFile(d) => {
             let rel = sanitize_repo_relative(&d.file)?;
-            let old = std::fs::read_to_string(repo.join(&rel)).with_context(|| {
-                format!(
-                    "provider targets missing file for deletion: {}",
-                    rel.display()
-                )
-            })?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            render_two_sides(&rel_str, Some(&old), None)
+            match std::fs::read_to_string(repo.join(&rel)) {
+                Ok(old) => render_two_sides(&rel_str, Some(&old), None),
+                Err(_) => {
+                    persist_render_rejection(
+                        &render_diagnostics_base(),
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "delete_target_missing",
+                            operation: "delete_file",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider targets missing file for deletion: {}", rel_str)
+                }
+            }
         }
         EditOperation::WholeFile(w) => {
             let rel = sanitize_repo_relative(&w.file)?;
@@ -670,11 +742,61 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
         }
         EditOperation::SearchReplace(sr) => {
             let rel = sanitize_repo_relative(&sr.file)?;
-            let old = std::fs::read_to_string(repo.join(&rel))
-                .with_context(|| format!("provider targets missing file: {}", rel.display()))?;
-            let new = apply_search_replace(&old, sr)?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            render_two_sides(&rel_str, Some(&old), Some(&new))
+            let old = match std::fs::read_to_string(repo.join(&rel)) {
+                Ok(o) => o,
+                Err(_) => {
+                    persist_render_rejection(
+                        &render_diagnostics_base(),
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "search_replace_target_missing",
+                            operation: "search_replace",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider targets missing file: {}", rel_str)
+                }
+            };
+            if sr.replace_all != Some(true) && old.matches(&sr.search).count() > 1 {
+                persist_render_rejection(
+                    &render_diagnostics_base(),
+                    &RenderRejectionRecord {
+                        stage: "edit_rendering",
+                        outcome: "rejected",
+                        rejection_reason: "search_text_ambiguous",
+                        operation: "search_replace",
+                        path: rel_str.clone(),
+                        proposal_generated: false,
+                        repository_mutated: false,
+                    },
+                );
+                bail!(
+                    "provider search text matched multiple locations: {}",
+                    rel_str
+                );
+            }
+            match apply_search_replace(&old, sr) {
+                Ok(new) => render_two_sides(&rel_str, Some(&old), Some(&new)),
+                Err(_) => {
+                    persist_render_rejection(
+                        &render_diagnostics_base(),
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "search_text_not_found",
+                            operation: "search_replace",
+                            path: rel_str,
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider search text not found: {}", ellipsize(&sr.search))
+                }
+            }
         }
         EditOperation::RenameFile(_) => {
             bail!("rename edits are not supported by the governed proposal path")
@@ -1619,6 +1741,162 @@ mod tests {
                 None,
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod render_diagnostics_tests {
+    use super::{RenderRejectionRecord, persist_render_rejection, render_single_edit};
+    use crate::harness::edit_protocol::{
+        CreateFileEdit, DeleteFileEdit, EditOperation, SearchReplaceEdit,
+    };
+
+    fn temp_repo_with_file(name: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let path = repo.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+        (dir, repo)
+    }
+
+    #[test]
+    fn search_replace_missing_file_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/missing.rs".into(),
+            search: "fn f".into(),
+            replace: "fn g".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string().contains("provider targets missing file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn create_file_existing_target_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::CreateFile(CreateFileEdit {
+            file: "src/existing.rs".into(),
+            content: "pub fn g() {}\n".into(),
+            executable: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider targets existing file for creation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn delete_missing_file_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::DeleteFile(DeleteFileEdit {
+            file: "src/missing.rs".into(),
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider targets missing file for deletion"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn search_text_not_found_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/existing.rs".into(),
+            search: "nonexistent_token".into(),
+            replace: "x".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string().contains("provider search text not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn search_text_ambiguous_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn a() {}\npub fn a() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/existing.rs".into(),
+            search: "pub fn a() {}".into(),
+            replace: "pub fn b() {}".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string().contains("matched multiple locations"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn valid_search_replace_renders_without_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/existing.rs".into(),
+            search: "pub fn f".into(),
+            replace: "pub fn g".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        assert!(render_single_edit(&repo, &edit).is_ok());
+    }
+
+    #[test]
+    fn render_rejection_record_persisted_to_diagnostics() {
+        let base = tempfile::tempdir().unwrap();
+        let record = RenderRejectionRecord {
+            stage: "edit_rendering",
+            outcome: "rejected",
+            rejection_reason: "search_replace_target_missing",
+            operation: "search_replace",
+            path: "tests/ryu_formatting_tests.rs".into(),
+            proposal_generated: false,
+            repository_mutated: false,
+        };
+        persist_render_rejection(base.path(), &record);
+        let dir = base.path().join(".prometheos").join("diagnostics");
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(entries.len(), 1, "expected exactly one diagnostics file");
+        let content = std::fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
+        assert!(
+            content.contains("\"stage\": \"edit_rendering\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"rejection_reason\": \"search_replace_target_missing\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"operation\": \"search_replace\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"path\": \"tests/ryu_formatting_tests.rs\""),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"proposal_generated\": false"),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"repository_mutated\": false"),
+            "{content}"
         );
     }
 }
