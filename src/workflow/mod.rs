@@ -657,23 +657,45 @@ struct RenderRejectionRecord {
     repository_mutated: bool,
 }
 
-/// Base directory for render-time diagnostics, mirroring the parse-stage
-/// persistence convention (`.prometheos/diagnostics` under the current dir).
-fn render_diagnostics_base() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+/// Result of attempting to read a render target file, classified so that only a
+/// genuine absence is reported as "missing". Other read failures (permission,
+/// directory, invalid UTF-8) are preserved separately rather than mislabeled.
+enum TargetRead {
+    Present(String),
+    Missing,
+    Unreadable(std::io::Error),
+}
+
+/// Read a render target file from `repo`, mapping `NotFound` to
+/// [`TargetRead::Missing`] and any other I/O error to [`TargetRead::Unreadable`]
+/// so callers can classify the rejection reason accurately.
+fn read_target_file(repo: &Path, rel: &Path) -> TargetRead {
+    match std::fs::read_to_string(repo.join(rel)) {
+        Ok(s) => TargetRead::Present(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TargetRead::Missing,
+        Err(e) => TargetRead::Unreadable(e),
+    }
 }
 
 /// Persist a render-time rejection record under `<base>/.prometheos/diagnostics/`.
 ///
-/// The file name is a stable hash of the operation + path (no raw response is
-/// needed). All failures are swallowed: diagnostics are best-effort observability,
-/// never a reason to fail the surrounding workflow.
+/// `base` is the target repository being rendered (or its workflow context), so
+/// diagnostics are scoped to the work they describe rather than the caller's
+/// current directory. The file name incorporates the operation, path, and
+/// rejection reason, plus a unique id, so distinct or repeated rejections are each
+/// captured as separate evidence instead of overwriting one another. All failures
+/// are swallowed: diagnostics are best-effort observability, never a reason to fail
+/// the surrounding workflow.
 fn persist_render_rejection(base: &Path, record: &RenderRejectionRecord) {
     let dir = base.join(".prometheos").join("diagnostics");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let id = hash_str(&format!("render:{}:{}", record.operation, record.path));
+    let stem = hash_str(&format!(
+        "render:{}:{}:{}",
+        record.operation, record.path, record.rejection_reason
+    ));
+    let id = format!("{}-{}", stem, uuid::Uuid::new_v4());
     if let Ok(json) = serde_json::to_string_pretty(record) {
         let _ = std::fs::write(dir.join(format!("{}.json", id)), json);
     }
@@ -697,7 +719,7 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
             let rel_str = rel.to_string_lossy().replace('\\', "/");
             if repo.join(&rel).exists() {
                 persist_render_rejection(
-                    &render_diagnostics_base(),
+                    repo,
                     &RenderRejectionRecord {
                         stage: "edit_rendering",
                         outcome: "rejected",
@@ -715,11 +737,11 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
         EditOperation::DeleteFile(d) => {
             let rel = sanitize_repo_relative(&d.file)?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            match std::fs::read_to_string(repo.join(&rel)) {
-                Ok(old) => render_two_sides(&rel_str, Some(&old), None),
-                Err(_) => {
+            match read_target_file(repo, &rel) {
+                TargetRead::Present(old) => render_two_sides(&rel_str, Some(&old), None),
+                TargetRead::Missing => {
                     persist_render_rejection(
-                        &render_diagnostics_base(),
+                        repo,
                         &RenderRejectionRecord {
                             stage: "edit_rendering",
                             outcome: "rejected",
@@ -732,6 +754,21 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
                     );
                     bail!("provider targets missing file for deletion: {}", rel_str)
                 }
+                TargetRead::Unreadable(e) => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "delete_target_unreadable",
+                            operation: "delete_file",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider could not read target {}: {}", rel_str, e)
+                }
             }
         }
         EditOperation::WholeFile(w) => {
@@ -743,11 +780,11 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
         EditOperation::SearchReplace(sr) => {
             let rel = sanitize_repo_relative(&sr.file)?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let old = match std::fs::read_to_string(repo.join(&rel)) {
-                Ok(o) => o,
-                Err(_) => {
+            let old = match read_target_file(repo, &rel) {
+                TargetRead::Present(o) => o,
+                TargetRead::Missing => {
                     persist_render_rejection(
-                        &render_diagnostics_base(),
+                        repo,
                         &RenderRejectionRecord {
                             stage: "edit_rendering",
                             outcome: "rejected",
@@ -760,10 +797,25 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
                     );
                     bail!("provider targets missing file: {}", rel_str)
                 }
+                TargetRead::Unreadable(e) => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "search_replace_target_unreadable",
+                            operation: "search_replace",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider could not read target {}: {}", rel_str, e)
+                }
             };
             if sr.replace_all != Some(true) && old.matches(&sr.search).count() > 1 {
                 persist_render_rejection(
-                    &render_diagnostics_base(),
+                    repo,
                     &RenderRejectionRecord {
                         stage: "edit_rendering",
                         outcome: "rejected",
@@ -783,7 +835,7 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
                 Ok(new) => render_two_sides(&rel_str, Some(&old), Some(&new)),
                 Err(_) => {
                     persist_render_rejection(
-                        &render_diagnostics_base(),
+                        repo,
                         &RenderRejectionRecord {
                             stage: "edit_rendering",
                             outcome: "rejected",
@@ -1747,12 +1799,13 @@ mod tests {
 
 #[cfg(test)]
 mod render_diagnostics_tests {
-    use super::{RenderRejectionRecord, persist_render_rejection, render_single_edit};
+    use super::render_single_edit;
     use crate::harness::edit_protocol::{
         CreateFileEdit, DeleteFileEdit, EditOperation, SearchReplaceEdit,
     };
+    use std::path::PathBuf;
 
-    fn temp_repo_with_file(name: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    fn temp_repo_with_file(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().to_path_buf();
         let path = repo.join(name);
@@ -1761,6 +1814,61 @@ mod render_diagnostics_tests {
         }
         std::fs::write(path, content).unwrap();
         (dir, repo)
+    }
+
+    /// Return the structured JSON diagnostics files written for `repo`, or empty
+    /// if no `.prometheos/diagnostics` directory exists yet.
+    fn diagnostics_files(repo: &std::path::Path) -> Vec<PathBuf> {
+        let dir = repo.join(".prometheos").join("diagnostics");
+        match std::fs::read_dir(&dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Assert that exactly one rejection diagnostics file was persisted for `repo`
+    /// and that it carries the expected structured fields.
+    fn assert_rejection_persisted(
+        repo: &std::path::Path,
+        reason: &str,
+        operation: &str,
+        path: &str,
+    ) {
+        let files = diagnostics_files(repo);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected exactly one diagnostics file, found {files:?}"
+        );
+        let content = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(
+            content.contains("\"stage\": \"edit_rendering\""),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("\"rejection_reason\": \"{reason}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("\"operation\": \"{operation}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("\"path\": \"{path}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"proposal_generated\": false"),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"repository_mutated\": false"),
+            "{content}"
+        );
     }
 
     #[test]
@@ -1778,6 +1886,14 @@ mod render_diagnostics_tests {
             err.to_string().contains("provider targets missing file"),
             "unexpected error: {err}"
         );
+        // Diagnostics must be scoped to the target repo, never the checkout.
+        assert!(!std::path::Path::new(".prometheos/diagnostics").exists());
+        assert_rejection_persisted(
+            &repo,
+            "search_replace_target_missing",
+            "search_replace",
+            "src/missing.rs",
+        );
     }
 
     #[test]
@@ -1794,6 +1910,12 @@ mod render_diagnostics_tests {
                 .contains("provider targets existing file for creation"),
             "unexpected error: {err}"
         );
+        assert_rejection_persisted(
+            &repo,
+            "create_target_exists",
+            "create_file",
+            "src/existing.rs",
+        );
     }
 
     #[test]
@@ -1807,6 +1929,12 @@ mod render_diagnostics_tests {
             err.to_string()
                 .contains("provider targets missing file for deletion"),
             "unexpected error: {err}"
+        );
+        assert_rejection_persisted(
+            &repo,
+            "delete_target_missing",
+            "delete_file",
+            "src/missing.rs",
         );
     }
 
@@ -1825,6 +1953,12 @@ mod render_diagnostics_tests {
             err.to_string().contains("provider search text not found"),
             "unexpected error: {err}"
         );
+        assert_rejection_persisted(
+            &repo,
+            "search_text_not_found",
+            "search_replace",
+            "src/existing.rs",
+        );
     }
 
     #[test]
@@ -1842,6 +1976,12 @@ mod render_diagnostics_tests {
             err.to_string().contains("matched multiple locations"),
             "unexpected error: {err}"
         );
+        assert_rejection_persisted(
+            &repo,
+            "search_text_ambiguous",
+            "search_replace",
+            "src/existing.rs",
+        );
     }
 
     #[test]
@@ -1855,48 +1995,9 @@ mod render_diagnostics_tests {
             context_lines: None,
         });
         assert!(render_single_edit(&repo, &edit).is_ok());
-    }
-
-    #[test]
-    fn render_rejection_record_persisted_to_diagnostics() {
-        let base = tempfile::tempdir().unwrap();
-        let record = RenderRejectionRecord {
-            stage: "edit_rendering",
-            outcome: "rejected",
-            rejection_reason: "search_replace_target_missing",
-            operation: "search_replace",
-            path: "tests/ryu_formatting_tests.rs".into(),
-            proposal_generated: false,
-            repository_mutated: false,
-        };
-        persist_render_rejection(base.path(), &record);
-        let dir = base.path().join(".prometheos").join("diagnostics");
-        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-        assert_eq!(entries.len(), 1, "expected exactly one diagnostics file");
-        let content = std::fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
         assert!(
-            content.contains("\"stage\": \"edit_rendering\""),
-            "{content}"
-        );
-        assert!(
-            content.contains("\"rejection_reason\": \"search_replace_target_missing\""),
-            "{content}"
-        );
-        assert!(
-            content.contains("\"operation\": \"search_replace\""),
-            "{content}"
-        );
-        assert!(
-            content.contains("\"path\": \"tests/ryu_formatting_tests.rs\""),
-            "{content}"
-        );
-        assert!(
-            content.contains("\"proposal_generated\": false"),
-            "{content}"
-        );
-        assert!(
-            content.contains("\"repository_mutated\": false"),
-            "{content}"
+            diagnostics_files(&repo).is_empty(),
+            "a valid edit must not write any diagnostics"
         );
     }
 }
