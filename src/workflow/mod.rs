@@ -638,8 +638,76 @@ pub fn sanitize_provider_route(url: &str) -> Option<String> {
     Some(format!("{}://{}", scheme, authority))
 }
 
+/// Structured, content-free record of an edit-rendering rejection.
+///
+/// Persisted under `.prometheos/diagnostics/` so render-time rejections become
+/// observability evidence instead of being lost to stderr. No raw model response
+/// is required: the parsed operation and the render failure are sufficient. This
+/// intentionally does not reinterpret the model's intent (e.g. a `search_replace`
+/// on a missing file is recorded and rejected, never silently rewritten into a
+/// `create_file`).
+#[derive(Debug, serde::Serialize)]
+struct RenderRejectionRecord {
+    stage: &'static str,
+    outcome: &'static str,
+    rejection_reason: &'static str,
+    operation: &'static str,
+    path: String,
+    proposal_generated: bool,
+    repository_mutated: bool,
+}
+
+/// Result of attempting to read a render target file, classified so that only a
+/// genuine absence is reported as "missing". Other read failures (permission,
+/// directory, invalid UTF-8) are preserved separately rather than mislabeled.
+enum TargetRead {
+    Present(String),
+    Missing,
+    Unreadable(std::io::Error),
+}
+
+/// Read a render target file from `repo`, mapping `NotFound` to
+/// [`TargetRead::Missing`] and any other I/O error to [`TargetRead::Unreadable`]
+/// so callers can classify the rejection reason accurately.
+fn read_target_file(repo: &Path, rel: &Path) -> TargetRead {
+    match std::fs::read_to_string(repo.join(rel)) {
+        Ok(s) => TargetRead::Present(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TargetRead::Missing,
+        Err(e) => TargetRead::Unreadable(e),
+    }
+}
+
+/// Persist a render-time rejection record under `<base>/.prometheos/diagnostics/`.
+///
+/// `base` is the target repository being rendered (or its workflow context), so
+/// diagnostics are scoped to the work they describe rather than the caller's
+/// current directory. The file name incorporates the operation, path, and
+/// rejection reason, plus a unique id, so distinct or repeated rejections are each
+/// captured as separate evidence instead of overwriting one another. All failures
+/// are swallowed: diagnostics are best-effort observability, never a reason to fail
+/// the surrounding workflow.
+fn persist_render_rejection(base: &Path, record: &RenderRejectionRecord) {
+    let dir = base.join(".prometheos").join("diagnostics");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stem = hash_str(&format!(
+        "render:{}:{}:{}",
+        record.operation, record.path, record.rejection_reason
+    ));
+    let id = format!("{}-{}", stem, uuid::Uuid::new_v4());
+    if let Ok(json) = serde_json::to_string_pretty(record) {
+        let _ = std::fs::write(dir.join(format!("{}.json", id)), json);
+    }
+}
+
 /// Render a single provider edit into a unified-diff fragment. The edit's file
 /// path is validated as hostile input first.
+///
+/// Semantic rejections (e.g. `search_replace` against a missing file, `create_file`
+/// against an existing file, search text not found/ambiguous) persist a structured
+/// [`RenderRejectionRecord`] before returning an error, so the governed path's
+/// rejection is captured as evidence rather than lost to stderr.
 fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
     match edit {
         EditOperation::UnifiedDiff(u) => {
@@ -649,18 +717,59 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
         EditOperation::CreateFile(c) => {
             let rel = sanitize_repo_relative(&c.file)?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if repo.join(&rel).exists() {
+                persist_render_rejection(
+                    repo,
+                    &RenderRejectionRecord {
+                        stage: "edit_rendering",
+                        outcome: "rejected",
+                        rejection_reason: "create_target_exists",
+                        operation: "create_file",
+                        path: rel_str.clone(),
+                        proposal_generated: false,
+                        repository_mutated: false,
+                    },
+                );
+                bail!("provider targets existing file for creation: {}", rel_str);
+            }
             render_two_sides(&rel_str, None, Some(&c.content))
         }
         EditOperation::DeleteFile(d) => {
             let rel = sanitize_repo_relative(&d.file)?;
-            let old = std::fs::read_to_string(repo.join(&rel)).with_context(|| {
-                format!(
-                    "provider targets missing file for deletion: {}",
-                    rel.display()
-                )
-            })?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            render_two_sides(&rel_str, Some(&old), None)
+            match read_target_file(repo, &rel) {
+                TargetRead::Present(old) => render_two_sides(&rel_str, Some(&old), None),
+                TargetRead::Missing => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "delete_target_missing",
+                            operation: "delete_file",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider targets missing file for deletion: {}", rel_str)
+                }
+                TargetRead::Unreadable(e) => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "delete_target_unreadable",
+                            operation: "delete_file",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider could not read target {}: {}", rel_str, e)
+                }
+            }
         }
         EditOperation::WholeFile(w) => {
             let rel = sanitize_repo_relative(&w.file)?;
@@ -670,11 +779,76 @@ fn render_single_edit(repo: &Path, edit: &EditOperation) -> Result<String> {
         }
         EditOperation::SearchReplace(sr) => {
             let rel = sanitize_repo_relative(&sr.file)?;
-            let old = std::fs::read_to_string(repo.join(&rel))
-                .with_context(|| format!("provider targets missing file: {}", rel.display()))?;
-            let new = apply_search_replace(&old, sr)?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            render_two_sides(&rel_str, Some(&old), Some(&new))
+            let old = match read_target_file(repo, &rel) {
+                TargetRead::Present(o) => o,
+                TargetRead::Missing => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "search_replace_target_missing",
+                            operation: "search_replace",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider targets missing file: {}", rel_str)
+                }
+                TargetRead::Unreadable(e) => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "search_replace_target_unreadable",
+                            operation: "search_replace",
+                            path: rel_str.clone(),
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider could not read target {}: {}", rel_str, e)
+                }
+            };
+            if sr.replace_all != Some(true) && old.matches(&sr.search).count() > 1 {
+                persist_render_rejection(
+                    repo,
+                    &RenderRejectionRecord {
+                        stage: "edit_rendering",
+                        outcome: "rejected",
+                        rejection_reason: "search_text_ambiguous",
+                        operation: "search_replace",
+                        path: rel_str.clone(),
+                        proposal_generated: false,
+                        repository_mutated: false,
+                    },
+                );
+                bail!(
+                    "provider search text matched multiple locations: {}",
+                    rel_str
+                );
+            }
+            match apply_search_replace(&old, sr) {
+                Ok(new) => render_two_sides(&rel_str, Some(&old), Some(&new)),
+                Err(_) => {
+                    persist_render_rejection(
+                        repo,
+                        &RenderRejectionRecord {
+                            stage: "edit_rendering",
+                            outcome: "rejected",
+                            rejection_reason: "search_text_not_found",
+                            operation: "search_replace",
+                            path: rel_str,
+                            proposal_generated: false,
+                            repository_mutated: false,
+                        },
+                    );
+                    bail!("provider search text not found: {}", ellipsize(&sr.search))
+                }
+            }
         }
         EditOperation::RenameFile(_) => {
             bail!("rename edits are not supported by the governed proposal path")
@@ -1619,6 +1793,211 @@ mod tests {
                 None,
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod render_diagnostics_tests {
+    use super::render_single_edit;
+    use crate::harness::edit_protocol::{
+        CreateFileEdit, DeleteFileEdit, EditOperation, SearchReplaceEdit,
+    };
+    use std::path::PathBuf;
+
+    fn temp_repo_with_file(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let path = repo.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+        (dir, repo)
+    }
+
+    /// Return the structured JSON diagnostics files written for `repo`, or empty
+    /// if no `.prometheos/diagnostics` directory exists yet.
+    fn diagnostics_files(repo: &std::path::Path) -> Vec<PathBuf> {
+        let dir = repo.join(".prometheos").join("diagnostics");
+        match std::fs::read_dir(&dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Assert that exactly one rejection diagnostics file was persisted for `repo`
+    /// and that it carries the expected structured fields.
+    fn assert_rejection_persisted(
+        repo: &std::path::Path,
+        reason: &str,
+        operation: &str,
+        path: &str,
+    ) {
+        let files = diagnostics_files(repo);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected exactly one diagnostics file, found {files:?}"
+        );
+        let content = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(
+            content.contains("\"stage\": \"edit_rendering\""),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("\"rejection_reason\": \"{reason}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("\"operation\": \"{operation}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("\"path\": \"{path}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"proposal_generated\": false"),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"repository_mutated\": false"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn search_replace_missing_file_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/missing.rs".into(),
+            search: "fn f".into(),
+            replace: "fn g".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string().contains("provider targets missing file"),
+            "unexpected error: {err}"
+        );
+        // Diagnostics must be scoped to the target repo, never the checkout.
+        assert!(!std::path::Path::new(".prometheos/diagnostics").exists());
+        assert_rejection_persisted(
+            &repo,
+            "search_replace_target_missing",
+            "search_replace",
+            "src/missing.rs",
+        );
+    }
+
+    #[test]
+    fn create_file_existing_target_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::CreateFile(CreateFileEdit {
+            file: "src/existing.rs".into(),
+            content: "pub fn g() {}\n".into(),
+            executable: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider targets existing file for creation"),
+            "unexpected error: {err}"
+        );
+        assert_rejection_persisted(
+            &repo,
+            "create_target_exists",
+            "create_file",
+            "src/existing.rs",
+        );
+    }
+
+    #[test]
+    fn delete_missing_file_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::DeleteFile(DeleteFileEdit {
+            file: "src/missing.rs".into(),
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider targets missing file for deletion"),
+            "unexpected error: {err}"
+        );
+        assert_rejection_persisted(
+            &repo,
+            "delete_target_missing",
+            "delete_file",
+            "src/missing.rs",
+        );
+    }
+
+    #[test]
+    fn search_text_not_found_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/existing.rs".into(),
+            search: "nonexistent_token".into(),
+            replace: "x".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string().contains("provider search text not found"),
+            "unexpected error: {err}"
+        );
+        assert_rejection_persisted(
+            &repo,
+            "search_text_not_found",
+            "search_replace",
+            "src/existing.rs",
+        );
+    }
+
+    #[test]
+    fn search_text_ambiguous_persists_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn a() {}\npub fn a() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/existing.rs".into(),
+            search: "pub fn a() {}".into(),
+            replace: "pub fn b() {}".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        let err = render_single_edit(&repo, &edit).unwrap_err();
+        assert!(
+            err.to_string().contains("matched multiple locations"),
+            "unexpected error: {err}"
+        );
+        assert_rejection_persisted(
+            &repo,
+            "search_text_ambiguous",
+            "search_replace",
+            "src/existing.rs",
+        );
+    }
+
+    #[test]
+    fn valid_search_replace_renders_without_rejection() {
+        let (_d, repo) = temp_repo_with_file("src/existing.rs", "pub fn f() {}\n");
+        let edit = EditOperation::SearchReplace(SearchReplaceEdit {
+            file: "src/existing.rs".into(),
+            search: "pub fn f".into(),
+            replace: "pub fn g".into(),
+            replace_all: None,
+            context_lines: None,
+        });
+        assert!(render_single_edit(&repo, &edit).is_ok());
+        assert!(
+            diagnostics_files(&repo).is_empty(),
+            "a valid edit must not write any diagnostics"
         );
     }
 }
