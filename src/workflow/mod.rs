@@ -895,9 +895,11 @@ fn render_two_sides(rel_str: &str, old: Option<&str>, new: Option<&str>) -> Resu
 /// Normalize `git diff --no-index` headers (`a/o/<rel>` / `b/n/<rel>`) to
 /// `a/<rel>` / `b/<rel>` and force forward slashes.
 fn rewrite_diff_header(raw: &str) -> String {
-    raw.replace("a/o/", "a/")
+    raw.replace('\\', "/")
+        .replace("a/o/", "a/")
+        .replace("b/o/", "b/")
+        .replace("a/n/", "a/")
         .replace("b/n/", "b/")
-        .replace('\\', "/")
 }
 
 /// Apply a provider `SearchReplace` edit to file text. An empty search prepends
@@ -1982,6 +1984,39 @@ mod render_diagnostics_tests {
             "search_replace",
             "src/existing.rs",
         );
+    }
+
+    #[test]
+    fn create_file_renders_without_leaked_temp_prefix() {
+        // Regression test for the leaked `a/n/` / `b/n/` temp path segments
+        // that `git diff --no-index` emits for create-file operations. The
+        // renderer must normalize create-file headers to repo-relative
+        // `a/<rel>` / `b/<rel>` and never leak the temporary `o/` or `n/`
+        // prefixes used inside the OS temp directory.
+        let raw = "\
+diff --git a/n/tests/foo.rs b/n/tests/foo.rs\n\
+new file mode 100644\n\
+index 0000000..7f869ab\n\
+--- /dev/null\n\
++++ b/n/tests/foo.rs\n\
+@@ -0,0 +1,2 @@\n\
++use foo;\n\
++";
+        let out = crate::workflow::rewrite_diff_header(raw);
+        assert!(
+            out.contains("--- /dev/null"),
+            "create-file old side must be /dev/null, got:\n{out}"
+        );
+        assert!(
+            out.contains("+++ b/tests/foo.rs"),
+            "create-file new side must be b/tests/foo.rs, got:\n{out}"
+        );
+        for bad in ["a/n/", "b/n/", "a/o/", "b/o/"] {
+            assert!(
+                !out.contains(bad),
+                "leaked temp prefix {bad} in rendered header:\n{out}"
+            );
+        }
     }
 
     #[test]
