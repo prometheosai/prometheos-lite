@@ -1048,6 +1048,44 @@ pub async fn generate_proposal(
     })
 }
 
+/// Platform-aware shell selection for running a user-supplied validation command.
+///
+/// On Windows the command runs through `cmd /C`; elsewhere through `sh -c`. The
+/// command string is always passed as a single shell expression (one argument to
+/// the shell flag), never split on whitespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShellSpec {
+    program: &'static str,
+    flag: &'static str,
+}
+
+/// Return the shell the current platform uses to evaluate a validation command.
+fn validation_shell_spec() -> ShellSpec {
+    #[cfg(windows)]
+    {
+        ShellSpec {
+            program: "cmd",
+            flag: "/C",
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        ShellSpec {
+            program: "sh",
+            flag: "-c",
+        }
+    }
+}
+
+/// Build a [`Command`] that runs `command` as one platform-appropriate shell
+/// expression. The caller sets the working directory and reads status/output.
+fn validation_shell(command: &str) -> Command {
+    let spec = validation_shell_spec();
+    let mut cmd = Command::new(spec.program);
+    cmd.arg(spec.flag).arg(command);
+    cmd
+}
+
 /// Run an isolated dry-run in a detached Git worktree: validate with `git apply --check`,
 /// apply, optionally run a validation command, then remove the worktree.
 pub fn dry_run(repo: &Path, id: &str, validation: Option<&str>) -> Result<bool> {
@@ -1093,9 +1131,7 @@ pub fn dry_run(repo: &Path, id: &str, validation: Option<&str>) -> Result<bool> 
             .context("patch application failed in dry-run")?;
 
         if let Some(cmd) = validation {
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
+            let status = validation_shell(cmd)
                 .current_dir(&wt_root)
                 .status()
                 .context("failed to run validation command")?;
@@ -1158,8 +1194,9 @@ pub fn approve(repo: &Path, id: &str, patch_hash: &str, approver: &str) -> Resul
 /// `.prometheos/` metadata). On validation failure it rolls back by reverse-applying and
 /// reports honestly; the checkpoint branch is preserved as recovery evidence.
 ///
-/// Validation commands run through `sh -c` with the CLI process's OS permissions. They
-/// are NOT sandboxed (no process/network/secrets isolation). Remote or model-generated
+/// Validation commands run through a platform-aware shell (`sh -c` on Unix,
+/// `cmd /C` on Windows) with the CLI process's OS permissions. They are NOT
+/// sandboxed (no process/network/secrets isolation). Remote or model-generated
 /// validation commands must never be executed automatically; future policy needs
 /// allowlisted command templates.
 pub fn apply(
@@ -1245,9 +1282,7 @@ pub fn apply(
         run_git(repo, &["apply", patch_file.to_str().unwrap()])
             .context("patch application failed")?;
         if let Some(cmd) = validation {
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
+            let status = validation_shell(cmd)
                 .current_dir(repo)
                 .status()
                 .context("failed to run validation command")?;
@@ -1365,7 +1400,7 @@ mod tests {
         patch_for(
             "src/calc.rs",
             "pub fn add(a: i32, b: i32) -> i32 { a - b }",
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+            "pub fn add(a: i32, b: i32) -> i32 { a.add(b) }",
         )
     }
 
@@ -1387,6 +1422,34 @@ mod tests {
         )
         .unwrap()
     }
+
+    // Platform-aware validation commands used by the workflow gating tests. The
+    // workflow runs the user-supplied command through a platform shell (`sh -c`
+    // on Unix, `cmd /C` on Windows — see #98), so the command itself must be
+    // expressed in a way the target shell understands. Paths use the platform
+    // separator (findstr on Windows does not accept a forward-slash file path),
+    // and the search tokens are space-free to avoid nested-quote parsing.
+    #[cfg(windows)]
+    const OK_VALIDATION: &str = "findstr /L a.add(b) src\\calc.rs";
+    #[cfg(not(windows))]
+    const OK_VALIDATION: &str = "grep -qF 'a.add(b)' src/calc.rs";
+
+    #[cfg(windows)]
+    const FAIL_VALIDATION: &str = "findstr /L NOPE src\\calc.rs";
+    #[cfg(not(windows))]
+    const FAIL_VALIDATION: &str = "grep -qF NOPE src/calc.rs";
+
+    #[cfg(windows)]
+    const STAR_VALIDATION: &str = "findstr /L a.mul(b) src\\calc.rs";
+    #[cfg(not(windows))]
+    const STAR_VALIDATION: &str = "grep -qF 'a.mul(b)' src/calc.rs";
+
+    // Corrupt the patched file (so reverse-apply can no longer match) and then
+    // exit non-zero, to exercise rollback-failure reporting.
+    #[cfg(windows)]
+    const CORRUPT_VALIDATION: &str = "echo corrupted > src\\calc.rs & exit /b 1";
+    #[cfg(not(windows))]
+    const CORRUPT_VALIDATION: &str = "printf 'corrupted\\n' > src/calc.rs; false";
 
     // --- existing structural tests ---
 
@@ -1443,7 +1506,7 @@ mod tests {
     fn apply_rejects_without_approval() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
     }
 
@@ -1477,7 +1540,7 @@ mod tests {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
         // Validation fails during dry-run -> dry_run_passed == false.
-        assert!(dry_run(&repo, &id, Some("grep -q 'NOPE' src/calc.rs")).is_err());
+        assert!(dry_run(&repo, &id, Some(FAIL_VALIDATION)).is_err());
         assert!(approve(&repo, &id, &phash(&good_patch()), "op").is_err());
     }
 
@@ -1485,7 +1548,7 @@ mod tests {
     fn apply_rejects_after_head_changed() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         // Move HEAD away from the validated base.
         std::fs::write(repo.join("unrelated.rs"), "fn u() {}\n").unwrap();
@@ -1498,7 +1561,7 @@ mod tests {
     fn approval_wrong_hash_rejected() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         assert!(approve(&repo, &id, "deadbeef", "op").is_err());
     }
 
@@ -1506,7 +1569,7 @@ mod tests {
     fn stored_patch_tamper_after_approval_rejected() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         // Edit the stored patch but leave the recorded hash unchanged -> integrity fails.
         let path = repo
@@ -1519,7 +1582,7 @@ mod tests {
         doc["patch"] = serde_json::Value::String(patch_for(
             "src/calc.rs",
             "pub fn add(a: i32, b: i32) -> i32 { a - b }",
-            "pub fn add(a: i32, b: i32) -> i32 { a * b }",
+            "pub fn add(a: i32, b: i32) -> i32 { a.mul(b) }",
         ));
         std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
         assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
@@ -1529,7 +1592,7 @@ mod tests {
     fn stored_metadata_tamper_rejected() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         let path = repo
             .join(".prometheos")
@@ -1657,7 +1720,7 @@ mod tests {
     fn dirty_tree_rejected() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         // Untracked user change (not under .prometheos).
         std::fs::write(repo.join("scratch.rs"), "fn s() {}\n").unwrap();
@@ -1668,7 +1731,7 @@ mod tests {
     fn prometheos_metadata_not_dirty() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         // Only .prometheos/ is untracked; apply must not treat it as dirty.
         assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_ok());
@@ -1678,13 +1741,13 @@ mod tests {
     fn validation_failure_rolls_back_and_preserves_checkpoint() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
-        // Apply a different patch whose validation (grep 'a + b') fails.
+        // Apply a different patch whose validation (matching the patched line) fails.
         let bad_patch = patch_for(
             "src/calc.rs",
             "pub fn add(a: i32, b: i32) -> i32 { a - b }",
-            "pub fn add(a: i32, b: i32) -> i32 { a * b }",
+            "pub fn add(a: i32, b: i32) -> i32 { a.mul(b) }",
         );
         let bad_id = propose(
             &repo,
@@ -1699,14 +1762,14 @@ mod tests {
         )
         .unwrap();
         // Dry-run validation passes (the patch produces `a * b`); apply validation fails.
-        dry_run(&repo, &bad_id, Some("grep -q 'a \\* b' src/calc.rs")).unwrap();
+        dry_run(&repo, &bad_id, Some(STAR_VALIDATION)).unwrap();
         approve(&repo, &bad_id, &phash(&bad_patch), "op").unwrap();
         assert!(
             apply(
                 &repo,
                 &bad_id,
                 &phash(&bad_patch),
-                Some("grep -q 'a + b' src/calc.rs"),
+                Some(OK_VALIDATION),
                 true
             )
             .is_err()
@@ -1728,7 +1791,7 @@ mod tests {
     fn rollback_failure_reported_and_checkpoint_preserved() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         // Validation command fails (to trigger rollback) but mutates the changed line
         // so that reverse-apply can no longer match, forcing a rollback failure.
@@ -1736,7 +1799,7 @@ mod tests {
             &repo,
             &id,
             &phash(&good_patch()),
-            Some("sed -i 's/a + b/a + b EXTRA/' src/calc.rs; false"),
+            Some(CORRUPT_VALIDATION),
             true,
         );
         assert!(result.is_err());
@@ -1756,7 +1819,7 @@ mod tests {
     fn reapply_already_applied_rejected() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Assist);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_ok());
         // Second application of the same proposal is refused.
@@ -1772,7 +1835,7 @@ mod tests {
     fn propose_authority_cannot_apply() {
         let (_d, repo, _base) = temp_repo();
         let id = propose_ok(&repo, AuthorityLevel::Propose);
-        dry_run(&repo, &id, Some("grep -q 'a + b' src/calc.rs")).unwrap();
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
         approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
         // Propose authority cannot apply.
         assert!(apply(&repo, &id, &phash(&good_patch()), None, true).is_err());
@@ -1795,6 +1858,91 @@ mod tests {
                 None,
             )
             .is_err()
+        );
+    }
+
+    // --- #98: platform-aware validation shell ---
+
+    #[test]
+    fn validation_shell_spec_is_platform_aware() {
+        let spec = validation_shell_spec();
+        #[cfg(windows)]
+        assert_eq!(
+            spec,
+            ShellSpec {
+                program: "cmd",
+                flag: "/C"
+            }
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            spec,
+            ShellSpec {
+                program: "sh",
+                flag: "-c"
+            }
+        );
+    }
+
+    #[test]
+    fn validation_command_runs_as_single_shell_expression() {
+        // If the command were split into multiple argv entries, a Unix `sh -c`
+        // would run only the first token and not emit both words. On Windows the
+        // same expression runs under `cmd /C`. Both prove it reaches the shell as
+        // one expression rather than being tokenized by the caller.
+        let out = validation_shell("echo one two")
+            .output()
+            .expect("platform shell must be available");
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("one two"),
+            "validation command not run as one expression; stdout={stdout:?}"
+        );
+    }
+
+    #[test]
+    fn validation_runs_in_worktree_directory() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        // The repository still holds the *unpatched* src/calc.rs ("a - b") during a
+        // dry-run; only the detached worktree has the patched line ("a.add(b)"). So a
+        // validation that matches the patched line can only succeed if the command
+        // ran with the worktree as its working directory.
+        assert!(dry_run(&repo, &id, Some(OK_VALIDATION)).is_ok());
+    }
+
+    #[test]
+    fn apply_validation_runs_in_repository_directory() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        dry_run(&repo, &id, Some(OK_VALIDATION)).unwrap();
+        approve(&repo, &id, &phash(&good_patch()), "op").unwrap();
+        // The validation writes a sentinel file into its working directory. If that
+        // directory is the user's repository (as required), the sentinel appears
+        // there after apply. `validation_shell` already supplies the platform
+        // shell wrapper, so the raw command below is shell-internal only.
+        #[cfg(windows)]
+        let sentinel = "echo sentinel > PROMETHEOS_CWD_MARKER";
+        #[cfg(not(windows))]
+        let sentinel = "echo sentinel > PROMETHEOS_CWD_MARKER";
+        apply(&repo, &id, &phash(&good_patch()), Some(sentinel), true).unwrap();
+        let marker = std::fs::read_to_string(repo.join("PROMETHEOS_CWD_MARKER")).unwrap();
+        assert!(
+            marker.contains("sentinel"),
+            "apply validation did not run in the repository directory; marker={marker:?}"
+        );
+    }
+
+    #[test]
+    fn validation_failure_is_diagnosable() {
+        let (_d, repo, _base) = temp_repo();
+        let id = propose_ok(&repo, AuthorityLevel::Assist);
+        let err = dry_run(&repo, &id, Some(FAIL_VALIDATION)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("validation command failed"),
+            "expected diagnosable validation failure, got: {msg}"
         );
     }
 }
