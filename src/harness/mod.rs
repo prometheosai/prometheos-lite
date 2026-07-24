@@ -116,10 +116,10 @@ pub use observability::{
 };
 pub use patch_applier::*;
 pub use patch_provider::{
-    AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
-    HeuristicPatchProvider, LlmPatchProvider, MockProposalMode, MockProposalProvider,
-    PatchProvider, PatchProviderContext, ProviderCandidate, ProviderCapabilities, RepairResponse,
-    RiskEstimate,
+    AggregatePatchProvider, AttemptOutcome, AttemptRecord, CountingProposalProvider,
+    GenerateRequest, GenerateResponse, HeuristicPatchProvider, LlmPatchProvider, MockProposalMode,
+    MockProposalProvider, PatchProvider, PatchProviderContext, ProviderCandidate,
+    ProviderCapabilities, RepairResponse, RiskEstimate,
 };
 pub use permissions::{
     Permission, PermissionCheck, PermissionGrant, PermissionLedger, PermissionScope,

@@ -15,6 +15,7 @@ use prometheos_lite::config::AppConfig;
 use prometheos_lite::harness::patch_provider::{
     MockProposalMode, MockProposalProvider, PatchProvider, PatchProviderContext, ProviderRegistry,
 };
+use prometheos_lite::workflow::evaluate::{self, EvaluationConfig, TaskManifest};
 use prometheos_lite::workflow::{
     self, AuthorityLevel, GenerateScope, ProviderRouteInfo, sanitize_provider_route,
 };
@@ -161,6 +162,57 @@ enum WorkflowSubcommand {
         /// Workflow id.
         id: String,
     },
+    /// Fast Governed Loop V1: automated evaluation pipeline.
+    ///
+    /// Takes a task from definition through REVIEW_GATE, producing a trustworthy
+    /// evidence bundle. The human still makes the final correctness decision.
+    ///
+    /// Accepts either a path to a JSON manifest file (--manifest) or inline
+    /// arguments (--repo, --goal, etc.).
+    Evaluate {
+        /// Path to a JSON task manifest file.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Repository root to operate on (used with inline args).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Goal description (used with inline args).
+        #[arg(short, long)]
+        goal: Option<String>,
+        /// Task ID (used with inline args; auto-generated if omitted).
+        #[arg(long)]
+        task_id: Option<String>,
+        /// Authority level: review | propose | assist | execute.
+        #[arg(long, default_value = "propose")]
+        authority: String,
+        /// Allowed repo-relative path prefixes (repeatable).
+        #[arg(long = "allowed")]
+        allowed: Vec<String>,
+        /// Forbidden repo-relative path prefixes (repeatable).
+        #[arg(long = "forbidden")]
+        forbidden: Vec<String>,
+        /// Allow dependency-manifest changes.
+        #[arg(long)]
+        allow_deps: bool,
+        /// Maximum changed files before blocking.
+        #[arg(long)]
+        max_files: Option<usize>,
+        /// Maximum changed lines before blocking.
+        #[arg(long)]
+        max_lines: Option<usize>,
+        /// Validation command (run in the isolated worktree).
+        #[arg(long)]
+        validate: Option<String>,
+        /// Provider source: `config` or `mock`.
+        #[arg(long, default_value = "mock")]
+        provider: String,
+        /// Minimum free disk space in bytes.
+        #[arg(long, default_value = "104857600")]
+        min_disk_bytes: u64,
+        /// Output the JSON evidence bundle to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl WorkflowCommand {
@@ -227,6 +279,148 @@ impl WorkflowCommand {
             WorkflowSubcommand::Report { repo, id } => {
                 let report = workflow::report(&repo, &id)?;
                 println!("{report}");
+                Ok(())
+            }
+            WorkflowSubcommand::Evaluate {
+                manifest,
+                repo,
+                goal,
+                task_id,
+                authority,
+                allowed,
+                forbidden,
+                allow_deps,
+                max_files,
+                max_lines,
+                validate,
+                provider,
+                min_disk_bytes,
+                json,
+            } => {
+                let task_manifest = if let Some(manifest_path) = manifest {
+                    let text = std::fs::read_to_string(&manifest_path).with_context(|| {
+                        format!("cannot read manifest {}", manifest_path.display())
+                    })?;
+                    serde_json::from_str::<TaskManifest>(&text)
+                        .context("failed to parse task manifest")?
+                } else {
+                    let repo_path = repo.ok_or_else(|| {
+                        anyhow::anyhow!("--repo is required when --manifest is not provided")
+                    })?;
+                    let goal_str = goal.ok_or_else(|| {
+                        anyhow::anyhow!("--goal is required when --manifest is not provided")
+                    })?;
+                    TaskManifest {
+                        task_id: task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        goal: goal_str,
+                        repo: repo_path,
+                        allowed_paths: allowed,
+                        forbidden_paths: forbidden,
+                        allow_dependency_changes: allow_deps,
+                        max_files_changed: max_files,
+                        max_lines_changed: max_lines,
+                        validation_command: validate,
+                        provider: provider.clone(),
+                        authority: authority.clone(),
+                        min_disk_bytes,
+                        evidence_dir: None,
+                    }
+                };
+
+                // Select the provider.
+                let (boxed, route_info): (
+                    Box<dyn prometheos_lite::harness::patch_provider::PatchProvider>,
+                    Option<ProviderRouteInfo>,
+                ) = if task_manifest.provider == "mock" {
+                    let mode = std::env::var("PROMETHEOS_MOCK_MODE")
+                        .map(|s| provider_mode_from_str(&s))
+                        .unwrap_or(MockProposalMode::Safe);
+                    (Box::new(MockProposalProvider::with_mode(mode)), None)
+                } else {
+                    let config = AppConfig::load().context(
+                        "failed to load provider configuration; set PROMETHEOS_PROVIDER/MODEL/BASE_URL or use --provider mock",
+                    )?;
+                    let registry =
+                        prometheos_lite::harness::patch_provider::ProviderRegistry::from_config(
+                            &config,
+                        )?;
+                    let route = ProviderRouteInfo {
+                        model: Some(config.model.clone()),
+                        route: sanitize_provider_route(&config.base_url),
+                    };
+                    (Box::new(registry), Some(route))
+                };
+
+                let eval_config = EvaluationConfig {
+                    manifest: task_manifest,
+                    provider: boxed,
+                    route_info,
+                };
+
+                let bundle = evaluate::evaluate(eval_config).await?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&bundle)
+                            .context("failed to serialize evidence bundle")?
+                    );
+                } else {
+                    println!("Result: {}", bundle.final_state);
+                    if let Some(ref fc) = bundle.failure_classification {
+                        println!("Classification: {fc}");
+                    }
+                    if let Some(ref proposal) = bundle.proposal {
+                        println!("Generation: completed exactly once");
+                        println!("Proposal: {}", proposal.id);
+                    } else {
+                        println!("Generation: failed");
+                    }
+                    if let Some(ref validation) = bundle.validation {
+                        println!(
+                            "Test discovered: {}",
+                            if validation.test_discovered {
+                                "yes"
+                            } else {
+                                "no"
+                            }
+                        );
+                        println!(
+                            "Test executed: {}",
+                            if validation.test_executed {
+                                "yes"
+                            } else {
+                                "no"
+                            }
+                        );
+                        println!(
+                            "Validation: {}",
+                            if validation.validation_passed {
+                                "passed"
+                            } else {
+                                "failed"
+                            }
+                        );
+                    }
+                    if let Some(ref integrity) = bundle.integrity {
+                        println!(
+                            "Original repository: {}",
+                            if integrity.original_commit_unchanged
+                                && integrity.no_tracked_modifications
+                            {
+                                "unchanged"
+                            } else {
+                                "MODIFIED"
+                            }
+                        );
+                    }
+                    // Show evidence bundle path.
+                    let evidence_path = PathBuf::from(&bundle.repo)
+                        .join(".prometheos")
+                        .join("evidence")
+                        .join(&bundle.run_id);
+                    println!("Evidence bundle: {}", evidence_path.display());
+                }
                 Ok(())
             }
             WorkflowSubcommand::Generate {
