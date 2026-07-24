@@ -25,6 +25,11 @@ use std::process::Command;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+extern crate libc;
+#[cfg(windows)]
+extern crate winapi;
+
 use crate::harness::patch_provider::{PatchProvider, PatchProviderContext};
 use crate::workflow::{
     AuthorityLevel, GenerateScope, ProposalArtifact, ProviderRouteInfo, is_git_repo,
@@ -221,15 +226,44 @@ impl EvaluationState {
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic identity registry
+// Deterministic identity registry (stateful, atomic reservation)
 // ---------------------------------------------------------------------------
 
-/// Registry that maps deterministic identity keys to proposal IDs.
+/// Registry entry tracking the full lifecycle of a proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    /// Current pipeline state for this identity key.
+    pub state: ProposalState,
+    /// Proposal ID (set after generation completes).
+    pub proposal_id: Option<String>,
+    /// Run ID of the process that holds the reservation.
+    pub run_id: String,
+    /// RFC3339 timestamp when the reservation was created.
+    pub reserved_at: String,
+    /// RFC3339 timestamp of the last state transition.
+    pub updated_at: String,
+}
+
+/// Lifecycle state of a registry entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalState {
+    /// Identity reserved; generation not yet started.
+    Reserved,
+    /// Generation in progress (model call running).
+    Generating,
+    /// Proposal generated and persisted; validation pending or in progress.
+    ProposalGenerated,
+    /// Validation complete; evidence bundle finalized.
+    ValidationComplete,
+}
+
+/// Registry mapping identity keys to their lifecycle entries.
 /// Stored at `<repo>/.prometheos/workflow/proposal_registry.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProposalRegistry {
-    /// Maps identity_key → proposal_id.
-    pub entries: std::collections::HashMap<String, String>,
+    /// Maps identity_key → RegistryEntry.
+    pub entries: std::collections::HashMap<String, RegistryEntry>,
 }
 
 /// Compute a deterministic identity key for a proposal lookup.
@@ -266,6 +300,12 @@ fn registry_path(repo: &Path) -> PathBuf {
         .join("proposal_registry.json")
 }
 
+fn registry_lock_path(repo: &Path) -> PathBuf {
+    repo.join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.lock")
+}
+
 fn load_registry(repo: &Path) -> ProposalRegistry {
     let path = registry_path(repo);
     std::fs::read_to_string(&path)
@@ -279,24 +319,229 @@ fn save_registry(repo: &Path, registry: &ProposalRegistry) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("failed to create workflow dir for registry")?;
     }
+    // Write to a temp file, then atomically rename to avoid partial writes.
+    let tmp = path.with_extension("json.tmp");
     let json =
         serde_json::to_string_pretty(registry).context("failed to serialize proposal registry")?;
-    std::fs::write(&path, json).context("failed to write proposal registry")?;
+    std::fs::write(&tmp, &json).context("failed to write proposal registry temp file")?;
+    std::fs::rename(&tmp, &path).context("failed to atomically rename proposal registry")?;
     Ok(())
 }
 
-fn find_existing_proposal_by_key(repo: &Path, identity_key: &str) -> Option<ProposalArtifact> {
-    let registry = load_registry(repo);
-    let proposal_id = registry.entries.get(identity_key)?;
-    load_proposal_from_repo(repo, proposal_id).ok()
+/// Try to acquire an atomic reservation for an identity key.
+///
+/// Returns `Ok(true)` if the reservation was acquired (new entry).
+/// Returns `Ok(false)` if the entry already exists (caller should reuse or wait).
+/// Returns `Err` on I/O failure.
+fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
+    let lock_path = registry_lock_path(repo);
+
+    // Ensure the workflow directory exists before creating the lock file.
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
+    }
+
+    // Acquire an exclusive lock file.
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file")?;
+
+    // Use platform-exclusive lock (flock on Unix, LockFileEx on Windows).
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            // Lock held by another process.
+            return Ok(false);
+        }
+    }
+
+    // Now read the registry under the lock.
+    let mut registry = load_registry(repo);
+    if registry.entries.contains_key(identity_key) {
+        // Another process reserved it first.
+        drop(lock_file);
+        let _ = std::fs::remove_file(&lock_path);
+        return Ok(false);
+    }
+
+    // Reserve the identity.
+    let now = now_iso();
+    registry.entries.insert(
+        identity_key.to_string(),
+        RegistryEntry {
+            state: ProposalState::Reserved,
+            proposal_id: None,
+            run_id: run_id.to_string(),
+            reserved_at: now.clone(),
+            updated_at: now,
+        },
+    );
+    save_registry(repo, &registry)?;
+
+    // Release lock and remove lock file.
+    drop(lock_file);
+    let _ = std::fs::remove_file(&lock_path);
+    Ok(true)
 }
 
-fn register_proposal(repo: &Path, identity_key: &str, proposal_id: &str) -> Result<()> {
+/// Look up the registry entry for an identity key.
+fn lookup_entry(repo: &Path, identity_key: &str) -> Option<RegistryEntry> {
+    let registry = load_registry(repo);
+    registry.entries.get(identity_key).cloned()
+}
+
+/// Transition the state of a registry entry.
+fn transition_entry(
+    repo: &Path,
+    identity_key: &str,
+    new_state: ProposalState,
+    proposal_id: Option<&str>,
+) -> Result<()> {
+    let lock_path = registry_lock_path(repo);
+
+    // Ensure the workflow directory exists before creating the lock file.
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file for transition")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            bail!("failed to acquire lock for registry transition");
+        }
+    }
+
     let mut registry = load_registry(repo);
-    registry
+    let entry = registry
         .entries
-        .insert(identity_key.to_string(), proposal_id.to_string());
-    save_registry(repo, &registry)
+        .get_mut(identity_key)
+        .context("registry entry not found during transition")?;
+
+    entry.state = new_state;
+    entry.updated_at = now_iso();
+    if let Some(pid) = proposal_id {
+        entry.proposal_id = Some(pid.to_string());
+    }
+    save_registry(repo, &registry)?;
+
+    drop(lock_file);
+    let _ = std::fs::remove_file(&lock_path);
+    Ok(())
+}
+
+/// Release a reservation (remove the entry from the registry).
+/// Called when generation fails so another process can retry.
+fn release_reservation(repo: &Path, identity_key: &str) -> Result<()> {
+    let lock_path = registry_lock_path(repo);
+
+    // Ensure the workflow directory exists before creating the lock file.
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file for release")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            bail!("failed to acquire lock for reservation release");
+        }
+    }
+
+    let mut registry = load_registry(repo);
+    registry.entries.remove(identity_key);
+    save_registry(repo, &registry)?;
+
+    drop(lock_file);
+    let _ = std::fs::remove_file(&lock_path);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -495,10 +740,14 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &config.manifest.validation_command,
     );
 
-    // Check for an existing proposal (resume after restart).
-    let existing_proposal = find_existing_proposal_by_key(&repo, &identity_key);
-    if let Some(proposal) = existing_proposal {
-        return resume_from_proposal(
+    // ---- Atomic reservation gate ----
+    // Try to reserve the identity. If another process holds it, wait/reuse.
+    let reserved = try_reserve(&repo, &identity_key, &run_id)
+        .context("failed to attempt identity reservation")?;
+    if !reserved {
+        // Another process reserved this identity. Wait for it to complete,
+        // then reuse the existing proposal.
+        return wait_and_reuse(
             &repo,
             &commit_at_start,
             &run_id,
@@ -506,7 +755,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
             &config,
             &evidence_dir,
             &governance_scope,
-            proposal,
+            &identity_key,
         )
         .await;
     }
@@ -528,6 +777,8 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     update_identity_state(&identity_path, EvaluationState::PreflightPassed);
 
     // ---- Stage: Generate ----
+    transition_entry(&repo, &identity_key, ProposalState::Generating, None)
+        .context("failed to transition to Generating state")?;
     update_identity_state(&identity_path, EvaluationState::Generating);
     let scope = GenerateScope {
         allowed_paths: config.manifest.allowed_paths.clone(),
@@ -562,17 +813,22 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
                 .outcome_label()
                 .to_string();
             bundle.completed_at = now_iso();
+            // Release the reservation so another process can retry.
+            let _ = release_reservation(&repo, &identity_key);
             write_bundle(&evidence_dir, &bundle)?;
             return Ok(bundle);
         }
     };
     update_identity_state(&identity_path, EvaluationState::ProposalGenerated);
 
-    // Register the proposal for deterministic resume lookup.
-    if let Err(e) = register_proposal(&repo, &identity_key, &gen_result.id) {
-        // Registration failure is non-fatal; the proposal still exists.
-        // Log but continue.
-        eprintln!("warning: failed to register proposal in registry: {e}");
+    // Register the proposal in the registry.
+    if let Err(e) = transition_entry(
+        &repo,
+        &identity_key,
+        ProposalState::ProposalGenerated,
+        Some(&gen_result.id),
+    ) {
+        eprintln!("warning: failed to transition registry to ProposalGenerated: {e}");
     }
 
     let proposal = load_proposal_from_repo(&repo, &gen_result.id)?;
@@ -611,6 +867,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &evidence_dir,
     );
     update_identity_state(&identity_path, EvaluationState::ValidationComplete);
+
+    // Transition registry to ValidationComplete.
+    if let Err(e) = transition_entry(
+        &repo,
+        &identity_key,
+        ProposalState::ValidationComplete,
+        Some(&gen_result.id),
+    ) {
+        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
+    }
 
     match &validation_result {
         Ok(vr) => {
@@ -666,10 +932,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
 }
 
 // ---------------------------------------------------------------------------
-// Resume from existing proposal (exactly-once)
+// Wait and reuse (exactly-once resume after concurrent or restart)
 // ---------------------------------------------------------------------------
 
-async fn resume_from_proposal(
+/// Wait for another process to complete its reservation, then reuse the result.
+///
+/// This handles three cases:
+/// 1. The other process completed validation → return preserved evidence.
+/// 2. The other process completed generation but not validation → resume validation.
+/// 3. The other process is still in progress → wait and retry.
+async fn wait_and_reuse(
     repo: &Path,
     commit_at_start: &str,
     run_id: &str,
@@ -677,7 +949,199 @@ async fn resume_from_proposal(
     config: &EvaluationConfig,
     evidence_dir: &Path,
     governance_scope: &GovernanceScopeSnapshot,
-    proposal: ProposalArtifact,
+    identity_key: &str,
+) -> Result<EvidenceBundle> {
+    // Run validation-specific preflight first.
+    run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
+
+    let max_wait = std::time::Duration::from_secs(300); // 5 minutes
+    let poll_interval = std::time::Duration::from_millis(500);
+    let mut elapsed = std::time::Duration::ZERO;
+
+    loop {
+        let entry = lookup_entry(repo, identity_key);
+        match entry {
+            Some(e) if e.state == ProposalState::ValidationComplete => {
+                // The other process finished validation. Return the preserved evidence.
+                let proposal_id = e
+                    .proposal_id
+                    .as_deref()
+                    .context("ValidationComplete entry missing proposal_id")?;
+                let proposal = load_proposal_from_repo(repo, proposal_id)?;
+                return return_completed_evidence(
+                    repo,
+                    commit_at_start,
+                    run_id,
+                    manifest,
+                    config,
+                    evidence_dir,
+                    governance_scope,
+                    &proposal,
+                    proposal_id,
+                    identity_key,
+                )
+                .await;
+            }
+            Some(e) if e.state == ProposalState::ProposalGenerated => {
+                // The other process finished generation but not validation.
+                // Resume validation from this process.
+                let proposal_id = e
+                    .proposal_id
+                    .as_deref()
+                    .context("ProposalGenerated entry missing proposal_id")?;
+                let proposal = load_proposal_from_repo(repo, proposal_id)?;
+                return resume_validation(
+                    repo,
+                    commit_at_start,
+                    run_id,
+                    manifest,
+                    config,
+                    evidence_dir,
+                    governance_scope,
+                    &proposal,
+                    identity_key,
+                )
+                .await;
+            }
+            Some(e) => {
+                // Still in Reserved or Generating state. Wait and retry.
+                // But first check if the reservation is stale (crashed process).
+                let stale_threshold = std::time::Duration::from_secs(120); // 2 minutes
+                if let Ok(reserved_time) = chrono::DateTime::parse_from_rfc3339(&e.reserved_at) {
+                    let age = chrono::Utc::now()
+                        .signed_duration_since(reserved_time)
+                        .to_std()
+                        .unwrap_or(std::time::Duration::ZERO);
+                    if age > stale_threshold {
+                        // Stale reservation — release it and retry from scratch.
+                        let _ = release_reservation(repo, identity_key);
+                        bail!(
+                            "stale identity reservation detected (age: {}s); \
+                             reservation released, caller should retry",
+                            age.as_secs()
+                        );
+                    }
+                }
+                if elapsed >= max_wait {
+                    bail!(
+                        "timed out waiting for another process to complete \
+                         identity reservation after {} seconds",
+                        max_wait.as_secs()
+                    );
+                }
+                tokio::time::sleep(poll_interval).await;
+                elapsed += poll_interval;
+            }
+            None => {
+                // Entry was removed (generation failed and reservation released).
+                // Return an error so the caller can retry from scratch.
+                bail!(
+                    "identity reservation was released by another process \
+                     (generation likely failed); caller should retry"
+                );
+            }
+        }
+    }
+}
+
+/// Return preserved evidence from a completed validation.
+async fn return_completed_evidence(
+    repo: &Path,
+    commit_at_start: &str,
+    run_id: &str,
+    manifest: &TaskManifest,
+    config: &EvaluationConfig,
+    evidence_dir: &Path,
+    governance_scope: &GovernanceScopeSnapshot,
+    proposal: &ProposalArtifact,
+    proposal_id: &str,
+    identity_key: &str,
+) -> Result<EvidenceBundle> {
+    let mut bundle = new_bundle_from_identity(
+        run_id,
+        &manifest.task_id,
+        repo,
+        commit_at_start,
+        governance_scope,
+        evidence_dir,
+    );
+
+    bundle.proposal = Some(ProposalRecord {
+        id: proposal.id.clone(),
+        patch_hash: proposal.patch_hash.clone(),
+        changed_files: proposal.changed_files.clone(),
+        added_lines: proposal.added_lines,
+        removed_lines: proposal.removed_lines,
+        base_sha: proposal.base_sha.clone(),
+    });
+    bundle.provider_provenance = ProviderProvenanceRecord {
+        implementation: config.provider.name().to_string(),
+        model: config.route_info.as_ref().and_then(|r| r.model.clone()),
+        route: config
+            .route_info
+            .as_ref()
+            .and_then(|r| r.route.clone())
+            .and_then(|u| sanitize_provider_route(&u)),
+        generated_at: None,
+        input_digest: Some(hash_str(&manifest.goal)),
+        patch_hash: Some(proposal.patch_hash.clone()),
+    };
+
+    // Check if there's an existing evidence bundle from the previous run.
+    // If so, load it instead of re-running validation.
+    let existing_bundle = find_existing_evidence(evidence_dir, proposal_id);
+    if let Some(mut eb) = existing_bundle {
+        // Reuse the preserved validation result.
+        eb.run_id = run_id.to_string();
+        eb.completed_at = now_iso();
+        if let Ok(head) = git_rev_parse_head(repo) {
+            eb.repo_pin_after = head;
+        }
+        write_bundle(evidence_dir, &eb)?;
+        return Ok(eb);
+    }
+
+    // No existing evidence — this shouldn't happen for ValidationComplete,
+    // but handle it gracefully by running validation.
+    resume_validation(
+        repo,
+        commit_at_start,
+        run_id,
+        manifest,
+        config,
+        evidence_dir,
+        governance_scope,
+        proposal,
+        identity_key,
+    )
+    .await
+}
+
+/// Find an existing evidence bundle for a proposal.
+fn find_existing_evidence(evidence_dir: &Path, proposal_id: &str) -> Option<EvidenceBundle> {
+    // Look for bundle.json in the evidence directory.
+    let bundle_path = evidence_dir.join("bundle.json");
+    if bundle_path.exists() {
+        let text = std::fs::read_to_string(&bundle_path).ok()?;
+        let bundle: EvidenceBundle = serde_json::from_str(&text).ok()?;
+        if bundle.proposal.as_ref().map(|p| p.id.as_str()) == Some(proposal_id) {
+            return Some(bundle);
+        }
+    }
+    None
+}
+
+/// Resume validation from the ProposalGenerated state.
+async fn resume_validation(
+    repo: &Path,
+    commit_at_start: &str,
+    run_id: &str,
+    manifest: &TaskManifest,
+    config: &EvaluationConfig,
+    evidence_dir: &Path,
+    governance_scope: &GovernanceScopeSnapshot,
+    proposal: &ProposalArtifact,
+    identity_key: &str,
 ) -> Result<EvidenceBundle> {
     let mut bundle = new_bundle_from_identity(
         run_id,
@@ -754,10 +1218,19 @@ async fn resume_from_proposal(
         bundle.final_state = EvaluationState::ReviewGate.outcome_label().to_string();
     }
 
+    // Transition registry to ValidationComplete.
+    if let Err(e) = transition_entry(
+        repo,
+        identity_key,
+        ProposalState::ValidationComplete,
+        Some(&proposal.id),
+    ) {
+        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
+    }
+
     let cleanup = cleanup_worktree(repo, &proposal.id);
     bundle.cleanup = Some(cleanup);
     bundle.completed_at = now_iso();
-    // Fill repo_pin_after on the returned bundle.
     if let Ok(head) = git_rev_parse_head(repo) {
         bundle.repo_pin_after = head;
     }
@@ -853,6 +1326,91 @@ fn run_preflight(
 
     if !errors.is_empty() {
         bail!("preflight failed:\n- {}", errors.join("\n- "));
+    }
+
+    Ok(result)
+}
+
+/// Validation-specific preflight checks. Used when resuming validation on an
+/// existing proposal. Does NOT require provider credentials (generation already
+/// happened), but does require disk space, validation command, and evidence
+/// writability.
+fn run_validation_preflight(
+    repo: &Path,
+    commit: &str,
+    manifest: &TaskManifest,
+    evidence_dir: &Path,
+) -> Result<PreflightResult> {
+    let is_git = is_git_repo(repo);
+    let working_tree_clean = is_repo_clean(repo);
+    let disk_space = available_disk_bytes(repo);
+    let disk_sufficient = match &disk_space {
+        DiskSpaceStatus::Available(bytes) => *bytes >= manifest.min_disk_bytes,
+        DiskSpaceStatus::Unsupported | DiskSpaceStatus::Failed(_) => false,
+    };
+    // Validation does NOT require credentials — generation already happened.
+    let credential_available = true;
+    let validation_available = manifest
+        .validation_command
+        .as_ref()
+        .map(|cmd| check_command_available(cmd))
+        .unwrap_or(true);
+    let governance_valid = !manifest.authority.is_empty();
+    let evidence_writable = evidence_dir
+        .join("test_write_probe")
+        .to_path_buf()
+        .as_path()
+        .parent()
+        .map(|d| {
+            std::fs::write(d.join(".prometheos_write_probe"), "ok").is_ok()
+                && std::fs::remove_file(d.join(".prometheos_write_probe")).is_ok()
+        })
+        .unwrap_or(false);
+
+    let _ = std::fs::remove_file(evidence_dir.join(".prometheos_write_probe"));
+
+    let result = PreflightResult {
+        is_git_repo: is_git,
+        commit_at_start: commit.to_string(),
+        working_tree_clean,
+        disk_space: disk_space.clone(),
+        disk_space_sufficient: disk_sufficient,
+        credential_available,
+        validation_command_available: validation_available,
+        governance_scope_valid: governance_valid,
+        evidence_dir_writable: evidence_writable,
+    };
+
+    let mut errors = Vec::new();
+    if !result.is_git_repo {
+        errors.push("not a git repository".to_string());
+    }
+    if !result.disk_space_sufficient {
+        let detail = match &result.disk_space {
+            DiskSpaceStatus::Available(bytes) => {
+                format!(
+                    "{} bytes available, {} required",
+                    bytes, manifest.min_disk_bytes
+                )
+            }
+            DiskSpaceStatus::Unsupported => {
+                "disk space measurement not supported on this platform".to_string()
+            }
+            DiskSpaceStatus::Failed(msg) => {
+                format!("disk space measurement failed: {msg}")
+            }
+        };
+        errors.push(format!("insufficient or unmeasurable disk space: {detail}"));
+    }
+    if !result.validation_command_available {
+        errors.push("validation command not available".to_string());
+    }
+    if !result.evidence_dir_writable {
+        errors.push("evidence directory not writable".to_string());
+    }
+
+    if !errors.is_empty() {
+        bail!("validation preflight failed:\n- {}", errors.join("\n- "));
     }
 
     Ok(result)
