@@ -1182,7 +1182,7 @@ async fn completed_validation_not_rerun() {
 
     // Write the bundle from the first run.
     let bundle_json = serde_json::to_string_pretty(&bundle1).unwrap();
-    std::fs::write(evidence_dir.join("bundle.json"), &bundle_json).unwrap();
+    std::fs::write(evidence_dir.join("evidence.json"), &bundle_json).unwrap();
 
     // Second run: should return the preserved evidence without rerunning validation.
     let config2 = EvaluationConfig {
@@ -1362,6 +1362,203 @@ async fn corrupted_registry_fails_closed() {
                     || msg.contains("corrupt")
                     || msg.contains("reservation"),
                 "unexpected error: {msg}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: completed evidence returned byte-for-byte immutable
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn completed_evidence_is_immutable() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "fix the bug");
+
+    // First run: complete successfully.
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    assert!(bundle1.proposal.is_some());
+
+    // Find the evidence directory from the first run.
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    let entry = registry.entries.values().next().unwrap();
+    let original_evidence_dir = PathBuf::from(entry.evidence_dir.as_ref().unwrap());
+
+    // Hash the original evidence.json.
+    let original_bytes = std::fs::read(original_evidence_dir.join("evidence.json")).unwrap();
+    let mut hasher = DefaultHasher::new();
+    original_bytes.hash(&mut hasher);
+    let original_hash = hasher.finish();
+
+    // Second run: should return the preserved bundle unchanged.
+    let config2 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+    };
+    let bundle2 = evaluate::evaluate(config2).await.unwrap();
+
+    // The evidence.json in the original evidence dir must be byte-identical.
+    let after_bytes = std::fs::read(original_evidence_dir.join("evidence.json")).unwrap();
+    let mut hasher2 = DefaultHasher::new();
+    after_bytes.hash(&mut hasher2);
+    let after_hash = hasher2.finish();
+
+    assert_eq!(
+        original_hash, after_hash,
+        "completed evidence bundle must be immutable (byte-for-byte identical)"
+    );
+    assert_eq!(
+        bundle2.proposal.as_ref().unwrap().id,
+        bundle1.proposal.as_ref().unwrap().id,
+        "should return same proposal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: Generating state not reclaimed after 2 minutes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn generating_state_not_reclaimed_by_stale_check() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "fix the bug");
+
+    // First run: complete successfully.
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    assert!(bundle1.proposal.is_some());
+
+    // Simulate a live Generating entry with old reserved_at but fresh updated_at.
+    // This should NOT be reclaimed because updated_at is fresh.
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+
+    for entry in registry.entries.values_mut() {
+        entry.state = prometheos_lite::workflow::evaluate::ProposalState::Generating;
+        // Old reserved_at (would trigger stale check for Reserved).
+        entry.reserved_at = "2020-01-01T00:00:00Z".to_string();
+        // Fresh updated_at (should protect Generating from reclaim).
+        entry.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    // Second run: should wait for the Generating entry, NOT reclaim it.
+    let config2 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+    };
+
+    // This should either succeed (if the entry transitions) or fail with
+    // timeout — but it must NOT reclaim the Generating entry.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        evaluate::evaluate(config2),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(bundle)) => {
+            // Succeeded — the entry must have transitioned.
+            assert!(bundle.proposal.is_some());
+        }
+        Ok(Err(e)) => {
+            // Failed — should be timeout, not stale reclaim.
+            let msg = e.to_string();
+            assert!(
+                msg.contains("timed out") || msg.contains("reservation"),
+                "unexpected error (should not reclaim Generating): {msg}"
+            );
+            // Verify the entry is still in the registry (not released).
+            let registry_after: prometheos_lite::workflow::evaluate::ProposalRegistry =
+                serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+            assert!(
+                !registry_after.entries.is_empty(),
+                "Generating entry must NOT be reclaimed"
+            );
+        }
+        Err(_) => {
+            // Timeout — acceptable, proves we waited instead of reclaiming.
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: ValidationComplete with missing evidence fails closed
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn validation_complete_with_missing_evidence_fails_closed() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "fix the bug");
+
+    // First run: complete successfully.
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    assert!(bundle1.proposal.is_some());
+
+    // Get the original evidence directory and delete the evidence.json.
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    let entry = registry.entries.values().next().unwrap();
+    let original_evidence_dir = PathBuf::from(entry.evidence_dir.as_ref().unwrap());
+
+    // Delete the evidence.json to simulate missing evidence.
+    let bundle_path = original_evidence_dir.join("evidence.json");
+    std::fs::remove_file(&bundle_path).unwrap();
+
+    // Second run: should fail closed, not silently re-run validation.
+    let config2 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+    };
+    let result = evaluate::evaluate(config2).await;
+
+    match result {
+        Ok(_bundle) => {
+            panic!("ValidationComplete with missing evidence should fail closed");
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("missing or corrupt") || msg.contains("evidence"),
+                "expected evidence-missing error, got: {msg}"
             );
         }
     }

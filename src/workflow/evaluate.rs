@@ -1048,22 +1048,49 @@ async fn wait_and_reuse(
             }
             Some(e) => {
                 // Still in Reserved or Generating state. Wait and retry.
-                // But first check if the reservation is stale (crashed process).
+                //
+                // Fix 2: Only auto-release `Reserved` entries after stale threshold.
+                // `Generating` entries are protected by a heartbeat: the generating
+                // process must call `transition_entry` (which updates `updated_at`)
+                // within the generation timeout. If `updated_at` is too old,
+                // the generation process is considered dead.
                 let stale_threshold = std::time::Duration::from_secs(120); // 2 minutes
-                if let Ok(reserved_time) = chrono::DateTime::parse_from_rfc3339(&e.reserved_at) {
-                    let age = chrono::Utc::now()
-                        .signed_duration_since(reserved_time)
-                        .to_std()
-                        .unwrap_or(std::time::Duration::ZERO);
-                    if age > stale_threshold {
-                        // Stale reservation — release it and retry from scratch.
-                        let _ = release_reservation(repo, identity_key);
-                        bail!(
-                            "stale identity reservation detected (age: {}s); \
-                             reservation released, caller should retry",
-                            age.as_secs()
-                        );
+                let generation_timeout = std::time::Duration::from_secs(600); // 10 minutes
+
+                let (is_stale, state_label) = match e.state {
+                    ProposalState::Reserved => {
+                        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&e.reserved_at) {
+                            let age = chrono::Utc::now()
+                                .signed_duration_since(t)
+                                .to_std()
+                                .unwrap_or(std::time::Duration::ZERO);
+                            (age > stale_threshold, "Reserved")
+                        } else {
+                            (false, "Reserved")
+                        }
                     }
+                    ProposalState::Generating => {
+                        // Check heartbeat via updated_at. If the generating process
+                        // hasn't updated in > generation_timeout, it's dead.
+                        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&e.updated_at) {
+                            let age = chrono::Utc::now()
+                                .signed_duration_since(t)
+                                .to_std()
+                                .unwrap_or(std::time::Duration::ZERO);
+                            (age > generation_timeout, "Generating")
+                        } else {
+                            (false, "Generating")
+                        }
+                    }
+                    _ => (false, "other"),
+                };
+
+                if is_stale {
+                    let _ = release_reservation(repo, identity_key);
+                    bail!(
+                        "stale {} entry detected; reservation released, caller should retry",
+                        state_label
+                    );
                 }
                 if elapsed >= max_wait {
                     bail!(
@@ -1088,84 +1115,37 @@ async fn wait_and_reuse(
 }
 
 /// Return preserved evidence from a completed validation.
+///
+/// The original bundle is returned UNCHANGED — no field modification, no rewrite.
+/// This ensures completed evidence is immutable and returned byte-for-byte.
 async fn return_completed_evidence(
-    repo: &Path,
-    commit_at_start: &str,
-    run_id: &str,
-    manifest: &TaskManifest,
-    config: &EvaluationConfig,
+    _repo: &Path,
+    _commit_at_start: &str,
+    _run_id: &str,
+    _manifest: &TaskManifest,
+    _config: &EvaluationConfig,
     evidence_dir: &Path,
-    governance_scope: &GovernanceScopeSnapshot,
-    proposal: &ProposalArtifact,
+    _governance_scope: &GovernanceScopeSnapshot,
+    _proposal: &ProposalArtifact,
     proposal_id: &str,
-    identity_key: &str,
+    _identity_key: &str,
 ) -> Result<EvidenceBundle> {
-    let mut bundle = new_bundle_from_identity(
-        run_id,
-        &manifest.task_id,
-        repo,
-        commit_at_start,
-        governance_scope,
-        evidence_dir,
-    );
+    // Load the preserved bundle from the original evidence directory.
+    let existing_bundle = find_existing_evidence(evidence_dir, proposal_id).context(
+        "ValidationComplete entry references evidence that is missing or corrupt; \
+             cannot return preserved bundle",
+    )?;
 
-    bundle.proposal = Some(ProposalRecord {
-        id: proposal.id.clone(),
-        patch_hash: proposal.patch_hash.clone(),
-        changed_files: proposal.changed_files.clone(),
-        added_lines: proposal.added_lines,
-        removed_lines: proposal.removed_lines,
-        base_sha: proposal.base_sha.clone(),
-    });
-    bundle.provider_provenance = ProviderProvenanceRecord {
-        implementation: config.provider.name().to_string(),
-        model: config.route_info.as_ref().and_then(|r| r.model.clone()),
-        route: config
-            .route_info
-            .as_ref()
-            .and_then(|r| r.route.clone())
-            .and_then(|u| sanitize_provider_route(&u)),
-        generated_at: None,
-        input_digest: Some(hash_str(&manifest.goal)),
-        patch_hash: Some(proposal.patch_hash.clone()),
-    };
-
-    // Check if there's an existing evidence bundle from the previous run.
-    // If so, load it instead of re-running validation.
-    let existing_bundle = find_existing_evidence(evidence_dir, proposal_id);
-    if let Some(mut eb) = existing_bundle {
-        // Reuse the preserved validation result.
-        eb.run_id = run_id.to_string();
-        eb.completed_at = now_iso();
-        if let Ok(head) = git_rev_parse_head(repo) {
-            eb.repo_pin_after = head;
-        }
-        write_bundle(evidence_dir, &eb)?;
-        return Ok(eb);
-    }
-
-    // No existing evidence — this shouldn't happen for ValidationComplete,
-    // but handle it gracefully by running validation.
-    resume_validation(
-        repo,
-        commit_at_start,
-        run_id,
-        manifest,
-        config,
-        evidence_dir,
-        governance_scope,
-        proposal,
-        identity_key,
-    )
-    .await
+    // Return the original bundle unchanged. No modification, no rewrite.
+    Ok(existing_bundle)
 }
 
 /// Find an existing evidence bundle for a proposal.
 fn find_existing_evidence(evidence_dir: &Path, proposal_id: &str) -> Option<EvidenceBundle> {
-    // Look for bundle.json in the evidence directory.
-    let bundle_path = evidence_dir.join("bundle.json");
-    if bundle_path.exists() {
-        let text = std::fs::read_to_string(&bundle_path).ok()?;
+    // Look for evidence.json in the evidence directory.
+    let evidence_path = evidence_dir.join("evidence.json");
+    if evidence_path.exists() {
+        let text = std::fs::read_to_string(&evidence_path).ok()?;
         let bundle: EvidenceBundle = serde_json::from_str(&text).ok()?;
         if bundle.proposal.as_ref().map(|p| p.id.as_str()) == Some(proposal_id) {
             return Some(bundle);
