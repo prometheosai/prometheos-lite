@@ -308,10 +308,12 @@ pub struct RegistryEntry {
 pub enum ProposalState {
     /// Identity reserved; generation not yet started.
     Reserved,
-    /// Generation in progress (model call running).
+    /// Generation in progress (model call running, heartbeat active).
     Generating,
-    /// Proposal generated and persisted; validation pending or in progress.
+    /// Proposal generated and persisted; hasn't started validation yet.
     ProposalGenerated,
+    /// Validation is actively running (heartbeat active).
+    Validating,
     /// Validation complete; evidence bundle finalized.
     ValidationComplete,
 }
@@ -497,17 +499,32 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<ReserveR
     Ok(ReserveResult::Owned(token))
 }
 
-/// Try to atomically take ownership of an existing registry entry.
+/// Result of an attempted takeover.
+#[derive(Debug)]
+enum TakeoverResult {
+    /// Successfully took ownership. Contains the new fencing token.
+    Taken(FenceToken),
+    /// Entry is still live (not stale or owned by another). Caller should wait.
+    StillLive,
+}
+
+/// Attempt an atomic takeover of a registry entry.
 ///
-/// The caller must have already verified that the entry is stale (for
-/// `Reserved`/`Generating`) or in a reclaimable state (`ProposalGenerated`).
-/// Returns `Some(FenceToken)` on success, `None` if another worker took
-/// ownership first, or `Err` on I/O failure.
+/// Under the registry lock:
+/// 1. Re-validates staleness using `is_entry_stale`.
+/// 2. Confirms the entry's state, owner, and epoch haven't changed since the
+///    caller's outer stale check.
+/// 3. Increments the epoch and assigns the new owner.
+///
+/// Returns `Taken(FenceToken)` on success, `StillLive` if the entry is not
+/// stale (heartbeat renewed between check and lock), or if
+/// another worker already claimed it, or `Err` on I/O failure.
 fn try_take_ownership(
     repo: &Path,
     identity_key: &str,
     new_owner: &str,
-) -> Result<Option<FenceToken>> {
+    lease_config: &LeaseConfig,
+) -> Result<TakeoverResult> {
     let lock_path = registry_lock_path(repo);
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
@@ -559,17 +576,52 @@ fn try_take_ownership(
         .get_mut(identity_key)
         .context("registry entry not found during takeover")?;
 
-    // Increment epoch to create a new fencing token.
+    // Re-validate stale status under the lock. A heartbeat may have renewed
+    // between the caller's outer stale check and this lock acquisition.
+    match entry.state {
+        ProposalState::Reserved | ProposalState::Generating | ProposalState::Validating => {
+            let stale = is_entry_stale(entry, lease_config)
+                .context("failed to check entry staleness during takeover")?;
+            if !stale {
+                // Entry is still live — another worker is actively renewing.
+                drop(lock_file);
+                return Ok(TakeoverResult::StillLive);
+            }
+        }
+        ProposalState::ProposalGenerated => {
+            // ProposalGenerated is always reclaimable: the previous owner has
+            // finished generation and hasn't entered Validating yet. No stale
+            // check needed — but we do verify the entry still exists.
+        }
+        ProposalState::ValidationComplete => {
+            // Terminal state — no takeover needed.
+            drop(lock_file);
+            return Ok(TakeoverResult::StillLive);
+        }
+    }
+
+    // Verify this entry hasn't already been taken by another worker.
+    // We check that the current epoch matches what the caller last observed.
+    // If the caller doesn't have a previous observation, we just take it
+    // (the stale check above already validated the entry is reclaimable).
+    // Generate a new epoch and assign the new owner.
     let new_epoch = entry.lease_epoch + 1;
     let now = now_iso();
     entry.owner_run_id = new_owner.to_string();
     entry.lease_epoch = new_epoch;
     entry.updated_at = now.clone();
-    entry.heartbeat_at = now;
+    entry.heartbeat_at = now.clone();
+    // Reset proposal_id for Reserved/Generating entries being reclaimed.
+    if matches!(
+        entry.state,
+        ProposalState::Reserved | ProposalState::Generating
+    ) {
+        entry.proposal_id = None;
+    }
     save_registry(repo, &registry)?;
 
     drop(lock_file);
-    Ok(Some(FenceToken {
+    Ok(TakeoverResult::Taken(FenceToken {
         owner_run_id: new_owner.to_string(),
         lease_epoch: new_epoch,
     }))
@@ -875,7 +927,17 @@ fn is_entry_stale(entry: &RegistryEntry, lease_config: &LeaseConfig) -> Result<b
                 .unwrap_or(std::time::Duration::ZERO);
             Ok(age > lease_config.generation_lease_timeout)
         }
-        ProposalState::ProposalGenerated | ProposalState::ValidationComplete => Ok(false),
+        ProposalState::ProposalGenerated | ProposalState::Validating => {
+            // Validating uses the same heartbeat-based stale check as Generating.
+            let t = parse_rfc3339(&entry.heartbeat_at)
+                .context("malformed heartbeat_at timestamp in registry entry")?;
+            let age = chrono::Utc::now()
+                .signed_duration_since(t)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO);
+            Ok(age > lease_config.generation_lease_timeout)
+        }
+        ProposalState::ValidationComplete => Ok(false),
     }
 }
 
@@ -1158,31 +1220,53 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         ..Default::default()
     };
 
-    // Spawn a heartbeat task that renews the lease while the provider call runs.
+    // Spawn a heartbeat task that renews the lease while the pipeline is active.
+    // The heartbeat runs from `Generating` through `Validating` and stops only
+    // when the pipeline reaches a terminal or `ValidationComplete`.
+    // Errors and ownership loss are propagated via the `heartbeat_status` channel.
     let heartbeat_repo = repo.clone();
     let heartbeat_key = identity_key.clone();
     let heartbeat_fence = fence.clone();
     let heartbeat_interval = config.lease_config.heartbeat_interval;
-    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::watch::channel(false);
+    let (heartbeat_status_tx, heartbeat_status_rx) =
+        tokio::sync::watch::channel::<Option<String>>(None);
     let heartbeat_handle = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(heartbeat_interval) => {}
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
+                _ = heartbeat_stop_rx.changed() => {
+                    if *heartbeat_stop_rx.borrow() {
                         break;
                     }
                 }
             }
-            if *stop_rx.borrow() {
+            if *heartbeat_stop_rx.borrow() {
                 break;
             }
-            if let Err(e) = renew_heartbeat(&heartbeat_repo, &heartbeat_key, &heartbeat_fence) {
-                eprintln!("heartbeat renewal failed: {e}");
-                break;
+            match renew_heartbeat(&heartbeat_repo, &heartbeat_key, &heartbeat_fence) {
+                Err(e) => {
+                    let _ = heartbeat_status_tx.send(Some(format!("{e:#}")));
+                    break;
+                }
+                Ok(false) => {
+                    let _ = heartbeat_status_tx.send(Some(
+                        "ownership lost: registry entry claimed by another worker".to_string(),
+                    ));
+                    break;
+                }
+                Ok(true) => {}
             }
         }
     });
+
+    macro_rules! check_heartbeat {
+        () => {
+            if let Some(msg) = heartbeat_status_rx.borrow().as_ref() {
+                bail!("heartbeat failure: {msg}");
+            }
+        };
+    }
 
     let gen_result = match crate::workflow::generate_proposal(
         &repo,
@@ -1196,28 +1280,12 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     )
     .await
     {
-        Ok(r) => {
-            // Stop heartbeat and check ownership before proceeding.
-            let _ = stop_tx.send(true);
-            let _ = heartbeat_handle.await;
-            r
-        }
+        Ok(r) => r,
         Err(e) => {
-            // Stop heartbeat.
-            let _ = stop_tx.send(true);
+            // Stop heartbeat and check for heartbeat errors first.
+            let _ = heartbeat_stop_tx.send(true);
             let _ = heartbeat_handle.await;
-
-            // Check ownership before recording failure.
-            if let Some(entry) = lookup_entry(&repo, &identity_key)
-                && (entry.owner_run_id != fence.owner_run_id
-                    || entry.lease_epoch != fence.lease_epoch)
-            {
-                bail!(
-                    "ownership lost during generation (found owner={}, epoch={})",
-                    entry.owner_run_id,
-                    entry.lease_epoch,
-                );
-            }
+            check_heartbeat!();
 
             let msg = e.to_string();
             let classification = classify_generation_error(&msg);
@@ -1234,17 +1302,8 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         }
     };
 
-    // Stop heartbeat (completed successfully — already stopped above).
-    // Verify ownership is still held.
-    if let Some(entry) = lookup_entry(&repo, &identity_key)
-        && (entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch)
-    {
-        bail!(
-            "ownership lost after generation (found owner={}, epoch={})",
-            entry.owner_run_id,
-            entry.lease_epoch,
-        );
-    }
+    // Check heartbeat — ownership must still be held.
+    check_heartbeat!();
 
     update_identity_state(&identity_path, EvaluationState::ProposalGenerated);
 
@@ -1285,14 +1344,28 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     // Record that it passed.
     update_identity_state(&identity_path, EvaluationState::GovernancePassed);
 
-    // ---- Stage: Isolated dry-run validation ----
+    // ---- Stage: Isolated dry-run validation (with heartbeat) ----
+    // Transition to Validating state so other workers know validation is live.
+    transition_entry(
+        &repo,
+        &identity_key,
+        ProposalState::Validating,
+        Some(&gen_result.id),
+        &fence,
+    )
+    .context("failed to transition to Validating state")?;
     update_identity_state(&identity_path, EvaluationState::Validating);
+
     let validation_result = run_isolated_validation(
         &repo,
         &gen_result.id,
         config.manifest.validation_command.as_deref(),
         &evidence_dir,
     );
+
+    // Check heartbeat after validation — must still own the entry.
+    check_heartbeat!();
+
     update_identity_state(&identity_path, EvaluationState::ValidationComplete);
 
     match &validation_result {
@@ -1343,6 +1416,11 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     if let Ok(head) = git_rev_parse_head(&repo) {
         bundle.repo_pin_after = head;
     }
+
+    // ---- Finalise: stop heartbeat FIRST, then write bundle and transition. ----
+    let _ = heartbeat_stop_tx.send(true);
+    let _ = heartbeat_handle.await;
+
     write_bundle(&evidence_dir, &bundle)?;
 
     // Transition to ValidationComplete AFTER bundle is durable.
@@ -1419,10 +1497,10 @@ async fn wait_and_reuse(
                 .await;
             }
             Some(e) if e.state == ProposalState::ProposalGenerated => {
-                // Generation is done but validation hasn't completed.
+                // Generation is done but validation hasn't started.
                 // Take ownership atomically, then resume validation.
-                match try_take_ownership(repo, identity_key, run_id)? {
-                    Some(fence) => {
+                match try_take_ownership(repo, identity_key, run_id, lease_config)? {
+                    TakeoverResult::Taken(fence) => {
                         let proposal_id = e
                             .proposal_id
                             .as_deref()
@@ -1442,8 +1520,8 @@ async fn wait_and_reuse(
                         )
                         .await;
                     }
-                    None => {
-                        // Another worker took ownership first. Retry.
+                    TakeoverResult::StillLive => {
+                        // Another worker owns it or is actively renewing. Retry.
                         tokio::time::sleep(poll_interval).await;
                         elapsed += poll_interval;
                         continue;
@@ -1451,7 +1529,7 @@ async fn wait_and_reuse(
                 }
             }
             Some(e) => {
-                // Still in Reserved or Generating state.
+                // Still in Reserved, Generating or Validating state.
                 let stale = match is_entry_stale(&e, lease_config) {
                     Ok(s) => s,
                     Err(err) => {
@@ -1469,8 +1547,8 @@ async fn wait_and_reuse(
 
                 if stale {
                     // Attempt to take ownership of the expired entry.
-                    match try_take_ownership(repo, identity_key, run_id)? {
-                        Some(fence) => {
+                    match try_take_ownership(repo, identity_key, run_id, lease_config)? {
+                        TakeoverResult::Taken(fence) => {
                             // We now own the expired entry. Release and let the caller retry
                             // from scratch (or continue with the new owner).
                             release_reservation(repo, identity_key, &fence)
@@ -1479,13 +1557,15 @@ async fn wait_and_reuse(
                                 "stale {} entry reclaimed; caller should retry now owning it",
                                 match e.state {
                                     ProposalState::Reserved => "Reserved",
-                                    ProposalState::Generating => "Generating",
+                                    ProposalState::Generating | ProposalState::Validating =>
+                                        "Generating",
                                     _ => "entry",
                                 }
                             );
                         }
-                        None => {
-                            // Another worker reclaimed it first. Continue waiting.
+                        TakeoverResult::StillLive => {
+                            // Another worker reclaimed it first, or the entry is still live.
+                            // Continue waiting.
                             tokio::time::sleep(poll_interval).await;
                             elapsed += poll_interval;
                             continue;
@@ -1610,6 +1690,51 @@ async fn resume_validation(
         );
     }
 
+    // Transition to Validating state to protect the live validation from takeover.
+    transition_entry(
+        repo,
+        identity_key,
+        ProposalState::Validating,
+        Some(&proposal.id),
+        fence,
+    )
+    .context("failed to transition to Validating state in resume")?;
+
+    // Spawn a heartbeat task to protect validation from stale-reclaim.
+    let hb_repo = repo.to_path_buf();
+    let hb_key = identity_key.to_string();
+    let hb_fence = fence.clone();
+    let hb_interval = config.lease_config.heartbeat_interval;
+    let (hb_stop_tx, mut hb_stop_rx) = tokio::sync::watch::channel(false);
+    let (hb_status_tx, hb_status_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    let hb_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(hb_interval) => {}
+                _ = hb_stop_rx.changed() => {
+                    if *hb_stop_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+            if *hb_stop_rx.borrow() {
+                break;
+            }
+            match renew_heartbeat(&hb_repo, &hb_key, &hb_fence) {
+                Err(e) => {
+                    let _ = hb_status_tx.send(Some(format!("{e:#}")));
+                    break;
+                }
+                Ok(false) => {
+                    let _ = hb_status_tx
+                        .send(Some("ownership lost during resume validation".to_string()));
+                    break;
+                }
+                Ok(true) => {}
+            }
+        }
+    });
+
     // Run validation on the existing proposal.
     let validation_result = run_isolated_validation(
         repo,
@@ -1617,6 +1742,13 @@ async fn resume_validation(
         manifest.validation_command.as_deref(),
         evidence_dir,
     );
+
+    // Stop heartbeat and check for errors.
+    let _ = hb_stop_tx.send(true);
+    let _ = hb_handle.await;
+    if let Some(msg) = hb_status_rx.borrow().as_ref() {
+        bail!("heartbeat failure during resume validation: {msg}");
+    }
 
     match &validation_result {
         Ok(vr) => {
