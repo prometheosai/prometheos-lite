@@ -95,6 +95,51 @@ fn default_min_disk_bytes() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Lease configuration for ownership fencing
+// ---------------------------------------------------------------------------
+
+/// Lease and heartbeat configuration for ownership fencing.
+///
+/// Controls how long an entry may stay in `Reserved` or `Generating` before
+/// another worker may reclaim it. Defaults are conservative for production;
+/// tests inject shorter durations.
+#[derive(Debug, Clone)]
+pub struct LeaseConfig {
+    /// How long a `Reserved` entry can exist before it is considered stale.
+    /// Default: 120 seconds.
+    pub stale_reservation_timeout: std::time::Duration,
+    /// How long a `Generating` entry may go without a heartbeat before it is
+    /// considered dead and reclaimable. Default: 600 seconds.
+    pub generation_lease_timeout: std::time::Duration,
+    /// How often the heartbeat task renews the lease on behalf of a live
+    /// generation worker. Must be meaningfully shorter than
+    /// `generation_lease_timeout` — preferably ≤ ⅓ of it. Default: 180 seconds.
+    pub heartbeat_interval: std::time::Duration,
+}
+
+impl Default for LeaseConfig {
+    fn default() -> Self {
+        Self {
+            stale_reservation_timeout: std::time::Duration::from_secs(120),
+            generation_lease_timeout: std::time::Duration::from_secs(600),
+            heartbeat_interval: std::time::Duration::from_secs(180),
+        }
+    }
+}
+
+/// Fencing token proving ownership of a registry entry.
+///
+/// Every state mutation under the registry lock must verify that the
+/// caller's `owner_run_id` and `lease_epoch` still match the entry.
+#[derive(Debug, Clone)]
+pub struct FenceToken {
+    /// Unique run id of the process that owns this entry.
+    pub owner_run_id: String,
+    /// Monotonically increasing epoch. Each takeover increments this value.
+    pub lease_epoch: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Execution identity — persisted before any model call
 // ---------------------------------------------------------------------------
 
@@ -236,12 +281,22 @@ pub struct RegistryEntry {
     pub state: ProposalState,
     /// Proposal ID (set after generation completes).
     pub proposal_id: Option<String>,
-    /// Run ID of the process that holds the reservation.
-    pub run_id: String,
+    /// Run ID of the process that holds the ownership of this entry.
+    /// Every state mutation checks that the caller's run id matches.
+    pub owner_run_id: String,
+    /// Monotonically increasing fencing token. Each takeover or fresh
+    /// reservation starts at epoch 1; every subsequent takeover
+    /// increments it. State mutations require both `owner_run_id` and
+    /// `lease_epoch` to match the caller's token.
+    pub lease_epoch: u64,
     /// RFC3339 timestamp when the reservation was created.
     pub reserved_at: String,
     /// RFC3339 timestamp of the last state transition.
     pub updated_at: String,
+    /// RFC3339 timestamp of the last heartbeat renewal.
+    /// Only relevant in `Generating` state — checked by other workers
+    /// that want to reclaim an expired lease.
+    pub heartbeat_at: String,
     /// Evidence directory path (set when validation completes).
     /// Used to locate preserved evidence across different run directories.
     pub evidence_dir: Option<String>,
@@ -341,12 +396,22 @@ fn save_registry(repo: &Path, registry: &ProposalRegistry) -> Result<()> {
     Ok(())
 }
 
+/// Result of attempting to reserve or reclaim an identity key.
+#[derive(Debug)]
+enum ReserveResult {
+    /// Successfully acquired ownership. Contains the fencing token.
+    Owned(FenceToken),
+    /// Entry already exists and is owned by another live worker.
+    /// Caller should wait and reuse.
+    AlreadyExists,
+}
+
 /// Try to acquire an atomic reservation for an identity key.
 ///
-/// Returns `Ok(true)` if the reservation was acquired (new entry).
-/// Returns `Ok(false)` if the entry already exists (caller should reuse or wait).
+/// Returns `Owned(FenceToken)` if the reservation was acquired.
+/// Returns `AlreadyExists` if the entry already exists (caller should reuse or wait).
 /// Returns `Err` on I/O failure.
-fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
+fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<ReserveResult> {
     let lock_path = registry_lock_path(repo);
 
     // Ensure the workflow directory exists before creating the lock file.
@@ -363,7 +428,7 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
         .context("failed to create registry lock file")?;
 
     // Use platform-exclusive lock (flock on Unix, LockFileEx on Windows).
-    // Fix 3: Check return value and fail closed on error.
+    // Check return value and fail closed on error.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -394,7 +459,8 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
         };
         if result == 0 {
             // Lock held by another process.
-            return Ok(false);
+            drop(lock_file);
+            return Ok(ReserveResult::AlreadyExists);
         }
     }
 
@@ -402,29 +468,186 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
     let mut registry = load_registry(repo).context("failed to read registry under lock")?;
     if registry.entries.contains_key(identity_key) {
         // Another process reserved it first.
-        // Fix 2: Do NOT delete the lock file — just drop the handle to release.
         drop(lock_file);
-        return Ok(false);
+        return Ok(ReserveResult::AlreadyExists);
     }
 
-    // Reserve the identity.
+    // Reserve the identity with initial epoch 1.
     let now = now_iso();
     registry.entries.insert(
         identity_key.to_string(),
         RegistryEntry {
             state: ProposalState::Reserved,
             proposal_id: None,
-            run_id: run_id.to_string(),
+            owner_run_id: run_id.to_string(),
+            lease_epoch: 1,
             reserved_at: now.clone(),
-            updated_at: now,
+            updated_at: now.clone(),
+            heartbeat_at: now,
             evidence_dir: None,
         },
     );
     save_registry(repo, &registry)?;
 
-    // Fix 2: Do NOT delete the lock file — just drop the handle to release.
     drop(lock_file);
-    Ok(true)
+    let token = FenceToken {
+        owner_run_id: run_id.to_string(),
+        lease_epoch: 1,
+    };
+    Ok(ReserveResult::Owned(token))
+}
+
+/// Try to atomically take ownership of an existing registry entry.
+///
+/// The caller must have already verified that the entry is stale (for
+/// `Reserved`/`Generating`) or in a reclaimable state (`ProposalGenerated`).
+/// Returns `Some(FenceToken)` on success, `None` if another worker took
+/// ownership first, or `Err` on I/O failure.
+fn try_take_ownership(
+    repo: &Path,
+    identity_key: &str,
+    new_owner: &str,
+) -> Result<Option<FenceToken>> {
+    let lock_path = registry_lock_path(repo);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file for takeover")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock for takeover: {err}");
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            bail!("failed to acquire lock for registry takeover");
+        }
+    }
+
+    let mut registry = load_registry(repo).context("failed to read registry for takeover")?;
+    let entry = registry
+        .entries
+        .get_mut(identity_key)
+        .context("registry entry not found during takeover")?;
+
+    // Increment epoch to create a new fencing token.
+    let new_epoch = entry.lease_epoch + 1;
+    let now = now_iso();
+    entry.owner_run_id = new_owner.to_string();
+    entry.lease_epoch = new_epoch;
+    entry.updated_at = now.clone();
+    entry.heartbeat_at = now;
+    save_registry(repo, &registry)?;
+
+    drop(lock_file);
+    Ok(Some(FenceToken {
+        owner_run_id: new_owner.to_string(),
+        lease_epoch: new_epoch,
+    }))
+}
+
+/// Renew the heartbeat timestamp for a registry entry.
+///
+/// Only the current owner (matching `owner_run_id` and `lease_epoch`) may
+/// renew. Returns `Ok(true)` on success, `Ok(false)` if ownership was lost
+/// (another worker took over), or `Err` on I/O failure.
+fn renew_heartbeat(repo: &Path, identity_key: &str, fence: &FenceToken) -> Result<bool> {
+    let lock_path = registry_lock_path(repo);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file for heartbeat")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock for heartbeat: {err}");
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            bail!("failed to acquire lock for heartbeat renewal");
+        }
+    }
+
+    let mut registry = load_registry(repo).context("failed to read registry for heartbeat")?;
+    let entry_option = registry.entries.get_mut(identity_key);
+
+    match entry_option {
+        Some(e) if e.owner_run_id == fence.owner_run_id && e.lease_epoch == fence.lease_epoch => {
+            e.heartbeat_at = now_iso();
+            e.updated_at = now_iso();
+            save_registry(repo, &registry)?;
+            drop(lock_file);
+            Ok(true)
+        }
+        Some(_) => {
+            // Ownership has been taken by another worker.
+            drop(lock_file);
+            Ok(false)
+        }
+        None => {
+            // Entry was removed.
+            drop(lock_file);
+            Ok(false)
+        }
+    }
 }
 
 /// Look up the registry entry for an identity key.
@@ -434,22 +657,26 @@ fn lookup_entry(repo: &Path, identity_key: &str) -> Option<RegistryEntry> {
 }
 
 /// Transition the state of a registry entry.
+/// Requires ownership fencing — the caller must provide a valid FenceToken.
 fn transition_entry(
     repo: &Path,
     identity_key: &str,
     new_state: ProposalState,
     proposal_id: Option<&str>,
+    fence: &FenceToken,
 ) -> Result<()> {
-    transition_entry_with_evidence(repo, identity_key, new_state, proposal_id, None)
+    transition_entry_with_evidence(repo, identity_key, new_state, proposal_id, None, fence)
 }
 
 /// Transition the state of a registry entry, optionally setting the evidence dir.
+/// Requires ownership fencing — the caller must provide a valid FenceToken.
 fn transition_entry_with_evidence(
     repo: &Path,
     identity_key: &str,
     new_state: ProposalState,
     proposal_id: Option<&str>,
     evidence_dir: Option<&str>,
+    fence: &FenceToken,
 ) -> Result<()> {
     let lock_path = registry_lock_path(repo);
 
@@ -465,7 +692,7 @@ fn transition_entry_with_evidence(
         .open(&lock_path)
         .context("failed to create registry lock file for transition")?;
 
-    // Fix 3: Check flock return value.
+    // Check flock return value.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -505,6 +732,17 @@ fn transition_entry_with_evidence(
         .get_mut(identity_key)
         .context("registry entry not found during transition")?;
 
+    // Fencing check: verify the caller still owns this entry.
+    if entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch {
+        bail!(
+            "ownership lost (expected owner={}, epoch={}; found owner={}, epoch={})",
+            fence.owner_run_id,
+            fence.lease_epoch,
+            entry.owner_run_id,
+            entry.lease_epoch,
+        );
+    }
+
     entry.state = new_state;
     entry.updated_at = now_iso();
     if let Some(pid) = proposal_id {
@@ -515,14 +753,15 @@ fn transition_entry_with_evidence(
     }
     save_registry(repo, &registry)?;
 
-    // Fix 2: Do NOT delete the lock file — just drop the handle to release.
+    // Do NOT delete the lock file — just drop the handle to release.
     drop(lock_file);
     Ok(())
 }
 
 /// Release a reservation (remove the entry from the registry).
 /// Called when generation fails so another process can retry.
-fn release_reservation(repo: &Path, identity_key: &str) -> Result<()> {
+/// Requires ownership fencing.
+fn release_reservation(repo: &Path, identity_key: &str, fence: &FenceToken) -> Result<()> {
     let lock_path = registry_lock_path(repo);
 
     // Ensure the workflow directory exists before creating the lock file.
@@ -537,7 +776,7 @@ fn release_reservation(repo: &Path, identity_key: &str) -> Result<()> {
         .open(&lock_path)
         .context("failed to create registry lock file for release")?;
 
-    // Fix 3: Check flock return value.
+    // Check flock return value.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -572,12 +811,79 @@ fn release_reservation(repo: &Path, identity_key: &str) -> Result<()> {
     }
 
     let mut registry = load_registry(repo).context("failed to read registry for release")?;
-    registry.entries.remove(identity_key);
+    let entry = registry.entries.get_mut(identity_key);
+
+    match entry {
+        Some(ref e)
+            if e.owner_run_id == fence.owner_run_id && e.lease_epoch == fence.lease_epoch =>
+        {
+            // Owner matches — remove the entry.
+            registry.entries.remove(identity_key);
+        }
+        Some(_) => {
+            // Ownership has changed. Do not remove the entry.
+            bail!(
+                "cannot release reservation: ownership lost (expected owner={}, epoch={})",
+                fence.owner_run_id,
+                fence.lease_epoch,
+            );
+        }
+        None => {
+            // Entry already removed — that's fine.
+        }
+    }
+
     save_registry(repo, &registry)?;
 
-    // Fix 2: Do NOT delete the lock file — just drop the handle to release.
+    // Do NOT delete the lock file — just drop the handle to release.
     drop(lock_file);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Lease / stale-entry helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether a registry entry is stale according to its state and
+/// the given lease configuration.
+///
+/// - `Reserved`: stale when `reserved_at` is older than
+///   `stale_reservation_timeout`.
+/// - `Generating`: stale when `heartbeat_at` is older than
+///   `generation_lease_timeout`.
+/// - Other states: never stale (they should be consumed or returned).
+///
+/// Malformed timestamps fail closed (return an error) so that corrupt
+/// data cannot silently make an entry immortal.
+fn is_entry_stale(entry: &RegistryEntry, lease_config: &LeaseConfig) -> Result<bool> {
+    match entry.state {
+        ProposalState::Reserved => {
+            let t = parse_rfc3339(&entry.reserved_at)
+                .context("malformed reserved_at timestamp in registry entry")?;
+            let age = chrono::Utc::now()
+                .signed_duration_since(t)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO);
+            Ok(age > lease_config.stale_reservation_timeout)
+        }
+        ProposalState::Generating => {
+            let t = parse_rfc3339(&entry.heartbeat_at)
+                .context("malformed heartbeat_at timestamp in registry entry")?;
+            let age = chrono::Utc::now()
+                .signed_duration_since(t)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO);
+            Ok(age > lease_config.generation_lease_timeout)
+        }
+        ProposalState::ProposalGenerated | ProposalState::ValidationComplete => Ok(false),
+    }
+}
+
+/// Parse an RFC3339 timestamp string, returning the `chrono::DateTime<Utc>`.
+fn parse_rfc3339(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .context("invalid RFC3339 timestamp")
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +1015,20 @@ pub struct EvaluationConfig {
     pub manifest: TaskManifest,
     pub provider: Box<dyn PatchProvider>,
     pub route_info: Option<ProviderRouteInfo>,
+    /// Lease and heartbeat configuration. Defaults are conservative for
+    /// production; tests should inject short durations.
+    pub lease_config: LeaseConfig,
+}
+
+impl EvaluationConfig {
+    pub fn new(manifest: TaskManifest, provider: Box<dyn PatchProvider>) -> Self {
+        Self {
+            manifest,
+            provider,
+            route_info: None,
+            lease_config: LeaseConfig::default(),
+        }
+    }
 }
 
 /// Run the full evaluation pipeline and return the evidence bundle.
@@ -778,23 +1098,25 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
 
     // ---- Atomic reservation gate ----
     // Try to reserve the identity. If another process holds it, wait/reuse.
-    let reserved = try_reserve(&repo, &identity_key, &run_id)
-        .context("failed to attempt identity reservation")?;
-    if !reserved {
-        // Another process reserved this identity. Wait for it to complete,
-        // then reuse the existing proposal.
-        return wait_and_reuse(
-            &repo,
-            &commit_at_start,
-            &run_id,
-            &config.manifest,
-            &config,
-            &evidence_dir,
-            &governance_scope,
-            &identity_key,
-        )
-        .await;
-    }
+    let fence = match try_reserve(&repo, &identity_key, &run_id)
+        .context("failed to attempt identity reservation")?
+    {
+        ReserveResult::Owned(token) => token,
+        ReserveResult::AlreadyExists => {
+            return wait_and_reuse(
+                &repo,
+                &commit_at_start,
+                &run_id,
+                &config.manifest,
+                &config,
+                &evidence_dir,
+                &governance_scope,
+                &identity_key,
+                &config.lease_config,
+            )
+            .await;
+        }
+    };
 
     // ---- Stage: Preflight ----
     let preflight = run_preflight(&repo, &commit_at_start, &config.manifest, &evidence_dir);
@@ -807,14 +1129,22 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
             .to_string();
         bundle.completed_at = now_iso();
         write_bundle(&evidence_dir, &bundle)?;
+        // Release the reservation so another process can retry.
+        let _ = release_reservation(&repo, &identity_key, &fence);
         return Ok(bundle);
     }
     let _preflight = preflight.unwrap();
     update_identity_state(&identity_path, EvaluationState::PreflightPassed);
 
-    // ---- Stage: Generate ----
-    transition_entry(&repo, &identity_key, ProposalState::Generating, None)
-        .context("failed to transition to Generating state")?;
+    // ---- Stage: Generate (with heartbeat) ----
+    transition_entry(
+        &repo,
+        &identity_key,
+        ProposalState::Generating,
+        None,
+        &fence,
+    )
+    .context("failed to transition to Generating state")?;
     update_identity_state(&identity_path, EvaluationState::Generating);
     let scope = GenerateScope {
         allowed_paths: config.manifest.allowed_paths.clone(),
@@ -828,6 +1158,32 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         ..Default::default()
     };
 
+    // Spawn a heartbeat task that renews the lease while the provider call runs.
+    let heartbeat_repo = repo.clone();
+    let heartbeat_key = identity_key.clone();
+    let heartbeat_fence = fence.clone();
+    let heartbeat_interval = config.lease_config.heartbeat_interval;
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let heartbeat_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(heartbeat_interval) => {}
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+            if *stop_rx.borrow() {
+                break;
+            }
+            if let Err(e) = renew_heartbeat(&heartbeat_repo, &heartbeat_key, &heartbeat_fence) {
+                eprintln!("heartbeat renewal failed: {e}");
+                break;
+            }
+        }
+    });
+
     let gen_result = match crate::workflow::generate_proposal(
         &repo,
         &config.manifest.goal,
@@ -840,8 +1196,29 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     )
     .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            // Stop heartbeat and check ownership before proceeding.
+            let _ = stop_tx.send(true);
+            let _ = heartbeat_handle.await;
+            r
+        }
         Err(e) => {
+            // Stop heartbeat.
+            let _ = stop_tx.send(true);
+            let _ = heartbeat_handle.await;
+
+            // Check ownership before recording failure.
+            if let Some(entry) = lookup_entry(&repo, &identity_key)
+                && (entry.owner_run_id != fence.owner_run_id
+                    || entry.lease_epoch != fence.lease_epoch)
+            {
+                bail!(
+                    "ownership lost during generation (found owner={}, epoch={})",
+                    entry.owner_run_id,
+                    entry.lease_epoch,
+                );
+            }
+
             let msg = e.to_string();
             let classification = classify_generation_error(&msg);
             bundle.failure_classification = Some(classification);
@@ -850,22 +1227,36 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
                 .to_string();
             bundle.completed_at = now_iso();
             // Release the reservation so another process can retry.
-            let _ = release_reservation(&repo, &identity_key);
+            release_reservation(&repo, &identity_key, &fence)
+                .context("failed to release reservation after generation failure")?;
             write_bundle(&evidence_dir, &bundle)?;
             return Ok(bundle);
         }
     };
+
+    // Stop heartbeat (completed successfully — already stopped above).
+    // Verify ownership is still held.
+    if let Some(entry) = lookup_entry(&repo, &identity_key)
+        && (entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch)
+    {
+        bail!(
+            "ownership lost after generation (found owner={}, epoch={})",
+            entry.owner_run_id,
+            entry.lease_epoch,
+        );
+    }
+
     update_identity_state(&identity_path, EvaluationState::ProposalGenerated);
 
     // Register the proposal in the registry.
-    if let Err(e) = transition_entry(
+    transition_entry(
         &repo,
         &identity_key,
         ProposalState::ProposalGenerated,
         Some(&gen_result.id),
-    ) {
-        eprintln!("warning: failed to transition registry to ProposalGenerated: {e}");
-    }
+        &fence,
+    )
+    .context("failed to transition registry to ProposalGenerated")?;
 
     let proposal = load_proposal_from_repo(&repo, &gen_result.id)?;
     bundle.proposal = Some(ProposalRecord {
@@ -954,17 +1345,17 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     }
     write_bundle(&evidence_dir, &bundle)?;
 
-    // Fix 5: Transition to ValidationComplete AFTER bundle is durable.
-    // Fix 1: Set evidence_dir so cross-run resume can find the bundle.
-    if let Err(e) = transition_entry_with_evidence(
+    // Transition to ValidationComplete AFTER bundle is durable.
+    // Set evidence_dir so cross-run resume can find the bundle.
+    transition_entry_with_evidence(
         &repo,
         &identity_key,
         ProposalState::ValidationComplete,
         Some(&gen_result.id),
         Some(evidence_dir.to_str().unwrap_or("")),
-    ) {
-        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
-    }
+        &fence,
+    )
+    .context("failed to transition registry to ValidationComplete")?;
 
     Ok(bundle)
 }
@@ -975,10 +1366,12 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
 
 /// Wait for another process to complete its reservation, then reuse the result.
 ///
-/// This handles three cases:
-/// 1. The other process completed validation → return preserved evidence.
-/// 2. The other process completed generation but not validation → resume validation.
-/// 3. The other process is still in progress → wait and retry.
+/// This handles five cases:
+/// 1. ValidationComplete → return preserved evidence.
+/// 2. ProposalGenerated → take ownership, resume validation.
+/// 3. Reserved stale → take ownership, run generation from scratch.
+/// 4. Generating stale heartbeat → take ownership, run generation from scratch.
+/// 5. Reserved/Generating fresh → wait and retry.
 async fn wait_and_reuse(
     repo: &Path,
     commit_at_start: &str,
@@ -988,6 +1381,7 @@ async fn wait_and_reuse(
     evidence_dir: &Path,
     governance_scope: &GovernanceScopeSnapshot,
     identity_key: &str,
+    lease_config: &LeaseConfig,
 ) -> Result<EvidenceBundle> {
     // Run validation-specific preflight first.
     run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
@@ -1006,7 +1400,6 @@ async fn wait_and_reuse(
                     .as_deref()
                     .context("ValidationComplete entry missing proposal_id")?;
                 let proposal = load_proposal_from_repo(repo, proposal_id)?;
-                // Use the evidence_dir from the registry entry (the original run's dir).
                 let original_evidence_dir_str = e
                     .evidence_dir
                     .as_deref()
@@ -1026,72 +1419,80 @@ async fn wait_and_reuse(
                 .await;
             }
             Some(e) if e.state == ProposalState::ProposalGenerated => {
-                // The other process finished generation but not validation.
-                // Resume validation from this process.
-                let proposal_id = e
-                    .proposal_id
-                    .as_deref()
-                    .context("ProposalGenerated entry missing proposal_id")?;
-                let proposal = load_proposal_from_repo(repo, proposal_id)?;
-                return resume_validation(
-                    repo,
-                    commit_at_start,
-                    run_id,
-                    manifest,
-                    config,
-                    evidence_dir,
-                    governance_scope,
-                    &proposal,
-                    identity_key,
-                )
-                .await;
+                // Generation is done but validation hasn't completed.
+                // Take ownership atomically, then resume validation.
+                match try_take_ownership(repo, identity_key, run_id)? {
+                    Some(fence) => {
+                        let proposal_id = e
+                            .proposal_id
+                            .as_deref()
+                            .context("ProposalGenerated entry missing proposal_id")?;
+                        let proposal = load_proposal_from_repo(repo, proposal_id)?;
+                        return resume_validation(
+                            repo,
+                            commit_at_start,
+                            run_id,
+                            manifest,
+                            config,
+                            evidence_dir,
+                            governance_scope,
+                            &proposal,
+                            identity_key,
+                            &fence,
+                        )
+                        .await;
+                    }
+                    None => {
+                        // Another worker took ownership first. Retry.
+                        tokio::time::sleep(poll_interval).await;
+                        elapsed += poll_interval;
+                        continue;
+                    }
+                }
             }
             Some(e) => {
-                // Still in Reserved or Generating state. Wait and retry.
-                //
-                // Fix 2: Only auto-release `Reserved` entries after stale threshold.
-                // `Generating` entries are protected by a heartbeat: the generating
-                // process must call `transition_entry` (which updates `updated_at`)
-                // within the generation timeout. If `updated_at` is too old,
-                // the generation process is considered dead.
-                let stale_threshold = std::time::Duration::from_secs(120); // 2 minutes
-                let generation_timeout = std::time::Duration::from_secs(600); // 10 minutes
-
-                let (is_stale, state_label) = match e.state {
-                    ProposalState::Reserved => {
-                        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&e.reserved_at) {
-                            let age = chrono::Utc::now()
-                                .signed_duration_since(t)
-                                .to_std()
-                                .unwrap_or(std::time::Duration::ZERO);
-                            (age > stale_threshold, "Reserved")
-                        } else {
-                            (false, "Reserved")
-                        }
+                // Still in Reserved or Generating state.
+                let stale = match is_entry_stale(&e, lease_config) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        // Malformed timestamp — fail closed.
+                        bail!(
+                            "failed to check staleness for {} entry: {err}",
+                            match e.state {
+                                ProposalState::Reserved => "Reserved",
+                                ProposalState::Generating => "Generating",
+                                _ => "unknown",
+                            }
+                        );
                     }
-                    ProposalState::Generating => {
-                        // Check heartbeat via updated_at. If the generating process
-                        // hasn't updated in > generation_timeout, it's dead.
-                        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&e.updated_at) {
-                            let age = chrono::Utc::now()
-                                .signed_duration_since(t)
-                                .to_std()
-                                .unwrap_or(std::time::Duration::ZERO);
-                            (age > generation_timeout, "Generating")
-                        } else {
-                            (false, "Generating")
-                        }
-                    }
-                    _ => (false, "other"),
                 };
 
-                if is_stale {
-                    let _ = release_reservation(repo, identity_key);
-                    bail!(
-                        "stale {} entry detected; reservation released, caller should retry",
-                        state_label
-                    );
+                if stale {
+                    // Attempt to take ownership of the expired entry.
+                    match try_take_ownership(repo, identity_key, run_id)? {
+                        Some(fence) => {
+                            // We now own the expired entry. Release and let the caller retry
+                            // from scratch (or continue with the new owner).
+                            release_reservation(repo, identity_key, &fence)
+                                .context("failed to release stale entry after takeover")?;
+                            bail!(
+                                "stale {} entry reclaimed; caller should retry now owning it",
+                                match e.state {
+                                    ProposalState::Reserved => "Reserved",
+                                    ProposalState::Generating => "Generating",
+                                    _ => "entry",
+                                }
+                            );
+                        }
+                        None => {
+                            // Another worker reclaimed it first. Continue waiting.
+                            tokio::time::sleep(poll_interval).await;
+                            elapsed += poll_interval;
+                            continue;
+                        }
+                    }
                 }
+
                 if elapsed >= max_wait {
                     bail!(
                         "timed out waiting for another process to complete \
@@ -1155,6 +1556,7 @@ fn find_existing_evidence(evidence_dir: &Path, proposal_id: &str) -> Option<Evid
 }
 
 /// Resume validation from the ProposalGenerated state.
+/// The caller must already own the entry (via `FenceToken`).
 async fn resume_validation(
     repo: &Path,
     commit_at_start: &str,
@@ -1165,6 +1567,7 @@ async fn resume_validation(
     governance_scope: &GovernanceScopeSnapshot,
     proposal: &ProposalArtifact,
     identity_key: &str,
+    fence: &FenceToken,
 ) -> Result<EvidenceBundle> {
     let mut bundle = new_bundle_from_identity(
         run_id,
@@ -1195,6 +1598,17 @@ async fn resume_validation(
         input_digest: Some(hash_str(&manifest.goal)),
         patch_hash: Some(proposal.patch_hash.clone()),
     };
+
+    // Check ownership before starting validation.
+    if let Some(entry) = lookup_entry(repo, identity_key)
+        && (entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch)
+    {
+        bail!(
+            "ownership lost before validation (found owner={}, epoch={})",
+            entry.owner_run_id,
+            entry.lease_epoch,
+        );
+    }
 
     // Run validation on the existing proposal.
     let validation_result = run_isolated_validation(
@@ -1248,20 +1662,19 @@ async fn resume_validation(
         bundle.repo_pin_after = head;
     }
 
-    // Fix 5: Write bundle BEFORE transitioning to ValidationComplete.
-    // The bundle must be durable before the registry claims completion.
+    // Write bundle BEFORE transitioning to ValidationComplete.
     write_bundle(evidence_dir, &bundle)?;
 
-    // Fix 1: Set evidence_dir in registry so cross-run resume can find the bundle.
-    if let Err(e) = transition_entry_with_evidence(
+    // Set evidence_dir in registry so cross-run resume can find the bundle.
+    transition_entry_with_evidence(
         repo,
         identity_key,
         ProposalState::ValidationComplete,
         Some(&proposal.id),
         Some(evidence_dir.to_str().unwrap_or("")),
-    ) {
-        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
-    }
+        fence,
+    )
+    .context("failed to transition registry to ValidationComplete")?;
 
     Ok(bundle)
 }

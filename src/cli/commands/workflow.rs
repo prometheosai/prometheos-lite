@@ -355,6 +355,7 @@ impl WorkflowCommand {
                     manifest: task_manifest,
                     provider: boxed,
                     route_info,
+                    lease_config: Default::default(),
                 };
 
                 let bundle = evaluate::evaluate(eval_config).await?;

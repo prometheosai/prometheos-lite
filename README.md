@@ -8,6 +8,18 @@ Under the hood, PrometheOS Lite is evolving into a broader runtime for agentic s
 
 > Alpha status: the supported alpha path is `prometheos work`. Experimental surfaces exist in the repo but are not yet promised as stable product surfaces. See the [Product Surface Inventory](docs/guides/product-surface-inventory.md) for the full classification.
 
+## Product maturity and roadmap
+
+PrometheOS Lite separates shipped capability from planned direction:
+
+- **Stable alpha:** Repo Workbench through `prometheos work`, including repository analysis, review artifacts, provenance, memory, continuation, and recorded approval decisions.
+- **Experimental:** Runtime surfaces already present in the repository, including flow execution, harness workflows, API, frontend, memory, and the governed evaluation work being developed through Fast Governed Loop V1.
+- **Planned:** Production hardening, reusable governed node contracts, deterministic graph orchestration, specialized agent nodes, a broader developer product, external validation, and integration with the full PrometheOS system.
+
+Planned capabilities are roadmap targets, not shipped functionality or alpha promises. They become part of the public product promise only after implementation, verification, human review, and the relevant release decision.
+
+Development sequencing is tracked in the [governed execution roadmap](https://github.com/prometheosai/prometheos-lite/issues/147).
+
 ## Stable alpha surface
 
 - `prometheos work` — Repo Workbench CRUD, artifacts, memory, continue, approve
@@ -102,6 +114,13 @@ PrometheOS Lite
 │   ├── Configuration
 │   └── Observability
 └── Future
+    ├── Production-hardened governed runtime
+    ├── Reusable governed node contracts
+    ├── Governed graph orchestration
+    ├── Specialized agent nodes
+    ├── Broader developer product
+    ├── External validation
+    ├── Full PrometheOS integration
     ├── Brain
     ├── Mnemosyne
     ├── Cloud/team control plane
@@ -122,6 +141,8 @@ PrometheOS Lite contains several experimental surfaces that exist in the codebas
 These surfaces may change significantly. They are not alpha-promised.
 
 ## What this is not yet
+
+Several items below are roadmap targets, but remain unshipped and outside the current alpha promise.
 
 PrometheOS Lite is not yet:
 

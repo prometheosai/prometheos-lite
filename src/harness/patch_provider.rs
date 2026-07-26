@@ -3007,6 +3007,83 @@ impl PatchProvider for CountingProposalProvider {
     }
 }
 
+/// Shared inner state for a blocking proposal provider used in lease tests.
+pub struct BlockingProviderInner {
+    pub invocation_count: std::sync::atomic::AtomicUsize,
+    pub barrier: tokio::sync::Barrier,
+}
+
+/// A mock provider that blocks on a barrier during `generate()`.
+/// Used to simulate a slow/long-running generation for lease/heartbeat tests.
+pub struct BlockingProposalProvider {
+    pub inner: std::sync::Arc<BlockingProviderInner>,
+}
+
+#[async_trait]
+impl PatchProvider for BlockingProposalProvider {
+    fn name(&self) -> &str {
+        "blocking_mock"
+    }
+
+    async fn generate(&self, _request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        self.inner
+            .invocation_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Block until the barrier is reached by another party.
+        let _ = self.inner.barrier.wait().await;
+
+        let edits = vec![EditOperation::CreateFile(CreateFileEdit {
+            file: PathBuf::from("src/generated_patch.rs"),
+            content: "pub fn generated() -> i32 { 42 }\n".to_string(),
+            executable: None,
+        })];
+
+        Ok(GenerateResponse {
+            candidates: vec![build_candidate(edits, "blocking_mock")],
+            generation_time_ms: 0,
+            provider_notes: Some("blocking mock provider".to_string()),
+        })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: false,
+            max_candidates: 1,
+            supported_operations: vec!["create_file".to_string()],
+            typical_latency_ms: 0,
+        }
+    }
+}
+
+/// A provider that returns no edits; used for testing generation failure recovery.
+pub struct EmptyProposalProvider;
+
+#[async_trait]
+impl PatchProvider for EmptyProposalProvider {
+    fn name(&self) -> &str {
+        "empty_mock"
+    }
+
+    async fn generate(&self, _request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+        Ok(GenerateResponse {
+            candidates: vec![],
+            generation_time_ms: 0,
+            provider_notes: Some("empty mock".to_string()),
+        })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            can_generate: true,
+            can_repair: false,
+            max_candidates: 0,
+            supported_operations: vec![],
+            typical_latency_ms: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
