@@ -1288,6 +1288,7 @@ async fn concurrent_writes_preserve_unrelated_entries() {
             run_id: "unrelated_run".to_string(),
             reserved_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
+            evidence_dir: None,
         },
     );
     std::fs::write(
@@ -1346,17 +1347,20 @@ async fn corrupted_registry_fails_closed() {
         route_info: None,
     };
 
-    // Should succeed by treating corrupted registry as empty.
+    // Should fail (corrupted registry = fail closed) with a clear diagnostic error.
     let result = evaluate::evaluate(config).await;
     match result {
-        Ok(bundle) => {
-            assert!(bundle.proposal.is_some(), "should generate new proposal");
+        Ok(_bundle) => {
+            panic!("corrupted registry should fail closed, not succeed");
         }
         Err(e) => {
-            // If it fails, it should be for a clear reason, not a panic.
+            // Must fail with a diagnostic error, not a panic.
             let msg = e.to_string();
             assert!(
-                msg.contains("registry") || msg.contains("json") || msg.contains("corrupt"),
+                msg.contains("registry")
+                    || msg.contains("json")
+                    || msg.contains("corrupt")
+                    || msg.contains("reservation"),
                 "unexpected error: {msg}"
             );
         }

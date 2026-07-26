@@ -242,6 +242,9 @@ pub struct RegistryEntry {
     pub reserved_at: String,
     /// RFC3339 timestamp of the last state transition.
     pub updated_at: String,
+    /// Evidence directory path (set when validation completes).
+    /// Used to locate preserved evidence across different run directories.
+    pub evidence_dir: Option<String>,
 }
 
 /// Lifecycle state of a registry entry.
@@ -306,12 +309,22 @@ fn registry_lock_path(repo: &Path) -> PathBuf {
         .join("proposal_registry.lock")
 }
 
-fn load_registry(repo: &Path) -> ProposalRegistry {
+fn load_registry(repo: &Path) -> Result<ProposalRegistry> {
     let path = registry_path(repo);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    // Fix 4: Only treat missing file as empty. Corrupted/unreadable files fail closed.
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            serde_json::from_str(&text).context("corrupted proposal registry (invalid JSON)")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Missing file is expected — return empty registry.
+            Ok(ProposalRegistry::default())
+        }
+        Err(e) => {
+            // Unreadable file fails closed.
+            bail!("failed to read proposal registry: {e}")
+        }
+    }
 }
 
 fn save_registry(repo: &Path, registry: &ProposalRegistry) -> Result<()> {
@@ -350,11 +363,14 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
         .context("failed to create registry lock file")?;
 
     // Use platform-exclusive lock (flock on Unix, LockFileEx on Windows).
+    // Fix 3: Check return value and fail closed on error.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock: {err}");
         }
     }
     #[cfg(windows)]
@@ -383,11 +399,11 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
     }
 
     // Now read the registry under the lock.
-    let mut registry = load_registry(repo);
+    let mut registry = load_registry(repo).context("failed to read registry under lock")?;
     if registry.entries.contains_key(identity_key) {
         // Another process reserved it first.
+        // Fix 2: Do NOT delete the lock file — just drop the handle to release.
         drop(lock_file);
-        let _ = std::fs::remove_file(&lock_path);
         return Ok(false);
     }
 
@@ -401,19 +417,19 @@ fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<bool> {
             run_id: run_id.to_string(),
             reserved_at: now.clone(),
             updated_at: now,
+            evidence_dir: None,
         },
     );
     save_registry(repo, &registry)?;
 
-    // Release lock and remove lock file.
+    // Fix 2: Do NOT delete the lock file — just drop the handle to release.
     drop(lock_file);
-    let _ = std::fs::remove_file(&lock_path);
     Ok(true)
 }
 
 /// Look up the registry entry for an identity key.
 fn lookup_entry(repo: &Path, identity_key: &str) -> Option<RegistryEntry> {
-    let registry = load_registry(repo);
+    let registry = load_registry(repo).ok()?;
     registry.entries.get(identity_key).cloned()
 }
 
@@ -423,6 +439,17 @@ fn transition_entry(
     identity_key: &str,
     new_state: ProposalState,
     proposal_id: Option<&str>,
+) -> Result<()> {
+    transition_entry_with_evidence(repo, identity_key, new_state, proposal_id, None)
+}
+
+/// Transition the state of a registry entry, optionally setting the evidence dir.
+fn transition_entry_with_evidence(
+    repo: &Path,
+    identity_key: &str,
+    new_state: ProposalState,
+    proposal_id: Option<&str>,
+    evidence_dir: Option<&str>,
 ) -> Result<()> {
     let lock_path = registry_lock_path(repo);
 
@@ -438,11 +465,14 @@ fn transition_entry(
         .open(&lock_path)
         .context("failed to create registry lock file for transition")?;
 
+    // Fix 3: Check flock return value.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock for transition: {err}");
         }
     }
     #[cfg(windows)]
@@ -469,7 +499,7 @@ fn transition_entry(
         }
     }
 
-    let mut registry = load_registry(repo);
+    let mut registry = load_registry(repo).context("failed to read registry for transition")?;
     let entry = registry
         .entries
         .get_mut(identity_key)
@@ -480,10 +510,13 @@ fn transition_entry(
     if let Some(pid) = proposal_id {
         entry.proposal_id = Some(pid.to_string());
     }
+    if let Some(ed) = evidence_dir {
+        entry.evidence_dir = Some(ed.to_string());
+    }
     save_registry(repo, &registry)?;
 
+    // Fix 2: Do NOT delete the lock file — just drop the handle to release.
     drop(lock_file);
-    let _ = std::fs::remove_file(&lock_path);
     Ok(())
 }
 
@@ -504,11 +537,14 @@ fn release_reservation(repo: &Path, identity_key: &str) -> Result<()> {
         .open(&lock_path)
         .context("failed to create registry lock file for release")?;
 
+    // Fix 3: Check flock return value.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock for release: {err}");
         }
     }
     #[cfg(windows)]
@@ -535,12 +571,12 @@ fn release_reservation(repo: &Path, identity_key: &str) -> Result<()> {
         }
     }
 
-    let mut registry = load_registry(repo);
+    let mut registry = load_registry(repo).context("failed to read registry for release")?;
     registry.entries.remove(identity_key);
     save_registry(repo, &registry)?;
 
+    // Fix 2: Do NOT delete the lock file — just drop the handle to release.
     drop(lock_file);
-    let _ = std::fs::remove_file(&lock_path);
     Ok(())
 }
 
@@ -868,16 +904,6 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     );
     update_identity_state(&identity_path, EvaluationState::ValidationComplete);
 
-    // Transition registry to ValidationComplete.
-    if let Err(e) = transition_entry(
-        &repo,
-        &identity_key,
-        ProposalState::ValidationComplete,
-        Some(&gen_result.id),
-    ) {
-        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
-    }
-
     match &validation_result {
         Ok(vr) => {
             bundle.validation = Some(vr.clone());
@@ -928,6 +954,18 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     }
     write_bundle(&evidence_dir, &bundle)?;
 
+    // Fix 5: Transition to ValidationComplete AFTER bundle is durable.
+    // Fix 1: Set evidence_dir so cross-run resume can find the bundle.
+    if let Err(e) = transition_entry_with_evidence(
+        &repo,
+        &identity_key,
+        ProposalState::ValidationComplete,
+        Some(&gen_result.id),
+        Some(evidence_dir.to_str().unwrap_or("")),
+    ) {
+        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
+    }
+
     Ok(bundle)
 }
 
@@ -968,13 +1006,18 @@ async fn wait_and_reuse(
                     .as_deref()
                     .context("ValidationComplete entry missing proposal_id")?;
                 let proposal = load_proposal_from_repo(repo, proposal_id)?;
+                // Use the evidence_dir from the registry entry (the original run's dir).
+                let original_evidence_dir_str = e
+                    .evidence_dir
+                    .as_deref()
+                    .unwrap_or(evidence_dir.to_str().unwrap_or(""));
                 return return_completed_evidence(
                     repo,
                     commit_at_start,
                     run_id,
                     manifest,
                     config,
-                    evidence_dir,
+                    Path::new(original_evidence_dir_str),
                     governance_scope,
                     &proposal,
                     proposal_id,
@@ -1218,23 +1261,27 @@ async fn resume_validation(
         bundle.final_state = EvaluationState::ReviewGate.outcome_label().to_string();
     }
 
-    // Transition registry to ValidationComplete.
-    if let Err(e) = transition_entry(
-        repo,
-        identity_key,
-        ProposalState::ValidationComplete,
-        Some(&proposal.id),
-    ) {
-        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
-    }
-
     let cleanup = cleanup_worktree(repo, &proposal.id);
     bundle.cleanup = Some(cleanup);
     bundle.completed_at = now_iso();
     if let Ok(head) = git_rev_parse_head(repo) {
         bundle.repo_pin_after = head;
     }
+
+    // Fix 5: Write bundle BEFORE transitioning to ValidationComplete.
+    // The bundle must be durable before the registry claims completion.
     write_bundle(evidence_dir, &bundle)?;
+
+    // Fix 1: Set evidence_dir in registry so cross-run resume can find the bundle.
+    if let Err(e) = transition_entry_with_evidence(
+        repo,
+        identity_key,
+        ProposalState::ValidationComplete,
+        Some(&proposal.id),
+        Some(evidence_dir.to_str().unwrap_or("")),
+    ) {
+        eprintln!("warning: failed to transition registry to ValidationComplete: {e}");
+    }
 
     Ok(bundle)
 }
