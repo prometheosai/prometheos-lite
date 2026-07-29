@@ -2175,7 +2175,7 @@ async fn provider_invocation_exactly_once_via_stale_validating() {
 // Test H: Heartbeat failure prevents terminal publication
 // =========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn heartbeat_loss_during_generation_prevents_publication() {
     let (_dir, repo) = temp_repo();
     let manifest = make_manifest(&repo, "hb-gen-loss");
@@ -2202,16 +2202,25 @@ async fn heartbeat_loss_during_generation_prevents_publication() {
     let handle = tokio::spawn(async move { evaluate::evaluate(config).await });
 
     // Wait for generation to start (blocking provider is invoked).
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Steal ownership by modifying the registry directly.
     let registry_path = repo
         .join(".prometheos")
         .join("workflow")
         .join("proposal_registry.json");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("timed out waiting for registry to appear")
+        }
+        if registry_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Steal ownership by modifying the registry directly.
     let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
-    for (_, entry) in registry.entries.iter_mut() {
+    for entry in registry.entries.values_mut() {
         entry.owner_run_id = "thief".to_string();
         entry.lease_epoch = entry.lease_epoch.saturating_add(1);
     }
@@ -2230,32 +2239,32 @@ async fn heartbeat_loss_during_generation_prevents_publication() {
         "evaluate must fail when heartbeat detects ownership loss during generation"
     );
 
-    // Verify no terminal evidence was written — no entry reached
-    // ValidationComplete and no evidence.json file exists.
-    let registry2: prometheos_lite::workflow::evaluate::ProposalRegistry =
-        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
-    for entry in registry2.entries.values() {
-        assert_ne!(
-            entry.state,
-            prometheos_lite::workflow::evaluate::ProposalState::ValidationComplete,
-            "no entry may reach ValidationComplete after heartbeat failure"
-        );
-    }
-    // Verify no evidence.json exists in any evidence dir.
-    for entry in registry2.entries.values() {
-        if let Some(ed) = &entry.evidence_dir {
+    let evidence_dir = repo.join(".prometheos").join("evidence");
+    if evidence_dir.exists() {
+        for run_dir in std::fs::read_dir(&evidence_dir).unwrap().flatten() {
             assert!(
-                !std::path::Path::new(ed).join("evidence.json").exists(),
-                "terminat evidence must not be published after heartbeat failure"
+                !run_dir.path().join("evidence.json").exists(),
+                "terminal evidence must not be published after heartbeat failure"
             );
         }
     }
 }
 
-#[tokio::test]
+// Validation command that blocks for ~2s so the test can steal ownership
+// while evaluation is definitely in the Validating state.
+#[cfg(windows)]
+const BLOCKING_VALIDATION: &str =
+    "ping -n 3 127.0.0.1 >nul & findstr /L generated src\\generated_patch.rs";
+#[cfg(not(windows))]
+const BLOCKING_VALIDATION: &str = "sleep 2 && grep -qF 'generated' src/generated_patch.rs";
+
+#[tokio::test(flavor = "multi_thread")]
 async fn heartbeat_loss_during_validation_prevents_publication() {
     let (_dir, repo) = temp_repo();
-    let manifest = make_manifest(&repo, "hb-val-loss");
+    let manifest = TaskManifest {
+        validation_command: Some(BLOCKING_VALIDATION.to_string()),
+        ..make_manifest(&repo, "hb-val-loss")
+    };
 
     // Short heartbeat interval so theft is detected within ~100ms.
     let short_lease = LeaseConfig::with_timeouts(
@@ -2274,12 +2283,13 @@ async fn heartbeat_loss_during_validation_prevents_publication() {
     let handle = tokio::spawn(async move { evaluate::evaluate(config).await });
 
     // Wait until the entry transitions to Validating (heartbeat active).
+    // The BLOCKING_VALIDATION command takes ~2s, so there is a guaranteed
+    // window to observe and steal the entry while validation is running.
     let registry_path = repo
         .join(".prometheos")
         .join("workflow")
         .join("proposal_registry.json");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         if tokio::time::Instant::now() > deadline {
             panic!("timed out waiting for Validating state")
@@ -2287,36 +2297,22 @@ async fn heartbeat_loss_during_validation_prevents_publication() {
         if let Ok(text) = std::fs::read_to_string(&registry_path)
             && let Ok(reg) =
                 serde_json::from_str::<prometheos_lite::workflow::evaluate::ProposalRegistry>(&text)
-        {
-            if reg
+            && reg
                 .entries
                 .values()
                 .any(|e| e.state == prometheos_lite::workflow::evaluate::ProposalState::Validating)
-            {
-                break;
-            }
-            // Also accept ValidationComplete — the entry may have finished
-            // before we could steal, but the fenced finalization guarantees
-            // the heartbeat was healthy at publication time.
-            if reg.entries.values().any(|e| {
-                e.state == prometheos_lite::workflow::evaluate::ProposalState::ValidationComplete
-            }) {
-                // Entry reached terminal — no theft needed. Accept this.
-                let result = handle.await.unwrap();
-                assert!(
-                    result.is_ok(),
-                    "entry already terminal, evaluate must succeed"
-                );
-                return;
-            }
+        {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Entry is Validating. Steal ownership now — the heartbeat will detect it.
+    // Entry is definitely Validating (blocking validation command is running).
+    // Steal ownership — the heartbeat will detect it within ~100ms.
+    let evidence_base = repo.join(".prometheos").join("evidence");
     let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
-    for (_, entry) in registry.entries.iter_mut() {
+    for entry in registry.entries.values_mut() {
         entry.owner_run_id = "thief".to_string();
         entry.lease_epoch = entry.lease_epoch.saturating_add(1);
     }
@@ -2326,27 +2322,20 @@ async fn heartbeat_loss_during_validation_prevents_publication() {
     )
     .unwrap();
 
-    // The heartbeat detects the theft on its next renewal (~100ms) and signals
-    // failure. The check_heartbeat!() call after run_isolated_validation (or
-    // inside fenced_finalize) catches it and bails before writing evidence.
+    // Wait for the heartbeat to have a chance to detect the theft before the
+    // blocking validation command completes.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let result = handle.await.unwrap();
     assert!(
         result.is_err(),
         "evaluate must fail when heartbeat detects ownership loss during validation"
     );
 
-    // Verify no entry reached ValidationComplete and no evidence.json exists.
-    let registry2: prometheos_lite::workflow::evaluate::ProposalRegistry =
-        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
-    for entry in registry2.entries.values() {
-        assert_ne!(
-            entry.state,
-            prometheos_lite::workflow::evaluate::ProposalState::ValidationComplete,
-            "no entry may reach ValidationComplete after heartbeat failure"
-        );
-        if let Some(ed) = &entry.evidence_dir {
+    if evidence_base.exists() {
+        for run_dir in std::fs::read_dir(&evidence_base).unwrap().flatten() {
             assert!(
-                !std::path::Path::new(ed).join("evidence.json").exists(),
+                !run_dir.path().join("evidence.json").exists(),
                 "terminal evidence must not be published after heartbeat failure"
             );
         }

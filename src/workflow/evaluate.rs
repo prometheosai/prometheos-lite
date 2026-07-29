@@ -836,7 +836,7 @@ fn fenced_finalize(
     proposal_id: &str,
     evidence_dir: &Path,
     bundle: &EvidenceBundle,
-    heartbeat_error: Option<&str>,
+    heartbeat_rx: &tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<()> {
     let lock_path = registry_lock_path(repo);
     if let Some(parent) = lock_path.parent() {
@@ -900,7 +900,11 @@ fn fenced_finalize(
         );
     }
 
-    if let Some(msg) = heartbeat_error {
+    // Read heartbeat status under the lock — guarantees no race between the
+    // revalidation and the status read.  The lock prevents concurrent registry
+    // modification, and the watch channel reflects the latest heartbeat
+    // renewal result.
+    if let Some(msg) = heartbeat_rx.borrow().as_ref() {
         bail!("heartbeat failure during finalization: {msg}");
     }
 
@@ -1555,7 +1559,6 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     // Fenced finalization: acquire registry lock, revalidate ownership and
     // heartbeat health, write evidence, and transition to ValidationComplete
     // atomically — no takeover can occur between the checks and publication.
-    let heartbeat_err = heartbeat_status_rx.borrow().clone();
     fenced_finalize(
         &repo,
         &identity_key,
@@ -1563,7 +1566,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &gen_result.id,
         &evidence_dir,
         &bundle,
-        heartbeat_err.as_deref(),
+        &heartbeat_status_rx,
     )
     .context("fenced finalization failed")?;
 
@@ -1966,7 +1969,6 @@ async fn resume_validation(
     // Fenced finalization: acquire registry lock, revalidate ownership and
     // heartbeat health, write evidence, and transition to ValidationComplete
     // atomically — no takeover can occur between the checks and publication.
-    let heartbeat_err = hb_status_rx.borrow().clone();
     fenced_finalize(
         repo,
         identity_key,
@@ -1974,7 +1976,7 @@ async fn resume_validation(
         &proposal.id,
         evidence_dir,
         &bundle,
-        heartbeat_err.as_deref(),
+        &hb_status_rx,
     )
     .context("fenced finalization failed")?;
 
