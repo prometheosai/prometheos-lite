@@ -2036,3 +2036,143 @@ async fn ownership_mismatch_fails_closed() {
         "owner must be the second run"
     );
 }
+
+// =========================================================================
+// Test F: Stale Validating entry reuses the original proposal
+// =========================================================================
+
+#[tokio::test]
+async fn stale_validating_reuses_proposal() {
+    let (_dir, repo) = temp_repo();
+    let evidence_dir = repo
+        .join(".prometheos")
+        .join("evidence")
+        .join("test-validating-reuse");
+    std::fs::create_dir_all(&evidence_dir).unwrap();
+    let manifest = make_manifest(&repo, "validating-reuse-test");
+
+    let config1 = EvaluationConfig {
+        manifest: TaskManifest {
+            evidence_dir: Some(evidence_dir.clone()),
+            ..manifest.clone()
+        },
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    let original_proposal_id = bundle1.proposal.as_ref().unwrap().id.clone();
+
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    for entry in registry.entries.values_mut() {
+        entry.state = prometheos_lite::workflow::evaluate::ProposalState::Validating;
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
+    }
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let config2 = EvaluationConfig {
+        manifest: TaskManifest {
+            evidence_dir: Some(evidence_dir.clone()),
+            ..manifest.clone()
+        },
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(30),
+        ),
+    };
+    let bundle2 = evaluate::evaluate(config2).await.unwrap();
+    assert_eq!(
+        bundle2.proposal.as_ref().unwrap().id,
+        original_proposal_id,
+        "stale Validating must reuse the original proposal"
+    );
+}
+
+// =========================================================================
+// Test G: Exactly-once provider invocation across stale Validating
+// =========================================================================
+
+#[tokio::test]
+async fn provider_invocation_exactly_once_via_stale_validating() {
+    let (_dir, repo) = temp_repo();
+    let evidence_dir = repo
+        .join(".prometheos")
+        .join("evidence")
+        .join("test-exactly-once-vs");
+    std::fs::create_dir_all(&evidence_dir).unwrap();
+    let manifest = make_manifest(&repo, "exactly-once-vs");
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let config1 = EvaluationConfig {
+        manifest: TaskManifest {
+            evidence_dir: Some(evidence_dir.clone()),
+            ..manifest.clone()
+        },
+        provider: Box::new(CountingProposalProvider::new(counter.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    let original_id = bundle1.proposal.as_ref().unwrap().id.clone();
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    for entry in registry.entries.values_mut() {
+        entry.state = prometheos_lite::workflow::evaluate::ProposalState::Validating;
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
+    }
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let config2 = EvaluationConfig {
+        manifest: TaskManifest {
+            evidence_dir: Some(evidence_dir.clone()),
+            ..manifest.clone()
+        },
+        provider: Box::new(CountingProposalProvider::new(counter.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(30),
+        ),
+    };
+    let bundle2 = evaluate::evaluate(config2).await.unwrap();
+    assert_eq!(
+        bundle2.proposal.as_ref().unwrap().id,
+        original_id,
+        "second run must reuse original proposal"
+    );
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "provider must have been invoked exactly once across both runs"
+    );
+}
+
+// =========================================================================
+// Test H: Heartbeat ownership detection prevents terminal publication
+// (verified via is_entry_stale, renew_heartbeat, and transition_entry
+//  unit tests in evaluate.rs)
+// =========================================================================

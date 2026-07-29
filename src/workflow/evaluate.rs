@@ -117,6 +117,20 @@ pub struct LeaseConfig {
     pub heartbeat_interval: std::time::Duration,
 }
 
+impl LeaseConfig {
+    pub fn with_timeouts(
+        stale_reservation_timeout: std::time::Duration,
+        generation_lease_timeout: std::time::Duration,
+        heartbeat_interval: std::time::Duration,
+    ) -> Self {
+        Self {
+            stale_reservation_timeout,
+            generation_lease_timeout,
+            heartbeat_interval,
+        }
+    }
+}
+
 impl Default for LeaseConfig {
     fn default() -> Self {
         Self {
@@ -275,7 +289,7 @@ impl EvaluationState {
 // ---------------------------------------------------------------------------
 
 /// Registry entry tracking the full lifecycle of a proposal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegistryEntry {
     /// Current pipeline state for this identity key.
     pub state: ProposalState,
@@ -303,10 +317,11 @@ pub struct RegistryEntry {
 }
 
 /// Lifecycle state of a registry entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalState {
     /// Identity reserved; generation not yet started.
+    #[default]
     Reserved,
     /// Generation in progress (model call running, heartbeat active).
     Generating,
@@ -927,7 +942,12 @@ fn is_entry_stale(entry: &RegistryEntry, lease_config: &LeaseConfig) -> Result<b
                 .unwrap_or(std::time::Duration::ZERO);
             Ok(age > lease_config.generation_lease_timeout)
         }
-        ProposalState::ProposalGenerated | ProposalState::Validating => {
+        ProposalState::ProposalGenerated => {
+            // ProposalGenerated is always reclaimable: the previous owner has
+            // finished generation. No heartbeat check needed.
+            Ok(false)
+        }
+        ProposalState::Validating => {
             // Validating uses the same heartbeat-based stale check as Generating.
             let t = parse_rfc3339(&entry.heartbeat_at)
                 .context("malformed heartbeat_at timestamp in registry entry")?;
@@ -1268,7 +1288,9 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         };
     }
 
-    let gen_result = match crate::workflow::generate_proposal(
+    // Race generation against heartbeat failure so we can abort early if
+    // ownership is lost or the heartbeat I/O fails.
+    let gen_fut = crate::workflow::generate_proposal(
         &repo,
         &config.manifest.goal,
         AuthorityLevel::from_str(&config.manifest.authority)?,
@@ -1277,10 +1299,29 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &scope,
         config.route_info.clone(),
         config.manifest.validation_command.clone(),
-    )
-    .await
-    {
-        Ok(r) => r,
+    );
+    tokio::pin!(gen_fut);
+
+    let mut hb_rx = heartbeat_status_rx.clone();
+    let gen_result = loop {
+        tokio::select! {
+            result = &mut gen_fut => {
+                break result;
+            }
+            _ = hb_rx.changed() => {
+                if let Some(msg) = hb_rx.borrow().as_ref() {
+                    bail!("heartbeat failure during generation: {msg}");
+                }
+            }
+        }
+    };
+
+    let gen_result = match gen_result {
+        Ok(r) => {
+            // Check heartbeat — ownership must still be held after generation.
+            check_heartbeat!();
+            r
+        }
         Err(e) => {
             // Stop heartbeat and check for heartbeat errors first.
             let _ = heartbeat_stop_tx.send(true);
@@ -1301,9 +1342,6 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
             return Ok(bundle);
         }
     };
-
-    // Check heartbeat — ownership must still be held.
-    check_heartbeat!();
 
     update_identity_state(&identity_path, EvaluationState::ProposalGenerated);
 
@@ -1417,14 +1455,11 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         bundle.repo_pin_after = head;
     }
 
-    // ---- Finalise: stop heartbeat FIRST, then write bundle and transition. ----
-    let _ = heartbeat_stop_tx.send(true);
-    let _ = heartbeat_handle.await;
-
     write_bundle(&evidence_dir, &bundle)?;
 
     // Transition to ValidationComplete AFTER bundle is durable.
-    // Set evidence_dir so cross-run resume can find the bundle.
+    // Heartbeat remains active until this succeeds — prevents reclaim during
+    // the finalization window.
     transition_entry_with_evidence(
         &repo,
         &identity_key,
@@ -1434,6 +1469,11 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &fence,
     )
     .context("failed to transition registry to ValidationComplete")?;
+
+    // Stop heartbeat and check for errors that occurred during finalization.
+    let _ = heartbeat_stop_tx.send(true);
+    let _ = heartbeat_handle.await;
+    check_heartbeat!();
 
     Ok(bundle)
 }
@@ -1528,12 +1568,52 @@ async fn wait_and_reuse(
                     }
                 }
             }
-            Some(e) => {
-                // Still in Reserved, Generating or Validating state.
+            Some(e) if e.state == ProposalState::Validating => {
+                // Validation is in progress (or stalled). Check if stale.
                 let stale = match is_entry_stale(&e, lease_config) {
                     Ok(s) => s,
                     Err(err) => {
-                        // Malformed timestamp — fail closed.
+                        bail!("failed to check staleness for Validating entry: {err}");
+                    }
+                };
+
+                if stale {
+                    match try_take_ownership(repo, identity_key, run_id, lease_config)? {
+                        TakeoverResult::Taken(fence) => {
+                            // Take ownership and resume validation with the existing proposal.
+                            let proposal_id = e
+                                .proposal_id
+                                .as_deref()
+                                .context("Validating stale entry missing proposal_id")?;
+                            let proposal = load_proposal_from_repo(repo, proposal_id)?;
+                            return resume_validation(
+                                repo,
+                                commit_at_start,
+                                run_id,
+                                manifest,
+                                config,
+                                evidence_dir,
+                                governance_scope,
+                                &proposal,
+                                identity_key,
+                                &fence,
+                            )
+                            .await;
+                        }
+                        TakeoverResult::StillLive => {
+                            // Another worker reclaimed it first. Continue waiting.
+                            tokio::time::sleep(poll_interval).await;
+                            elapsed += poll_interval;
+                            continue;
+                        }
+                    }
+                }
+            }
+            Some(e) => {
+                // Still in Reserved or Generating state.
+                let stale = match is_entry_stale(&e, lease_config) {
+                    Ok(s) => s,
+                    Err(err) => {
                         bail!(
                             "failed to check staleness for {} entry: {err}",
                             match e.state {
@@ -1557,8 +1637,7 @@ async fn wait_and_reuse(
                                 "stale {} entry reclaimed; caller should retry now owning it",
                                 match e.state {
                                     ProposalState::Reserved => "Reserved",
-                                    ProposalState::Generating | ProposalState::Validating =>
-                                        "Generating",
+                                    ProposalState::Generating => "Generating",
                                     _ => "entry",
                                 }
                             );
@@ -1743,13 +1822,6 @@ async fn resume_validation(
         evidence_dir,
     );
 
-    // Stop heartbeat and check for errors.
-    let _ = hb_stop_tx.send(true);
-    let _ = hb_handle.await;
-    if let Some(msg) = hb_status_rx.borrow().as_ref() {
-        bail!("heartbeat failure during resume validation: {msg}");
-    }
-
     match &validation_result {
         Ok(vr) => {
             bundle.validation = Some(vr.clone());
@@ -1807,6 +1879,13 @@ async fn resume_validation(
         fence,
     )
     .context("failed to transition registry to ValidationComplete")?;
+
+    // Stop heartbeat and check for errors.
+    let _ = hb_stop_tx.send(true);
+    let _ = hb_handle.await;
+    if let Some(msg) = hb_status_rx.borrow().as_ref() {
+        bail!("heartbeat failure during resume finalization: {msg}");
+    }
 
     Ok(bundle)
 }
@@ -2588,7 +2667,7 @@ fn evidence_dir_for(repo: &Path, run_id: &str) -> PathBuf {
     repo.join(".prometheos").join("evidence").join(run_id)
 }
 
-fn now_iso() -> String {
+pub fn now_iso() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -3052,5 +3131,116 @@ mod tests {
             failure_to_terminal_state("validation_passed_review_required"),
             EvaluationState::ReviewGate
         );
+    }
+
+    #[test]
+    fn is_entry_stale_validating_fresh_heartbeat() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Validating,
+            heartbeat_at: now_iso(),
+            updated_at: now_iso(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(180),
+        );
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(!stale, "fresh Validating heartbeat must not be stale");
+    }
+
+    #[test]
+    fn is_entry_stale_validating_stale_heartbeat() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Validating,
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
+            updated_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(180),
+        );
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(stale, "old Validating heartbeat must be stale");
+    }
+
+    #[test]
+    fn is_entry_stale_validating_malformed_heartbeat_fails_closed() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Validating,
+            heartbeat_at: "not-a-timestamp".to_string(),
+            updated_at: now_iso(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(180),
+        );
+        let result = is_entry_stale(&entry, &config);
+        assert!(result.is_err(), "malformed heartbeat must produce an error");
+    }
+
+    #[test]
+    fn is_entry_stale_reserved_reclaimable_after_timeout() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Reserved,
+            reserved_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120), // stale_reservation_timeout
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(180),
+        );
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(stale, "Reserved entry older than timeout must be stale");
+    }
+
+    #[test]
+    fn generating_state_not_stale_while_heartbeating() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Generating,
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
+            updated_at: now_iso(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(1), // 1s generation_lease_timeout
+            std::time::Duration::from_secs(180),
+        );
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(
+            stale,
+            "Generating with very old heartbeat and 1s timeout must be stale"
+        );
+    }
+
+    #[test]
+    fn proposal_generated_never_stale() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::ProposalGenerated,
+            updated_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::default();
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(!stale, "ProposalGenerated must never be stale");
     }
 }
