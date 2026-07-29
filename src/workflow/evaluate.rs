@@ -825,6 +825,103 @@ fn transition_entry_with_evidence(
     Ok(())
 }
 
+/// Fenced finalization: acquire the registry lock, revalidate ownership and
+/// heartbeat health, write the evidence bundle, and transition to
+/// `ValidationComplete` — all under the same lock so that no takeover can
+/// occur between the checks and the publication.
+fn fenced_finalize(
+    repo: &Path,
+    identity_key: &str,
+    fence: &FenceToken,
+    proposal_id: &str,
+    evidence_dir: &Path,
+    bundle: &EvidenceBundle,
+    heartbeat_error: Option<&str>,
+) -> Result<()> {
+    let lock_path = registry_lock_path(repo);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
+    }
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file for finalization")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock for finalization: {err}");
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            bail!("failed to acquire lock for finalization");
+        }
+    }
+
+    // Under lock: revalidate ownership and heartbeat health.
+    let mut registry = load_registry(repo).context("failed to read registry for finalization")?;
+    let entry = registry
+        .entries
+        .get_mut(identity_key)
+        .context("entry disappeared before finalization")?;
+
+    if entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch {
+        bail!(
+            "ownership changed during finalization (expected owner={}, epoch={}; \
+             found owner={}, epoch={})",
+            fence.owner_run_id,
+            fence.lease_epoch,
+            entry.owner_run_id,
+            entry.lease_epoch,
+        );
+    }
+
+    if let Some(msg) = heartbeat_error {
+        bail!("heartbeat failure during finalization: {msg}");
+    }
+
+    // Write evidence bundle while holding the lock — no concurrent modification
+    // can invalidate our ownership between the check and the write.
+    write_bundle(evidence_dir, bundle)
+        .context("failed to write evidence bundle during finalization")?;
+
+    // Transition to ValidationComplete under the same lock.
+    entry.state = ProposalState::ValidationComplete;
+    entry.proposal_id = Some(proposal_id.to_string());
+    entry.evidence_dir = Some(evidence_dir.to_str().unwrap_or("").to_string());
+    entry.updated_at = now_iso();
+    entry.heartbeat_at = now_iso();
+
+    save_registry(repo, &registry).context("failed to save registry during finalization")?;
+
+    drop(lock_file);
+    Ok(())
+}
+
 /// Release a reservation (remove the entry from the registry).
 /// Called when generation fails so another process can retry.
 /// Requires ownership fencing.
@@ -1455,25 +1552,20 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         bundle.repo_pin_after = head;
     }
 
-    // Check heartbeat health BEFORE writing terminal evidence — heartbeat is
-    // still active so this catches ownership loss or I/O failure that occurred
-    // during validation or cleanup.
-    check_heartbeat!();
-
-    write_bundle(&evidence_dir, &bundle)?;
-
-    // Transition to ValidationComplete AFTER bundle is durable.
-    // Heartbeat remains active until this succeeds — prevents reclaim during
-    // the finalization window.
-    transition_entry_with_evidence(
+    // Fenced finalization: acquire registry lock, revalidate ownership and
+    // heartbeat health, write evidence, and transition to ValidationComplete
+    // atomically — no takeover can occur between the checks and publication.
+    let heartbeat_err = heartbeat_status_rx.borrow().clone();
+    fenced_finalize(
         &repo,
         &identity_key,
-        ProposalState::ValidationComplete,
-        Some(&gen_result.id),
-        Some(evidence_dir.to_str().unwrap_or("")),
         &fence,
+        &gen_result.id,
+        &evidence_dir,
+        &bundle,
+        heartbeat_err.as_deref(),
     )
-    .context("failed to transition registry to ValidationComplete")?;
+    .context("fenced finalization failed")?;
 
     // Stop heartbeat and check for errors that occurred during finalization.
     let _ = heartbeat_stop_tx.send(true);
@@ -1871,26 +1963,20 @@ async fn resume_validation(
         bundle.repo_pin_after = head;
     }
 
-    // Check heartbeat health BEFORE writing terminal evidence — heartbeat is
-    // still active so this catches ownership loss or I/O failure that occurred
-    // during resumed validation or cleanup.
-    if let Some(msg) = hb_status_rx.borrow().as_ref() {
-        bail!("heartbeat failure before resume finalization: {msg}");
-    }
-
-    // Write bundle BEFORE transitioning to ValidationComplete.
-    write_bundle(evidence_dir, &bundle)?;
-
-    // Set evidence_dir in registry so cross-run resume can find the bundle.
-    transition_entry_with_evidence(
+    // Fenced finalization: acquire registry lock, revalidate ownership and
+    // heartbeat health, write evidence, and transition to ValidationComplete
+    // atomically — no takeover can occur between the checks and publication.
+    let heartbeat_err = hb_status_rx.borrow().clone();
+    fenced_finalize(
         repo,
         identity_key,
-        ProposalState::ValidationComplete,
-        Some(&proposal.id),
-        Some(evidence_dir.to_str().unwrap_or("")),
         fence,
+        &proposal.id,
+        evidence_dir,
+        &bundle,
+        heartbeat_err.as_deref(),
     )
-    .context("failed to transition registry to ValidationComplete")?;
+    .context("fenced finalization failed")?;
 
     // Stop heartbeat and check for errors.
     let _ = hb_stop_tx.send(true);
@@ -2680,13 +2766,12 @@ fn evidence_dir_for(repo: &Path, run_id: &str) -> PathBuf {
 }
 
 pub fn now_iso() -> String {
-    let secs = SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .unwrap_or_default();
+    chrono::DateTime::from_timestamp(dur.as_secs() as i64, dur.subsec_nanos())
         .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| secs.to_string())
+        .unwrap_or_else(|| dur.as_secs().to_string())
 }
 
 fn hash_str(s: &str) -> String {
