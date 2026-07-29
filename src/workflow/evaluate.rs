@@ -1455,6 +1455,11 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         bundle.repo_pin_after = head;
     }
 
+    // Check heartbeat health BEFORE writing terminal evidence — heartbeat is
+    // still active so this catches ownership loss or I/O failure that occurred
+    // during validation or cleanup.
+    check_heartbeat!();
+
     write_bundle(&evidence_dir, &bundle)?;
 
     // Transition to ValidationComplete AFTER bundle is durable.
@@ -1864,6 +1869,13 @@ async fn resume_validation(
     bundle.completed_at = now_iso();
     if let Ok(head) = git_rev_parse_head(repo) {
         bundle.repo_pin_after = head;
+    }
+
+    // Check heartbeat health BEFORE writing terminal evidence — heartbeat is
+    // still active so this catches ownership loss or I/O failure that occurred
+    // during resumed validation or cleanup.
+    if let Some(msg) = hb_status_rx.borrow().as_ref() {
+        bail!("heartbeat failure before resume finalization: {msg}");
     }
 
     // Write bundle BEFORE transitioning to ValidationComplete.
@@ -3242,5 +3254,103 @@ mod tests {
         let config = LeaseConfig::default();
         let stale = is_entry_stale(&entry, &config).unwrap();
         assert!(!stale, "ProposalGenerated must never be stale");
+    }
+
+    #[test]
+    fn generating_state_fresh_heartbeat_not_stale() {
+        // A Generating entry with a fresh heartbeat is NOT stale even when
+        // the generation_lease_timeout is shorter than typical execution time,
+        // because the heartbeat re-validates liveness.  The timeout must be
+        // >1s because now_iso() has 1-second precision.
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Generating,
+            heartbeat_at: now_iso(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(180),
+        );
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(!stale, "Generating with fresh heartbeat must not be stale");
+    }
+
+    #[test]
+    fn validating_state_fresh_heartbeat_not_stale() {
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Validating,
+            heartbeat_at: now_iso(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(180),
+        );
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(!stale, "Validating with fresh heartbeat must not be stale");
+    }
+
+    #[test]
+    fn renew_heartbeat_detects_ownership_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // Create registry with one entry under worker-1's ownership.
+        let entry = RegistryEntry {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Generating,
+            heartbeat_at: now_iso(),
+            ..Default::default()
+        };
+        let mut registry = ProposalRegistry::default();
+        registry.entries.insert("test-key".to_string(), entry);
+        save_registry(&repo, &registry).unwrap();
+
+        let fence = FenceToken {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+        };
+
+        // First heartbeat must succeed — owner and epoch match.
+        let result = renew_heartbeat(&repo, "test-key", &fence).unwrap();
+        assert!(result, "initial heartbeat with matching fence must succeed");
+
+        // Simulate ownership theft by a second worker.
+        let mut registry = load_registry(&repo).unwrap();
+        if let Some(e) = registry.entries.get_mut("test-key") {
+            e.owner_run_id = "thief".to_string();
+            e.lease_epoch = 2;
+        }
+        save_registry(&repo, &registry).unwrap();
+
+        // Heartbeat with original (stale) fence must return false.
+        let result = renew_heartbeat(&repo, "test-key", &fence).unwrap();
+        assert!(!result, "heartbeat must fail after ownership changes");
+    }
+
+    #[test]
+    fn renew_heartbeat_missing_entry_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let fence = FenceToken {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+        };
+
+        // Empty registry — no entry for this key.
+        save_registry(&repo, &ProposalRegistry::default()).unwrap();
+
+        let result = renew_heartbeat(&repo, "missing-key", &fence).unwrap();
+        assert!(!result, "heartbeat for missing entry must return false");
     }
 }

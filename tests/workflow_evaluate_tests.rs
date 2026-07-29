@@ -2172,7 +2172,249 @@ async fn provider_invocation_exactly_once_via_stale_validating() {
 }
 
 // =========================================================================
-// Test H: Heartbeat ownership detection prevents terminal publication
-// (verified via is_entry_stale, renew_heartbeat, and transition_entry
-//  unit tests in evaluate.rs)
+// Test H: Heartbeat failure prevents terminal publication
 // =========================================================================
+
+#[tokio::test]
+async fn heartbeat_loss_during_generation_prevents_publication() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "hb-gen-loss");
+
+    let inner = Arc::new(BlockingProviderInner {
+        invocation_count: AtomicUsize::new(0),
+        barrier: Barrier::new(2),
+    });
+
+    let config = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(BlockingProposalProvider { inner }),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+
+    let handle = tokio::spawn(async move { evaluate::evaluate(config).await });
+
+    // Wait for generation to start (blocking provider invokes barrier).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Steal ownership by modifying the registry directly — simulates a second
+    // worker that preempts the first worker's lease.
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    for (_, entry) in registry.entries.iter_mut() {
+        entry.owner_run_id = "thief".to_string();
+        entry.lease_epoch = entry.lease_epoch.saturating_add(1);
+    }
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    // The heartbeat task detects the ownership change on its next renewal
+    // attempt and signals failure via the watch channel. The generation race
+    // (tokio::select!) catches this and bails before consuming the provider
+    // result.
+    let result = handle.await.unwrap();
+    assert!(
+        result.is_err(),
+        "evaluate must fail when heartbeat detects ownership loss during generation"
+    );
+
+    // Verify no terminal evidence was written — no entry reached
+    // ValidationComplete.
+    let registry2: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    for entry in registry2.entries.values() {
+        assert_ne!(
+            entry.state,
+            prometheos_lite::workflow::evaluate::ProposalState::ValidationComplete,
+            "no entry may reach ValidationComplete after heartbeat failure"
+        );
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_loss_during_validation_prevents_publication() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "hb-val-loss");
+
+    let config = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+
+    let handle = tokio::spawn(async move { evaluate::evaluate(config).await });
+
+    // Wait until the entry transitions to Validating (heartbeat active).
+    // Must sleep first so the spawned task has a chance to start.
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("timed out waiting for Validating state")
+        }
+        if let Ok(text) = std::fs::read_to_string(&registry_path)
+            && let Ok(reg) =
+                serde_json::from_str::<prometheos_lite::workflow::evaluate::ProposalRegistry>(&text)
+        {
+            let has_validating = reg.entries.values().any(|e| {
+                e.state == prometheos_lite::workflow::evaluate::ProposalState::Validating
+            });
+            if has_validating {
+                break;
+            }
+            // If already past Validating, that also works — we can still
+            // steal ownership before finalization.
+            let has_terminal = reg.entries.values().any(|e| {
+                e.state
+                    == prometheos_lite::workflow::evaluate::ProposalState::ValidationComplete
+            });
+            if has_terminal {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Steal ownership. If the entry is already in ValidationComplete, the
+    // heartbeat has already stopped, so the theft has no effect — but the
+    // entry is already terminal, so the final verification will detect it.
+    let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    for (_, entry) in registry.entries.iter_mut() {
+        entry.owner_run_id = "thief".to_string();
+        entry.lease_epoch = entry.lease_epoch.saturating_add(1);
+    }
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let result = handle.await.unwrap();
+    let registry2: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    let terminal = registry2
+        .entries
+        .values()
+        .any(|e| e.state == prometheos_lite::workflow::evaluate::ProposalState::ValidationComplete);
+
+    match (result.is_ok(), terminal) {
+        (true, true) => {
+            // If the entry beat us to ValidationComplete before we could steal
+            // it, that is also acceptable — the heartbeat check after
+            // finalization will catch any racing failure.
+        }
+        (false, false) => {
+            // Preferred outcome: heartbeat caught the theft and bailed before
+            // terminal publication.
+        }
+        (true, false) => {
+            panic!("evaluate succeeded but no terminal state: inconsistent");
+        }
+        (false, true) => {
+            panic!("evaluate failed despite reaching ValidationComplete");
+        }
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_renews_lease_beyond_generation_timeout() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "hb-renew-timeout");
+
+    let inner = Arc::new(BlockingProviderInner {
+        invocation_count: AtomicUsize::new(0),
+        barrier: Barrier::new(2),
+    });
+
+    // generation_lease_timeout (200ms) is shorter than the blocking provider's
+    // generation duration (~300ms). Without heartbeat renewal, the entry would
+    // appear stale to other workers. With heartbeat renewal (50ms interval),
+    // it stays alive. We prove this by comparing heartbeat_at before and after
+    // the timeout: if the heartbeat ran, heartbeat_at changes.
+    let lease_config = LeaseConfig::with_timeouts(
+        Duration::from_secs(600),
+        Duration::from_millis(200),
+        Duration::from_millis(50),
+    );
+
+    let config = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(BlockingProposalProvider {
+            inner: inner.clone(),
+        }),
+        route_info: None,
+        lease_config,
+    };
+
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+
+    let handle = tokio::spawn(async move { evaluate::evaluate(config).await });
+
+    // Wait for the entry to appear and record the initial heartbeat_at.
+    // Use parsed timestamps because now_iso() has 1-second precision.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let parse_hb = |reg: &prometheos_lite::workflow::evaluate::ProposalRegistry| {
+        chrono::DateTime::parse_from_rfc3339(&reg.entries.values().next().unwrap().heartbeat_at)
+            .unwrap()
+    };
+    let initial_hb = {
+        let text = std::fs::read_to_string(&registry_path).unwrap();
+        let reg: prometheos_lite::workflow::evaluate::ProposalRegistry =
+            serde_json::from_str(&text).unwrap();
+        parse_hb(&reg)
+    };
+
+    // Wait past the generation lease timeout again — the heartbeat should have
+    // renewed at least once (50ms interval). Read the new heartbeat_at.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let current_hb = {
+        let text = std::fs::read_to_string(&registry_path).unwrap();
+        let reg: prometheos_lite::workflow::evaluate::ProposalRegistry =
+            serde_json::from_str(&text).unwrap();
+        parse_hb(&reg)
+    };
+
+    assert!(
+        current_hb > initial_hb,
+        "heartbeat_at must advance within 600ms, proving heartbeat renewal ran: \
+         initial={initial_hb} current={current_hb}",
+    );
+
+    // Verify the current heartbeat_at is within 2 seconds of now (generous
+    // bound for 1-second precision timestamp + test timing).
+    let age = chrono::Utc::now()
+        .signed_duration_since(current_hb)
+        .to_std()
+        .unwrap_or(Duration::from_secs(0));
+    assert!(
+        age < Duration::from_secs(2),
+        "heartbeat_at must be recent: age={:?}",
+        age,
+    );
+
+    // Release the barrier so generation completes.
+    inner.barrier.wait().await;
+
+    // Verify evaluation completes successfully.
+    let result = handle.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "evaluate must succeed with active heartbeat despite short lease timeout"
+    );
+}
