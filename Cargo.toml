@@ -33,7 +33,7 @@ opentelemetry = { version = "0.23", features = ["trace"] }
 opentelemetry-otlp = { version = "0.16", features = ["trace"] }
 opentelemetry-semantic-conventions = "0.15"
 opentelemetry-stdout = { version = "0.4", features = ["trace"] }
-opentelemetry_sdk = { version = "0.23", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 rand = "0.8"
 regex = "1.10"
 sysinfo = "0.30"
