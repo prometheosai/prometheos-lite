@@ -1989,6 +1989,7 @@ dependencies = [
  "git2",
  "ignore",
  "lazy_static",
+ "libc",
  "md5",
  "once_cell",
  "opentelemetry",
@@ -2023,6 +2024,7 @@ dependencies = [
  "tree-sitter-typescript",
  "uuid",
  "walkdir",
+ "winapi",
  "zstd",
 ]
 

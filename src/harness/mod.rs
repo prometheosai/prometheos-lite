@@ -116,7 +116,8 @@ pub use observability::{
 };
 pub use patch_applier::*;
 pub use patch_provider::{
-    AggregatePatchProvider, AttemptOutcome, AttemptRecord, GenerateRequest, GenerateResponse,
+    AggregatePatchProvider, AttemptOutcome, AttemptRecord, BlockingProposalProvider,
+    BlockingProviderInner, CountingProposalProvider, GenerateRequest, GenerateResponse,
     HeuristicPatchProvider, LlmPatchProvider, MockProposalMode, MockProposalProvider,
     PatchProvider, PatchProviderContext, ProviderCandidate, ProviderCapabilities, RepairResponse,
     RiskEstimate,
