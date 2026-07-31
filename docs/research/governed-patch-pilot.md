@@ -1,14 +1,20 @@
 # Milestone: Governed Patch Pilot
 
-**Status:** Partially executed. Attempt 1 was infrastructure-blocked; the
-governed path was verified end-to-end against a deterministic stub; Attempt 2
-ran a real local model (Ollama + `qwen2.5-coder:7b`) exactly once and produced
-an honest model-output compatibility failure (no tuning performed). Attempt 3
-re-ran the same model/goal/repo after the prompt/parser compatibility fix and
-again produced zero usable edits; the **exact rejection subtype is unknown**
-because production observability did not preserve or safely expose the raw
-response or the parser rejection reason. An observability fix (issue #86, PR
-#87) was merged to make future attempts classifiable.
+**Status:** Complete. 5 real tasks attempted across 4 distinct repositories.
+All 5 rejected safely by governance (0 unsafe mutations, 0 silent scope
+violations). Two local models tested (`qwen2.5-coder:7b` and `14b`): in the
+recorded pilot runs, the 7B did not emit recognizable canonical JSON. The 14B
+emitted recognizable canonical JSON but failed schema or operation validation,
+producing no usable governed edit set. This is directional evidence from a
+small sample, not a universal claim about either model. Diagnostics
+precedence (PR #91, issue #90) corrected so primary rejection reason is never
+masked by fallback. An observability gap remains when rejection occurs during
+edit rendering (Task 5). The governed pipeline—preflight, provider generation,
+scope enforcement, isolated dry-run, approval, checkpointed apply, validation,
+rollback, evidence—was validated end-to-end deterministically with a stub
+provider. Fast Governed Loop V1 (PR #101) now provides the automated
+evaluation pipeline: fenced generation, heartbeat-protected validation,
+immutable evidence, and deterministic terminal states.
 
 **Purpose:** Stop building platform foundations and prove PrometheOS Lite on
 real repositories. The product already has the full governed path:
@@ -295,6 +301,186 @@ re-run or tuned around.
   *why* it refused the model output (`edit_fence_missing`). No prompt, parser,
   model, config, or temperature change was made after observing the response, and
   no second call was issued.
+
+### Task 1 — consolidated outcome
+
+```text
+Outcome: unsuccessful
+Primary reason: local model failed to emit a valid supported edit format
+Governance result: safe rejection, no repository mutation
+System defect discovered: yes, fixed during Attempts 2–3
+Remaining failure attributable to system: no
+```
+
+- Attempts 1–4 are the **same Task 1**. Attempt 4 is diagnostic evidence attached
+  to Task 1, not a separate product-success task. It does not move the success
+  count.
+- The remaining failure is attributable to the model's output format, not to
+  PrometheOS. Closing the parser to malformed JSON is the correct boundary;
+  loosening it to accommodate one model's typo would weaken governance.
+
+### Pilot metrics (to date)
+
+```text
+Real tasks attempted: 1
+Successful tasks: 0
+Silent scope violations: 0
+Unsafe mutations: 0
+Diagnosable rejections: 1
+Rollback demonstrations: 1
+```
+
+The meaningful result is not "the model failed." It is:
+
+> PrometheOS rejected malformed model output deterministically, explained the
+> rejection, and left the target repository clean.
+
+## Task 2 — model baseline on second repository (same 7B config)
+
+**Design:** identical to Task 1 in every axis except the repository: `byteorder`
+(second distinct repository) with the **same unchanged model and configuration**
+(`ollama` / `qwen2.5-coder:7b` / `http://localhost:11434/v1`). This isolates
+model behavior from repo-specific quirks. No prompt, parser, model, config, or
+temperature changes relative to Task 1.
+
+### Task 2 — preflight (infrastructure-blocked, not pilot-qualified)
+
+- Target repository: `BurntSushi/byteorder`, branch `master`, initial commit
+  `5a82625fae462e8ba64cec8146b24a372b4d75c6` (cloned and pinned before any run).
+- Provider preflight: `POST http://localhost:11434/v1/chat/completions` with
+  `qwen2.5-coder:7b` → **connection refused** (Ollama not reachable).
+- **No `workflow generate` was issued.** The go-ahead condition (preflight
+  returns `ready`) is not satisfied.
+- `pilot_qualified`: false (infrastructure-blocked, identical class to Task 1
+  Attempt 1). `proposal_generated: false`; repository mutation: none.
+- Disposition: blocked, not failed. Re-run the preflight once Ollama is live;
+  then execute Task 2 Attempt 1 exactly once with no config changes.
+
+### Task 2 Attempt 1 — pilot-qualified, executed once
+
+- **Pilot-qualified:** true
+- **Repository:** `BurntSushi/byteorder`, branch `master`, commit
+  `5a82625fae462e8ba64cec8146b24a372b4d75c6` (different codebase from Task 1's
+  `memchr`; same language/toolchain).
+- **Provider:** `ollama`, model `qwen2.5-coder:7b`, `base_url: http://localhost:11434/v1`
+  (unchanged config from Task 1; model pulled during this session after the
+  `not_found_error` preflight, then preflight returned `ready`).
+- **Authority:** `assist`; allowed `src/**`, `tests/**`; forbidden `.github/**`,
+  `Cargo.toml`, `Cargo.lock`; `--max-files 2`, `--max-lines 80`,
+  `--validate "cargo test"`; `--provider config`.
+- **Same goal** as specified (boundary/zero-length/exact-length read/write test).
+- **Outcome:** `provider_produced_no_usable_candidate`.
+- `proposal_generated: false`; dry-run, approval, and apply **not reached**;
+  `repository mutation: none` (byteorder tree clean at `5a82625`); `cost: $0`.
+- **Classification (from structured diagnostics only):**
+  - `provider_response_received`: true
+  - `rejection_reason`: `edit_fence_missing`
+  - `parse_route_attempted`: `edit_block_fallback`
+  - `canonical_json_detected`: false
+  - `edit_fence_detected`: false
+  - `response_length`: 843
+  - `response_sha256`: `3abc5b9456ba84a7fcf5a2a0111a605986ccc603149d091370e795c311de175e`
+  - `usable_edit_count`: 0
+  - `raw_response_persisted`: false
+- **Interpretation:** same zero-usable-edits family as Task 1 Attempts 3–4, now on
+  a *different repository*. The model responded (843 bytes) but emitted neither a
+  canonical JSON edit block nor a fenced ```edit``` block, so the production parser
+  rejected it deterministically via `edit_fence_missing`. The change of codebase
+  did not change the failure mode — the defect is in the model's output format,
+  not the target repo.
+- **Disposition:** Valid pilot data point, not a success. Attempted exactly once;
+  no prompt, parser, model, config, or temperature change after observing the
+  result, and no second call. Structured diagnostics persisted by default at
+  `pilot/run/.prometheos/diagnostics/3abc5b9456ba84a7fcf5a2a0111a605986ccc603149d091370e795c311de175e.json`.
+
+### Task 2 — consolidated outcome
+
+```text
+Outcome: unsuccessful
+Primary reason: local model failed to emit a valid supported edit format
+Governance result: safe rejection, no repository mutation
+System defect discovered: no (parser already hardened in Attempts 2–3)
+Remaining failure attributable to system: no
+```
+
+- Same classification as Task 1 (`edit_fence_missing`); the failure reproduces
+  across two distinct repositories (`memchr`, `byteorder`) with one unchanged
+  model/config. This strengthens the reading that the boundary is correct and the
+  model output format is the cause, not the target codebase.
+
+## Task 3 — model-comparison (controlled variable: model only)
+
+**Design:** identical to Task 2 in every axis (repository `byteorder` @ `5a82625`,
+same goal, same scope/authority/governance) except the **model**: `qwen2.5-coder:14b`
+replaces `qwen2.5-coder:7b`. This isolates *model-specific conformance failure*
+from *prompt/schema design broadly incompatible with local coding models*.
+Recorded as a comparison, **not** a retry of Task 2. Parser unchanged.
+
+### Task 3 Attempt 1 — pilot-qualified, executed once
+
+- **Pilot-qualified:** true
+- **Repository:** `BurntSushi/byteorder`, branch `master`, commit
+  `5a82625fae462e8ba64cec8146b24a372b4d75c6` (identical to Task 2).
+- **Provider:** `ollama`, model `qwen2.5-coder:14b`, `base_url: http://localhost:11434/v1`
+  (model pulled this session; preflight returned `ready`). All other settings
+  unchanged from Task 2.
+- **Authority:** `assist`; allowed `src/**`, `tests/**`; forbidden `.github/**`,
+  `Cargo.toml`, `Cargo.lock`; `--max-files 2`, `--max-lines 80`,
+  `--validate "cargo test"`; `--provider config`.
+- **Same goal** as Tasks 1–2.
+- **Outcome:** `provider_produced_no_usable_candidate`.
+- `proposal_generated: false`; dry-run, approval, and apply **not reached**;
+  `repository mutation: none` (byteorder tree clean at `5a82625`); `cost: $0`.
+- **Classification (from structured diagnostics only):**
+  - `provider_response_received`: true
+  - `canonical_json_detected`: **true**  ← differs from 7b (`false`)
+  - `edit_fence_detected`: false
+  - `parse_route_attempted`: `edit_block_fallback`
+  - `rejection_reason`: `edit_fence_missing`
+  - `response_length`: 190
+  - `response_sha256`: `779e43537678b5822fcd135ae968f81a81c8261c497234c4a8ed03fca80806a5`
+  - `usable_edit_count`: 0
+  - `raw_response_persisted`: false
+- **Interpretation:** the 14b model emitted a *canonical JSON* block (detected),
+  but its edits were not a usable supported set, so the fallback still rejected it
+  via `edit_fence_missing`. This is a **different failure signature** from the 7b
+  (which emitted no detectable JSON and no edit fence). Both fail safely with zero
+  mutation. In this recorded run the 14b got "closer" to the schema — it emitted
+  recognizable canonical JSON — but did not produce a usable governed edit set.
+- **Disposition:** Valid pilot data point, not a success. Attempted exactly once;
+  no parser/prompt/config/temperature change after observing the result, and no
+  second call. Structured diagnostics persisted by default at
+  `pilot/run/.prometheos/diagnostics/779e43537678b5822fcd135ae968f81a81c8261c497234c4a8ed03fca80806a5.json`.
+
+### Task 3 — consolidated outcome
+
+```text
+Outcome: unsuccessful
+Primary reason: local model emitted canonical JSON but no usable supported edit set
+Governance result: safe rejection, no repository mutation
+Controlled variable: model (7b -> 14b); all else unchanged
+Remaining failure attributable to system: no
+```
+
+## Model-comparison read (Tasks 2 vs 3)
+
+| Axis | Task 2 (7b) | Task 3 (14b) |
+|------|-------------|-------------|
+| `canonical_json_detected` | false | true |
+| `edit_fence_detected` | false | false |
+| `usable_edit_count` | 0 | 0 |
+| rejection | `edit_fence_missing` | `edit_fence_missing` |
+| repo mutation | none | none |
+
+In the recorded runs, the two models fail for *related but distinct* reasons:
+the 7b did not emit recognizable canonical JSON (it did not reach the JSON
+schema), while the 14b emitted recognizable canonical JSON but still produced
+no usable governed edit set. This argues against "the prompt/schema is broadly
+incompatible with local coding models" being the sole cause (the 14b engaged
+the schema in the recorded run) and toward *model-specific conformance
+failure* at the 7b/14b tier. Both are still governed safely. Caveat: two
+models and three tasks remain a small sample; this is a directional signal, not
+proof.
 
 ## Task 4 — distinct repository, same 14B configuration
 

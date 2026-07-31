@@ -1,3 +1,35 @@
+## V1.7.0 Fast Governed Loop V1 — Evaluation Pipeline
+
+- Added the **Fast Governed Loop V1** automated evaluation pipeline (`src/workflow/evaluate.rs`):
+  - Exactly-once proposal generation via lock file + registry states (`Reserved`/`Generating`/`ProposalGenerated`/`Validating`/`ValidationComplete`)
+  - Ownership fencing with `FenceToken` (`owner_run_id` + `lease_epoch`) — verified under registry lock for every state mutation
+  - Renewable heartbeat (`Generating` and `Validating` states) with configurable lease intervals and generation timeouts
+  - `tokio::select!` race between generation and heartbeat status — ownership loss during generation is detected before provider result is consumed
+  - Blocking validation with heartbeat protection — `Validating` state has its own renewable lease via spawned heartbeat task
+  - `fenced_finalize()` — atomic registry-lock acquisition, ownership revalidation, heartbeat health check, evidence bundle write, and `ValidationComplete` transition (no takeover window between checks and publication)
+  - Heartbeat errors propagate via `watch` channel; `check_heartbeat!()` macro bails after generation, validation, and inside the fenced finalization boundary
+  - Stale-run recovery (`Reserved`/`Generating`/`Validating` entries) with takeover that re-validates staleness, owner, epoch, and proposal ID under the lock
+  - `ProposalGenerated` state is never stale (no heartbeat required); `ValidationComplete` with missing/corrupt evidence fails closed
+  - Immutable evidence bundles — completed bundles returned byte-for-byte, never modified or rewritten
+  - Classified terminal failures (compile error, infrastructure, provider rejection) with structured evidence schema
+  - Original-repository integrity verification and cleanup per evaluation
+  - Sub-second timestamp precision (`now_iso()` preserving nanoseconds) enabling short configurable lease durations
+- Added `src/harness/patch_provider.rs` harness types:
+  - `BlockingProposalProvider` with test barrier for deterministic concurrency testing
+  - `CountingProposalProvider` for exactly-once invocation verification
+  - `EmptyProposalProvider` for empty-output testing
+- Added the identity-keyed `prometheos workflow evaluate` CLI command. Lease policy is configurable through the internal `LeaseConfig` API; the CLI currently uses the default lease configuration.
+- Added 48 integration tests covering: exactly-once generation, ownership fencing, heartbeat renewal, stale-run recovery, immutable evidence, concurrent evaluation isolation, crash recovery, validation resumption, and heartbeat-loss prevention of terminal publication
+- Added 25 unit tests covering: state machine transitions, stale classification, heartbeat renewal, evidence parsing, error classification
+- All tests deterministic (blocking validation, poll loops, `#[tokio::test(flavor = "multi_thread")]`)
+- Historical dispositions closed:
+  - Issue #90 (diagnostics precedence): implemented by PR #91, verified on main
+  - Issue #75 (strict clippy baseline): restored on current stable toolchain, verified on main
+  - Issue #74 (metadata validation): deferred to #113
+  - PR #92 (pilot tasks 1-3): unique content incorporated into pilot doc, PR closed as superseded
+- Pilot records for 5 tasks across 4 repositories reconciled in `docs/research/governed-patch-pilot.md`
+- V1 release tag pending human review in PR #149 for issue #111.
+
 ## V1.6.4 Runtime Identity, Tool Awareness, and Stack Alignment
 
 - Updated runtime/provider configuration toward an OpenRouter-first stack:
