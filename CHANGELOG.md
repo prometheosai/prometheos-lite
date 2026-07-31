@@ -18,7 +18,7 @@
   - `BlockingProposalProvider` with test barrier for deterministic concurrency testing
   - `CountingProposalProvider` for exactly-once invocation verification
   - `EmptyProposalProvider` for empty-output testing
-- Added CLI command `prometheos work` with `evaluate` subcommand (lease-configurable, identity-keyed)
+- Added the identity-keyed `prometheos workflow evaluate` CLI command. Lease policy is configurable through the internal `LeaseConfig` API; the CLI currently uses the default lease configuration.
 - Added 48 integration tests covering: exactly-once generation, ownership fencing, heartbeat renewal, stale-run recovery, immutable evidence, concurrent evaluation isolation, crash recovery, validation resumption, and heartbeat-loss prevention of terminal publication
 - Added 25 unit tests covering: state machine transitions, stale classification, heartbeat renewal, evidence parsing, error classification
 - All tests deterministic (blocking validation, poll loops, `#[tokio::test(flavor = "multi_thread")]`)
@@ -28,7 +28,7 @@
   - Issue #74 (metadata validation): deferred to #113
   - PR #92 (pilot tasks 1-3): unique content incorporated into pilot doc, PR closed as superseded
 - Pilot records for 5 tasks across 4 repositories reconciled in `docs/research/governed-patch-pilot.md`
-- V1 release tag pending human review at `docs/e1-v1-release-closeout` (PR #111)
+- V1 release tag pending human review in PR #149 for issue #111.
 
 ## V1.6.4 Runtime Identity, Tool Awareness, and Stack Alignment
 

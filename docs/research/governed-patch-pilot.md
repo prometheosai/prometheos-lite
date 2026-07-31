@@ -2,9 +2,11 @@
 
 **Status:** Complete. 5 real tasks attempted across 4 distinct repositories.
 All 5 rejected safely by governance (0 unsafe mutations, 0 silent scope
-violations). Two local models tested (`qwen2.5-coder:7b` and `14b`): the 7B
-never emits recognizable canonical JSON; the 14B reaches JSON-schema
-conformance but emits semantically unusable edit operations. Diagnostics
+violations). Two local models tested (`qwen2.5-coder:7b` and `14b`): in the
+recorded pilot runs, the 7B did not emit recognizable canonical JSON. The 14B
+emitted recognizable canonical JSON but failed schema or operation validation,
+producing no usable governed edit set. This is directional evidence from a
+small sample, not a universal claim about either model. Diagnostics
 precedence (PR #91, issue #90) corrected so primary rejection reason is never
 masked by fallback. An observability gap remains when rejection occurs during
 edit rendering (Task 5). The governed pipeline—preflight, provider generation,
@@ -443,7 +445,8 @@ Recorded as a comparison, **not** a retry of Task 2. Parser unchanged.
   but its edits were not a usable supported set, so the fallback still rejected it
   via `edit_fence_missing`. This is a **different failure signature** from the 7b
   (which emitted no detectable JSON and no edit fence). Both fail safely with zero
-  mutation. The 14b gets "closer" to the schema but still does not satisfy it.
+  mutation. In this recorded run the 14b got "closer" to the schema — it emitted
+  recognizable canonical JSON — but did not produce a usable governed edit set.
 - **Disposition:** Valid pilot data point, not a success. Attempted exactly once;
   no parser/prompt/config/temperature change after observing the result, and no
   second call. Structured diagnostics persisted by default at
@@ -469,12 +472,14 @@ Remaining failure attributable to system: no
 | rejection | `edit_fence_missing` | `edit_fence_missing` |
 | repo mutation | none | none |
 
-The two models fail for *related but distinct* reasons: 7b never reaches the JSON
-schema; 14b reaches it but still does not emit a usable edit set. This argues
-against "the prompt/schema is broadly incompatible with local coding models" being
-the sole cause (14b clearly engages the schema) and toward *model-specific
-conformance failure* at the 7b/14b tier. Both are still governed safely. Caveat:
-two models and three tasks remain a small sample; this is a directional signal, not
+In the recorded runs, the two models fail for *related but distinct* reasons:
+the 7b did not emit recognizable canonical JSON (it did not reach the JSON
+schema), while the 14b emitted recognizable canonical JSON but still produced
+no usable governed edit set. This argues against "the prompt/schema is broadly
+incompatible with local coding models" being the sole cause (the 14b engaged
+the schema in the recorded run) and toward *model-specific conformance
+failure* at the 7b/14b tier. Both are still governed safely. Caveat: two
+models and three tasks remain a small sample; this is a directional signal, not
 proof.
 
 ## Task 4 — distinct repository, same 14B configuration
