@@ -329,7 +329,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn mock_provider_is_credential_available() {
+    fn offline_provider_credentials_are_available() {
         assert!(check_credential_available("mock"));
     }
 
