@@ -101,6 +101,11 @@ pub struct RawLogPaths {
     pub stderr: Option<PathBuf>,
     pub validation_output: Option<PathBuf>,
 }
+/// Create the evidence directory (and any parents) for a run.
+pub(super) fn prepare_evidence_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create evidence dir: {}", path.display()))
+}
 /// Find an existing evidence bundle for a proposal.
 pub(super) fn find_existing_evidence(
     evidence_dir: &Path,
@@ -380,4 +385,88 @@ fn render_markdown_report(bundle: &EvidenceBundle) -> String {
     ));
 
     md
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::evaluate::identity::EvaluationState;
+
+    fn sample_identity() -> ExecutionIdentity {
+        ExecutionIdentity {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            repo: "/tmp/repo".to_string(),
+            repo_pin: "abc123".to_string(),
+            model: "mock".to_string(),
+            provider: "mock".to_string(),
+            governance_scope: GovernanceScopeSnapshot {
+                allowed_paths: vec!["src/**".to_string()],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: Some(5),
+                max_lines_changed: None,
+                authority: "propose".to_string(),
+                validation_command: Some("cargo test".to_string()),
+            },
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            state: EvaluationState::Created,
+        }
+    }
+
+    #[test]
+    fn prepare_evidence_dir_creates_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let evidence_dir = dir.path().join("a").join("b").join("evidence");
+        prepare_evidence_dir(&evidence_dir).unwrap();
+        assert!(evidence_dir.is_dir());
+    }
+
+    #[test]
+    fn bundle_json_writes_and_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = sample_identity();
+        let bundle = new_bundle(&identity, "abc123", Path::new("/tmp/repo"), dir.path());
+        write_bundle(dir.path(), &bundle).unwrap();
+
+        let reloaded: EvidenceBundle = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("evidence.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reloaded.run_id, "run-1");
+        assert_eq!(reloaded.task_id, "task-1");
+        assert_eq!(reloaded.final_state, "in_progress");
+        assert_eq!(reloaded.schema_version, "1.0.0");
+    }
+
+    #[test]
+    fn find_existing_evidence_matches_proposal_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = sample_identity();
+        let mut bundle = new_bundle(&identity, "abc123", Path::new("/tmp/repo"), dir.path());
+        bundle.proposal = Some(ProposalRecord {
+            id: "proposal-1".to_string(),
+            patch_hash: "deadbeef".to_string(),
+            changed_files: vec!["src/main.rs".to_string()],
+            added_lines: 1,
+            removed_lines: 0,
+            base_sha: "abc123".to_string(),
+        });
+        write_bundle(dir.path(), &bundle).unwrap();
+
+        assert!(find_existing_evidence(dir.path(), "proposal-1").is_some());
+        assert!(find_existing_evidence(dir.path(), "other").is_none());
+    }
+
+    #[test]
+    fn markdown_report_contains_stable_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = sample_identity();
+        let bundle = new_bundle(&identity, "abc123", Path::new("/tmp/repo"), dir.path());
+        let md = render_markdown_report(&bundle);
+        assert!(md.contains("# Evaluation Evidence"));
+        assert!(md.contains("**Schema:** `1.0.0`"));
+        assert!(md.contains("## Outcome"));
+        assert!(md.contains("## Governance"));
+    }
 }

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -219,6 +220,22 @@ pub(super) fn update_identity_state(path: &Path, state: EvaluationState) {
         }
     }
 }
+/// Persist the execution identity to `execution_identity.json` in the
+/// evidence directory, before any model call (the exactly-once gate).
+///
+/// Returns the identity path used by later state updates.
+pub(super) fn persist_execution_identity(
+    evidence_dir: &Path,
+    identity: &ExecutionIdentity,
+) -> Result<PathBuf> {
+    let identity_path = evidence_dir.join("execution_identity.json");
+    std::fs::write(
+        &identity_path,
+        serde_json::to_string_pretty(identity).context("failed to serialize identity")?,
+    )
+    .context("failed to persist execution identity")?;
+    Ok(identity_path)
+}
 pub(super) fn evidence_dir_for(repo: &Path, run_id: &str) -> PathBuf {
     repo.join(".prometheos").join("evidence").join(run_id)
 }
@@ -239,6 +256,29 @@ pub(super) fn hash_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_identity() -> ExecutionIdentity {
+        ExecutionIdentity {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            repo: "/tmp/repo".to_string(),
+            repo_pin: "abc123".to_string(),
+            model: "mock".to_string(),
+            provider: "mock".to_string(),
+            governance_scope: GovernanceScopeSnapshot {
+                allowed_paths: vec!["src/**".to_string()],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: Some(5),
+                max_lines_changed: None,
+                authority: "propose".to_string(),
+                validation_command: Some("cargo test".to_string()),
+            },
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            state: EvaluationState::Created,
+        }
+    }
+
     #[test]
     fn state_machine_terminal_states() {
         assert!(EvaluationState::ReviewGate.is_terminal());
@@ -274,5 +314,41 @@ mod tests {
             EvaluationState::GenerationFailed.outcome_label(),
             "GENERATION_FAILED"
         );
+    }
+    #[test]
+    fn persist_execution_identity_writes_round_trippable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = sample_identity();
+        let path = persist_execution_identity(dir.path(), &identity).unwrap();
+
+        assert_eq!(
+            path.file_name().unwrap(),
+            std::ffi::OsStr::new("execution_identity.json")
+        );
+        assert!(path.exists());
+
+        let stored: ExecutionIdentity =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored.run_id, "run-1");
+        assert_eq!(stored.task_id, "task-1");
+        assert_eq!(stored.repo, "/tmp/repo");
+        assert_eq!(stored.state, EvaluationState::Created);
+        assert_eq!(stored.governance_scope.authority, "propose");
+    }
+    #[test]
+    fn update_identity_state_changes_only_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = sample_identity();
+        let path = persist_execution_identity(dir.path(), &identity).unwrap();
+
+        update_identity_state(&path, EvaluationState::PreflightPassed);
+
+        let stored: ExecutionIdentity =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored.state, EvaluationState::PreflightPassed);
+        // All other fields remain unchanged.
+        assert_eq!(stored.run_id, "run-1");
+        assert_eq!(stored.task_id, "task-1");
+        assert_eq!(stored.governance_scope.authority, "propose");
     }
 }

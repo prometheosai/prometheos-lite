@@ -28,3 +28,23 @@ pub(super) fn cleanup_worktree(repo: &Path, proposal_id: &str) -> CleanupRecord 
         evidence_preserved: true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_worktree_treated_as_removed_and_evidence_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let proposal_id = format!("unique-proposal-{}", uuid::Uuid::new_v4());
+
+        let record = cleanup_worktree(&repo, &proposal_id);
+        assert!(record.worktree_removed);
+        assert!(record.evidence_preserved);
+
+        // Temp patch path is absent afterward.
+        let patch = std::env::temp_dir().join(format!("prometheos-eval-patch-{proposal_id}.patch"));
+        assert!(!patch.exists());
+    }
+}

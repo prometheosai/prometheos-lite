@@ -11,19 +11,21 @@ use crate::workflow::{
 use super::cleanup::cleanup_worktree;
 use super::evidence::{
     EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, find_existing_evidence, new_bundle,
-    new_bundle_from_identity, write_bundle,
+    new_bundle_from_identity, prepare_evidence_dir, write_bundle,
 };
 use super::generation::{classify_generation_error, load_proposal_from_repo};
+use super::heartbeat::HeartbeatSession;
 use super::identity::{
     EvaluationState, ExecutionIdentity, GovernanceScopeSnapshot, TaskManifest,
-    compute_identity_key, evidence_dir_for, hash_str, now_iso, update_identity_state,
+    compute_identity_key, evidence_dir_for, hash_str, now_iso, persist_execution_identity,
+    update_identity_state,
 };
 use super::integrity::{git_rev_parse_head, verify_repo_integrity};
 use super::preflight::{run_preflight, run_validation_preflight};
 use super::registry::{
     FenceToken, LeaseConfig, ProposalState, ReserveResult, TakeoverResult, fenced_finalize,
-    is_entry_stale, lookup_entry, release_reservation, renew_heartbeat, transition_entry,
-    try_reserve, try_take_ownership,
+    is_entry_stale, lookup_entry, release_reservation, transition_entry, try_reserve,
+    try_take_ownership,
 };
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
@@ -71,8 +73,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         .evidence_dir
         .clone()
         .unwrap_or_else(|| evidence_dir_for(&repo, &run_id));
-    std::fs::create_dir_all(&evidence_dir)
-        .with_context(|| format!("failed to create evidence dir: {}", evidence_dir.display()))?;
+    prepare_evidence_dir(&evidence_dir)?;
 
     let governance_scope = GovernanceScopeSnapshot {
         allowed_paths: config.manifest.allowed_paths.clone(),
@@ -101,12 +102,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     };
 
     // Persist identity before any model call (exactly-once gate).
-    let identity_path = evidence_dir.join("execution_identity.json");
-    std::fs::write(
-        &identity_path,
-        serde_json::to_string_pretty(&identity).context("failed to serialize identity")?,
-    )
-    .context("failed to persist execution identity")?;
+    let identity_path = persist_execution_identity(&evidence_dir, &identity)?;
 
     // Compute deterministic identity key for resume lookup.
     let identity_key = compute_identity_key(
@@ -184,50 +180,14 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     // Spawn a heartbeat task that renews the lease while the pipeline is active.
     // The heartbeat runs from `Generating` through `Validating` and stops only
     // when the pipeline reaches a terminal or `ValidationComplete`.
-    // Errors and ownership loss are propagated via the `heartbeat_status` channel.
-    let heartbeat_repo = repo.clone();
-    let heartbeat_key = identity_key.clone();
-    let heartbeat_fence = fence.clone();
-    let heartbeat_interval = config.lease_config.heartbeat_interval;
-    let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::watch::channel(false);
-    let (heartbeat_status_tx, heartbeat_status_rx) =
-        tokio::sync::watch::channel::<Option<String>>(None);
-    let heartbeat_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(heartbeat_interval) => {}
-                _ = heartbeat_stop_rx.changed() => {
-                    if *heartbeat_stop_rx.borrow() {
-                        break;
-                    }
-                }
-            }
-            if *heartbeat_stop_rx.borrow() {
-                break;
-            }
-            match renew_heartbeat(&heartbeat_repo, &heartbeat_key, &heartbeat_fence) {
-                Err(e) => {
-                    let _ = heartbeat_status_tx.send(Some(format!("{e:#}")));
-                    break;
-                }
-                Ok(false) => {
-                    let _ = heartbeat_status_tx.send(Some(
-                        "ownership lost: registry entry claimed by another worker".to_string(),
-                    ));
-                    break;
-                }
-                Ok(true) => {}
-            }
-        }
-    });
-
-    macro_rules! check_heartbeat {
-        () => {
-            if let Some(msg) = heartbeat_status_rx.borrow().as_ref() {
-                bail!("heartbeat failure: {msg}");
-            }
-        };
-    }
+    // Errors and ownership loss are propagated via the status channel.
+    let heartbeat = HeartbeatSession::start(
+        repo.clone(),
+        identity_key.clone(),
+        fence.clone(),
+        config.lease_config.heartbeat_interval,
+        "ownership lost: registry entry claimed by another worker",
+    );
 
     // Race generation against heartbeat failure so we can abort early if
     // ownership is lost or the heartbeat I/O fails.
@@ -243,7 +203,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     );
     tokio::pin!(gen_fut);
 
-    let mut hb_rx = heartbeat_status_rx.clone();
+    let mut hb_rx = heartbeat.status_receiver();
     let gen_result = loop {
         tokio::select! {
             result = &mut gen_fut => {
@@ -260,14 +220,12 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     let gen_result = match gen_result {
         Ok(r) => {
             // Check heartbeat — ownership must still be held after generation.
-            check_heartbeat!();
+            heartbeat.check("")?;
             r
         }
         Err(e) => {
             // Stop heartbeat and check for heartbeat errors first.
-            let _ = heartbeat_stop_tx.send(true);
-            let _ = heartbeat_handle.await;
-            check_heartbeat!();
+            heartbeat.shutdown("").await?;
 
             let msg = e.to_string();
             let classification = classify_generation_error(&msg);
@@ -343,7 +301,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     );
 
     // Check heartbeat after validation — must still own the entry.
-    check_heartbeat!();
+    heartbeat.check("")?;
 
     update_identity_state(&identity_path, EvaluationState::ValidationComplete);
 
@@ -406,14 +364,12 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &gen_result.id,
         &evidence_dir,
         &bundle,
-        &heartbeat_status_rx,
+        &heartbeat.status_receiver(),
     )
     .context("fenced finalization failed")?;
 
     // Stop heartbeat and check for errors that occurred during finalization.
-    let _ = heartbeat_stop_tx.send(true);
-    let _ = heartbeat_handle.await;
-    check_heartbeat!();
+    heartbeat.shutdown("").await?;
 
     Ok(bundle)
 }
@@ -703,39 +659,13 @@ async fn resume_validation(
     .context("failed to transition to Validating state in resume")?;
 
     // Spawn a heartbeat task to protect validation from stale-reclaim.
-    let hb_repo = repo.to_path_buf();
-    let hb_key = identity_key.to_string();
-    let hb_fence = fence.clone();
-    let hb_interval = config.lease_config.heartbeat_interval;
-    let (hb_stop_tx, mut hb_stop_rx) = tokio::sync::watch::channel(false);
-    let (hb_status_tx, hb_status_rx) = tokio::sync::watch::channel::<Option<String>>(None);
-    let hb_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(hb_interval) => {}
-                _ = hb_stop_rx.changed() => {
-                    if *hb_stop_rx.borrow() {
-                        break;
-                    }
-                }
-            }
-            if *hb_stop_rx.borrow() {
-                break;
-            }
-            match renew_heartbeat(&hb_repo, &hb_key, &hb_fence) {
-                Err(e) => {
-                    let _ = hb_status_tx.send(Some(format!("{e:#}")));
-                    break;
-                }
-                Ok(false) => {
-                    let _ = hb_status_tx
-                        .send(Some("ownership lost during resume validation".to_string()));
-                    break;
-                }
-                Ok(true) => {}
-            }
-        }
-    });
+    let hb = HeartbeatSession::start(
+        repo.to_path_buf(),
+        identity_key.to_string(),
+        fence.clone(),
+        config.lease_config.heartbeat_interval,
+        "ownership lost during resume validation",
+    );
 
     // Run validation on the existing proposal.
     let validation_result = run_isolated_validation(
@@ -799,16 +729,79 @@ async fn resume_validation(
         &proposal.id,
         evidence_dir,
         &bundle,
-        &hb_status_rx,
+        &hb.status_receiver(),
     )
     .context("fenced finalization failed")?;
 
     // Stop heartbeat and check for errors.
-    let _ = hb_stop_tx.send(true);
-    let _ = hb_handle.await;
-    if let Some(msg) = hb_status_rx.borrow().as_ref() {
-        bail!("heartbeat failure during resume finalization: {msg}");
-    }
+    hb.shutdown(" during resume finalization").await?;
 
     Ok(bundle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopProvider;
+
+    #[async_trait::async_trait]
+    impl PatchProvider for NoopProvider {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        async fn generate(
+            &self,
+            _request: crate::harness::patch_provider::GenerateRequest,
+        ) -> anyhow::Result<crate::harness::patch_provider::GenerateResponse> {
+            Ok(crate::harness::patch_provider::GenerateResponse {
+                candidates: vec![],
+                generation_time_ms: 0,
+                provider_notes: None,
+            })
+        }
+    }
+
+    fn sample_manifest() -> TaskManifest {
+        TaskManifest {
+            task_id: "task-1".to_string(),
+            goal: "goal".to_string(),
+            repo: std::path::PathBuf::from("/tmp/repo"),
+            allowed_paths: vec!["src/**".to_string()],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: Some(5),
+            max_lines_changed: None,
+            validation_command: Some("cargo test".to_string()),
+            provider: "noop".to_string(),
+            authority: "propose".to_string(),
+            min_disk_bytes: 100 * 1024 * 1024,
+            evidence_dir: None,
+        }
+    }
+
+    #[test]
+    fn evaluation_config_new_uses_defaults_and_preserves_inputs() {
+        let manifest = sample_manifest();
+        let provider: Box<dyn PatchProvider> = Box::new(NoopProvider);
+        let config = EvaluationConfig::new(manifest.clone(), provider);
+
+        assert!(config.route_info.is_none());
+        assert_eq!(
+            config.lease_config.stale_reservation_timeout,
+            LeaseConfig::default().stale_reservation_timeout
+        );
+        assert_eq!(
+            config.lease_config.generation_lease_timeout,
+            LeaseConfig::default().generation_lease_timeout
+        );
+        assert_eq!(
+            config.lease_config.heartbeat_interval,
+            LeaseConfig::default().heartbeat_interval
+        );
+        assert_eq!(config.manifest.task_id, "task-1");
+        assert_eq!(config.manifest.goal, "goal");
+        assert_eq!(config.provider.name(), "noop");
+    }
 }

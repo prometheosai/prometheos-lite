@@ -72,3 +72,79 @@ pub(super) fn is_repo_clean(repo: &Path) -> bool {
         .map(|s| s.trim().is_empty())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("file.txt"), "hello").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+        dir
+    }
+
+    fn head(repo: &Path) -> String {
+        git_rev_parse_head(repo).unwrap()
+    }
+
+    #[test]
+    fn clean_repository_accepted() {
+        let dir = init_repo();
+        let record = verify_repo_integrity(dir.path(), &head(dir.path()), "missing-proposal");
+        assert!(record.original_commit_unchanged);
+        assert!(record.no_tracked_modifications);
+        assert!(record.no_staged_modifications);
+        assert!(record.proposal_not_applied);
+        assert!(record.candidate_changes_confined);
+    }
+
+    #[test]
+    fn tracked_modification_detected() {
+        let dir = init_repo();
+        let expected = head(dir.path());
+        std::fs::write(dir.path().join("file.txt"), "changed").unwrap();
+        let record = verify_repo_integrity(dir.path(), &expected, "missing-proposal");
+        assert!(!record.no_tracked_modifications);
+    }
+
+    #[test]
+    fn prometheos_artifacts_remain_allowed() {
+        let dir = init_repo();
+        let expected = head(dir.path());
+        // Untracked artifacts under .prometheos/ are allowed by the policy.
+        std::fs::create_dir_all(dir.path().join(".prometheos/diagnostics")).unwrap();
+        std::fs::write(dir.path().join(".prometheos/diagnostics/probe.log"), "x").unwrap();
+        let record = verify_repo_integrity(dir.path(), &expected, "missing-proposal");
+        assert!(record.original_commit_unchanged);
+        assert!(record.no_tracked_modifications);
+        assert!(record.candidate_changes_confined);
+    }
+
+    #[test]
+    fn untracked_file_outside_prometheos_breaks_confined() {
+        let dir = init_repo();
+        let expected = head(dir.path());
+        std::fs::write(dir.path().join("new_untracked.txt"), "x").unwrap();
+        let record = verify_repo_integrity(dir.path(), &expected, "missing-proposal");
+        assert!(!record.candidate_changes_confined);
+    }
+}

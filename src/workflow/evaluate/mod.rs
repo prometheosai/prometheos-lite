@@ -20,6 +20,7 @@
 mod cleanup;
 mod evidence;
 mod generation;
+mod heartbeat;
 mod identity;
 mod integrity;
 mod orchestrator;
