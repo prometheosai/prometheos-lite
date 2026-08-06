@@ -220,6 +220,13 @@ pub(super) fn update_identity_state(path: &Path, state: EvaluationState) {
         }
     }
 }
+
+/// Read the current state from a persisted identity document.
+pub(super) fn read_identity_state(path: &Path) -> Option<EvaluationState> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let identity: ExecutionIdentity = serde_json::from_str(&text).ok()?;
+    Some(identity.state)
+}
 /// Persist the execution identity to `execution_identity.json` in the
 /// evidence directory, before any model call (the exactly-once gate).
 ///

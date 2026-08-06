@@ -18,7 +18,6 @@ use super::heartbeat::HeartbeatSession;
 use super::identity::{
     EvaluationState, ExecutionIdentity, GovernanceScopeSnapshot, TaskManifest,
     compute_identity_key, evidence_dir_for, hash_str, now_iso, persist_execution_identity,
-    update_identity_state,
 };
 use super::integrity::{git_rev_parse_head, verify_repo_integrity};
 use super::preflight::{run_preflight, run_validation_preflight};
@@ -56,6 +55,31 @@ impl EvaluationConfig {
         }
     }
 }
+/// Perform a durable, journaled state transition under the current fence.
+///
+/// The journal event is the authoritative durable record; the identity
+/// document and checkpoint are derived views written afterwards.
+fn durable_transition(
+    repo: &Path,
+    identity_path: &Path,
+    run_id: &str,
+    identity_key: &str,
+    fence: &FenceToken,
+    to_state: EvaluationState,
+    proposal_ref: Option<String>,
+) -> Result<u64> {
+    super::journal::record_transition(
+        repo,
+        identity_path,
+        run_id,
+        identity_key,
+        to_state,
+        proposal_ref,
+        &fence.owner_run_id,
+        fence.lease_epoch,
+    )
+}
+
 /// Run the full evaluation pipeline and return the evidence bundle.
 ///
 /// This is the primary entry point for the `workflow evaluate` command.
@@ -153,7 +177,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         return Ok(bundle);
     }
     let _preflight = preflight.unwrap();
-    update_identity_state(&identity_path, EvaluationState::PreflightPassed);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::PreflightPassed,
+        None,
+    )
+    .context("failed to persist PreflightPassed transition")?;
 
     // ---- Stage: Generate (with heartbeat) ----
     transition_entry(
@@ -164,7 +197,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &fence,
     )
     .context("failed to transition to Generating state")?;
-    update_identity_state(&identity_path, EvaluationState::Generating);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::Generating,
+        None,
+    )
+    .context("failed to persist Generating transition")?;
     let scope = GenerateScope {
         allowed_paths: config.manifest.allowed_paths.clone(),
         forbidden_paths: config.manifest.forbidden_paths.clone(),
@@ -242,7 +284,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         }
     };
 
-    update_identity_state(&identity_path, EvaluationState::ProposalGenerated);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::ProposalGenerated,
+        Some(gen_result.id.clone()),
+    )
+    .context("failed to persist ProposalGenerated transition")?;
 
     // Register the proposal in the registry.
     transition_entry(
@@ -279,7 +330,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     // ---- Stage: Governance verification ----
     // Governance is already enforced by `generate_proposal` → `propose_with_meta`.
     // Record that it passed.
-    update_identity_state(&identity_path, EvaluationState::GovernancePassed);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::GovernancePassed,
+        Some(gen_result.id.clone()),
+    )
+    .context("failed to persist GovernancePassed transition")?;
 
     // ---- Stage: Isolated dry-run validation (with heartbeat) ----
     // Transition to Validating state so other workers know validation is live.
@@ -291,7 +351,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
         &fence,
     )
     .context("failed to transition to Validating state")?;
-    update_identity_state(&identity_path, EvaluationState::Validating);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::Validating,
+        Some(gen_result.id.clone()),
+    )
+    .context("failed to persist Validating transition")?;
 
     let validation_result = run_isolated_validation(
         &repo,
@@ -303,7 +372,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     // Check heartbeat after validation — must still own the entry.
     heartbeat.check("")?;
 
-    update_identity_state(&identity_path, EvaluationState::ValidationComplete);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::ValidationComplete,
+        Some(gen_result.id.clone()),
+    )
+    .context("failed to persist ValidationComplete transition")?;
 
     match &validation_result {
         Ok(vr) => {
@@ -324,7 +402,16 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     }
 
     // ---- Stage: Repository integrity ----
-    update_identity_state(&identity_path, EvaluationState::IntegrityVerified);
+    durable_transition(
+        &repo,
+        &identity_path,
+        &run_id,
+        &identity_key,
+        &fence,
+        EvaluationState::IntegrityVerified,
+        Some(gen_result.id.clone()),
+    )
+    .context("failed to persist IntegrityVerified transition")?;
     let integrity = verify_repo_integrity(&repo, &commit_at_start, &gen_result.id);
     bundle.integrity = Some(integrity.clone());
 
@@ -399,6 +486,12 @@ async fn wait_and_reuse(
     // Run validation-specific preflight first.
     run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
 
+    // Recover durable state before deciding how to proceed. This validates
+    // journal integrity (fail closed on corruption) so a restart after a
+    // crash cannot silently continue from a corrupted journal.
+    let recovered = super::recovery::recover_evaluation(repo, identity_key)
+        .context("durable state recovery failed; refusing to continue")?;
+
     let max_wait = std::time::Duration::from_secs(300); // 5 minutes
     let poll_interval = std::time::Duration::from_millis(500);
     let mut elapsed = std::time::Duration::ZERO;
@@ -452,6 +545,7 @@ async fn wait_and_reuse(
                             &proposal,
                             identity_key,
                             &fence,
+                            recovered.as_ref(),
                         )
                         .await;
                     }
@@ -492,6 +586,7 @@ async fn wait_and_reuse(
                                 &proposal,
                                 identity_key,
                                 &fence,
+                                recovered.as_ref(),
                             )
                             .await;
                         }
@@ -606,7 +701,19 @@ async fn resume_validation(
     proposal: &ProposalArtifact,
     identity_key: &str,
     fence: &FenceToken,
+    recovered: Option<&super::recovery::RecoveredEvaluation>,
 ) -> Result<EvidenceBundle> {
+    // Cross-check the durable journal against the resume target. The journal
+    // is authoritative; a terminal state or a conflicting proposal reference
+    // must fail closed rather than resume a finished or mismatched run.
+    if let Some(recovered) = recovered {
+        super::recovery::ensure_resumable(
+            EvaluationState::ProposalGenerated,
+            &proposal.id,
+            recovered,
+        )
+        .context("durable journal conflicts with resume")?;
+    }
     let mut bundle = new_bundle_from_identity(
         run_id,
         &manifest.task_id,
