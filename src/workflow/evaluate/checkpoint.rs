@@ -52,31 +52,11 @@ pub fn checkpoint_path_for(repo: &Path, identity_key: &str) -> PathBuf {
         .join(format!("{identity_key}.json"))
 }
 
-/// Write a checkpoint atomically (temp file + rename).
+/// Write a checkpoint atomically (temp file + fsync + rename + dir fsync).
 pub fn write_checkpoint(repo: &Path, checkpoint: &EvaluationCheckpoint) -> Result<()> {
-    use std::io::Write;
     let path = checkpoint_path_for(repo, &checkpoint.identity_key);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create checkpoint dir {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(checkpoint)?;
-    let mut file = std::fs::File::create(&tmp)
-        .with_context(|| format!("failed to write checkpoint {}", tmp.display()))?;
-    file.write_all(json.as_bytes())
-        .with_context(|| format!("failed to write checkpoint {}", tmp.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to fsync checkpoint {}", tmp.display()))?;
-    drop(file);
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("failed to commit checkpoint {}", path.display()))?;
-    if let Some(parent) = path.parent()
-        && let Ok(d) = std::fs::File::open(parent)
-    {
-        let _ = d.sync_all();
-    }
-    Ok(())
+    super::durable::atomic_write_json(&path, checkpoint)
+        .with_context(|| format!("failed to commit checkpoint {}", path.display()))
 }
 
 /// Read and validate a checkpoint for an identity, if present.

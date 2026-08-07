@@ -54,6 +54,7 @@ pub fn validate_transition(from: EvaluationState, to: EvaluationState) -> Result
             | (EvaluationState::IntegrityVerified, EvaluationState::CandidateCompileFailed)
             | (EvaluationState::IntegrityVerified, EvaluationState::CandidateTestFailed)
             | (EvaluationState::IntegrityVerified, EvaluationState::InfraBlocked)
+            | (EvaluationState::IntegrityVerified, EvaluationState::InternalError)
     );
     if legal {
         Ok(())

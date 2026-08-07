@@ -8,15 +8,21 @@
 //! Invariants:
 //! - Append-only: each event has a monotonic sequence per identity.
 //! - Atomic: an event is never partially written (temp file + rename).
-//! - A malformed or sequence-colliding event fails closed rather than being
-//!   silently skipped.
+//! - Fenced: appends verify ownership (`owner_run_id` + `lease_epoch`) against
+//!   the registry under its lock; a stale fence cannot append.
+//! - Provenance: every event records the owning run, lease epoch, repository
+//!   revision, and evidence reference so recovery can validate them.
+//! - A malformed, sequence-colliding, or provenance-mismatched event fails
+//!   closed rather than being silently skipped.
 //! - No secrets are ever written to events.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use super::identity::EvaluationState;
+use super::registry::FenceToken;
 use super::schema::{
     CURRENT_SCHEMA_VERSION, DocumentType, SchemaVersion, validate_version, version_diagnostic,
 };
@@ -42,10 +48,20 @@ pub struct JournalEvent {
     pub to_state: EvaluationState,
     /// The proposal id, when one exists at this point.
     pub proposal_ref: Option<String>,
-    /// Checkpoint file reference (relative path), when written.
-    pub checkpoint_ref: Option<String>,
     /// Failure classification, for terminal failure events.
     pub failure_classification: Option<String>,
+    /// Run id that held ownership of the registry entry when this event was
+    /// appended (fencing provenance).
+    pub owner_run_id: String,
+    /// Lease epoch that protected the append (fencing provenance).
+    pub lease_epoch: u64,
+    /// Repository revision the transition was made against.
+    pub repository_revision: String,
+    /// Evidence artifact reference (repo-relative path to the evidence dir or
+    /// `evidence.json`), when one exists at this point.
+    pub evidence_ref: Option<String>,
+    /// Checkpoint file reference (repo-relative path), when written.
+    pub checkpoint_ref: Option<String>,
 }
 
 /// Directory that holds the event journal for a single identity.
@@ -70,6 +86,11 @@ fn read_all(journal_dir: &Path) -> Result<Vec<JournalEvent>> {
     if !journal_dir.exists() {
         return Ok(events);
     }
+    let expected_key = journal_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(journal_dir)
         .with_context(|| format!("failed to read journal dir {}", journal_dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -79,14 +100,40 @@ fn read_all(journal_dir: &Path) -> Result<Vec<JournalEvent>> {
     for path in entries {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read journal event {}", path.display()))?;
-        let event: JournalEvent = serde_json::from_str(&text)
+        let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("corrupt journal event {}", path.display()))?;
-        let status = validate_version(DocumentType::JournalEvent, event.schema_version)?;
+        let declared = match value.get("schema_version") {
+            Some(v) => SchemaVersion::parse(v.as_str().context("schema_version must be a string")?)
+                .with_context(|| format!("malformed schema_version in {}", path.display()))?,
+            None => super::schema::LEGACY_UNVERSIONED_VERSION,
+        };
+        let status = validate_version(DocumentType::JournalEvent, declared)?;
         if let super::schema::VersionStatus::Unsupported = status {
             bail!(
                 "{}",
-                version_diagnostic(DocumentType::JournalEvent, event.schema_version)
-                    .migration_action
+                version_diagnostic(DocumentType::JournalEvent, declared).migration_action
+            );
+        }
+        let event: JournalEvent = serde_json::from_value(value)
+            .with_context(|| format!("corrupt journal event {}", path.display()))?;
+        // The on-disk filename encodes the expected sequence; a mismatch means
+        // the journal was reordered or forged — fail closed.
+        let filename_seq = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .with_context(|| format!("journal filename has no sequence: {}", path.display()))?;
+        if filename_seq != event.sequence {
+            bail!(
+                "journal filename/sequence mismatch for {}: filename {filename_seq}, event {}",
+                path.display(),
+                event.sequence
+            );
+        }
+        if event.identity_key != expected_key {
+            bail!(
+                "journal event identity mismatch: directory expects {expected_key}, event has {}",
+                event.identity_key
             );
         }
         events.push(event);
@@ -96,13 +143,10 @@ fn read_all(journal_dir: &Path) -> Result<Vec<JournalEvent>> {
 
 /// Append an event once the sequence is known to be the next expected value.
 ///
-/// The event is written to a temp file, fsynced, then renamed into place.
+/// The event is written atomically (temp file + fsync + rename + dir fsync).
 /// The caller must ensure `next_sequence` equals `last_sequence + 1` to
-/// preserve monotonicity (see [`append_event`]).
+/// preserve monotonicity (see [`append_event`] and [`append_event_unlocked`]).
 fn write_event(journal_dir: &Path, event: &JournalEvent) -> Result<()> {
-    use std::io::Write;
-    std::fs::create_dir_all(journal_dir)
-        .with_context(|| format!("failed to create journal dir {}", journal_dir.display()))?;
     let path = event_path(journal_dir, event.sequence);
     if path.exists() {
         bail!(
@@ -111,33 +155,16 @@ fn write_event(journal_dir: &Path, event: &JournalEvent) -> Result<()> {
             event.identity_key
         );
     }
-    let tmp = journal_dir.join(format!("{}.tmp", event.sequence));
-    let json = serde_json::to_string_pretty(event).context("failed to serialize journal event")?;
-    let mut file = std::fs::File::create(&tmp)
-        .with_context(|| format!("failed to create event temp {}", tmp.display()))?;
-    file.write_all(json.as_bytes())
-        .with_context(|| format!("failed to write event temp {}", tmp.display()))?;
-    // fsync the temp file so a crash cannot leave a truncated final event.
-    file.sync_all()
-        .with_context(|| format!("failed to fsync event temp {}", tmp.display()))?;
-    drop(file);
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("failed to commit event {}", path.display()))?;
-    sync_dir(journal_dir);
-    Ok(())
+    super::durable::atomic_write_json(&path, event)
+        .with_context(|| format!("failed to commit event {}", path.display()))
 }
 
-fn sync_dir(dir: &Path) {
-    if let Ok(f) = std::fs::File::open(dir) {
-        let _ = f.sync_all();
-    }
-}
-
-/// Append a transition event to the identity's journal.
+/// Append a transition event without registry fencing.
 ///
-/// Returns the sequence number of the appended event. Fails if `from_state`
-/// does not legally lead to `to_state`, or if the journal is inconsistent.
-pub fn append_event(
+/// Used by recovery tests and by [`fenced_finalize`] (which already holds the
+/// registry lock and revalidated the fence). Production transitions must use
+/// the fenced [`append_event`].
+pub fn append_event_unlocked(
     repo: &Path,
     run_id: &str,
     identity_key: &str,
@@ -145,6 +172,10 @@ pub fn append_event(
     to_state: EvaluationState,
     proposal_ref: Option<String>,
     failure_classification: Option<String>,
+    owner_run_id: &str,
+    lease_epoch: u64,
+    repository_revision: &str,
+    evidence_ref: Option<String>,
 ) -> Result<u64> {
     super::transition::validate_transition(from_state, to_state)
         .context("refusing to journal an illegal state transition")?;
@@ -153,6 +184,10 @@ pub fn append_event(
         Some(last) => last + 1,
         None => 0,
     };
+    let checkpoint_ref = super::durable::repo_relative_path(
+        repo,
+        &super::checkpoint::checkpoint_path_for(repo, identity_key),
+    );
     let event = JournalEvent {
         schema_version: CURRENT_SCHEMA_VERSION,
         event_id: uuid::Uuid::new_v4().to_string(),
@@ -163,26 +198,109 @@ pub fn append_event(
         from_state,
         to_state,
         proposal_ref,
-        checkpoint_ref: None,
         failure_classification,
+        owner_run_id: owner_run_id.to_string(),
+        lease_epoch,
+        repository_revision: repository_revision.to_string(),
+        evidence_ref,
+        checkpoint_ref: Some(checkpoint_ref),
     };
     write_event(&journal_dir, &event)?;
     Ok(next_sequence)
 }
 
-/// Read all journal events for an identity, in sequence order.
-pub fn read_journal(repo: &Path, identity_key: &str) -> Result<Vec<JournalEvent>> {
-    read_all(&journal_dir_for(repo, identity_key))
+/// Append a transition event under the registry synchronization boundary.
+///
+/// The registry lock is acquired, the registry reloaded, and ownership
+/// revalidated against `fence` before the next sequence is computed and the
+/// event appended. A stale fence (entry owned by another run or a newer
+/// epoch) is rejected so a timed-out worker can never append to a journal it
+/// no longer owns.
+pub fn append_event(
+    repo: &Path,
+    run_id: &str,
+    identity_key: &str,
+    from_state: EvaluationState,
+    to_state: EvaluationState,
+    proposal_ref: Option<String>,
+    failure_classification: Option<String>,
+    repository_revision: &str,
+    evidence_ref: Option<String>,
+    fence: &FenceToken,
+) -> Result<u64> {
+    super::transition::validate_transition(from_state, to_state)
+        .context("refusing to journal an illegal state transition")?;
+    super::registry::with_registry_lock(repo, |registry| {
+        let entry = registry.entries.get(identity_key).with_context(|| {
+            format!(
+                "journal append refused: no registry entry for {identity_key} \
+                 (ownership not established)"
+            )
+        })?;
+        if entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch {
+            bail!(
+                "stale fence: journal append rejected (entry owner={} epoch={}; \
+                 caller owner={} epoch={})",
+                entry.owner_run_id,
+                entry.lease_epoch,
+                fence.owner_run_id,
+                fence.lease_epoch,
+            );
+        }
+        let journal_dir = journal_dir_for(repo, identity_key);
+        let next_sequence = match last_sequence(&journal_dir)? {
+            Some(last) => last + 1,
+            None => 0,
+        };
+        let checkpoint_ref = super::durable::repo_relative_path(
+            repo,
+            &super::checkpoint::checkpoint_path_for(repo, identity_key),
+        );
+        let event = JournalEvent {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            sequence: next_sequence,
+            run_id: run_id.to_string(),
+            identity_key: identity_key.to_string(),
+            timestamp: super::identity::now_iso(),
+            from_state,
+            to_state,
+            proposal_ref,
+            failure_classification,
+            owner_run_id: fence.owner_run_id.clone(),
+            lease_epoch: fence.lease_epoch,
+            repository_revision: repository_revision.to_string(),
+            evidence_ref,
+            checkpoint_ref: Some(checkpoint_ref),
+        };
+        write_event(&journal_dir, &event)?;
+        Ok(next_sequence)
+    })
 }
 
-/// Perform a durable, ordered state transition.
+/// Read all journal events for an identity, in sequence order.
+pub fn read_journal(repo: &Path, identity_key: &str) -> Result<Vec<JournalEvent>> {
+    let events = read_all(&journal_dir_for(repo, identity_key))?;
+    for event in &events {
+        if event.identity_key != identity_key {
+            bail!(
+                "journal event identity mismatch: expected {identity_key}, event has {}",
+                event.identity_key
+            );
+        }
+    }
+    Ok(events)
+}
+
+/// Perform a durable, ordered state transition, fail-closed.
 ///
 /// Ordering protocol (durability before visibility):
 /// 1. Validate the transition against the transition law.
-/// 2. Append the journal event (fsynced file + dir sync) — this is the
-///    authoritative, durable record.
-/// 3. Flush the identity document to the new state (derived, best-effort).
-/// 4. Write a compact checkpoint (best-effort fast path for recovery).
+/// 2. Append the journal event under the registry lock with the caller's
+///    fence (authoritative durable record; stale owners are rejected).
+/// 3. Flush the identity document to the new state — a failure here
+///    propagates to the caller (the run refuses to continue).
+/// 4. Write a compact checkpoint — a failure here also propagates.
 ///
 /// The caller must already hold ownership of the identity.
 pub fn record_transition(
@@ -192,8 +310,10 @@ pub fn record_transition(
     identity_key: &str,
     to_state: EvaluationState,
     proposal_ref: Option<String>,
-    owner_run_id: &str,
-    lease_epoch: u64,
+    failure_classification: Option<String>,
+    repository_revision: &str,
+    evidence_ref: Option<String>,
+    fence: &FenceToken,
 ) -> Result<u64> {
     let from_state = super::identity::read_identity_state(identity_path).with_context(|| {
         format!(
@@ -208,33 +328,34 @@ pub fn record_transition(
         from_state,
         to_state,
         proposal_ref.clone(),
-        None,
+        failure_classification,
+        repository_revision,
+        evidence_ref.clone(),
+        fence,
     )
     .context("failed to persist journal event")?;
-    super::identity::update_identity_state(identity_path, to_state);
+    super::identity::update_identity_state(identity_path, to_state)
+        .with_context(|| format!("failed to flush identity state for {to_state:?}"))?;
     let checkpoint = super::checkpoint::build_checkpoint(
         repo,
         identity_key,
         run_id,
-        &repo_pin(repo),
+        repository_revision,
         to_state,
         sequence,
         proposal_ref,
-        Some(identity_path.to_string_lossy().into_owned()),
-        owner_run_id,
-        lease_epoch,
+        evidence_ref,
+        &fence.owner_run_id,
+        fence.lease_epoch,
     );
-    let _ = super::checkpoint::write_checkpoint(repo, &checkpoint);
+    super::checkpoint::write_checkpoint(repo, &checkpoint)
+        .context("failed to persist checkpoint for transition")?;
     Ok(sequence)
 }
 
-fn repo_pin(repo: &Path) -> String {
-    super::integrity::git_rev_parse_head(repo).unwrap_or_else(|_| "unknown".to_string())
-}
-
 /// Verify journal integrity:
-/// - no duplicate sequences, monotonic order
-/// - the newest existing event (if any) is followed (optional)
+/// - no duplicate sequences, monotonic order, no gaps
+/// - every event validates against the replay (checked by recovery)
 pub fn validate_journal(journal_dir: &Path) -> Result<()> {
     let events = read_all(journal_dir)?;
     for pair in events.windows(2) {
@@ -269,15 +390,19 @@ mod tests {
             from_state: EvaluationState::Created,
             to_state: EvaluationState::PreflightPassed,
             proposal_ref: None,
-            checkpoint_ref: None,
             failure_classification: None,
+            owner_run_id: "run-1".to_string(),
+            lease_epoch: 1,
+            repository_revision: "abc123".to_string(),
+            evidence_ref: None,
+            checkpoint_ref: None,
         }
     }
 
     #[test]
     fn append_events_are_monotonic_and_round_trippable() {
         let repo = repo_dir();
-        let seq0 = append_event(
+        let seq0 = append_event_unlocked(
             &repo,
             "run-1",
             "key-1",
@@ -285,15 +410,23 @@ mod tests {
             EvaluationState::PreflightPassed,
             None,
             None,
+            "run-1",
+            1,
+            "abc123",
+            None,
         )
         .unwrap();
-        let seq1 = append_event(
+        let seq1 = append_event_unlocked(
             &repo,
             "run-1",
             "key-1",
             EvaluationState::PreflightPassed,
             EvaluationState::Generating,
             None,
+            None,
+            "run-1",
+            1,
+            "abc123",
             None,
         )
         .unwrap();
@@ -305,6 +438,9 @@ mod tests {
         assert_eq!(events[0].sequence, 0);
         assert_eq!(events[1].sequence, 1);
         assert_eq!(events[1].to_state, EvaluationState::Generating);
+        assert_eq!(events[1].owner_run_id, "run-1");
+        assert_eq!(events[1].lease_epoch, 1);
+        assert_eq!(events[1].repository_revision, "abc123");
         assert_eq!(
             last_sequence(&journal_dir_for(&repo, "key-1")).unwrap(),
             Some(1)
@@ -315,13 +451,17 @@ mod tests {
     #[test]
     fn rejects_illegal_transition_before_writing() {
         let repo = repo_dir();
-        let err = append_event(
+        let err = append_event_unlocked(
             &repo,
             "run-1",
             "key-1",
             EvaluationState::Created,
             EvaluationState::ReviewGate,
             None,
+            None,
+            "run-1",
+            1,
+            "abc123",
             None,
         )
         .unwrap_err();
@@ -332,13 +472,17 @@ mod tests {
     #[test]
     fn duplicate_sequence_fails_closed() {
         let repo = repo_dir();
-        append_event(
+        append_event_unlocked(
             &repo,
             "run-1",
             "key-1",
             EvaluationState::Created,
             EvaluationState::PreflightPassed,
             None,
+            None,
+            "run-1",
+            1,
+            "abc123",
             None,
         )
         .unwrap();
@@ -351,13 +495,17 @@ mod tests {
     #[test]
     fn corrupt_event_file_fails_closed() {
         let repo = repo_dir();
-        append_event(
+        append_event_unlocked(
             &repo,
             "run-1",
             "key-1",
             EvaluationState::Created,
             EvaluationState::PreflightPassed,
             None,
+            None,
+            "run-1",
+            1,
+            "abc123",
             None,
         )
         .unwrap();
@@ -377,6 +525,38 @@ mod tests {
         std::fs::write(dir.join("00000000000000000000.json"), json).unwrap();
         let err = read_journal(&repo, "key-1").unwrap_err();
         assert!(err.to_string().contains("fail closed"));
+    }
+
+    #[test]
+    fn filename_sequence_mismatch_fails_closed() {
+        let repo = repo_dir();
+        let dir = journal_dir_for(&repo, "key-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Event claims sequence 0 but lives at sequence-1 filename.
+        let event = sample_event(0);
+        std::fs::write(
+            dir.join("00000000000000000001.json"),
+            serde_json::to_string_pretty(&event).unwrap(),
+        )
+        .unwrap();
+        let err = read_journal(&repo, "key-1").unwrap_err();
+        assert!(err.to_string().contains("filename/sequence mismatch"));
+    }
+
+    #[test]
+    fn identity_mismatch_fails_closed() {
+        let repo = repo_dir();
+        let dir = journal_dir_for(&repo, "key-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut event = sample_event(0);
+        event.identity_key = "other-key".to_string();
+        std::fs::write(
+            dir.join("00000000000000000000.json"),
+            serde_json::to_string_pretty(&event).unwrap(),
+        )
+        .unwrap();
+        let err = read_journal(&repo, "key-1").unwrap_err();
+        assert!(err.to_string().contains("identity mismatch"));
     }
 
     #[test]

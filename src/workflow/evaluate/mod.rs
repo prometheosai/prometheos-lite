@@ -19,6 +19,7 @@
 
 mod checkpoint;
 mod cleanup;
+mod durable;
 mod evidence;
 mod generation;
 mod heartbeat;

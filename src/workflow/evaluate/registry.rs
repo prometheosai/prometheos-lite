@@ -133,34 +133,89 @@ fn registry_lock_path(repo: &Path) -> PathBuf {
 
 fn load_registry(repo: &Path) -> Result<ProposalRegistry> {
     let path = registry_path(repo);
-    // Fix 4: Only treat missing file as empty. Corrupted/unreadable files fail closed.
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            serde_json::from_str(&text).context("corrupted proposal registry (invalid JSON)")
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Missing file is expected — return empty registry.
-            Ok(ProposalRegistry::default())
-        }
-        Err(e) => {
-            // Unreadable file fails closed.
-            bail!("failed to read proposal registry: {e}")
-        }
+    if !path.exists() {
+        // Missing file is expected — return empty registry.
+        return Ok(ProposalRegistry::default());
     }
+    // Migrate any unversioned legacy registry to the current versioned form
+    // (inject `schema_version`, validate the typed document, fail closed on
+    // corrupt or unsupported-future documents).
+    super::migration::migrate_document(&path, super::schema::DocumentType::ProposalRegistry)?;
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read proposal registry {}", path.display()))?;
+    serde_json::from_str(&text).context("corrupted proposal registry (invalid JSON)")
 }
 
 fn save_registry(repo: &Path, registry: &ProposalRegistry) -> Result<()> {
     let path = registry_path(repo);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for registry")?;
+    // Current-format write: the schema version is embedded in the document.
+    super::durable::versioned_write_json(&path, registry)
+        .context("failed to persist proposal registry")
+}
+
+/// Run `f` under the exclusive registry lock with a freshly loaded registry,
+/// then persist the registry.
+///
+/// Used by journal appends and recovery repairs so that fence verification,
+/// sequence computation, and snapshot repair all happen inside the same
+/// synchronization boundary as registry mutation. The lock file is kept (not
+/// deleted) — dropping the handle releases it.
+pub(super) fn with_registry_lock<T>(
+    repo: &Path,
+    f: impl FnOnce(&mut ProposalRegistry) -> Result<T>,
+) -> Result<T> {
+    let lock_path = registry_lock_path(repo);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
     }
-    // Write to a temp file, then atomically rename to avoid partial writes.
-    let tmp = path.with_extension("json.tmp");
-    let json =
-        serde_json::to_string_pretty(registry).context("failed to serialize proposal registry")?;
-    std::fs::write(&tmp, &json).context("failed to write proposal registry temp file")?;
-    std::fs::rename(&tmp, &path).context("failed to atomically rename proposal registry")?;
-    Ok(())
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .context("failed to create registry lock file")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed to acquire registry lock: {err}");
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::fileapi::LockFileEx;
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                handle as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            bail!("failed to acquire registry lock");
+        }
+    }
+
+    let mut registry = load_registry(repo).context("failed to load registry under lock")?;
+    let result = f(&mut registry);
+    let save = result.is_ok();
+    if save {
+        save_registry(repo, &registry).context("failed to persist registry under lock")?;
+    }
+    drop(lock_file);
+    result
 }
 /// Result of attempting to reserve or reclaim an identity key.
 #[derive(Debug)]
@@ -571,9 +626,15 @@ fn transition_entry_with_evidence(
     Ok(())
 }
 /// Fenced finalization: acquire the registry lock, revalidate ownership and
-/// heartbeat health, write the evidence bundle, and transition to
-/// `ValidationComplete` — all under the same lock so that no takeover can
-/// occur between the checks and the publication.
+/// heartbeat health, then commit the terminal outcome atomically.
+///
+/// Ordering (durability before visibility, all under the same lock so that no
+/// takeover can occur between the checks and publication):
+/// 1. Final evidence JSON + Markdown are written durably ([`write_bundle`]).
+/// 2. A terminal journal event is appended, referencing the evidence.
+/// 3. The identity document and checkpoint snapshots are flushed to the
+///    terminal state (fail-closed).
+/// 4. The registry entry transitions to `ValidationComplete`.
 pub(super) fn fenced_finalize(
     repo: &Path,
     identity_key: &str,
@@ -582,6 +643,11 @@ pub(super) fn fenced_finalize(
     evidence_dir: &Path,
     bundle: &EvidenceBundle,
     heartbeat_rx: &tokio::sync::watch::Receiver<Option<String>>,
+    identity_path: &Path,
+    run_id: &str,
+    repository_revision: &str,
+    terminal_state: super::identity::EvaluationState,
+    failure_classification: Option<String>,
 ) -> Result<()> {
     let lock_path = registry_lock_path(repo);
     if let Some(parent) = lock_path.parent() {
@@ -646,19 +712,59 @@ pub(super) fn fenced_finalize(
     }
 
     // Read heartbeat status under the lock — guarantees no race between the
-    // revalidation and the status read.  The lock prevents concurrent registry
-    // modification, and the watch channel reflects the latest heartbeat
-    // renewal result.
+    // revalidation and the status read.
     if let Some(msg) = heartbeat_rx.borrow().as_ref() {
         bail!("heartbeat failure during finalization: {msg}");
     }
 
-    // Write evidence bundle while holding the lock — no concurrent modification
-    // can invalidate our ownership between the check and the write.
+    // 1. Final evidence must be durable before the terminal event that
+    //    references it. Write the bundle while holding the lock.
     write_bundle(evidence_dir, bundle)
         .context("failed to write evidence bundle during finalization")?;
 
-    // Transition to ValidationComplete under the same lock.
+    // 2. Terminal journal event referencing the final evidence.
+    let from_state = super::identity::read_identity_state(identity_path).with_context(|| {
+        format!(
+            "cannot resolve identity state for terminal journal event at {}",
+            identity_path.display()
+        )
+    })?;
+    let evidence_ref =
+        super::durable::repo_relative_path(repo, &evidence_dir.join("evidence.json"));
+    let sequence = super::journal::append_event_unlocked(
+        repo,
+        run_id,
+        identity_key,
+        from_state,
+        terminal_state,
+        Some(proposal_id.to_string()),
+        failure_classification,
+        &fence.owner_run_id,
+        fence.lease_epoch,
+        repository_revision,
+        Some(evidence_ref.clone()),
+    )
+    .context("failed to journal terminal event during finalization")?;
+
+    // 3. Flush identity and checkpoint snapshots (fail-closed).
+    super::identity::update_identity_state(identity_path, terminal_state)
+        .context("failed to flush terminal identity state during finalization")?;
+    let checkpoint = super::checkpoint::build_checkpoint(
+        repo,
+        identity_key,
+        run_id,
+        repository_revision,
+        terminal_state,
+        sequence,
+        Some(proposal_id.to_string()),
+        Some(evidence_ref),
+        &fence.owner_run_id,
+        fence.lease_epoch,
+    );
+    super::checkpoint::write_checkpoint(repo, &checkpoint)
+        .context("failed to write terminal checkpoint during finalization")?;
+
+    // 4. Terminal registry snapshot.
     entry.state = ProposalState::ValidationComplete;
     entry.proposal_id = Some(proposal_id.to_string());
     entry.evidence_dir = Some(evidence_dir.to_str().unwrap_or("").to_string());

@@ -7,8 +7,10 @@
 //! used for read-path compatibility checks, migration dispatch, and
 //! fail-closed rejection of unknown future versions.
 //!
-//! Existing `v1.7.0` files are unversioned. They are treated as explicit
-//! legacy version `1` (the current major), not as corrupt data.
+//! Existing `v1.7.0` files are unversioned. They are treated as an explicit
+//! legacy version `0.0.0` — NEVER as the current version — so that every
+//! current-format document is written with an explicit `schema_version` and
+//! unversioned data is always migrated rather than silently accepted.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -17,6 +19,12 @@ use std::str::FromStr;
 
 /// Current supported schema version for all durable documents.
 pub const CURRENT_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0, 0);
+
+/// Version assumed for legacy unversioned documents.
+///
+/// Distinct from [`CURRENT_SCHEMA_VERSION`]: a document that carries no
+/// `schema_version` is legacy and must be migrated, never treated as current.
+pub const LEGACY_UNVERSIONED_VERSION: SchemaVersion = SchemaVersion::new(0, 0, 0);
 
 /// A validated semantic schema version (`major.minor.patch`).
 ///
@@ -199,6 +207,9 @@ pub fn validate_version(
     discovered: SchemaVersion,
 ) -> Result<VersionStatus> {
     let (min, max) = document_type.supported_range();
+    if discovered == LEGACY_UNVERSIONED_VERSION {
+        return Ok(VersionStatus::Legacy);
+    }
     if discovered.is_current() {
         return Ok(VersionStatus::Current);
     }
@@ -298,6 +309,12 @@ mod tests {
             validate_version(doc, SchemaVersion::new(1, 0, 0)).unwrap(),
             VersionStatus::Current
         );
+        // Unversioned legacy (0.0.0) is Legacy, never Current.
+        assert_eq!(
+            validate_version(doc, LEGACY_UNVERSIONED_VERSION).unwrap(),
+            VersionStatus::Legacy
+        );
+        assert!(!LEGACY_UNVERSIONED_VERSION.is_current());
         // Future versions within the current major and above it fail closed.
         assert_eq!(
             validate_version(doc, SchemaVersion::new(1, 1, 0)).unwrap(),

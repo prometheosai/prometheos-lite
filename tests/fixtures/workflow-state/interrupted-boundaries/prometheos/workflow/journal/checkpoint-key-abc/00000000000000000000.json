@@ -8,6 +8,10 @@
   "from_state": "created",
   "to_state": "preflight_passed",
   "proposal_ref": null,
-  "checkpoint_ref": null,
-  "failure_classification": null
+  "failure_classification": null,
+  "owner_run_id": "fixture-run",
+  "lease_epoch": 1,
+  "repository_revision": "fixture-head",
+  "evidence_ref": null,
+  "checkpoint_ref": "prometheos/workflow/checkpoint/checkpoint-key-abc.json"
 }

@@ -8,6 +8,10 @@
   "from_state": "generating",
   "to_state": "proposal_generated",
   "proposal_ref": "fixture-proposal-1",
-  "checkpoint_ref": null,
-  "failure_classification": null
+  "failure_classification": null,
+  "owner_run_id": "fixture-run",
+  "lease_epoch": 1,
+  "repository_revision": "fixture-head",
+  "evidence_ref": "prometheos/evidence/fixture",
+  "checkpoint_ref": "prometheos/workflow/checkpoint/checkpoint-key-abc.json"
 }

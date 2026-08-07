@@ -206,9 +206,8 @@ pub(super) fn write_bundle(evidence_dir: &Path, bundle: &EvidenceBundle) -> Resu
     }
 
     let json_path = evidence_dir.join("evidence.json");
-    let json =
-        serde_json::to_string_pretty(&bundle).context("failed to serialize evidence bundle")?;
-    std::fs::write(&json_path, &json).context("failed to write evidence.json")?;
+    super::durable::atomic_write_json(&json_path, &bundle)
+        .context("failed to write evidence.json")?;
 
     // Write Markdown report.
     let md_path = evidence_dir.join("evidence.md");
@@ -216,6 +215,26 @@ pub(super) fn write_bundle(evidence_dir: &Path, bundle: &EvidenceBundle) -> Resu
     std::fs::write(&md_path, &md).context("failed to write evidence.md")?;
 
     Ok(())
+}
+
+/// Persist the validation record durably, BEFORE the `ValidationComplete`
+/// journal event that references it.
+pub(super) fn write_validation_artifact(
+    evidence_dir: &Path,
+    validation: &ValidationRecord,
+) -> Result<()> {
+    let path = evidence_dir.join("validation.json");
+    super::durable::atomic_write_json(&path, validation).context("failed to write validation.json")
+}
+
+/// Persist the integrity record durably, BEFORE the `IntegrityVerified`
+/// journal event that references it.
+pub(super) fn write_integrity_artifact(
+    evidence_dir: &Path,
+    integrity: &IntegrityRecord,
+) -> Result<()> {
+    let path = evidence_dir.join("integrity.json");
+    super::durable::atomic_write_json(&path, integrity).context("failed to write integrity.json")
 }
 // ---------------------------------------------------------------------------
 // Markdown report

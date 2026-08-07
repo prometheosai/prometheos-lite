@@ -49,8 +49,12 @@ fn interrupted_run_recovers_to_proposal_generated() {
 
     let events = read_journal(repo, key).unwrap();
     assert_eq!(events.len(), 3);
+    // Loaded events carry the new fencing/provenance fields.
+    assert_eq!(events[2].owner_run_id, "fixture-run");
+    assert_eq!(events[2].lease_epoch, 1);
+    assert_eq!(events[2].repository_revision, "fixture-head");
 
-    let recovered = recover_evaluation(repo, key).unwrap().unwrap();
+    let recovered = recover_evaluation(repo, key, None, None).unwrap().unwrap();
     assert_eq!(recovered.state, EvaluationState::ProposalGenerated);
     assert_eq!(recovered.last_journal_sequence, 2);
     assert_eq!(
@@ -70,7 +74,7 @@ fn unsupported_future_schema_fails_closed() {
     assert!(err.to_string().contains("fail closed"));
 
     // Recovery must also fail closed, not silently proceed.
-    let err = recover_evaluation(repo, key).unwrap_err();
+    let err = recover_evaluation(repo, key, None, None).unwrap_err();
     assert!(err.to_string().contains("fail closed"));
 }
 
@@ -78,7 +82,7 @@ fn unsupported_future_schema_fails_closed() {
 fn missing_durable_state_returns_none() {
     let tmp = tempfile::tempdir().unwrap();
     assert!(
-        recover_evaluation(tmp.path(), "never-seen-key")
+        recover_evaluation(tmp.path(), "never-seen-key", None, None)
             .unwrap()
             .is_none()
     );
