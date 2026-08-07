@@ -37,6 +37,10 @@ prometheos-output/
 .prometheos/runs.db-wal
 .prometheos/runs.db-shm
 .prometheos/diagnostics/
+# Durable workflow state (journal, registry, evidence, proposals) is never
+# committed; it is reconstructed/derived at evaluation time.
+.prometheos/evidence/
+.prometheos/workflow/
 
 # Repo Workbench local state (MVP)
 .prometheos-lite/workbench/

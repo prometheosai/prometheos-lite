@@ -210,15 +210,27 @@ pub fn compute_identity_key(
     );
     hash_str(&input)
 }
-pub(super) fn update_identity_state(path: &Path, state: EvaluationState) {
-    if let Ok(text) = std::fs::read_to_string(path)
-        && let Ok(mut identity) = serde_json::from_str::<ExecutionIdentity>(&text)
-    {
-        identity.state = state;
-        if let Ok(json) = serde_json::to_string_pretty(&identity) {
-            let _ = std::fs::write(path, json);
-        }
-    }
+/// Update the persisted identity's state, fail-closed.
+///
+/// Every failure (read, parse, serialize, atomic publish) is propagated to the
+/// caller. The identity is never left half-written: publication goes through
+/// [`super::durable::atomic_write_json`].
+pub(super) fn update_identity_state(path: &Path, state: EvaluationState) -> Result<()> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read identity state file {}", path.display()))?;
+    let mut identity: ExecutionIdentity = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse identity state file {}", path.display()))?;
+    identity.state = state;
+    super::durable::versioned_write_json(path, &identity)
+        .with_context(|| format!("failed to persist identity state {}", path.display()))?;
+    Ok(())
+}
+
+/// Read the current state from a persisted identity document.
+pub(super) fn read_identity_state(path: &Path) -> Option<EvaluationState> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let identity: ExecutionIdentity = serde_json::from_str(&text).ok()?;
+    Some(identity.state)
 }
 /// Persist the execution identity to `execution_identity.json` in the
 /// evidence directory, before any model call (the exactly-once gate).
@@ -229,11 +241,8 @@ pub(super) fn persist_execution_identity(
     identity: &ExecutionIdentity,
 ) -> Result<PathBuf> {
     let identity_path = evidence_dir.join("execution_identity.json");
-    std::fs::write(
-        &identity_path,
-        serde_json::to_string_pretty(identity).context("failed to serialize identity")?,
-    )
-    .context("failed to persist execution identity")?;
+    super::durable::versioned_write_json(&identity_path, identity)
+        .context("failed to persist execution identity")?;
     Ok(identity_path)
 }
 pub(super) fn evidence_dir_for(repo: &Path, run_id: &str) -> PathBuf {
@@ -341,7 +350,7 @@ mod tests {
         let identity = sample_identity();
         let path = persist_execution_identity(dir.path(), &identity).unwrap();
 
-        update_identity_state(&path, EvaluationState::PreflightPassed);
+        update_identity_state(&path, EvaluationState::PreflightPassed).unwrap();
 
         let stored: ExecutionIdentity =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

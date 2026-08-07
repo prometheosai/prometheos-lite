@@ -8,7 +8,7 @@ use prometheos_lite::harness::patch_provider::{
     BlockingProposalProvider, CountingProposalProvider, MockProposalMode, MockProposalProvider,
 };
 use prometheos_lite::workflow::evaluate::{
-    self, EvaluationConfig, EvidenceBundle, LeaseConfig, TaskManifest,
+    self, EvaluationConfig, EvaluationState, EvidenceBundle, LeaseConfig, TaskManifest,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,6 +31,10 @@ fn temp_repo() -> (TempDir, PathBuf) {
         "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
     )
     .unwrap();
+    // Durable workflow state (.prometheos) must never be committed. Tests that
+    // run `git add -A` (e.g. repo_modification_causes_integrity_failure) would
+    // otherwise pick up journal/evidence files.
+    std::fs::write(repo.join(".gitignore"), ".prometheos/\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "init"]);
     (dir, repo)
@@ -98,6 +102,67 @@ async fn run_evaluate(repo: &Path, goal: &str, mode: MockProposalMode) -> Eviden
     evaluate::evaluate(default_config(manifest, mode))
         .await
         .unwrap()
+}
+
+/// Rewind the on-disk durable journal and checkpoint so the journal ends at
+/// `target` (a non-terminal stage), faithfully simulating a crash at that
+/// point.
+///
+/// The journal is the authoritative recovery source and a completed run now
+/// records a terminal outcome. Tests that rewind the registry entry to a
+/// non-terminal state (to exercise takeover/resume) must ALSO rewind the
+/// journal and remove its checkpoint; otherwise recovery correctly refuses to
+/// resume a journal that already reached a terminal outcome.
+fn rewind_durable_to(repo: &Path, target: EvaluationState) {
+    let tag = serde_json::to_value(target)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let journal_root = repo.join(".prometheos").join("workflow").join("journal");
+    if journal_root.exists() {
+        for identity_dir in std::fs::read_dir(&journal_root)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.path().is_dir().then(|| e.path()))
+        {
+            let mut events: Vec<PathBuf> = std::fs::read_dir(&identity_dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            events.sort();
+            // Keep the contiguous prefix ending at the last event that reached
+            // `target`; remove everything after it (the target event stays as
+            // the last durable record).
+            let mut last_at_target: Option<usize> = None;
+            for (i, path) in events.iter().enumerate() {
+                let text = std::fs::read_to_string(path).unwrap();
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value.get("to_state").and_then(|v| v.as_str()) == Some(tag.as_str()) {
+                    last_at_target = Some(i);
+                }
+            }
+            // If the target state never appears (unexpected), drop the whole
+            // journal to a clean state so recovery reports no durable record.
+            let keep = last_at_target;
+            for (i, path) in events.iter().enumerate() {
+                if keep.is_none() || Some(i) != keep {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+        }
+    }
+    // Remove checkpoints so a stale snapshot cannot disagree with the journal.
+    let checkpoint_dir = repo.join(".prometheos").join("workflow").join("checkpoint");
+    if checkpoint_dir.exists() {
+        for entry in std::fs::read_dir(&checkpoint_dir).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|x| x == "json") {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,6 +1232,10 @@ async fn crash_after_generation_is_recoverable() {
     )
     .unwrap();
 
+    // The journal (authoritative) must also be rewound to the same stage,
+    // otherwise recovery correctly refuses to resume a completed journal.
+    rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+
     // Second run: should detect the ProposalGenerated state and resume validation.
     let config2 = EvaluationConfig {
         manifest: manifest.clone(),
@@ -1601,7 +1670,9 @@ async fn validation_complete_with_missing_evidence_fails_closed() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains("missing or corrupt") || msg.contains("evidence"),
+                msg.contains("missing or corrupt")
+                    || msg.contains("evidence")
+                    || msg.contains("refusing to continue"),
                 "expected evidence-missing error, got: {msg}"
             );
         }
@@ -1842,6 +1913,10 @@ async fn stale_worker_is_fenced() {
         .unwrap();
     }
 
+    // Rewind the durable journal to the same stage; recovery refuses to resume
+    // a completed (terminal) journal.
+    rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+
     // Second evaluation takes over, gets new epoch.
     let config2 = EvaluationConfig {
         manifest: manifest.clone(),
@@ -1921,6 +1996,10 @@ async fn transition_failures_propagate() {
     )
     .unwrap();
 
+    // Rewind the durable journal so the completed terminal record does not
+    // block the takeover/resume below.
+    rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+
     // Second evaluation: will take over ProposalGenerated.
     // After takeover succeeds (epoch 2), the resume_validation will run
     // validation and then try transition_entry_with_evidence.
@@ -1959,6 +2038,9 @@ async fn transition_failures_propagate() {
         serde_json::to_string_pretty(&registry2).unwrap(),
     )
     .unwrap();
+
+    // Rewind the durable journal again (run 2 re-completed the journal).
+    rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
 
     // A third run with stale lease config should take over and complete.
     let config3 = evaluate::EvaluationConfig {
@@ -2008,6 +2090,10 @@ async fn ownership_mismatch_fails_closed() {
         serde_json::to_string_pretty(&registry).unwrap(),
     )
     .unwrap();
+
+    // Rewind the durable journal to the same stage; recovery refuses to resume
+    // a completed (terminal) journal.
+    rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
 
     // Second run takes over and completes. This works.
     let config2 = EvaluationConfig {
@@ -2079,6 +2165,10 @@ async fn stale_validating_reuses_proposal() {
     )
     .unwrap();
 
+    // Rewind the durable journal to the same stage so the completed terminal
+    // record does not block the Validating resume below.
+    rewind_durable_to(&repo, EvaluationState::Validating);
+
     let config2 = EvaluationConfig {
         manifest: TaskManifest {
             evidence_dir: Some(evidence_dir.clone()),
@@ -2144,6 +2234,10 @@ async fn provider_invocation_exactly_once_via_stale_validating() {
         serde_json::to_string_pretty(&registry).unwrap(),
     )
     .unwrap();
+
+    // Rewind the durable journal to the same stage so the completed terminal
+    // record does not block the Validating resume below.
+    rewind_durable_to(&repo, EvaluationState::Validating);
 
     let config2 = EvaluationConfig {
         manifest: TaskManifest {
