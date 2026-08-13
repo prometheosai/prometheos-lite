@@ -1,0 +1,13 @@
+{
+  "identity_key": "legacy-key",
+  "run_id": "legacy-run",
+  "repo": "/tmp/repo",
+  "repo_pin": "legacy-head",
+  "state": "proposal_generated",
+  "last_journal_sequence": 2,
+  "proposal_ref": "legacy-proposal-1",
+  "evidence_ref": "prometheos/evidence/legacy-evidence",
+  "owner_run_id": "legacy-run",
+  "lease_epoch": 1,
+  "updated_at": "2025-06-01T00:00:02Z"
+}

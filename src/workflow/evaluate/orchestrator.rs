@@ -10,9 +10,8 @@ use crate::workflow::{
 
 use super::cleanup::cleanup_worktree;
 use super::evidence::{
-    EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, find_existing_evidence, new_bundle,
-    new_bundle_from_identity, prepare_evidence_dir, write_bundle, write_integrity_artifact,
-    write_validation_artifact,
+    EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, new_bundle, new_bundle_from_identity,
+    prepare_evidence_dir, write_bundle, write_integrity_artifact, write_validation_artifact,
 };
 use super::generation::{classify_generation_error, load_proposal_from_repo};
 use super::heartbeat::HeartbeatSession;
@@ -752,27 +751,42 @@ async fn wait_and_reuse(
         elapsed += poll_interval;
     }
 }
-/// Return preserved evidence from a completed validation.
+/// Load and validate a preserved evidence bundle for a completed run.
 ///
-/// The original bundle is returned UNCHANGED — no field modification, no rewrite.
-/// This ensures completed evidence is immutable and returned byte-for-byte.
-async fn return_completed_evidence(
-    _repo: &Path,
-    _commit_at_start: &str,
-    _run_id: &str,
-    _manifest: &TaskManifest,
-    _config: &EvaluationConfig,
+/// A proposal reference is required only when the durable journal recorded one.
+/// Proposal-less terminal outcomes (`PreflightBlocked`, some `GenerationFailed`)
+/// return their evidence directly — no proposal is loaded and no validation is
+/// re-run. The bundle is returned byte-for-byte as written.
+fn load_preserved_evidence(
     evidence_dir: &Path,
-    _governance_scope: &GovernanceScopeSnapshot,
-    _proposal: &ProposalArtifact,
-    proposal_id: &str,
-    _identity_key: &str,
+    proposal_id: Option<&str>,
 ) -> Result<EvidenceBundle> {
-    let existing_bundle = find_existing_evidence(evidence_dir, proposal_id).context(
-        "ValidationComplete entry references evidence that is missing or corrupt; \
-              cannot return preserved bundle",
+    if let Some(pid) = proposal_id {
+        return super::evidence::find_existing_evidence(evidence_dir, pid)
+            .context("completed journal evidence missing or proposal id mismatch");
+    }
+    let evidence_path = evidence_dir.join("evidence.json");
+    if !evidence_path.exists() {
+        bail!(
+            "completed journal evidence is missing: {}",
+            evidence_path.display()
+        );
+    }
+    // Validate the durable document (immutable evidence is validated in memory,
+    // never blindly rewritten) before returning it unchanged.
+    super::migration::migrate_document(
+        &evidence_path,
+        super::schema::DocumentType::EvidenceBundle,
     )?;
-    Ok(existing_bundle)
+    let text = std::fs::read_to_string(&evidence_path)
+        .with_context(|| format!("failed to read evidence {}", evidence_path.display()))?;
+    let bundle: EvidenceBundle = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "corrupt preserved evidence bundle {}",
+            evidence_path.display()
+        )
+    })?;
+    Ok(bundle)
 }
 
 /// Return preserved evidence when the durable journal already records a
@@ -781,16 +795,18 @@ async fn return_completed_evidence(
 async fn return_journal_completed(
     recovered: &super::recovery::RecoveredEvaluation,
     repo: &Path,
-    commit_at_start: &str,
+    _commit_at_start: &str,
     run_id: &str,
-    manifest: &TaskManifest,
-    config: &EvaluationConfig,
-    governance_scope: &GovernanceScopeSnapshot,
+    _manifest: &TaskManifest,
+    _config: &EvaluationConfig,
+    _governance_scope: &GovernanceScopeSnapshot,
     identity_key: &str,
     lease_config: &LeaseConfig,
 ) -> Result<EvidenceBundle> {
     // If the registry entry is stale-owned and behind the journal, reclaim it
     // and reconcile to the terminal proposal state so future observers agree.
+    // Terminal proposal-less outcomes still reconcile to the terminal registry
+    // state (without a proposal id).
     if let Some(entry) = lookup_entry(repo, identity_key)
         && let Ok(true) = is_entry_stale(&entry, lease_config)
         && let TakeoverResult::Taken(fence) =
@@ -815,24 +831,12 @@ async fn return_journal_completed(
             .context("completed journal state has no evidence reference")?,
     )
     .context("completed journal evidence reference cannot be resolved")?;
-    let proposal_id = recovered
-        .proposal_ref
-        .as_deref()
-        .context("completed journal state has no proposal reference")?;
-    let proposal = load_proposal_from_repo(repo, proposal_id)?;
-    return_completed_evidence(
-        repo,
-        commit_at_start,
-        run_id,
-        manifest,
-        config,
-        &evidence_dir,
-        governance_scope,
-        &proposal,
-        proposal_id,
-        identity_key,
-    )
-    .await
+
+    // Return the preserved evidence. A proposal is loaded only when the journal
+    // recorded one; proposal-less terminal outcomes return their evidence
+    // directly. No provider call, no validation rerun, no duplicate publication.
+    load_preserved_evidence(&evidence_dir, recovered.proposal_ref.as_deref())
+        .context("failed to load preserved terminal evidence")
 }
 /// Resume validation from the ProposalGenerated (or later) state.
 ///

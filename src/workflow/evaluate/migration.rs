@@ -63,20 +63,6 @@ fn typed_validate(doc_type: DocumentType, value: &Value) -> Result<()> {
     .with_context(|| format!("migrated {} document is invalid", doc_type.as_str()))
 }
 
-fn ensure_version_field(value: &mut Value) -> Result<()> {
-    if let Some(obj) = value.as_object_mut() {
-        if !obj.contains_key("schema_version") {
-            obj.insert(
-                "schema_version".to_string(),
-                Value::String(CURRENT_SCHEMA_VERSION.to_string_owned()),
-            );
-        }
-        Ok(())
-    } else {
-        bail!("document is not a JSON object");
-    }
-}
-
 /// Ensure a document is at the current schema, migrating it in place if it is
 /// a supported legacy version.
 ///
@@ -105,20 +91,41 @@ pub fn migrate_document(
     let declared = read_declared_version(path, doc_type)?;
     let status = validate_version(doc_type, declared)?;
     match status {
-        super::schema::VersionStatus::Current => Ok(status),
+        super::schema::VersionStatus::Current => {
+            // A schema marker alone is not validation. Every current document
+            // is still type-validated; a malformed current document (missing
+            // required fields) fails closed rather than being silently trusted.
+            typed_validate(doc_type, &value)?;
+            Ok(status)
+        }
         super::schema::VersionStatus::Legacy => {
             if doc_type == DocumentType::EvidenceBundle {
                 // Immutable evidence: validate the migrated form in memory,
-                // never silently rewrite the completed artifact.
+                // never silently rewrite the completed artifact. The in-memory
+                // version is upgraded so downstream readers see a current doc.
                 let mut migrated = value.clone();
-                ensure_version_field(&mut migrated)?;
+                if let Some(obj) = migrated.as_object_mut() {
+                    obj.insert(
+                        "schema_version".to_string(),
+                        Value::String(CURRENT_SCHEMA_VERSION.to_string_owned()),
+                    );
+                }
                 typed_validate(doc_type, &migrated)?;
                 return Ok(status);
             }
-            let had_version = value.get("schema_version").is_some();
-            ensure_version_field(&mut value)?;
+            // Mutable documents: always migrate the schema version to CURRENT,
+            // including documents that already carry an explicit older version
+            // (e.g. "0.0.0"). The fully-typed form is validated before the
+            // atomic rewrite, which happens only when the version actually
+            // changed (so re-running migration is idempotent).
+            let current = CURRENT_SCHEMA_VERSION.to_string_owned();
+            let changed =
+                value.get("schema_version").and_then(|v| v.as_str()) != Some(current.as_str());
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("schema_version".to_string(), Value::String(current.clone()));
+            }
             typed_validate(doc_type, &value)?;
-            if !had_version {
+            if changed {
                 super::durable::atomic_write_json(path, &value)
                     .with_context(|| format!("failed to commit migrated {}", path.display()))?;
             }
@@ -264,5 +271,66 @@ mod tests {
         let path = dir.path().join("doc.json");
         std::fs::write(&path, "not json").unwrap();
         assert!(migrate_document(&path, DocumentType::JournalEvent).is_err());
+    }
+
+    #[test]
+    fn malformed_current_registry_fails() {
+        let dir = sample_dir();
+        let path = dir.path().join("doc.json");
+        // A current-version marker is not validation: required fields are absent.
+        std::fs::write(&path, "{\"schema_version\":\"1.0.0\"}").unwrap();
+        let err = migrate_document(&path, DocumentType::ProposalRegistry).unwrap_err();
+        assert!(err.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn malformed_current_identity_fails() {
+        let dir = sample_dir();
+        let path = dir.path().join("doc.json");
+        std::fs::write(&path, "{\"schema_version\":\"1.0.0\"}").unwrap();
+        let err = migrate_document(&path, DocumentType::ExecutionIdentity).unwrap_err();
+        assert!(err.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn malformed_current_evidence_fails() {
+        let dir = sample_dir();
+        let path = dir.path().join("doc.json");
+        std::fs::write(&path, "{\"schema_version\":\"1.0.0\"}").unwrap();
+        let err = migrate_document(&path, DocumentType::EvidenceBundle).unwrap_err();
+        assert!(err.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn explicit_legacy_version_upgrades_to_current() {
+        let dir = sample_dir();
+        let path = dir.path().join("doc.json");
+        // An explicit older version (0.0.0) with a complete body must be
+        // upgraded to the current schema version, not left as-is.
+        std::fs::write(&path, "{\"schema_version\":\"0.0.0\",\"entries\":{}}").unwrap();
+        let status = migrate_document(&path, DocumentType::ProposalRegistry).unwrap();
+        assert_eq!(status, super::super::schema::VersionStatus::Current);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"1.0.0\""),
+            "explicit legacy version must upgrade to current: {text}"
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let dir = sample_dir();
+        let path = dir.path().join("doc.json");
+        std::fs::write(&path, "{\"schema_version\":\"0.0.0\",\"entries\":{}}").unwrap();
+        let first = migrate_document(&path, DocumentType::ProposalRegistry).unwrap();
+        assert_eq!(first, super::super::schema::VersionStatus::Current);
+        let text1 = std::fs::read_to_string(&path).unwrap();
+        let second = migrate_document(&path, DocumentType::ProposalRegistry).unwrap();
+        assert_eq!(second, super::super::schema::VersionStatus::Current);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text1,
+            "migrating an already-current document must be a no-op"
+        );
     }
 }

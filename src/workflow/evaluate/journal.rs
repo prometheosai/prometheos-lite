@@ -83,30 +83,78 @@ pub fn last_sequence(journal_dir: &Path) -> Result<Option<u64>> {
 
 /// Enforce that a new event continues the journal tail without forking.
 ///
-/// A fork occurs when the same owner appends an event whose `from_state` does
-/// not match the previous event's `to_state` — two transitions branching from
-/// the same tail. Cross-run appends (a fresh owner that re-acquired the
-/// identity key after a reclaim) are intentionally allowed: the registry
-/// lock and fence already prevent two live owners from appending
-/// concurrently, and a reclaimed run starts a new chain by design.
+/// The durable journal is the authoritative append-only history. Ownership may
+/// change across runs (a reclaimed run continues the same identity key), but
+/// history may not: every non-empty journal's tail outcome is the only valid
+/// `from_state` for the next event, regardless of which run appends it.
+///
+/// Before an append we also validate, owner-independently:
+/// - the tail belongs to this identity key,
+/// - the sequence continues monotonically from the tail,
+/// - the repository revision is constant across the run,
+/// - the lease epoch does not regress.
+///
+/// Fencing (WHO may append) is enforced separately by the registry lock in
+/// `append_event`; this function enforces WHERE they may append (the journal
+/// tail).
 fn verify_tail_continuity(
     journal_dir: &Path,
+    identity_key: &str,
     from_state: EvaluationState,
     owner_run_id: &str,
+    repository_revision: &str,
+    lease_epoch: u64,
+    next_sequence: u64,
 ) -> Result<()> {
     let events = read_all(journal_dir)?;
-    if let Some(tail) = events.last()
-        && tail.owner_run_id == owner_run_id
-        && tail.to_state != from_state
-    {
+    let Some(tail) = events.last() else {
+        return Ok(());
+    };
+    // History is owner-independent: the tail outcome is authoritative for every
+    // subsequent append, no matter which run produced it.
+    if tail.to_state != from_state {
         bail!(
-            "journal tail continuity violation: tail event {} (owner {}) ended at {:?} \
+            "journal tail continuity violation: tail event {} ended at {:?} \
              but new event (owner {}) starts at {:?}",
             tail.sequence,
-            tail.owner_run_id,
             tail.to_state,
             owner_run_id,
             from_state
+        );
+    }
+    // The journal is per-identity; the tail must belong to this identity.
+    if tail.identity_key != identity_key {
+        bail!(
+            "journal tail identity mismatch: tail event {} belongs to {} not {}",
+            tail.sequence,
+            tail.identity_key,
+            identity_key
+        );
+    }
+    // Sequences must continue monotonically from the tail.
+    if tail.sequence + 1 != next_sequence {
+        bail!(
+            "journal sequence non-monotonic: tail {} followed by {}",
+            tail.sequence,
+            next_sequence
+        );
+    }
+    // The repository revision must stay constant across the run.
+    if tail.repository_revision != repository_revision {
+        bail!(
+            "journal repository revision changed mid-run at tail {}: {} -> {}",
+            tail.sequence,
+            tail.repository_revision,
+            repository_revision
+        );
+    }
+    // The lease epoch must not regress across appends.
+    if tail.lease_epoch > lease_epoch {
+        bail!(
+            "journal lease epoch regressed at tail {}: {} -> {}",
+            tail.sequence,
+            tail.lease_epoch,
+            lease_epoch
         );
     }
     Ok(())
@@ -211,11 +259,19 @@ pub fn append_event_unlocked(
     super::transition::validate_transition(from_state, to_state)
         .context("refusing to journal an illegal state transition")?;
     let journal_dir = journal_dir_for(repo, identity_key);
-    verify_tail_continuity(&journal_dir, from_state, owner_run_id)?;
     let next_sequence = match last_sequence(&journal_dir)? {
         Some(last) => last + 1,
         None => 0,
     };
+    verify_tail_continuity(
+        &journal_dir,
+        identity_key,
+        from_state,
+        owner_run_id,
+        repository_revision,
+        lease_epoch,
+        next_sequence,
+    )?;
     let checkpoint_ref = super::durable::repo_relative_path(
         repo,
         &super::checkpoint::checkpoint_path_for(repo, identity_key),
@@ -280,11 +336,19 @@ pub fn append_event(
             );
         }
         let journal_dir = journal_dir_for(repo, identity_key);
-        verify_tail_continuity(&journal_dir, from_state, &fence.owner_run_id)?;
         let next_sequence = match last_sequence(&journal_dir)? {
             Some(last) => last + 1,
             None => 0,
         };
+        verify_tail_continuity(
+            &journal_dir,
+            identity_key,
+            from_state,
+            &fence.owner_run_id,
+            repository_revision,
+            fence.lease_epoch,
+            next_sequence,
+        )?;
         let checkpoint_ref = super::durable::repo_relative_path(
             repo,
             &super::checkpoint::checkpoint_path_for(repo, identity_key),
@@ -629,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_continuity_allows_fresh_owner_chain() {
+    fn tail_continuity_rejects_cross_owner_fork() {
         let repo = repo_dir();
         append_event_unlocked(
             &repo,
@@ -645,9 +709,10 @@ mod tests {
             None,
         )
         .unwrap();
-        // A different owner (a reclaimed run) may start a new chain; the cross-run
-        // append is permitted and the event is written.
-        append_event_unlocked(
+        // A different owner may take over the identity, but it may NOT start a
+        // fresh chain from Created — the tail is at PreflightPassed. This is a
+        // fork and must fail closed regardless of owner.
+        let err = append_event_unlocked(
             &repo,
             "run-1",
             "key-1",
@@ -660,8 +725,55 @@ mod tests {
             "abc123",
             None,
         )
+        .unwrap_err();
+        assert!(err.to_string().contains("tail continuity"));
+    }
+
+    #[test]
+    fn tail_continuity_allows_valid_cross_owner_continuation() {
+        let repo = repo_dir();
+        // Owner A: Created -> PreflightPassed -> Generating -> ProposalGenerated.
+        for (from, to) in [
+            (EvaluationState::Created, EvaluationState::PreflightPassed),
+            (
+                EvaluationState::PreflightPassed,
+                EvaluationState::Generating,
+            ),
+            (
+                EvaluationState::Generating,
+                EvaluationState::ProposalGenerated,
+            ),
+        ] {
+            append_event_unlocked(
+                &repo, "run-1", "key-1", from, to, None, None, "run-1", 1, "abc123", None,
+            )
+            .unwrap();
+        }
+        // Owner B legitimately reclaims the identity (registry entry owned by
+        // run-2, epoch 1) and continues the chain with a valid fence.
+        super::super::registry::try_reserve(&repo, "key-1", "run-2").unwrap();
+        let fence = FenceToken {
+            owner_run_id: "run-2".to_string(),
+            lease_epoch: 1,
+        };
+        let seq = append_event(
+            &repo,
+            "run-1",
+            "key-1",
+            EvaluationState::ProposalGenerated,
+            EvaluationState::Validating,
+            None,
+            None,
+            "abc123",
+            None,
+            &fence,
+        )
         .unwrap();
-        assert_eq!(read_journal(&repo, "key-1").unwrap().len(), 2);
+        assert_eq!(seq, 3);
+        let events = read_journal(&repo, "key-1").unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3].to_state, EvaluationState::Validating);
+        assert_eq!(events[3].owner_run_id, "run-2");
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0.0",
+  "identity_key": "current-key",
+  "run_id": "current-run",
+  "repo": "/tmp/repo",
+  "repo_pin": "current-head",
+  "state": "proposal_generated",
+  "last_journal_sequence": 2,
+  "proposal_ref": "current-proposal-1",
+  "evidence_ref": "prometheos/evidence/current-evidence",
+  "owner_run_id": "current-run",
+  "lease_epoch": 1,
+  "updated_at": "2026-01-01T00:00:02Z"
+}

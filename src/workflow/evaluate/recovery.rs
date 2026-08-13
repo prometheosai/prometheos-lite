@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use super::checkpoint::{build_checkpoint, checkpoint_path_for, read_checkpoint, write_checkpoint};
-use super::identity::{EvaluationState, ExecutionIdentity, GovernanceScopeSnapshot};
+use super::identity::EvaluationState;
 use super::journal::{journal_dir_for, read_journal, validate_journal};
 use super::migration::migrate_document;
 use super::registry::FenceToken;
@@ -84,37 +84,42 @@ fn repair_snapshots_under_lock(
     evidence_dir: &Path,
     fence: &FenceToken,
 ) -> Result<()> {
-    super::registry::with_registry_lock(repo, |_registry| {
-        // Repair the identity document (best-effort derived view; a failure
-        // here fails closed rather than leaving a stale snapshot). A missing
-        // identity snapshot is created so the entry is fully reconstructable.
+    super::registry::with_registry_lock(repo, |registry| {
+        // Snapshot repair is derived-state reconciliation performed under the
+        // exclusive registry lock. It must be gated by the caller's fence: if the
+        // registry entry is owned by a different run or a different lease epoch,
+        // this caller is not authorized to rewrite derived snapshots.
+        let entry = registry.entries.get(identity_key).context(format!(
+            "cannot repair snapshots: no registry entry proves ownership of {identity_key}"
+        ))?;
+        if entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch {
+            bail!(
+                "stale fence cannot repair snapshots for {identity_key}: registry owner={} epoch={} \
+                 but caller owner={} epoch={}",
+                entry.owner_run_id,
+                entry.lease_epoch,
+                fence.owner_run_id,
+                fence.lease_epoch,
+            );
+        }
+
+        // Identity is a derived view; if it lags, bump its recorded state to the
+        // journal position. A missing identity must NOT be fabricated: the durable
+        // journal, checkpoint, and evidence do not carry task_id, model, provider,
+        // or governance_scope, so those required fields cannot be reconstructed
+        // from durable provenance. Recovery fails closed instead of writing
+        // historical fan fiction.
         let identity_path = evidence_dir.join("execution_identity.json");
         if identity_path.exists() {
             super::identity::update_identity_state(&identity_path, state)
                 .context("failed to repair lagging identity snapshot")?;
         } else {
-            let identity = ExecutionIdentity {
-                run_id: run_id.to_string(),
-                task_id: run_id.to_string(),
-                repo: repo.display().to_string(),
-                repo_pin: repository_revision.to_string(),
-                model: "unknown".to_string(),
-                provider: "unknown".to_string(),
-                governance_scope: GovernanceScopeSnapshot {
-                    allowed_paths: vec![],
-                    forbidden_paths: vec![],
-                    allow_dependency_changes: false,
-                    max_files_changed: None,
-                    max_lines_changed: None,
-                    authority: "propose".to_string(),
-                    validation_command: None,
-                },
-                created_at: super::identity::now_iso(),
-                state,
-            };
-            super::identity::persist_execution_identity(evidence_dir, &identity)
-                .context("failed to create missing identity snapshot")?;
+            bail!(
+                "identity provenance unavailable for repair: missing execution_identity.json for {identity_key} \
+                 and durable records carry no task_id/model/provider/governance"
+            );
         }
+
         let evidence_ref =
             super::durable::repo_relative_path(repo, &evidence_dir.join("evidence.json"));
         let checkpoint = build_checkpoint(
@@ -747,6 +752,10 @@ mod tests {
             !crate::workflow::evaluate::checkpoint::checkpoint_path_for(&repo, "key-1").exists()
         );
 
+        // Establish registry ownership matching the fence before derived-snapshot
+        // repair (repair is gated by the fence against the registry entry).
+        crate::workflow::evaluate::registry::try_reserve(&repo, "key-1", "run-1").unwrap();
+
         // Recover with a fence so the missing checkpoint is created under lock.
         let fence = crate::workflow::evaluate::registry::FenceToken {
             owner_run_id: "run-1".to_string(),
@@ -764,6 +773,210 @@ mod tests {
             .unwrap();
         assert_eq!(cp.state, EvaluationState::ValidationComplete);
         assert_eq!(cp.last_journal_sequence, 5);
+    }
+
+    #[test]
+    fn valid_fence_repairs_checkpoint_and_registry() {
+        let repo = repo_dir();
+        let evidence_dir = repo.join(".prometheos").join("evidence").join("run-1");
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let identity = crate::workflow::evaluate::identity::ExecutionIdentity {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            repo: repo.display().to_string(),
+            repo_pin: "abc123".to_string(),
+            model: "mock".to_string(),
+            provider: "mock".to_string(),
+            governance_scope: crate::workflow::evaluate::identity::GovernanceScopeSnapshot {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: None,
+                max_lines_changed: None,
+                authority: "propose".to_string(),
+                validation_command: None,
+            },
+            created_at: crate::workflow::evaluate::identity::now_iso(),
+            state: EvaluationState::ValidationComplete,
+        };
+        crate::workflow::evaluate::identity::persist_execution_identity(&evidence_dir, &identity)
+            .unwrap();
+
+        for (from, to) in [
+            (EvaluationState::Created, EvaluationState::PreflightPassed),
+            (
+                EvaluationState::PreflightPassed,
+                EvaluationState::Generating,
+            ),
+            (
+                EvaluationState::Generating,
+                EvaluationState::ProposalGenerated,
+            ),
+            (
+                EvaluationState::ProposalGenerated,
+                EvaluationState::Validating,
+            ),
+        ] {
+            let evidence_ref = if to == EvaluationState::Validating {
+                Some(".prometheos/evidence/run-1".to_string())
+            } else {
+                None
+            };
+            append_event_unlocked(
+                &repo,
+                "run-1",
+                "key-1",
+                from,
+                to,
+                None,
+                None,
+                "run-1",
+                1,
+                "abc123",
+                evidence_ref,
+            )
+            .unwrap();
+        }
+
+        // Ownership of the registry entry must match the fence for repair to run.
+        crate::workflow::evaluate::registry::try_reserve(&repo, "key-1", "run-1").unwrap();
+        let fence = crate::workflow::evaluate::registry::FenceToken {
+            owner_run_id: "run-1".to_string(),
+            lease_epoch: 1,
+        };
+        let cp_path = crate::workflow::evaluate::checkpoint::checkpoint_path_for(&repo, "key-1");
+        std::fs::remove_file(&cp_path).ok();
+        let recovered = recover_evaluation(&repo, "key-1", None, Some(&fence))
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, EvaluationState::Validating);
+        assert!(cp_path.exists());
+    }
+
+    #[test]
+    fn stale_fence_cannot_repair_snapshots() {
+        let repo = repo_dir();
+        let evidence_dir = repo.join(".prometheos").join("evidence").join("run-1");
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let identity = crate::workflow::evaluate::identity::ExecutionIdentity {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            repo: repo.display().to_string(),
+            repo_pin: "abc123".to_string(),
+            model: "mock".to_string(),
+            provider: "mock".to_string(),
+            governance_scope: crate::workflow::evaluate::identity::GovernanceScopeSnapshot {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: None,
+                max_lines_changed: None,
+                authority: "propose".to_string(),
+                validation_command: None,
+            },
+            created_at: crate::workflow::evaluate::identity::now_iso(),
+            state: EvaluationState::ValidationComplete,
+        };
+        crate::workflow::evaluate::identity::persist_execution_identity(&evidence_dir, &identity)
+            .unwrap();
+
+        for (from, to) in [
+            (EvaluationState::Created, EvaluationState::PreflightPassed),
+            (
+                EvaluationState::PreflightPassed,
+                EvaluationState::Generating,
+            ),
+            (
+                EvaluationState::Generating,
+                EvaluationState::ProposalGenerated,
+            ),
+            (
+                EvaluationState::ProposalGenerated,
+                EvaluationState::Validating,
+            ),
+        ] {
+            let evidence_ref = if to == EvaluationState::Validating {
+                Some(".prometheos/evidence/run-1".to_string())
+            } else {
+                None
+            };
+            append_event_unlocked(
+                &repo,
+                "run-1",
+                "key-1",
+                from,
+                to,
+                None,
+                None,
+                "run-1",
+                1,
+                "abc123",
+                evidence_ref,
+            )
+            .unwrap();
+        }
+
+        // Entry owned by run-1, but the caller presents a fence for run-2.
+        crate::workflow::evaluate::registry::try_reserve(&repo, "key-1", "run-1").unwrap();
+        let fence = crate::workflow::evaluate::registry::FenceToken {
+            owner_run_id: "run-2".to_string(),
+            lease_epoch: 1,
+        };
+        let err = recover_evaluation(&repo, "key-1", None, Some(&fence)).unwrap_err();
+        assert!(err.to_string().contains("stale fence"));
+    }
+
+    #[test]
+    fn missing_identity_without_provenance_fails_closed() {
+        let repo = repo_dir();
+        let evidence_dir = repo.join(".prometheos").join("evidence").join("run-1");
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        // Deliberately do NOT write execution_identity.json: recovery must fail
+        // closed rather than fabricate provenance.
+
+        for (from, to) in [
+            (EvaluationState::Created, EvaluationState::PreflightPassed),
+            (
+                EvaluationState::PreflightPassed,
+                EvaluationState::Generating,
+            ),
+            (
+                EvaluationState::Generating,
+                EvaluationState::ProposalGenerated,
+            ),
+            (
+                EvaluationState::ProposalGenerated,
+                EvaluationState::Validating,
+            ),
+        ] {
+            let evidence_ref = if to == EvaluationState::Validating {
+                Some(".prometheos/evidence/run-1".to_string())
+            } else {
+                None
+            };
+            append_event_unlocked(
+                &repo,
+                "run-1",
+                "key-1",
+                from,
+                to,
+                None,
+                None,
+                "run-1",
+                1,
+                "abc123",
+                evidence_ref,
+            )
+            .unwrap();
+        }
+
+        crate::workflow::evaluate::registry::try_reserve(&repo, "key-1", "run-1").unwrap();
+        let fence = crate::workflow::evaluate::registry::FenceToken {
+            owner_run_id: "run-1".to_string(),
+            lease_epoch: 1,
+        };
+        let err = recover_evaluation(&repo, "key-1", None, Some(&fence)).unwrap_err();
+        assert!(err.to_string().contains("identity provenance unavailable"));
     }
 
     #[test]

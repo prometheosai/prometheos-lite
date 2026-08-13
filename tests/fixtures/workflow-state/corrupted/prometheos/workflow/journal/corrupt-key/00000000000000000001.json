@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "corrupt-evt-1",
+  "sequence": 1,
+  "run_id": "corrupt-run",
+  "identity_key": "corrupt-key",
+  "timestamp": "2026-01-01T00:00:01Z",
+  "from_state": "created",
+  "to_state": "generating",
+  "proposal_ref": null,
+  "failure_classification": null,
+  "owner_run_id": "corrupt-run",
+  "lease_epoch": 1,
+  "repository_revision": "corrupt-head",
+  "evidence_ref": null,
+  "checkpoint_ref": "prometheos/workflow/checkpoint/corrupt-key.json"
+}
