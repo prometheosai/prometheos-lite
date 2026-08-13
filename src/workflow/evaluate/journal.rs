@@ -81,6 +81,37 @@ pub fn last_sequence(journal_dir: &Path) -> Result<Option<u64>> {
     Ok(read_all(journal_dir)?.last().map(|e| e.sequence))
 }
 
+/// Enforce that a new event continues the journal tail without forking.
+///
+/// A fork occurs when the same owner appends an event whose `from_state` does
+/// not match the previous event's `to_state` — two transitions branching from
+/// the same tail. Cross-run appends (a fresh owner that re-acquired the
+/// identity key after a reclaim) are intentionally allowed: the registry
+/// lock and fence already prevent two live owners from appending
+/// concurrently, and a reclaimed run starts a new chain by design.
+fn verify_tail_continuity(
+    journal_dir: &Path,
+    from_state: EvaluationState,
+    owner_run_id: &str,
+) -> Result<()> {
+    let events = read_all(journal_dir)?;
+    if let Some(tail) = events.last()
+        && tail.owner_run_id == owner_run_id
+        && tail.to_state != from_state
+    {
+        bail!(
+            "journal tail continuity violation: tail event {} (owner {}) ended at {:?} \
+             but new event (owner {}) starts at {:?}",
+            tail.sequence,
+            tail.owner_run_id,
+            tail.to_state,
+            owner_run_id,
+            from_state
+        );
+    }
+    Ok(())
+}
+
 fn read_all(journal_dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events: Vec<JournalEvent> = Vec::new();
     if !journal_dir.exists() {
@@ -180,6 +211,7 @@ pub fn append_event_unlocked(
     super::transition::validate_transition(from_state, to_state)
         .context("refusing to journal an illegal state transition")?;
     let journal_dir = journal_dir_for(repo, identity_key);
+    verify_tail_continuity(&journal_dir, from_state, owner_run_id)?;
     let next_sequence = match last_sequence(&journal_dir)? {
         Some(last) => last + 1,
         None => 0,
@@ -248,6 +280,7 @@ pub fn append_event(
             );
         }
         let journal_dir = journal_dir_for(repo, identity_key);
+        verify_tail_continuity(&journal_dir, from_state, &fence.owner_run_id)?;
         let next_sequence = match last_sequence(&journal_dir)? {
             Some(last) => last + 1,
             None => 0,
@@ -557,6 +590,78 @@ mod tests {
         .unwrap();
         let err = read_journal(&repo, "key-1").unwrap_err();
         assert!(err.to_string().contains("identity mismatch"));
+    }
+
+    #[test]
+    fn tail_continuity_detects_same_owner_fork() {
+        let repo = repo_dir();
+        append_event_unlocked(
+            &repo,
+            "run-1",
+            "key-1",
+            EvaluationState::Created,
+            EvaluationState::PreflightPassed,
+            None,
+            None,
+            "run-1",
+            1,
+            "abc123",
+            None,
+        )
+        .unwrap();
+        // Same owner attempts to branch from the original tail (Created) instead
+        // of continuing from PreflightPassed — this is a fork and must fail.
+        let err = append_event_unlocked(
+            &repo,
+            "run-1",
+            "key-1",
+            EvaluationState::Generating,
+            EvaluationState::ProposalGenerated,
+            None,
+            None,
+            "run-1",
+            1,
+            "abc123",
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("tail continuity"));
+    }
+
+    #[test]
+    fn tail_continuity_allows_fresh_owner_chain() {
+        let repo = repo_dir();
+        append_event_unlocked(
+            &repo,
+            "run-1",
+            "key-1",
+            EvaluationState::Created,
+            EvaluationState::PreflightPassed,
+            None,
+            None,
+            "run-1",
+            1,
+            "abc123",
+            None,
+        )
+        .unwrap();
+        // A different owner (a reclaimed run) may start a new chain; the cross-run
+        // append is permitted and the event is written.
+        append_event_unlocked(
+            &repo,
+            "run-1",
+            "key-1",
+            EvaluationState::Created,
+            EvaluationState::PreflightPassed,
+            None,
+            None,
+            "run-2",
+            1,
+            "abc123",
+            None,
+        )
+        .unwrap();
+        assert_eq!(read_journal(&repo, "key-1").unwrap().len(), 2);
     }
 
     #[test]

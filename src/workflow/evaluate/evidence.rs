@@ -59,7 +59,7 @@ pub struct ProposalRecord {
 }
 
 /// Validation execution record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationRecord {
     pub validation_command: Option<String>,
     pub exit_code: Option<i32>,

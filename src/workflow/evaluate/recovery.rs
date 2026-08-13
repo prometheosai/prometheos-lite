@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use super::checkpoint::{build_checkpoint, checkpoint_path_for, read_checkpoint, write_checkpoint};
-use super::identity::EvaluationState;
+use super::identity::{EvaluationState, ExecutionIdentity, GovernanceScopeSnapshot};
 use super::journal::{journal_dir_for, read_journal, validate_journal};
 use super::migration::migrate_document;
 use super::registry::FenceToken;
@@ -61,7 +61,7 @@ pub fn ensure_resumable(
 }
 
 /// Resolve a repo-relative `evidence_ref` to its evidence directory.
-fn resolve_evidence_dir(repo: &Path, evidence_ref: &str) -> Option<PathBuf> {
+pub(super) fn resolve_evidence_dir(repo: &Path, evidence_ref: &str) -> Option<PathBuf> {
     let resolved = super::durable::resolve_repo_relative(repo, evidence_ref).ok()?;
     if resolved.file_name().and_then(|n| n.to_str()) == Some("evidence.json") {
         resolved.parent().map(|d| d.to_path_buf())
@@ -86,11 +86,34 @@ fn repair_snapshots_under_lock(
 ) -> Result<()> {
     super::registry::with_registry_lock(repo, |_registry| {
         // Repair the identity document (best-effort derived view; a failure
-        // here fails closed rather than leaving a stale snapshot).
+        // here fails closed rather than leaving a stale snapshot). A missing
+        // identity snapshot is created so the entry is fully reconstructable.
         let identity_path = evidence_dir.join("execution_identity.json");
         if identity_path.exists() {
             super::identity::update_identity_state(&identity_path, state)
                 .context("failed to repair lagging identity snapshot")?;
+        } else {
+            let identity = ExecutionIdentity {
+                run_id: run_id.to_string(),
+                task_id: run_id.to_string(),
+                repo: repo.display().to_string(),
+                repo_pin: repository_revision.to_string(),
+                model: "unknown".to_string(),
+                provider: "unknown".to_string(),
+                governance_scope: GovernanceScopeSnapshot {
+                    allowed_paths: vec![],
+                    forbidden_paths: vec![],
+                    allow_dependency_changes: false,
+                    max_files_changed: None,
+                    max_lines_changed: None,
+                    authority: "propose".to_string(),
+                    validation_command: None,
+                },
+                created_at: super::identity::now_iso(),
+                state,
+            };
+            super::identity::persist_execution_identity(evidence_dir, &identity)
+                .context("failed to create missing identity snapshot")?;
         }
         let evidence_ref =
             super::durable::repo_relative_path(repo, &evidence_dir.join("evidence.json"));
@@ -106,7 +129,7 @@ fn repair_snapshots_under_lock(
             &fence.owner_run_id,
             fence.lease_epoch,
         );
-        write_checkpoint(repo, &checkpoint).context("failed to repair lagging checkpoint")?;
+        write_checkpoint(repo, &checkpoint).context("failed to create or repair checkpoint")?;
         Ok(())
     })
 }
@@ -266,7 +289,8 @@ pub fn recover_evaluation(
     }
 
     // 5. Checkpoint cross-check.
-    let lagging = if let Some(cp) = read_checkpoint(repo, identity_key)? {
+    let existing_cp = read_checkpoint(repo, identity_key)?;
+    let lagging = if let Some(ref cp) = existing_cp {
         if cp.last_journal_sequence > last_seq {
             bail!(
                 "checkpoint sequence {} is ahead of journal sequence {} for {} \
@@ -300,6 +324,8 @@ pub fn recover_evaluation(
     } else {
         false
     };
+    // A missing checkpoint is also repaired (created) under the lock below.
+    let checkpoint_missing = existing_cp.is_none();
 
     // 6. Terminal evidence requirement: a terminal state must reference
     //    durable evidence that exists and validates.
@@ -317,14 +343,11 @@ pub fn recover_evaluation(
         migrate_document(&evidence, DocumentType::EvidenceBundle)?;
     }
 
-    // 7. Repair lagging identity/checkpoint snapshots under the exclusive lock,
-    //    only when the caller owns the entry.
-    if let Some(fence) = fence
-        && lagging
+    // 7. Repair lagging (or missing) identity/checkpoint snapshots under the
+    //    exclusive lock, only when the caller owns the entry.
+    if let (Some(fence), Some(dir)) = (fence, evidence_dir.as_ref())
+        && (lagging || checkpoint_missing)
     {
-        let dir = evidence_dir.as_ref().with_context(|| {
-            format!("cannot repair snapshots for {identity_key}: unknown evidence directory")
-        })?;
         let run_id = events.last().map(|e| e.run_id.clone()).unwrap_or_default();
         repair_snapshots_under_lock(
             repo,
@@ -635,6 +658,112 @@ mod tests {
         .unwrap();
         let err = recover_evaluation(&repo, "key-1", Some("different-rev"), None).unwrap_err();
         assert!(err.to_string().contains("revision mismatch"));
+    }
+
+    #[test]
+    fn missing_checkpoint_is_created_on_recovery() {
+        let repo = repo_dir();
+        let evidence_dir = repo.join(".prometheos").join("evidence").join("run-1");
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        // A portable repo-relative evidence reference (the evidence directory
+        // itself exists; no evidence file is required for the checkpoint
+        // creation repair under test).
+        let evidence_ref = ".prometheos/evidence/run-1".to_string();
+
+        // A valid journal ending in a non-terminal, evidence-bearing state.
+        for (from, to) in [
+            (EvaluationState::Created, EvaluationState::PreflightPassed),
+            (
+                EvaluationState::PreflightPassed,
+                EvaluationState::Generating,
+            ),
+            (
+                EvaluationState::Generating,
+                EvaluationState::ProposalGenerated,
+            ),
+            (
+                EvaluationState::ProposalGenerated,
+                EvaluationState::GovernancePassed,
+            ),
+            (
+                EvaluationState::GovernancePassed,
+                EvaluationState::Validating,
+            ),
+            (
+                EvaluationState::Validating,
+                EvaluationState::ValidationComplete,
+            ),
+        ] {
+            let is_last = to == EvaluationState::ValidationComplete;
+            append_event_unlocked(
+                &repo,
+                "run-1",
+                "key-1",
+                from,
+                to,
+                if to == EvaluationState::ProposalGenerated {
+                    Some("proposal-9".to_string())
+                } else {
+                    None
+                },
+                None,
+                "run-1",
+                1,
+                "abc123",
+                if is_last {
+                    Some(evidence_ref.clone())
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+        }
+
+        // Persist a matching identity so the repair path can update it.
+        let identity = crate::workflow::evaluate::identity::ExecutionIdentity {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            repo: repo.display().to_string(),
+            repo_pin: "abc123".to_string(),
+            model: "mock".to_string(),
+            provider: "mock".to_string(),
+            governance_scope: crate::workflow::evaluate::identity::GovernanceScopeSnapshot {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: None,
+                max_lines_changed: None,
+                authority: "propose".to_string(),
+                validation_command: None,
+            },
+            created_at: crate::workflow::evaluate::identity::now_iso(),
+            state: EvaluationState::ValidationComplete,
+        };
+        crate::workflow::evaluate::identity::persist_execution_identity(&evidence_dir, &identity)
+            .unwrap();
+
+        // No checkpoint exists yet.
+        assert!(
+            !crate::workflow::evaluate::checkpoint::checkpoint_path_for(&repo, "key-1").exists()
+        );
+
+        // Recover with a fence so the missing checkpoint is created under lock.
+        let fence = crate::workflow::evaluate::registry::FenceToken {
+            owner_run_id: "run-1".to_string(),
+            lease_epoch: 1,
+        };
+        let recovered = recover_evaluation(&repo, "key-1", None, Some(&fence))
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, EvaluationState::ValidationComplete);
+        assert_eq!(recovered.last_journal_sequence, 5);
+
+        // The missing checkpoint must now exist and match the journal.
+        let cp = crate::workflow::evaluate::checkpoint::read_checkpoint(&repo, "key-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cp.state, EvaluationState::ValidationComplete);
+        assert_eq!(cp.last_journal_sequence, 5);
     }
 
     #[test]

@@ -24,8 +24,8 @@ use super::integrity::{git_rev_parse_head, verify_repo_integrity};
 use super::preflight::{run_preflight, run_validation_preflight};
 use super::registry::{
     FenceToken, LeaseConfig, ProposalState, ReserveResult, TakeoverResult, fenced_finalize,
-    is_entry_stale, lookup_entry, release_reservation, transition_entry, try_reserve,
-    try_take_ownership,
+    is_entry_stale, lookup_entry, proposal_state_for_state, release_reservation, transition_entry,
+    try_reserve, try_take_ownership,
 };
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
@@ -173,7 +173,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     {
         ReserveResult::Owned(token) => token,
         ReserveResult::AlreadyExists => {
-            return wait_and_reuse(
+            return match wait_and_reuse(
                 &repo,
                 &commit_at_start,
                 &run_id,
@@ -184,7 +184,17 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
                 &identity_key,
                 &config.lease_config,
             )
-            .await;
+            .await
+            {
+                Ok(bundle) => Ok(bundle),
+                // A stale Reserved/Generating entry was reclaimed and released;
+                // restart the pipeline fresh so generation re-runs (exactly-once
+                // still holds because the previous attempt left no proposal).
+                Err(e) if e.to_string().contains("caller should retry") => {
+                    Box::pin(evaluate(config)).await
+                }
+                Err(e) => Err(e),
+            };
         }
     };
 
@@ -574,87 +584,123 @@ async fn wait_and_reuse(
     // Run validation-specific preflight first.
     run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
 
-    // Recover durable state to validate journal integrity (fail closed on
-    // corruption) BEFORE deciding how to proceed. This read-only probe does not
-    // repair snapshots; repair happens after takeover with the new fence.
-    let _recovered = super::recovery::recover_evaluation(repo, identity_key, None, None)
-        .context("durable state recovery failed; refusing to continue")?;
-
     let max_wait = std::time::Duration::from_secs(300); // 5 minutes
     let poll_interval = std::time::Duration::from_millis(500);
     let mut elapsed = std::time::Duration::ZERO;
 
     loop {
+        // The durable journal is the authoritative source of truth. The registry
+        // is only a derived coordination snapshot and MUST NOT override it.
+        // Recovery first inspects the journal and derives the only allowed
+        // action; the registry is reconciled to (never above) the journal.
+        let recovered = super::recovery::recover_evaluation(repo, identity_key, None, None)
+            .context("durable state recovery failed; refusing to continue")?;
         let entry = lookup_entry(repo, identity_key);
-        match entry {
-            Some(e) if e.state == ProposalState::ValidationComplete => {
-                let proposal_id = e
-                    .proposal_id
-                    .as_deref()
-                    .context("ValidationComplete entry missing proposal_id")?;
-                let proposal = load_proposal_from_repo(repo, proposal_id)?;
-                let original_evidence_dir_str = e
-                    .evidence_dir
-                    .as_deref()
-                    .unwrap_or(evidence_dir.to_str().unwrap_or(""));
-                return return_completed_evidence(
-                    repo,
-                    commit_at_start,
-                    run_id,
-                    manifest,
-                    config,
-                    Path::new(original_evidence_dir_str),
-                    governance_scope,
-                    &proposal,
-                    proposal_id,
-                    identity_key,
-                )
-                .await;
-            }
-            Some(e) if e.state == ProposalState::ProposalGenerated => {
-                match try_take_ownership(repo, identity_key, run_id, lease_config)? {
-                    TakeoverResult::Taken(fence) => {
-                        let proposal_id = e
-                            .proposal_id
-                            .as_deref()
-                            .context("ProposalGenerated entry missing proposal_id")?;
-                        let proposal = load_proposal_from_repo(repo, proposal_id)?;
-                        return resume_validation(
-                            repo,
-                            commit_at_start,
-                            run_id,
-                            manifest,
-                            config,
-                            evidence_dir,
-                            governance_scope,
-                            &proposal,
-                            identity_key,
-                            &fence,
-                        )
-                        .await;
+
+        match recovered {
+            None => {
+                // No durable journal history exists. Without any durable record
+                // there is no immortalized proposal to protect, so a stale
+                // Reserved entry is safe to clear and let a fresh run start.
+                match entry {
+                    None => {
+                        // The reservation vanished (another process released it).
+                        // Let the caller retry with a fresh ownership attempt.
+                        bail!(
+                            "identity reservation was released by another process; caller should retry"
+                        );
                     }
-                    TakeoverResult::StillLive => {
-                        tokio::time::sleep(poll_interval).await;
-                        elapsed += poll_interval;
-                        continue;
+                    Some(e) => {
+                        let stale = is_entry_stale(&e, lease_config).with_context(|| {
+                            format!("failed to check staleness for {:?} entry", e.state)
+                        })?;
+                        if matches!(e.state, ProposalState::Reserved) && stale {
+                            // Safe to remove the stale reservation and start fresh.
+                            match try_take_ownership(repo, identity_key, run_id, lease_config)? {
+                                TakeoverResult::Taken(fence) => {
+                                    release_reservation(repo, identity_key, &fence).context(
+                                        "failed to release stale reservation after takeover",
+                                    )?;
+                                    bail!(
+                                        "stale Reserved entry cleared; caller should retry to start fresh"
+                                    );
+                                }
+                                TakeoverResult::StillLive => {
+                                    // Heartbeat renewed between check and lock; wait.
+                                }
+                            }
+                        }
+                        // Any other entry without a journal: wait for the owner
+                        // to make durable progress or release the reservation.
                     }
                 }
             }
-            Some(e) if e.state == ProposalState::Validating => {
-                let stale = match is_entry_stale(&e, lease_config) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        bail!("failed to check staleness for Validating entry: {err}");
+            Some(r) => match r.state {
+                EvaluationState::Created
+                | EvaluationState::PreflightPassed
+                | EvaluationState::Generating => {
+                    // The journal is authoritative. A crash during these early
+                    // stages cannot safely auto-restart generation: after a crash
+                    // mid provider-call we cannot know whether the external
+                    // provider already completed. #113 fails closed and defers
+                    // the restart/continuation policy to #114.
+                    //
+                    // A live (heartbeating) entry means another worker is still
+                    // progressing; we wait for it. A stale entry (or a missing
+                    // entry) means the worker died here: fail closed with an
+                    // actionable recovery message — never silently pretend the
+                    // durable history never happened.
+                    let stale = match &entry {
+                        Some(e) => is_entry_stale(e, lease_config).with_context(|| {
+                            format!("failed to check staleness for {:?} entry", e.state)
+                        })?,
+                        None => true,
+                    };
+                    if stale {
+                        bail!(
+                            "durable journal for {identity_key} records state {:?} after a crash; \
+                             re-running generation is unsafe because the external provider may have \
+                             already completed before the process died. Manual or #114-driven \
+                             recovery is required; refusing to auto-restart generation.",
+                            r.state
+                        );
                     }
-                };
-
-                if stale {
-                    match try_take_ownership(repo, identity_key, run_id, lease_config)? {
-                        TakeoverResult::Taken(fence) => {
-                            let proposal_id = e
-                                .proposal_id
-                                .as_deref()
-                                .context("Validating stale entry missing proposal_id")?;
+                    // Live entry: wait for the owner to progress or release.
+                }
+                EvaluationState::ProposalGenerated | EvaluationState::Validating => {
+                    // Journal reached proposal generation (or validation). Resume
+                    // validation on the ORIGINAL proposal — never re-invoke
+                    // generation. Take ownership only when the entry is
+                    // claimable (ProposalGenerated is always claimable; a
+                    // Validating/Generating entry must be stale); otherwise wait
+                    // for the live owner to finish.
+                    let claimable = match &entry {
+                        Some(e) => {
+                            matches!(e.state, ProposalState::ProposalGenerated)
+                                || is_entry_stale(e, lease_config).with_context(|| {
+                                    format!("failed to check staleness for {:?} entry", e.state)
+                                })?
+                        }
+                        None => true,
+                    };
+                    if claimable {
+                        let fence = match entry {
+                            Some(_) => {
+                                match try_take_ownership(repo, identity_key, run_id, lease_config)?
+                                {
+                                    TakeoverResult::Taken(f) => Some(f),
+                                    TakeoverResult::StillLive => None,
+                                }
+                            }
+                            None => match try_reserve(repo, identity_key, run_id)? {
+                                ReserveResult::Owned(f) => Some(f),
+                                ReserveResult::AlreadyExists => None,
+                            },
+                        };
+                        if let Some(fence) = fence {
+                            let proposal_id = r.proposal_ref.as_deref().context(
+                                "journal records ProposalGenerated/Validating without a proposal reference",
+                            )?;
                             let proposal = load_proposal_from_repo(repo, proposal_id)?;
                             return resume_validation(
                                 repo,
@@ -670,68 +716,40 @@ async fn wait_and_reuse(
                             )
                             .await;
                         }
-                        TakeoverResult::StillLive => {
-                            tokio::time::sleep(poll_interval).await;
-                            elapsed += poll_interval;
-                            continue;
-                        }
+                        // StillLive / AlreadyExists race: fall through to wait.
                     }
+                    // Not yet claimable: wait for the live owner.
                 }
-            }
-            Some(e) => {
-                let stale = match is_entry_stale(&e, lease_config) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        bail!(
-                            "failed to check staleness for {} entry: {err}",
-                            match e.state {
-                                ProposalState::Reserved => "Reserved",
-                                ProposalState::Generating => "Generating",
-                                _ => "unknown",
-                            }
-                        );
-                    }
-                };
-
-                if stale {
-                    match try_take_ownership(repo, identity_key, run_id, lease_config)? {
-                        TakeoverResult::Taken(fence) => {
-                            release_reservation(repo, identity_key, &fence)
-                                .context("failed to release stale entry after takeover")?;
-                            bail!(
-                                "stale {} entry reclaimed; caller should retry now owning it",
-                                match e.state {
-                                    ProposalState::Reserved => "Reserved",
-                                    ProposalState::Generating => "Generating",
-                                    _ => "entry",
-                                }
-                            );
-                        }
-                        TakeoverResult::StillLive => {
-                            tokio::time::sleep(poll_interval).await;
-                            elapsed += poll_interval;
-                            continue;
-                        }
-                    }
+                _ => {
+                    // ValidationComplete / IntegrityVerified / terminal / failed:
+                    // never transition backward. Return the preserved evidence;
+                    // no provider call, no validation rerun, no duplicate
+                    // terminal publication.
+                    return return_journal_completed(
+                        &r,
+                        repo,
+                        commit_at_start,
+                        run_id,
+                        manifest,
+                        config,
+                        governance_scope,
+                        identity_key,
+                        lease_config,
+                    )
+                    .await;
                 }
-
-                if elapsed >= max_wait {
-                    bail!(
-                        "timed out waiting for another process to complete \
-                         identity reservation after {} seconds",
-                        max_wait.as_secs()
-                    );
-                }
-                tokio::time::sleep(poll_interval).await;
-                elapsed += poll_interval;
-            }
-            None => {
-                bail!(
-                    "identity reservation was released by another process \
-                     (generation likely failed); caller should retry"
-                );
-            }
+            },
         }
+
+        if elapsed >= max_wait {
+            bail!(
+                "timed out waiting for another process to complete \
+                 identity reservation after {} seconds",
+                max_wait.as_secs()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+        elapsed += poll_interval;
     }
 }
 /// Return preserved evidence from a completed validation.
@@ -752,9 +770,69 @@ async fn return_completed_evidence(
 ) -> Result<EvidenceBundle> {
     let existing_bundle = find_existing_evidence(evidence_dir, proposal_id).context(
         "ValidationComplete entry references evidence that is missing or corrupt; \
-             cannot return preserved bundle",
+              cannot return preserved bundle",
     )?;
     Ok(existing_bundle)
+}
+
+/// Return preserved evidence when the durable journal already records a
+/// completed outcome, and reconcile a lagging registry entry to the terminal
+/// proposal state when we can reclaim it.
+async fn return_journal_completed(
+    recovered: &super::recovery::RecoveredEvaluation,
+    repo: &Path,
+    commit_at_start: &str,
+    run_id: &str,
+    manifest: &TaskManifest,
+    config: &EvaluationConfig,
+    governance_scope: &GovernanceScopeSnapshot,
+    identity_key: &str,
+    lease_config: &LeaseConfig,
+) -> Result<EvidenceBundle> {
+    // If the registry entry is stale-owned and behind the journal, reclaim it
+    // and reconcile to the terminal proposal state so future observers agree.
+    if let Some(entry) = lookup_entry(repo, identity_key)
+        && let Ok(true) = is_entry_stale(&entry, lease_config)
+        && let TakeoverResult::Taken(fence) =
+            try_take_ownership(repo, identity_key, run_id, lease_config)?
+    {
+        let target =
+            proposal_state_for_state(recovered.state).unwrap_or(ProposalState::ValidationComplete);
+        transition_entry(
+            repo,
+            identity_key,
+            target,
+            recovered.proposal_ref.as_deref(),
+            &fence,
+        )?;
+    }
+
+    let evidence_dir = super::recovery::resolve_evidence_dir(
+        repo,
+        recovered
+            .evidence_ref
+            .as_deref()
+            .context("completed journal state has no evidence reference")?,
+    )
+    .context("completed journal evidence reference cannot be resolved")?;
+    let proposal_id = recovered
+        .proposal_ref
+        .as_deref()
+        .context("completed journal state has no proposal reference")?;
+    let proposal = load_proposal_from_repo(repo, proposal_id)?;
+    return_completed_evidence(
+        repo,
+        commit_at_start,
+        run_id,
+        manifest,
+        config,
+        &evidence_dir,
+        governance_scope,
+        &proposal,
+        proposal_id,
+        identity_key,
+    )
+    .await
 }
 /// Resume validation from the ProposalGenerated (or later) state.
 ///
@@ -795,6 +873,15 @@ async fn resume_validation(
         .as_ref()
         .map(|r| r.state)
         .unwrap_or(EvaluationState::ProposalGenerated);
+
+    // Reconcile the registry to the authoritative journal position so a
+    // subsequent observer sees the correct state (data-driven mapping).
+    let target = proposal_state_for_state(start_state).unwrap_or(ProposalState::Validating);
+    if let Some(entry) = lookup_entry(repo, identity_key)
+        && entry.state != target
+    {
+        transition_entry(repo, identity_key, target, Some(&proposal.id), fence)?;
+    }
 
     let mut bundle = new_bundle_from_identity(
         run_id,

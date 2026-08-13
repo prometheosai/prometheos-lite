@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::evidence::{EvidenceBundle, write_bundle};
-use super::identity::now_iso;
+use super::identity::{EvaluationState, now_iso};
 
 // ---------------------------------------------------------------------------
 // Lease configuration for ownership fencing
@@ -865,6 +865,37 @@ pub(super) fn release_reservation(
 // Lease / stale-entry helpers
 // ---------------------------------------------------------------------------
 
+/// Map an evaluation journal state to the registry [`ProposalState`] used to
+/// represent it for reconciliation.
+///
+/// The registry is a coarse lifecycle view; the authoritative terminal outcome
+/// always lives in the journal and evidence bundle. Terminal evaluation
+/// outcomes (success or failure) all collapse to `ValidationComplete`, because
+/// the registry has no distinct failure state. Non-terminal states map to the
+/// registry state that a live run in that journal position would hold.
+pub(super) fn proposal_state_for_state(state: EvaluationState) -> Option<ProposalState> {
+    Some(match state {
+        EvaluationState::Created | EvaluationState::PreflightPassed => ProposalState::Reserved,
+        EvaluationState::Generating => ProposalState::Generating,
+        EvaluationState::ProposalGenerated => ProposalState::ProposalGenerated,
+        EvaluationState::GovernancePassed | EvaluationState::Validating => {
+            ProposalState::Validating
+        }
+        EvaluationState::ValidationComplete
+        | EvaluationState::IntegrityVerified
+        | EvaluationState::ReviewGate
+        | EvaluationState::PreflightBlocked
+        | EvaluationState::GenerationFailed
+        | EvaluationState::GovernanceRejected
+        | EvaluationState::CandidateCompileFailed
+        | EvaluationState::CandidateTestFailed
+        | EvaluationState::ValidationFailed
+        | EvaluationState::InfraBlocked
+        | EvaluationState::IntegrityFailed
+        | EvaluationState::InternalError => ProposalState::ValidationComplete,
+    })
+}
+
 /// Check whether a registry entry is stale according to its state and
 /// the given lease configuration.
 ///
@@ -925,6 +956,38 @@ fn parse_rfc3339(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proposal_state_for_state_mapping_is_data_driven() {
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::Generating),
+            Some(ProposalState::Generating)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::ProposalGenerated),
+            Some(ProposalState::ProposalGenerated)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::Validating),
+            Some(ProposalState::Validating)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::ValidationComplete),
+            Some(ProposalState::ValidationComplete)
+        );
+        // Every terminal outcome collapses to the registry's terminal state.
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::ReviewGate),
+            Some(ProposalState::ValidationComplete)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::GenerationFailed),
+            Some(ProposalState::ValidationComplete)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::IntegrityFailed),
+            Some(ProposalState::ValidationComplete)
+        );
+    }
     #[test]
     fn is_entry_stale_validating_fresh_heartbeat() {
         let entry = RegistryEntry {
