@@ -418,8 +418,9 @@ pub fn import_portable_state(
             "{}",
             version_diagnostic(DocumentType::PortableWorkState, declared).migration_action
         ),
-        // Legacy (unversioned) documents: inject the current version in memory
-        // and validate the migrated form. The caller's JSON is never rewritten.
+        // Legacy (unversioned) documents: inject the current portable version
+        // in memory and validate the migrated form. The caller's JSON is never
+        // rewritten.
         VersionStatus::Legacy => {
             if let Some(obj) = value.as_object_mut() {
                 obj.insert(
@@ -520,10 +521,12 @@ fn validate_state(state: &PortableWorkState) -> Result<()> {
     validate_work_identity(&state.work)?;
     validate_repository(&state.repository)?;
     validate_plan_and_steps(state)?;
+    validate_authority_snapshot(&state.authority)?;
     validate_refs(state)?;
     validate_decisions(state)?;
     validate_validation_results(&state.validation_results)?;
-    validate_failures(&state.failures)?;
+    validate_review_results(&state.review_results)?;
+    validate_failures(&state.failures, &state.steps)?;
     validate_compatibility(&state.compatibility)?;
     validate_execution_history(&state.execution_history)?;
     Ok(())
@@ -612,35 +615,86 @@ fn validate_plan_and_steps(state: &PortableWorkState) -> Result<()> {
     Ok(())
 }
 
+/// Validate the authority snapshot: path lists must be relative, non-empty,
+/// free of `..` traversal, and `policy_digest` (when present) must be a
+/// 64-character sha256 hex digest. This is a contract-integrity check on the
+/// portable record, not an authorization decision.
+fn validate_authority_snapshot(auth: &AuthoritySnapshot) -> Result<()> {
+    for (list, which) in [
+        (&auth.allowed_paths, "allowed_paths"),
+        (&auth.forbidden_paths, "forbidden_paths"),
+    ] {
+        for p in list {
+            let p = p.trim();
+            if p.is_empty() {
+                bail!("authority {which} must not contain an empty path");
+            }
+            if is_hostile_path(p) {
+                bail!("authority {which} path is absolute or escapes the repository: {p}");
+            }
+        }
+    }
+    if let Some(digest) = &auth.policy_digest {
+        let digest = digest.trim();
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("authority policy_digest must be a 64-character sha256 hex digest: {digest}");
+        }
+    }
+    Ok(())
+}
+
+/// Validate portable refs and the kind invariant on every ref position:
+/// `context_refs` must be `Context`, `proposal_ref` `Proposal`, `diff_ref`
+/// `Diff`, `artifact_refs` `Artifact`, validation evidence `Validation`,
+/// failure evidence `Evidence`. A decision provenance source may be any ref
+/// kind (it points at whatever grounded the decision).
 fn validate_refs(state: &PortableWorkState) -> Result<()> {
-    let mut refs: Vec<&PortableRef> = Vec::new();
-    refs.extend(state.context_refs.iter());
-    refs.extend(state.artifact_refs.iter());
+    for r in &state.context_refs {
+        validate_ref_kind(r, PortableRefKind::Context, "context ref")?;
+        validate_ref(r)?;
+    }
+    for r in &state.artifact_refs {
+        validate_ref_kind(r, PortableRefKind::Artifact, "artifact ref")?;
+        validate_ref(r)?;
+    }
     if let Some(r) = &state.proposal_ref {
-        refs.push(r);
+        validate_ref_kind(r, PortableRefKind::Proposal, "proposal_ref")?;
+        validate_ref(r)?;
     }
     if let Some(r) = &state.diff_ref {
-        refs.push(r);
+        validate_ref_kind(r, PortableRefKind::Diff, "diff_ref")?;
+        validate_ref(r)?;
     }
     for v in &state.validation_results {
         if let Some(r) = &v.evidence {
-            refs.push(r);
+            validate_ref_kind(r, PortableRefKind::Validation, "validation evidence")?;
+            validate_ref(r)?;
         }
     }
     for f in &state.failures {
         if let Some(r) = &f.evidence {
-            refs.push(r);
+            validate_ref_kind(r, PortableRefKind::Evidence, "failure evidence")?;
+            validate_ref(r)?;
         }
     }
     for d in &state.decisions {
         for p in &d.provenance {
             if let Some(r) = &p.source {
-                refs.push(r);
+                validate_ref(r)?;
             }
         }
     }
-    for r in refs {
-        validate_ref(r)?;
+    Ok(())
+}
+
+fn validate_ref_kind(r: &PortableRef, expected: PortableRefKind, where_: &str) -> Result<()> {
+    if r.kind != expected {
+        bail!(
+            "{where_} must have kind {:?}, found {:?}: {}",
+            expected,
+            r.kind,
+            r.uri
+        );
     }
     Ok(())
 }
@@ -690,6 +744,30 @@ fn validate_decisions(state: &PortableWorkState) -> Result<()> {
         }
         if !ids.insert(d.decision_id.as_str()) {
             bail!("duplicate decision_id: {}", d.decision_id);
+        }
+        if d.supersedes.iter().any(|s| s == &d.decision_id) {
+            bail!("decision {} must not supersede itself", d.decision_id);
+        }
+        if d.superseded_by.as_deref() == Some(d.decision_id.as_str()) {
+            bail!(
+                "decision {} must not be superseded by itself",
+                d.decision_id
+            );
+        }
+        if d.conflicts_with.iter().any(|c| c == &d.decision_id) {
+            bail!("decision {} must not conflict with itself", d.decision_id);
+        }
+        if has_duplicates(&d.supersedes) {
+            bail!(
+                "decision {} lists a superseded decision more than once",
+                d.decision_id
+            );
+        }
+        if has_duplicates(&d.conflicts_with) {
+            bail!(
+                "decision {} lists a conflicting decision more than once",
+                d.decision_id
+            );
         }
         if let Some(c) = &d.confidence {
             validate_confidence(c)?;
@@ -822,6 +900,13 @@ fn validate_decisions(state: &PortableWorkState) -> Result<()> {
     Ok(())
 }
 
+fn has_duplicates<T: PartialEq>(items: &[T]) -> bool {
+    items
+        .iter()
+        .enumerate()
+        .any(|(i, a)| items[i + 1..].iter().any(|b| a == b))
+}
+
 fn by_id<'a>(decisions: &'a [DecisionRecord], id: &str) -> &'a DecisionRecord {
     decisions
         .iter()
@@ -867,9 +952,13 @@ fn detect_supersession_cycles(edges: &[(String, String)]) -> Result<()> {
 }
 
 fn validate_validation_results(results: &[ValidationResult]) -> Result<()> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for v in results {
         if v.result_id.trim().is_empty() {
             bail!("validation result with empty result_id");
+        }
+        if !seen.insert(v.result_id.as_str()) {
+            bail!("duplicate result_id: {}", v.result_id);
         }
         if v.executed_at.trim().is_empty() {
             bail!("validation result {} has an empty executed_at", v.result_id);
@@ -881,16 +970,48 @@ fn validate_validation_results(results: &[ValidationResult]) -> Result<()> {
     Ok(())
 }
 
-fn validate_failures(failures: &[FailureRecord]) -> Result<()> {
+fn validate_review_results(results: &[ReviewResult]) -> Result<()> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for r in results {
+        if r.review_id.trim().is_empty() {
+            bail!("review result with empty review_id");
+        }
+        if !seen.insert(r.review_id.as_str()) {
+            bail!("duplicate review_id: {}", r.review_id);
+        }
+        if r.reviewer.trim().is_empty() {
+            bail!("review result {} has an empty reviewer", r.review_id);
+        }
+        if r.reviewed_at.trim().is_empty() {
+            bail!("review result {} has an empty reviewed_at", r.review_id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_failures(failures: &[FailureRecord], steps: &[WorkStep]) -> Result<()> {
+    let step_ids: BTreeSet<&str> = steps.iter().map(|s| s.step_id.as_str()).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for f in failures {
         if f.failure_id.trim().is_empty() {
             bail!("failure record with empty failure_id");
+        }
+        if !seen.insert(f.failure_id.as_str()) {
+            bail!("duplicate failure_id: {}", f.failure_id);
         }
         if f.stage.trim().is_empty() {
             bail!("failure record {} has an empty stage", f.failure_id);
         }
         if f.occurred_at.trim().is_empty() {
             bail!("failure record {} has an empty occurred_at", f.failure_id);
+        }
+        if let Some(sid) = &f.step_id
+            && !step_ids.contains(sid.as_str())
+        {
+            bail!(
+                "failure record {} references unknown step {sid}",
+                f.failure_id
+            );
         }
     }
     Ok(())
