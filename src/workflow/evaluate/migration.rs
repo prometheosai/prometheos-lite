@@ -59,6 +59,9 @@ fn typed_validate(doc_type: DocumentType, value: &Value) -> Result<()> {
         DocumentType::EvidenceBundle => {
             serde_json::from_value::<super::evidence::EvidenceBundle>(value.clone()).map(|_| ())
         }
+        DocumentType::PortableWorkState => {
+            bail!("PortableWorkState documents are imported through workflow::portable_state, not the evaluation migration path")
+        }
     }
     .with_context(|| format!("migrated {} document is invalid", doc_type.as_str()))
 }

@@ -14,7 +14,9 @@
 //! (or generated upstream by a `PatchProvider`). The safety value is the gating, not the
 //! generation.
 
+pub mod durable;
 pub mod evaluate;
+pub mod schema;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
