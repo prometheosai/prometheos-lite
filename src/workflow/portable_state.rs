@@ -23,8 +23,8 @@
 
 use crate::workflow::durable::atomic_write_json;
 use crate::workflow::schema::{
-    CURRENT_SCHEMA_VERSION, DocumentType, LEGACY_UNVERSIONED_VERSION, SchemaVersion, VersionStatus,
-    validate_version, version_diagnostic,
+    DocumentType, LEGACY_UNVERSIONED_VERSION, PORTABLE_WORK_STATE_SCHEMA_VERSION, SchemaVersion,
+    VersionStatus, validate_version, version_diagnostic,
 };
 use crate::workflow::{AuthorityLevel, is_hostile_path};
 use anyhow::{Context, Result, bail};
@@ -415,7 +415,7 @@ pub fn import_portable_state(
             if let Some(obj) = value.as_object_mut() {
                 obj.insert(
                     "schema_version".to_string(),
-                    Value::String(CURRENT_SCHEMA_VERSION.to_string_owned()),
+                    Value::String(PORTABLE_WORK_STATE_SCHEMA_VERSION.to_string_owned()),
                 );
             }
         }
@@ -476,9 +476,10 @@ fn declared_version(value: &Value) -> Result<SchemaVersion> {
 // ---------------------------------------------------------------------------
 
 fn validate_state(state: &PortableWorkState) -> Result<()> {
-    if !state.schema_version.is_current() {
+    if state.schema_version != PORTABLE_WORK_STATE_SCHEMA_VERSION {
         bail!(
-            "portable work state must declare the current schema version, found {}",
+            "portable work state must declare the current portable schema version {}, found {}",
+            PORTABLE_WORK_STATE_SCHEMA_VERSION,
             state.schema_version
         );
     }
@@ -862,10 +863,11 @@ fn validate_failures(failures: &[FailureRecord]) -> Result<()> {
 }
 
 fn validate_compatibility(c: &CompatibilityMetadata) -> Result<()> {
-    if !c.state_schema_version.is_current() {
+    if c.state_schema_version != PORTABLE_WORK_STATE_SCHEMA_VERSION {
         bail!(
-            "compatibility metadata declares non-current state schema version {}",
-            c.state_schema_version
+            "compatibility metadata declares state schema version {}, expected {}",
+            c.state_schema_version,
+            PORTABLE_WORK_STATE_SCHEMA_VERSION
         );
     }
     let mut seen: BTreeSet<&str> = BTreeSet::new();

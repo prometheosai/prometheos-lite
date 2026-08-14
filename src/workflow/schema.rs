@@ -17,8 +17,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
-/// Current supported schema version for all durable documents.
+/// Current supported schema version for the evaluation pipeline's durable
+/// documents (proposal registry, execution identity, evidence bundle,
+/// evaluation checkpoint, journal event).
 pub const CURRENT_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0, 0);
+
+/// Current supported schema version for the portable work state document.
+///
+/// Independent from [`CURRENT_SCHEMA_VERSION`]: the portable work state is a
+/// separate durable document kind and its schema can advance (or stay put)
+/// without forcing the evaluation pipeline documents to change. Validation is
+/// always resolved per [`DocumentType`] via [`DocumentType::current_version`],
+/// never against the global default.
+pub const PORTABLE_WORK_STATE_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0, 0);
 
 /// Version assumed for legacy unversioned documents.
 ///
@@ -74,13 +85,16 @@ impl SchemaVersion {
         })
     }
 
-    /// True if this version is exactly the current supported schema version.
+    /// True if this version is exactly the global default current schema
+    /// version. Document-specific checks should compare against
+    /// [`DocumentType::current_version`] instead.
     pub fn is_current(self) -> bool {
         self == CURRENT_SCHEMA_VERSION
     }
 
-    /// True if this version shares the current major (read-compatible or
-    /// migratable) and is not newer than the current version.
+    /// True if this version shares the global default major (read-compatible
+    /// or migratable) and is not newer than the global default. Use
+    /// [`DocumentType::supported_range`] for document-specific checks.
     pub fn is_supported(self) -> bool {
         self.major == CURRENT_SCHEMA_VERSION.major && self <= CURRENT_SCHEMA_VERSION
     }
@@ -170,9 +184,21 @@ impl DocumentType {
         }
     }
 
+    /// The exact schema version this document type is written as today.
+    ///
+    /// Document versions are decoupled per kind: the evaluation pipeline
+    /// documents track [`CURRENT_SCHEMA_VERSION`], while the portable work
+    /// state tracks [`PORTABLE_WORK_STATE_SCHEMA_VERSION`].
+    pub fn current_version(self) -> SchemaVersion {
+        match self {
+            DocumentType::PortableWorkState => PORTABLE_WORK_STATE_SCHEMA_VERSION,
+            _ => CURRENT_SCHEMA_VERSION,
+        }
+    }
+
     /// Inclusive supported version range for this document type.
     pub fn supported_range(self) -> (SchemaVersion, SchemaVersion) {
-        (SchemaVersion::new(1, 0, 0), CURRENT_SCHEMA_VERSION)
+        (SchemaVersion::new(1, 0, 0), self.current_version())
     }
 }
 
@@ -213,10 +239,10 @@ pub fn validate_version(
     if discovered == LEGACY_UNVERSIONED_VERSION {
         return Ok(VersionStatus::Legacy);
     }
-    if discovered.is_current() {
+    if discovered == document_type.current_version() {
         return Ok(VersionStatus::Current);
     }
-    if discovered.is_supported() && discovered >= min && discovered <= max {
+    if discovered >= min && discovered <= max {
         return Ok(VersionStatus::Legacy);
     }
     Ok(VersionStatus::Unsupported)
@@ -380,5 +406,49 @@ mod tests {
             validate_version(doc, SchemaVersion::new(99, 0, 0)).unwrap(),
             VersionStatus::Unsupported
         );
+    }
+
+    #[test]
+    fn document_schema_versions_are_independent() {
+        // The portable work state declares its own current version, decoupled
+        // from the evaluation pipeline documents. Each document type reports
+        // its own current version and validates against it, never against a
+        // shared global constant.
+        assert_eq!(
+            DocumentType::ProposalRegistry.current_version(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            DocumentType::ExecutionIdentity.current_version(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            DocumentType::PortableWorkState.current_version(),
+            PORTABLE_WORK_STATE_SCHEMA_VERSION
+        );
+
+        // The supported range ceiling follows the document's own current
+        // version, so the two document families can advance independently.
+        assert_eq!(
+            DocumentType::PortableWorkState.supported_range().1,
+            PORTABLE_WORK_STATE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            DocumentType::ProposalRegistry.supported_range().1,
+            CURRENT_SCHEMA_VERSION
+        );
+
+        // Validation resolves per document: a version that is current for the
+        // portable document is classified against the portable document's own
+        // range, and the evaluate-pipeline default remains global.
+        assert_eq!(
+            validate_version(
+                DocumentType::PortableWorkState,
+                PORTABLE_WORK_STATE_SCHEMA_VERSION
+            )
+            .unwrap(),
+            VersionStatus::Current
+        );
+        assert_eq!(SchemaVersion::default(), CURRENT_SCHEMA_VERSION);
     }
 }
