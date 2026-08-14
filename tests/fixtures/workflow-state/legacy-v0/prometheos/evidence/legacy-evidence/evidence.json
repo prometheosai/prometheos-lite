@@ -1,0 +1,43 @@
+{
+  "run_id": "legacy-run",
+  "task_id": "legacy-task",
+  "repo": "/tmp/repo",
+  "repo_pin_before": "legacy-head",
+  "repo_pin_after": "legacy-head",
+  "provider_provenance": {
+    "implementation": "mock",
+    "model": "mock",
+    "route": "mock",
+    "generated_at": "2025-06-01T00:00:01Z",
+    "input_digest": "legacy-digest",
+    "patch_hash": "legacy-patch"
+  },
+  "effective_governance": {
+    "allowed_paths": [],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": null,
+    "max_lines_changed": null,
+    "authority": "propose",
+    "validation_command": null
+  },
+  "proposal": {
+    "id": "legacy-proposal-1",
+    "patch_hash": "legacy-patch",
+    "changed_files": ["src/legacy.rs"],
+    "added_lines": 5,
+    "removed_lines": 2,
+    "base_sha": "legacy-head"
+  },
+  "validation": null,
+  "failure_classification": null,
+  "integrity": null,
+  "cleanup": null,
+  "raw_logs": {
+    "stdout": "prometheos/evidence/legacy-evidence/raw_stdout.log",
+    "stderr": null,
+    "validation_output": null
+  },
+  "final_state": "proposal_generated",
+  "completed_at": "2025-06-01T00:00:02Z"
+}
