@@ -1,0 +1,19 @@
+{
+  "run_id": "legacy-run",
+  "task_id": "legacy-task",
+  "repo": "/tmp/repo",
+  "repo_pin": "legacy-head",
+  "model": "mock",
+  "provider": "mock",
+  "governance_scope": {
+    "allowed_paths": [],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": null,
+    "max_lines_changed": null,
+    "authority": "propose",
+    "validation_command": null
+  },
+  "created_at": "2025-06-01T00:00:00Z",
+  "state": "proposal_generated"
+}

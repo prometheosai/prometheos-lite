@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "fixture-evt-1",
+  "sequence": 1,
+  "run_id": "fixture-run",
+  "identity_key": "checkpoint-key-abc",
+  "timestamp": "2026-01-01T00:00:01Z",
+  "from_state": "preflight_passed",
+  "to_state": "generating",
+  "proposal_ref": null,
+  "failure_classification": null,
+  "owner_run_id": "fixture-run",
+  "lease_epoch": 1,
+  "repository_revision": "fixture-head",
+  "evidence_ref": null,
+  "checkpoint_ref": "prometheos/workflow/checkpoint/checkpoint-key-abc.json"
+}

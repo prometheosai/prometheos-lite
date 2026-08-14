@@ -1,0 +1,16 @@
+{
+  "event_id": "legacy-evt-1",
+  "sequence": 1,
+  "run_id": "legacy-run",
+  "identity_key": "legacy-key",
+  "timestamp": "2025-06-01T00:00:01Z",
+  "from_state": "preflight_passed",
+  "to_state": "generating",
+  "proposal_ref": null,
+  "failure_classification": null,
+  "owner_run_id": "legacy-run",
+  "lease_epoch": 1,
+  "repository_revision": "legacy-head",
+  "evidence_ref": null,
+  "checkpoint_ref": "prometheos/workflow/checkpoint/legacy-key.json"
+}

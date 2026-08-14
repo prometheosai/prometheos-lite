@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "current-evt-0",
+  "sequence": 0,
+  "run_id": "current-run",
+  "identity_key": "current-key",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "from_state": "created",
+  "to_state": "preflight_passed",
+  "proposal_ref": null,
+  "failure_classification": null,
+  "owner_run_id": "current-run",
+  "lease_epoch": 1,
+  "repository_revision": "current-head",
+  "evidence_ref": null,
+  "checkpoint_ref": "prometheos/workflow/checkpoint/current-key.json"
+}

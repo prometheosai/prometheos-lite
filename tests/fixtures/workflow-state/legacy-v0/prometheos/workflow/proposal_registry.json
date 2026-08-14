@@ -1,0 +1,14 @@
+{
+  "entries": {
+    "legacy-key": {
+      "state": "proposal_generated",
+      "proposal_id": "legacy-proposal-1",
+      "owner_run_id": "legacy-run",
+      "lease_epoch": 1,
+      "reserved_at": "2025-06-01T00:00:00Z",
+      "updated_at": "2025-06-01T00:00:02Z",
+      "heartbeat_at": "2025-06-01T00:00:02Z",
+      "evidence_dir": "prometheos/evidence/legacy-evidence"
+    }
+  }
+}

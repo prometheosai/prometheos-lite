@@ -8,7 +8,7 @@ use prometheos_lite::harness::patch_provider::{
     BlockingProposalProvider, CountingProposalProvider, MockProposalMode, MockProposalProvider,
 };
 use prometheos_lite::workflow::evaluate::{
-    self, EvaluationConfig, EvidenceBundle, LeaseConfig, TaskManifest,
+    self, EvaluationConfig, EvaluationState, EvidenceBundle, LeaseConfig, TaskManifest,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +17,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Barrier;
+
+// Test-only durable-state fixture helpers (crash simulation). Not production.
+#[path = "common/durable_state.rs"]
+mod durable_state;
 
 /// Helper: create a temp git repo with one committed file.
 fn temp_repo() -> (TempDir, PathBuf) {
@@ -31,6 +35,10 @@ fn temp_repo() -> (TempDir, PathBuf) {
         "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
     )
     .unwrap();
+    // Durable workflow state (.prometheos) must never be committed. Tests that
+    // run `git add -A` (e.g. repo_modification_causes_integrity_failure) would
+    // otherwise pick up journal/evidence files.
+    std::fs::write(repo.join(".gitignore"), ".prometheos/\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "init"]);
     (dir, repo)
@@ -1167,6 +1175,10 @@ async fn crash_after_generation_is_recoverable() {
     )
     .unwrap();
 
+    // The journal (authoritative) must also be rewound to the same stage,
+    // otherwise recovery correctly refuses to resume a completed journal.
+    durable_state::rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+
     // Second run: should detect the ProposalGenerated state and resume validation.
     let config2 = EvaluationConfig {
         manifest: manifest.clone(),
@@ -1601,7 +1613,9 @@ async fn validation_complete_with_missing_evidence_fails_closed() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains("missing or corrupt") || msg.contains("evidence"),
+                msg.contains("missing or corrupt")
+                    || msg.contains("evidence")
+                    || msg.contains("refusing to continue"),
                 "expected evidence-missing error, got: {msg}"
             );
         }
@@ -1687,28 +1701,43 @@ async fn slow_generation_not_reclaimed_during_heartbeat() {
 }
 
 // =========================================================================
-// Test B: Dead generation can be reclaimed after lease timeout
+// Regression: terminal journal + stale registry returns preserved evidence
+// (no provider re-invocation, no validation rerun, no duplicate publication)
 // =========================================================================
 
 #[tokio::test]
-async fn dead_generation_can_be_reclaimed() {
+async fn terminal_journal_with_stale_registry_returns_preserved() {
     let (_dir, repo) = temp_repo();
     let manifest = make_manifest(&repo, "dead-gen-test");
 
-    // First run: generate normally to set up the identity.
-    let config1 = default_config(manifest.clone(), MockProposalMode::Safe);
+    // First run: generate + validate normally to set up durable state.
+    let provider_count = Arc::new(AtomicUsize::new(0));
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
     let bundle1 = evaluate::evaluate(config1).await.unwrap();
     assert!(bundle1.proposal.is_some());
     let proposal_id = bundle1.proposal.as_ref().unwrap().id.clone();
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        1,
+        "first run generates once"
+    );
+    assert!(bundle1.validation.is_some(), "first run validates");
 
-    // Manipulate the registry to have a stale Generating entry with old heartbeat.
+    // Simulate a crash: registry shows a stale Generating entry (mid-generation
+    // by the old worker), but the durable journal already records a terminal
+    // outcome. Per #113 the journal is authoritative: the run is finished and
+    // the preserved evidence must be returned — never regenerated.
     let registry_path = repo
         .join(".prometheos")
         .join("workflow")
         .join("proposal_registry.json");
     let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
-
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::Generating;
         entry.proposal_id = None;
@@ -1722,42 +1751,34 @@ async fn dead_generation_can_be_reclaimed() {
     )
     .unwrap();
 
-    // Second run with short stale timeout: should reclaim the dead entry.
-    let short_lease = LeaseConfig {
-        stale_reservation_timeout: Duration::from_secs(1),
-        generation_lease_timeout: Duration::from_secs(1),
-        heartbeat_interval: Duration::from_millis(100),
-    };
-
+    // Second run: must return the preserved evidence without re-invoking the
+    // provider or re-running validation.
     let config2 = EvaluationConfig {
         manifest,
-        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
         route_info: None,
-        lease_config: short_lease,
+        lease_config: LeaseConfig::default(),
     };
+    let bundle2 = evaluate::evaluate(config2).await.unwrap();
 
-    // The second run should either succeed with a new proposal or fail with
-    // a stale-entry message. It must NOT silently use the dead entry.
-    let result = evaluate::evaluate(config2).await;
-    match result {
-        Ok(bundle) => {
-            // Reclaimed and generated a fresh proposal.
-            assert!(bundle.proposal.is_some());
-            // The new proposal ID must differ from the old one (fresh generation).
-            assert_ne!(
-                bundle.proposal.as_ref().unwrap().id,
-                proposal_id,
-                "dead generation must produce a fresh proposal"
-            );
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("stale") || msg.contains("retry") || msg.contains("released"),
-                "expected stale entry or retry error, got: {msg}"
-            );
-        }
-    }
+    // Preserved proposal (no regeneration, no immortalized-proposal reuse).
+    assert_eq!(
+        bundle2.proposal.as_ref().unwrap().id,
+        proposal_id,
+        "terminal journal + stale registry must return the preserved proposal"
+    );
+    // Provider not re-invoked.
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        1,
+        "provider must not be re-invoked when returning preserved evidence"
+    );
+    // Validation not re-run: the returned validation record is unchanged.
+    assert_eq!(
+        bundle2.validation, bundle1.validation,
+        "validation must not be re-run when returning preserved evidence"
+    );
+    assert_eq!(bundle2.final_state, bundle1.final_state);
 }
 
 // =========================================================================
@@ -1842,6 +1863,10 @@ async fn stale_worker_is_fenced() {
         .unwrap();
     }
 
+    // Rewind the durable journal to the same stage; recovery refuses to resume
+    // a completed (terminal) journal.
+    durable_state::rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+
     // Second evaluation takes over, gets new epoch.
     let config2 = EvaluationConfig {
         manifest: manifest.clone(),
@@ -1921,6 +1946,10 @@ async fn transition_failures_propagate() {
     )
     .unwrap();
 
+    // Rewind the durable journal so the completed terminal record does not
+    // block the takeover/resume below.
+    durable_state::rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+
     // Second evaluation: will take over ProposalGenerated.
     // After takeover succeeds (epoch 2), the resume_validation will run
     // validation and then try transition_entry_with_evidence.
@@ -1959,6 +1988,9 @@ async fn transition_failures_propagate() {
         serde_json::to_string_pretty(&registry2).unwrap(),
     )
     .unwrap();
+
+    // Rewind the durable journal again (run 2 re-completed the journal).
+    durable_state::rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
 
     // A third run with stale lease config should take over and complete.
     let config3 = evaluate::EvaluationConfig {
@@ -2008,6 +2040,10 @@ async fn ownership_mismatch_fails_closed() {
         serde_json::to_string_pretty(&registry).unwrap(),
     )
     .unwrap();
+
+    // Rewind the durable journal to the same stage; recovery refuses to resume
+    // a completed (terminal) journal.
+    durable_state::rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
 
     // Second run takes over and completes. This works.
     let config2 = EvaluationConfig {
@@ -2079,6 +2115,10 @@ async fn stale_validating_reuses_proposal() {
     )
     .unwrap();
 
+    // Rewind the durable journal to the same stage so the completed terminal
+    // record does not block the Validating resume below.
+    durable_state::rewind_durable_to(&repo, EvaluationState::Validating);
+
     let config2 = EvaluationConfig {
         manifest: TaskManifest {
             evidence_dir: Some(evidence_dir.clone()),
@@ -2144,6 +2184,10 @@ async fn provider_invocation_exactly_once_via_stale_validating() {
         serde_json::to_string_pretty(&registry).unwrap(),
     )
     .unwrap();
+
+    // Rewind the durable journal to the same stage so the completed terminal
+    // record does not block the Validating resume below.
+    durable_state::rewind_durable_to(&repo, EvaluationState::Validating);
 
     let config2 = EvaluationConfig {
         manifest: TaskManifest {
@@ -2416,4 +2460,289 @@ async fn heartbeat_renews_lease_beyond_generation_timeout() {
         result.is_ok(),
         "evaluate must succeed with active heartbeat despite short lease timeout"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for the stale-recovery regression tests below.
+// ---------------------------------------------------------------------------
+
+/// Count durable journal events across all identity directories.
+fn journal_event_count(repo: &Path) -> usize {
+    let journal_root = repo.join(".prometheos").join("workflow").join("journal");
+    if !journal_root.exists() {
+        return 0;
+    }
+    let mut total = 0;
+    for dir in std::fs::read_dir(&journal_root)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.path().is_dir().then(|| e.path()))
+    {
+        total += std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|p| p.path().extension().is_some_and(|x| x == "json"))
+            .count();
+    }
+    total
+}
+
+fn set_registry_state(
+    repo: &Path,
+    state: prometheos_lite::workflow::evaluate::ProposalState,
+    proposal_id: Option<&str>,
+) {
+    let registry_path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
+    for entry in registry.entries.values_mut() {
+        entry.state = state;
+        entry.proposal_id = proposal_id.map(|s| s.to_string());
+        entry.reserved_at = "2020-01-01T00:00:00Z".to_string();
+        entry.updated_at = "2020-01-01T00:00:00Z".to_string();
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
+    }
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+}
+
+fn short_lease() -> LeaseConfig {
+    LeaseConfig {
+        stale_reservation_timeout: Duration::from_secs(1),
+        generation_lease_timeout: Duration::from_secs(1),
+        heartbeat_interval: Duration::from_millis(100),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression (#113): stale Generating journal + stale Generating registry.
+// The journal is authoritative and a crash mid-generation cannot safely
+// auto-restart generation (the external provider may have already completed).
+// Recovery must FAIL CLOSED and defer to #114 — no provider re-invocation.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stale_generating_with_generating_journal_fails_closed() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "stale-gen-journal");
+
+    // First run: complete successfully (generation happens once).
+    let provider_count = Arc::new(AtomicUsize::new(0));
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    let proposal_id = bundle1.proposal.as_ref().unwrap().id.clone();
+    assert_eq!(provider_count.load(Ordering::SeqCst), 1);
+
+    // Simulate a crash mid-generation: journal at Generating, registry at a
+    // stale Generating entry.
+    durable_state::rewind_durable_to(&repo, EvaluationState::Generating);
+    set_registry_state(
+        &repo,
+        prometheos_lite::workflow::evaluate::ProposalState::Generating,
+        None,
+    );
+    let events_before = journal_event_count(&repo);
+
+    // Second run: must FAIL CLOSED (deferred to #114), not auto-restart.
+    let config2 = EvaluationConfig {
+        manifest,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: short_lease(),
+    };
+    let result = evaluate::evaluate(config2).await;
+    assert!(
+        result.is_err(),
+        "stale Generating journal must fail closed, not auto-restart generation"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("generation") && (msg.contains("unsafe") || msg.contains("auto-restart")),
+        "fail-closed message must explain the unsafe auto-restart: {msg}"
+    );
+
+    // No provider re-invocation and no new durable history appended.
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        1,
+        "provider must not be re-invoked on fail-closed recovery"
+    );
+    assert_eq!(
+        journal_event_count(&repo),
+        events_before,
+        "fail-closed recovery must not append fresh durable history"
+    );
+    let _ = proposal_id;
+}
+
+// ---------------------------------------------------------------------------
+// Regression (#113): stale Generating registry but the durable journal is at an
+// EARLIER stage (PreflightPassed). The journal wins: we fail closed at the
+// journal's authoritative position and must NOT append a fresh Created history.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stale_generating_registry_with_earlier_journal_wins() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "earlier-journal-wins");
+
+    // First run: complete successfully.
+    let provider_count = Arc::new(AtomicUsize::new(0));
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let _bundle1 = evaluate::evaluate(config1).await.unwrap();
+    assert_eq!(provider_count.load(Ordering::SeqCst), 1);
+
+    // Journal at PreflightPassed (earlier than the registry's Generating) and a
+    // stale Generating registry entry.
+    durable_state::rewind_durable_to(&repo, EvaluationState::PreflightPassed);
+    set_registry_state(
+        &repo,
+        prometheos_lite::workflow::evaluate::ProposalState::Generating,
+        None,
+    );
+    let events_before = journal_event_count(&repo);
+
+    // Second run: journal (PreflightPassed) is authoritative → fail closed.
+    let config2 = EvaluationConfig {
+        manifest,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: short_lease(),
+    };
+    let result = evaluate::evaluate(config2).await;
+    assert!(
+        result.is_err(),
+        "the earlier journal position must win; recovery must fail closed"
+    );
+
+    // Journal unchanged: no fresh Created history appended.
+    assert_eq!(
+        journal_event_count(&repo),
+        events_before,
+        "journal must win; no fresh Created history may be appended"
+    );
+    assert_eq!(
+        events_before, 1,
+        "rewound journal should hold a single event"
+    );
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        1,
+        "provider must not be re-invoked"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression (#113): stale Reserved entry with NO durable journal. With no
+// durable record there is no immortalized proposal to protect, so clearing the
+// stale reservation and starting fresh is safe and permitted.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stale_reserved_without_journal_starts_fresh() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "stale-reserved-no-journal");
+
+    // First run: complete successfully.
+    let provider_count = Arc::new(AtomicUsize::new(0));
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let _bundle1 = evaluate::evaluate(config1).await.unwrap();
+    assert_eq!(provider_count.load(Ordering::SeqCst), 1);
+
+    // Remove durable history, then simulate a stale Reserved registry entry.
+    let wf = repo.join(".prometheos").join("workflow");
+    let _ = std::fs::remove_dir_all(wf.join("journal"));
+    let _ = std::fs::remove_dir_all(wf.join("checkpoint"));
+    set_registry_state(
+        &repo,
+        prometheos_lite::workflow::evaluate::ProposalState::Reserved,
+        None,
+    );
+
+    // Second run: fresh reservation permitted; generation runs again.
+    let config2 = EvaluationConfig {
+        manifest,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: short_lease(),
+    };
+    let bundle2 = evaluate::evaluate(config2).await.unwrap();
+    assert!(bundle2.proposal.is_some());
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        2,
+        "fresh reservation must permit a new generation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression (#113): crash at ProposalGenerated. The original proposal is
+// reused and validation is resumed — generation is NOT re-invoked.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stale_proposal_generated_reuses_proposal() {
+    let (_dir, repo) = temp_repo();
+    let manifest = make_manifest(&repo, "stale-proposal-generated");
+
+    // First run: complete successfully.
+    let provider_count = Arc::new(AtomicUsize::new(0));
+    let config1 = EvaluationConfig {
+        manifest: manifest.clone(),
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let bundle1 = evaluate::evaluate(config1).await.unwrap();
+    let proposal_id = bundle1.proposal.as_ref().unwrap().id.clone();
+    assert_eq!(provider_count.load(Ordering::SeqCst), 1);
+
+    // Simulate a crash at ProposalGenerated: journal + stale registry there.
+    durable_state::rewind_durable_to(&repo, EvaluationState::ProposalGenerated);
+    set_registry_state(
+        &repo,
+        prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated,
+        Some(&proposal_id),
+    );
+
+    // Second run: resume validation on the original proposal.
+    let config2 = EvaluationConfig {
+        manifest,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: LeaseConfig::default(),
+    };
+    let bundle2 = evaluate::evaluate(config2).await.unwrap();
+    assert_eq!(
+        bundle2.proposal.as_ref().unwrap().id,
+        proposal_id,
+        "crash at ProposalGenerated must reuse the original proposal"
+    );
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        1,
+        "generation must not be re-invoked when resuming validation"
+    );
+    assert_eq!(bundle2.final_state, "REVIEW_REQUIRED");
 }
