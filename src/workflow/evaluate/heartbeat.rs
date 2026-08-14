@@ -103,7 +103,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::workflow::evaluate::registry::{
-        LeaseConfig, lookup_entry, try_reserve, try_take_ownership,
+        LeaseConfig, OwnershipObservation, ProposalState, lookup_entry, try_reserve,
+        try_take_ownership, try_take_ownership_cas,
     };
     use crate::workflow::evaluate::registry::{ReserveResult, TakeoverResult};
 
@@ -187,5 +188,55 @@ mod tests {
         }
 
         session.shutdown("test").await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn long_live_reserved_owner_is_not_reclaimed() {
+        // Regression for a live `Reserved` owner surviving a long preflight.
+        // The heartbeat starts the moment the reservation is taken, so a slow
+        // preflight must never let a contender observe the owner as stale and
+        // reclaim it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let key = "test-key".to_string();
+        let fence = fresh_entry(&repo, &key, "worker-1");
+
+        // Short but SAFE lease: heartbeat * 3 <= reservation timeout.
+        let lease = LeaseConfig::with_timeouts(
+            Duration::from_secs(1),     // stale_reservation_timeout
+            Duration::from_secs(1),     // generation_lease_timeout
+            Duration::from_millis(100), // heartbeat_interval
+        );
+        assert!(lease.validate().is_ok());
+
+        let session = HeartbeatSession::start(
+            repo.clone(),
+            key.clone(),
+            fence.clone(),
+            Duration::from_millis(100),
+            "ownership lost",
+        );
+
+        let observed = OwnershipObservation {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: fence.lease_epoch,
+            state: ProposalState::Reserved,
+        };
+
+        // Sample across many stale windows. The heartbeat keeps renewing, so a
+        // contender that observed the owner must always back off as StillLive.
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let result =
+                try_take_ownership_cas(&repo, &key, "thief", &lease, Some(&observed)).unwrap();
+            assert!(
+                matches!(result, TakeoverResult::StillLive),
+                "a live Reserved owner must never be reclaimed: {result:?}"
+            );
+            let entry = lookup_entry(&repo, &key).unwrap();
+            assert_eq!(entry.owner_run_id, "worker-1");
+        }
+
+        session.shutdown("test").await.unwrap();
     }
 }

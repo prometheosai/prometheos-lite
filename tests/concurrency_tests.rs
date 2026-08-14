@@ -9,7 +9,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use prometheos_lite::workflow::evaluate::{
-    LeaseConfig, ProposalRegistry, ProposalState, RegistryEntry, TakeoverResult, try_take_ownership,
+    LeaseConfig, OwnershipObservation, ProposalRegistry, ProposalState, RegistryEntry,
+    TakeoverResult, try_take_ownership_cas,
 };
 
 const CHILD_ENV: &str = "PROMETHEOS_TAKEOVER_CHILD";
@@ -42,6 +43,16 @@ fn seed_stale_entry(repo: &Path, key: &str) {
     let path = registry_path(repo);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_string_pretty(&reg).unwrap()).unwrap();
+}
+
+/// Observation that matches the seeded stale entry, as a contender would record
+/// after observing it. The CAS takeover race is decided against this.
+fn seeded_observation() -> OwnershipObservation {
+    OwnershipObservation {
+        owner_run_id: "stale-owner".to_string(),
+        lease_epoch: 1,
+        state: ProposalState::Reserved,
+    }
 }
 
 fn takeover_child_command(repo: &Path, key: &str, owner: &str, out: &Path) -> Command {
@@ -131,7 +142,14 @@ fn exactly_one_thread_wins_the_takeover() {
         let repo = repo.clone();
         let lease = lease.clone();
         handles.push(std::thread::spawn(move || {
-            try_take_ownership(&repo, &key, &format!("thread-{i}"), &lease).unwrap()
+            try_take_ownership_cas(
+                &repo,
+                key,
+                &format!("thread-{i}"),
+                &lease,
+                Some(&seeded_observation()),
+            )
+            .unwrap()
         }));
     }
     let results: Vec<TakeoverResult> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -156,7 +174,15 @@ fn child_takeover_routine() {
     let key = std::env::var(KEY_ENV).unwrap();
     let owner = std::env::var(OWNER_ENV).unwrap();
     let out = PathBuf::from(std::env::var(OUT_ENV).unwrap());
-    let result = match try_take_ownership(&repo, &key, &owner, &LeaseConfig::default()).unwrap() {
+    let result = match try_take_ownership_cas(
+        &repo,
+        &key,
+        &owner,
+        &LeaseConfig::default(),
+        Some(&seeded_observation()),
+    )
+    .unwrap()
+    {
         TakeoverResult::Taken(_) => "won",
         _ => "lost",
     };

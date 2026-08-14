@@ -80,6 +80,13 @@ pub enum RecoveryDisposition {
     ResumeFromProposal,
     /// Validation is in flight or has been reached; resume validation.
     ResumeValidation,
+    /// Validation has already completed durably (journal at `ValidationComplete`)
+    /// but terminal publication has not. Resume finalization — integrity
+    /// verification and terminal publication — WITHOUT re-running validation.
+    ResumeAfterValidation,
+    /// Integrity has already been verified durably (journal at `IntegrityVerified`)
+    /// but terminal publication has not. Resume finalization ONLY.
+    ResumeFinalization,
     /// The proposal exists but the registry lags behind the journal; reconcile
     /// the derived snapshot before resuming.
     ReconcileSnapshots,
@@ -116,6 +123,8 @@ pub fn determine_recovery_disposition(
             EvaluationState::GovernancePassed | EvaluationState::Validating => {
                 RecoveryDisposition::ResumeValidation
             }
+            EvaluationState::ValidationComplete => RecoveryDisposition::ResumeAfterValidation,
+            EvaluationState::IntegrityVerified => RecoveryDisposition::ResumeFinalization,
             EvaluationState::Created | EvaluationState::PreflightPassed => {
                 RecoveryDisposition::FreshReservation
             }
@@ -151,6 +160,8 @@ pub fn determine_recovery_disposition(
                 EvaluationState::GovernancePassed | EvaluationState::Validating => {
                     RecoveryDisposition::ResumeValidation
                 }
+                EvaluationState::ValidationComplete => RecoveryDisposition::ResumeAfterValidation,
+                EvaluationState::IntegrityVerified => RecoveryDisposition::ResumeFinalization,
                 EvaluationState::Created | EvaluationState::PreflightPassed => {
                     RecoveryDisposition::ReclaimExpiredOwner
                 }

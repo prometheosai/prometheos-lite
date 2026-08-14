@@ -1093,13 +1093,14 @@ async fn crash_after_reservation_is_recoverable() {
     let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
 
-    // Find the entry and set its state to Reserved with an old timestamp
-    // (simulating a crashed process).
+    // Find the entry and set its state to Reserved with an old heartbeat
+    // (simulating a crashed process). Liveness is renewable, so the stale
+    // marker lives in `heartbeat_at`, not `reserved_at`.
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::Reserved;
         entry.proposal_id = None;
-        // Set reserved_at to 5 minutes ago so stale detection triggers.
-        entry.reserved_at = "2020-01-01T00:00:00Z".to_string();
+        // Set heartbeat_at to the past so stale detection triggers.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -1884,8 +1885,8 @@ async fn stale_worker_is_fenced() {
         provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
         route_info: None,
         lease_config: LeaseConfig {
-            stale_reservation_timeout: Duration::from_secs(1),
-            generation_lease_timeout: Duration::from_secs(60),
+            stale_reservation_timeout: Duration::from_secs(120),
+            generation_lease_timeout: Duration::from_secs(300),
             heartbeat_interval: Duration::from_secs(30),
             tolerated_clock_skew: Duration::from_secs(5),
         },
@@ -1972,9 +1973,9 @@ async fn transition_failures_propagate() {
     // If the entry was stolen again during validation, it would fail.
     // To test: simulate a theft DURING validation by racing.
     let short_lease = LeaseConfig {
-        stale_reservation_timeout: Duration::from_secs(1),
-        generation_lease_timeout: Duration::from_secs(60),
-        heartbeat_interval: Duration::from_secs(30),
+        stale_reservation_timeout: Duration::from_secs(60),
+        generation_lease_timeout: Duration::from_secs(120),
+        heartbeat_interval: Duration::from_secs(15),
         tolerated_clock_skew: Duration::from_secs(5),
     };
 

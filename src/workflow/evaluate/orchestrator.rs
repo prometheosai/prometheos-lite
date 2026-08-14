@@ -12,7 +12,8 @@ use super::cancellation::CancellationToken;
 use super::cleanup::cleanup_worktree;
 use super::evidence::{
     EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, new_bundle, new_bundle_from_identity,
-    prepare_evidence_dir, write_bundle, write_integrity_artifact, write_validation_artifact,
+    prepare_evidence_dir, read_validation_artifact, write_bundle, write_integrity_artifact,
+    write_validation_artifact,
 };
 use super::generation::{classify_generation_error, load_proposal_from_repo};
 use super::heartbeat::HeartbeatSession;
@@ -24,9 +25,9 @@ use super::integrity::{git_rev_parse_head, verify_repo_integrity};
 use super::preflight::{run_preflight, run_validation_preflight};
 use super::recovery::{RecoveryDisposition, determine_recovery_disposition};
 use super::registry::{
-    FenceToken, LeaseConfig, ProposalState, ReserveResult, TakeoverResult, fenced_finalize,
-    is_entry_stale, is_entry_stale_at, lookup_entry, proposal_state_for_state, release_reservation,
-    transition_entry, try_reserve, try_take_ownership,
+    FenceToken, LeaseConfig, OwnershipObservation, ProposalState, ReserveResult, TakeoverResult,
+    fenced_finalize, is_entry_stale, is_entry_stale_at, lookup_entry, proposal_state_for_state,
+    release_reservation, transition_entry, try_reserve, try_take_ownership_cas,
 };
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
@@ -234,6 +235,7 @@ pub async fn evaluate_with_cancellation(
                 &governance_scope,
                 &identity_key,
                 &config.lease_config,
+                &token,
             )
             .await
             {
@@ -248,6 +250,20 @@ pub async fn evaluate_with_cancellation(
             };
         }
     };
+
+    // ---- Stage: Heartbeat ----
+    // Start the heartbeat immediately after reservation so a long preflight (or
+    // any stall before generation) keeps the entry live. A live `Reserved`
+    // owner must never be falsely reclaimed because of immutable reservation
+    // metadata. The heartbeat spans the entire nonterminal lifecycle and is
+    // stopped on every exit path.
+    let heartbeat = HeartbeatSession::start(
+        repo.clone(),
+        identity_key.clone(),
+        fence.clone(),
+        config.lease_config.heartbeat_interval,
+        "ownership lost: registry entry claimed by another worker",
+    );
 
     // ---- Stage: Preflight ----
     let preflight = run_preflight(&repo, &commit_at_start, &config.manifest, &evidence_dir);
@@ -275,6 +291,7 @@ pub async fn evaluate_with_cancellation(
         )
         .context("failed to persist PreflightBlocked transition")?;
         // Release the reservation only after the failure history is recorded.
+        heartbeat.shutdown("").await?;
         release_reservation(&repo, &identity_key, &fence)?;
         return Ok(bundle);
     }
@@ -341,15 +358,6 @@ pub async fn evaluate_with_cancellation(
         task: config.manifest.goal.clone(),
         ..Default::default()
     };
-
-    // Spawn a heartbeat task that renews the lease while the pipeline is active.
-    let heartbeat = HeartbeatSession::start(
-        repo.clone(),
-        identity_key.clone(),
-        fence.clone(),
-        config.lease_config.heartbeat_interval,
-        "ownership lost: registry entry claimed by another worker",
-    );
 
     // Race generation against heartbeat failure so we can abort early if
     // ownership is lost or the heartbeat I/O fails.
@@ -571,7 +579,9 @@ pub async fn evaluate_with_cancellation(
         &gen_result.id,
         config.manifest.validation_command.as_deref(),
         &evidence_dir,
-    );
+        &token,
+    )
+    .await;
 
     // Check heartbeat after validation — must still own the entry.
     heartbeat.check("")?;
@@ -631,6 +641,27 @@ pub async fn evaluate_with_cancellation(
     )
     .context("failed to persist ValidationComplete transition")?;
 
+    // Safe point: validation is durable but the terminal event has not been
+    // published. A later run resumes finalization (integrity + publication)
+    // WITHOUT re-running validation.
+    if token.is_cancelled() {
+        record_cancellation(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::ValidationComplete,
+            Some(gen_result.id.clone()),
+            Some(refs.dir.clone()),
+        )?;
+        heartbeat
+            .shutdown(" evaluation cancelled after validation complete")
+            .await?;
+        bail!("evaluation cancelled by user request after validation complete");
+    }
+
     // ---- Stage: Repository integrity ----
     // Integrity verification RUNS before integrity is declared, and its record
     // is durable BEFORE the IntegrityVerified event.
@@ -650,6 +681,27 @@ pub async fn evaluate_with_cancellation(
         Some(refs.dir.clone()),
     )
     .context("failed to persist IntegrityVerified transition")?;
+
+    // Safe point: integrity is durable but the terminal event has not been
+    // published. A later run publishes the terminal outcome WITHOUT re-running
+    // validation or integrity.
+    if token.is_cancelled() {
+        record_cancellation(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::IntegrityVerified,
+            Some(gen_result.id.clone()),
+            Some(refs.dir.clone()),
+        )?;
+        heartbeat
+            .shutdown(" evaluation cancelled after integrity verified")
+            .await?;
+        bail!("evaluation cancelled by user request after integrity verified");
+    }
 
     // Resolve the terminal outcome.
     let terminal_state = if !integrity.original_commit_unchanged
@@ -730,6 +782,7 @@ async fn wait_and_reuse(
     governance_scope: &GovernanceScopeSnapshot,
     identity_key: &str,
     lease_config: &LeaseConfig,
+    token: &CancellationToken,
 ) -> Result<EvidenceBundle> {
     // Run validation-specific preflight first.
     run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
@@ -761,7 +814,21 @@ async fn wait_and_reuse(
                             .with_context(|| "failed to check staleness for Reserved entry")?
                     {
                         // Safe to remove the stale reservation and start fresh.
-                        match try_take_ownership(repo, identity_key, run_id, lease_config)? {
+                        // Use an observed-CAS takeover so a heartbeat renewal or
+                        // state transition between the staleness check and the
+                        // lock cannot silently steal a live owner.
+                        let obs = OwnershipObservation {
+                            owner_run_id: e.owner_run_id.clone(),
+                            lease_epoch: e.lease_epoch,
+                            state: e.state,
+                        };
+                        match try_take_ownership_cas(
+                            repo,
+                            identity_key,
+                            run_id,
+                            lease_config,
+                            Some(&obs),
+                        )? {
                             TakeoverResult::Taken(fence) => {
                                 release_reservation(repo, identity_key, &fence).context(
                                     "failed to release stale reservation after takeover",
@@ -813,9 +880,19 @@ async fn wait_and_reuse(
                         // generation. Take ownership only when the entry is claimable
                         // (stale or absent); a live owner is never reclaimed.
                         let fence = match &entry {
-                            Some(_) => {
-                                match try_take_ownership(repo, identity_key, run_id, lease_config)?
-                                {
+                            Some(owner_entry) => {
+                                let obs = OwnershipObservation {
+                                    owner_run_id: owner_entry.owner_run_id.clone(),
+                                    lease_epoch: owner_entry.lease_epoch,
+                                    state: owner_entry.state,
+                                };
+                                match try_take_ownership_cas(
+                                    repo,
+                                    identity_key,
+                                    run_id,
+                                    lease_config,
+                                    Some(&obs),
+                                )? {
                                     TakeoverResult::Taken(f) => Some(f),
                                     TakeoverResult::StillLive | TakeoverResult::LostRace => None,
                                 }
@@ -841,6 +918,57 @@ async fn wait_and_reuse(
                                 &proposal,
                                 identity_key,
                                 &fence,
+                                token,
+                            )
+                            .await;
+                        }
+                        // StillLive / LostRace / AlreadyExists race: fall through to wait.
+                    }
+                    RecoveryDisposition::ResumeAfterValidation
+                    | RecoveryDisposition::ResumeFinalization => {
+                        // Validation (and possibly integrity) has already completed
+                        // durably; resume FINALIZATION only. Take ownership when the
+                        // entry is claimable; a live owner is never reclaimed.
+                        let fence = match &entry {
+                            Some(owner_entry) => {
+                                let obs = OwnershipObservation {
+                                    owner_run_id: owner_entry.owner_run_id.clone(),
+                                    lease_epoch: owner_entry.lease_epoch,
+                                    state: owner_entry.state,
+                                };
+                                match try_take_ownership_cas(
+                                    repo,
+                                    identity_key,
+                                    run_id,
+                                    lease_config,
+                                    Some(&obs),
+                                )? {
+                                    TakeoverResult::Taken(f) => Some(f),
+                                    TakeoverResult::StillLive | TakeoverResult::LostRace => None,
+                                }
+                            }
+                            None => match try_reserve(repo, identity_key, run_id)? {
+                                ReserveResult::Owned(f) => Some(f),
+                                ReserveResult::AlreadyExists => None,
+                            },
+                        };
+                        if let Some(fence) = fence {
+                            let proposal_id = r.proposal_ref.as_deref().context(
+                                "journal records a late state without a proposal reference",
+                            )?;
+                            let proposal = load_proposal_from_repo(repo, proposal_id)?;
+                            return resume_late_finalization(
+                                repo,
+                                commit_at_start,
+                                run_id,
+                                manifest,
+                                config,
+                                evidence_dir,
+                                governance_scope,
+                                &proposal,
+                                identity_key,
+                                &fence,
+                                matches!(disposition, RecoveryDisposition::ResumeFinalization),
                             )
                             .await;
                         }
@@ -952,18 +1080,27 @@ async fn return_journal_completed(
     // state (without a proposal id).
     if let Some(entry) = lookup_entry(repo, identity_key)
         && let Ok(true) = is_entry_stale(&entry, lease_config)
-        && let TakeoverResult::Taken(fence) =
-            try_take_ownership(repo, identity_key, run_id, lease_config)?
     {
-        let target =
-            proposal_state_for_state(recovered.state).unwrap_or(ProposalState::ValidationComplete);
-        transition_entry(
-            repo,
-            identity_key,
-            target,
-            recovered.proposal_ref.as_deref(),
-            &fence,
-        )?;
+        // Use an observed-CAS takeover so a concurrent renewal or transition
+        // cannot be stolen; only a genuinely stale entry is reclaimed.
+        let obs = OwnershipObservation {
+            owner_run_id: entry.owner_run_id.clone(),
+            lease_epoch: entry.lease_epoch,
+            state: entry.state,
+        };
+        if let TakeoverResult::Taken(fence) =
+            try_take_ownership_cas(repo, identity_key, run_id, lease_config, Some(&obs))?
+        {
+            let target = proposal_state_for_state(recovered.state)
+                .unwrap_or(ProposalState::ValidationComplete);
+            transition_entry(
+                repo,
+                identity_key,
+                target,
+                recovered.proposal_ref.as_deref(),
+                &fence,
+            )?;
+        }
     }
 
     let evidence_dir = super::recovery::resolve_evidence_dir(
@@ -997,6 +1134,7 @@ async fn resume_validation(
     proposal: &ProposalArtifact,
     identity_key: &str,
     fence: &FenceToken,
+    token: &CancellationToken,
 ) -> Result<EvidenceBundle> {
     let refs = EvidenceRefs::of(repo, evidence_dir);
 
@@ -1128,7 +1266,30 @@ async fn resume_validation(
         &proposal.id,
         manifest.validation_command.as_deref(),
         evidence_dir,
-    );
+        token,
+    )
+    .await;
+
+    // Safe point: cancellation during resumed validation must be honoured the
+    // same way as during a fresh validation. The run records a same-state
+    // "cancelled" event at Validating and surfaces the cancellation as an
+    // error, so a later run can resume validation on the preserved proposal.
+    if token.is_cancelled() {
+        record_cancellation(
+            repo,
+            &identity_path,
+            run_id,
+            identity_key,
+            commit_at_start,
+            fence,
+            EvaluationState::Validating,
+            Some(proposal.id.clone()),
+            Some(refs.dir.clone()),
+        )?;
+        hb.shutdown(" evaluation cancelled during resume validation")
+            .await?;
+        bail!("evaluation cancelled by user request during validation");
+    }
 
     // Validation record durable BEFORE the ValidationComplete event.
     match &validation_result {
@@ -1230,6 +1391,203 @@ async fn resume_validation(
 
     // Stop heartbeat and check for errors.
     hb.shutdown(" during resume finalization").await?;
+
+    Ok(bundle)
+}
+
+/// Resume FINALIZATION after a late cancellation (issue #114).
+///
+/// The durable journal records `ValidationComplete` (or `IntegrityVerified`).
+/// Validation is already durable and is NEVER re-run; integrity is verified
+/// (read-only, idempotent) only when it had not already been recorded. The run
+/// then publishes the terminal outcome exactly once and finalizes.
+async fn resume_late_finalization(
+    repo: &Path,
+    commit_at_start: &str,
+    run_id: &str,
+    manifest: &TaskManifest,
+    config: &EvaluationConfig,
+    evidence_dir: &Path,
+    governance_scope: &GovernanceScopeSnapshot,
+    proposal: &ProposalArtifact,
+    identity_key: &str,
+    fence: &FenceToken,
+    integrity_already_done: bool,
+) -> Result<EvidenceBundle> {
+    let refs = EvidenceRefs::of(repo, evidence_dir);
+
+    // Recover with the newly acquired fence against the current revision.
+    let recovered =
+        super::recovery::recover_evaluation(repo, identity_key, Some(commit_at_start), Some(fence))
+            .context("durable state recovery after takeover failed; refusing to finalize")?;
+    if let Some(recovered) = &recovered {
+        super::recovery::ensure_resumable(
+            EvaluationState::ValidationComplete,
+            &proposal.id,
+            recovered,
+        )
+        .context("durable journal conflicts with late resume")?;
+    }
+
+    let start_state = recovered
+        .as_ref()
+        .map(|r| r.state)
+        .unwrap_or(EvaluationState::ValidationComplete);
+
+    // Reconcile the registry observation to the journal position.
+    let target = proposal_state_for_state(start_state).unwrap_or(ProposalState::ValidationComplete);
+    if let Some(entry) = lookup_entry(repo, identity_key)
+        && entry.state != target
+    {
+        transition_entry(repo, identity_key, target, Some(&proposal.id), fence)?;
+    }
+
+    let mut bundle = new_bundle_from_identity(
+        run_id,
+        &manifest.task_id,
+        repo,
+        commit_at_start,
+        governance_scope,
+        evidence_dir,
+    );
+
+    // Validation is durable; load it, never re-run it.
+    let vr = read_validation_artifact(evidence_dir)
+        .context("failed to read durable validation record for late finalization")?;
+    bundle.validation = Some(vr.clone());
+    if vr.validation_passed {
+        bundle.failure_classification = Some("validation_passed_review_required".to_string());
+    } else {
+        bundle.failure_classification = Some(classify_validation_failure(&vr));
+    }
+
+    bundle.proposal = Some(ProposalRecord {
+        id: proposal.id.clone(),
+        patch_hash: proposal.patch_hash.clone(),
+        changed_files: proposal.changed_files.clone(),
+        added_lines: proposal.added_lines,
+        removed_lines: proposal.removed_lines,
+        base_sha: proposal.base_sha.clone(),
+    });
+    bundle.provider_provenance = ProviderProvenanceRecord {
+        implementation: config.provider.name().to_string(),
+        model: config.route_info.as_ref().and_then(|r| r.model.clone()),
+        route: config
+            .route_info
+            .as_ref()
+            .and_then(|r| r.route.clone())
+            .and_then(|u| sanitize_provider_route(&u)),
+        generated_at: None,
+        input_digest: Some(hash_str(&manifest.goal)),
+        patch_hash: Some(proposal.patch_hash.clone()),
+    };
+
+    // Persist a resumable identity snapshot (state = recovered position).
+    let resumed_identity = ExecutionIdentity {
+        run_id: run_id.to_string(),
+        task_id: manifest.task_id.clone(),
+        repo: repo.display().to_string(),
+        repo_pin: commit_at_start.to_string(),
+        model: config
+            .route_info
+            .as_ref()
+            .and_then(|r| r.model.clone())
+            .unwrap_or_else(|| "mock".to_string()),
+        provider: config.provider.name().to_string(),
+        governance_scope: governance_scope.clone(),
+        created_at: now_iso(),
+        state: start_state,
+    };
+    let identity_path = persist_execution_identity(evidence_dir, &resumed_identity)?;
+
+    // Check ownership before finalizing.
+    if let Some(entry) = lookup_entry(repo, identity_key)
+        && (entry.owner_run_id != fence.owner_run_id || entry.lease_epoch != fence.lease_epoch)
+    {
+        bail!(
+            "ownership lost before late finalization (found owner={}, epoch={})",
+            entry.owner_run_id,
+            entry.lease_epoch,
+        );
+    }
+
+    // Spawn a heartbeat to protect finalization from stale-reclaim.
+    let hb = HeartbeatSession::start(
+        repo.to_path_buf(),
+        identity_key.to_string(),
+        fence.clone(),
+        config.lease_config.heartbeat_interval,
+        "ownership lost during late finalization",
+    );
+
+    // Integrity verification is read-only and idempotent; it is NOT validation.
+    let integrity = verify_repo_integrity(repo, commit_at_start, &proposal.id);
+    bundle.integrity = Some(integrity.clone());
+    write_integrity_artifact(evidence_dir, &integrity)?;
+    if !integrity_already_done {
+        durable_transition(
+            repo,
+            &identity_path,
+            run_id,
+            identity_key,
+            commit_at_start,
+            fence,
+            EvaluationState::IntegrityVerified,
+            Some(proposal.id.clone()),
+            None,
+            Some(refs.dir.clone()),
+        )
+        .context("failed to persist resume IntegrityVerified transition")?;
+    }
+
+    // Resolve the terminal outcome.
+    let terminal_state = if !integrity.original_commit_unchanged
+        || !integrity.no_tracked_modifications
+        || !integrity.no_staged_modifications
+    {
+        bundle.failure_classification = Some("integrity_failed".to_string());
+        bundle.final_state = EvaluationState::IntegrityFailed.outcome_label().to_string();
+        EvaluationState::IntegrityFailed
+    } else if let Some(ref fc) = bundle.failure_classification {
+        if fc == "validation_passed_review_required" {
+            bundle.final_state = EvaluationState::ReviewGate.outcome_label().to_string();
+            EvaluationState::ReviewGate
+        } else {
+            let terminal = failure_to_terminal_state(fc);
+            bundle.final_state = terminal.outcome_label().to_string();
+            terminal
+        }
+    } else {
+        bundle.final_state = EvaluationState::ReviewGate.outcome_label().to_string();
+        EvaluationState::ReviewGate
+    };
+
+    let cleanup = cleanup_worktree(repo, &proposal.id);
+    bundle.cleanup = Some(cleanup);
+    bundle.completed_at = now_iso();
+    if let Ok(head) = git_rev_parse_head(repo) {
+        bundle.repo_pin_after = head;
+    }
+
+    // Fenced finalization under the registry lock: final evidence → terminal
+    // event → identity → checkpoint → registry. No validation re-run.
+    fenced_finalize(
+        repo,
+        identity_key,
+        fence,
+        &proposal.id,
+        evidence_dir,
+        &bundle,
+        &hb.status_receiver(),
+        &identity_path,
+        run_id,
+        commit_at_start,
+        terminal_state,
+        bundle.failure_classification.clone(),
+    )
+    .context("fenced finalization failed during late resume")?;
+
+    hb.shutdown(" during late finalization").await?;
 
     Ok(bundle)
 }

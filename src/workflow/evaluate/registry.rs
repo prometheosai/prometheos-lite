@@ -52,11 +52,14 @@ impl LeaseConfig {
     /// Hard invariants (a violation makes false reclaim or immortal entries
     /// possible):
     /// - every timeout is strictly positive;
-    /// - the heartbeat interval never exceeds the generation lease timeout.
+    /// - the heartbeat interval is at most one third of the generation lease
+    ///   timeout AND at most one third of the reservation timeout.
     ///
-    /// The production safety ratio `heartbeat_interval ≤ lease / 3` is a
-    /// documented recommendation (already satisfied by [`LeaseConfig::default`])
-    /// rather than a hard rule, so tests may inject shorter leases.
+    /// The margin guarantees a live worker always renews its heartbeat well
+    /// before a contender could observe it as stale, even accounting for normal
+    /// scheduling jitter and brief lock contention. Without the margin a slow
+    /// heartbeat renewal (or a long preflight before the first renewal) could
+    /// let a perfectly alive `Reserved`/`Generating` owner be falsely reclaimed.
     pub fn validate(&self) -> Result<()> {
         if self.stale_reservation_timeout.is_zero() {
             bail!("stale_reservation_timeout must be greater than zero");
@@ -67,12 +70,23 @@ impl LeaseConfig {
         if self.heartbeat_interval.is_zero() {
             bail!("heartbeat_interval must be greater than zero");
         }
-        if self.heartbeat_interval > self.generation_lease_timeout {
+        let Some(three_hb) = self.heartbeat_interval.checked_mul(3) else {
+            bail!("heartbeat_interval interval is absurdly large");
+        };
+        if three_hb > self.generation_lease_timeout {
             bail!(
-                "heartbeat_interval {} exceeds generation_lease_timeout {}; \
-                 a live worker would look stale between renewals",
+                "heartbeat_interval {} exceeds one third of generation_lease_timeout {}; \
+                 a live worker would risk being reclaimed between renewals",
                 humantime_like(self.heartbeat_interval),
                 humantime_like(self.generation_lease_timeout),
+            );
+        }
+        if three_hb > self.stale_reservation_timeout {
+            bail!(
+                "heartbeat_interval {} exceeds one third of stale_reservation_timeout {}; \
+                 a live Reserved worker would risk being reclaimed during a long preflight",
+                humantime_like(self.heartbeat_interval),
+                humantime_like(self.stale_reservation_timeout),
             );
         }
         Ok(())
@@ -88,7 +102,7 @@ impl Default for LeaseConfig {
         Self {
             stale_reservation_timeout: std::time::Duration::from_secs(120),
             generation_lease_timeout: std::time::Duration::from_secs(600),
-            heartbeat_interval: std::time::Duration::from_secs(180),
+            heartbeat_interval: std::time::Duration::from_secs(30),
             tolerated_clock_skew: std::time::Duration::from_secs(5),
         }
     }
@@ -674,7 +688,7 @@ pub(super) fn proposal_state_for_state(state: EvaluationState) -> Option<Proposa
 /// Check whether a registry entry is stale according to its state and the
 /// given lease configuration, using the supplied clock.
 ///
-/// - `Reserved`: stale when `reserved_at` is older than
+/// - `Reserved`: stale when `heartbeat_at` is older than
 ///   `stale_reservation_timeout`.
 /// - `Generating`, `ProposalGenerated`, `Validating`: stale when `heartbeat_at`
 ///   is older than `generation_lease_timeout`. A live owner is never reclaimed:
@@ -696,8 +710,11 @@ pub fn is_entry_stale_at(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let (ts, timeout) = match entry.state {
+        // Reserved liveness is renewable: the heartbeat task refreshes
+        // `heartbeat_at` from reservation through the whole non-terminal
+        // lifecycle, so a live Reserved owner is never reclaimed.
         ProposalState::Reserved => (
-            entry.reserved_at.as_str(),
+            entry.heartbeat_at.as_str(),
             lease_config.stale_reservation_timeout,
         ),
         ProposalState::Generating
@@ -834,6 +851,7 @@ mod tests {
             lease_epoch: 1,
             state: ProposalState::Reserved,
             reserved_at: "2020-01-01T00:00:00Z".to_string(),
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
             ..Default::default()
         };
         let config = LeaseConfig::with_timeouts(
@@ -953,6 +971,53 @@ mod tests {
             .is_err()
         );
         assert!(LeaseConfig::default().validate().is_ok());
+    }
+    #[test]
+    fn lease_rejects_heartbeat_equal_to_timeout() {
+        // The reviewer's original red example: heartbeat == generation timeout
+        // leaves no margin for renewal jitter and permits false reclaim.
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(
+            config.validate().is_err(),
+            "heartbeat equal to the timeout must be rejected"
+        );
+    }
+    #[test]
+    fn lease_rejects_unsafe_reservation_ratio() {
+        // Heartbeat well under the generation timeout but above one third of the
+        // reservation timeout: a long preflight could make a live Reserved owner
+        // look stale.
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(90),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(40),
+        );
+        assert!(
+            config.validate().is_err(),
+            "heartbeat above one third of the reservation timeout must be rejected"
+        );
+    }
+    #[test]
+    fn default_lease_configuration_is_safe() {
+        // The shipped defaults must satisfy the safety ratio.
+        let config = LeaseConfig::default();
+        assert!(
+            config.validate().is_ok(),
+            "default lease configuration must pass the safety ratio"
+        );
+        let three_hb = config.heartbeat_interval * 3;
+        assert!(
+            three_hb <= config.generation_lease_timeout,
+            "default heartbeat margin must hold for generation"
+        );
+        assert!(
+            three_hb <= config.stale_reservation_timeout,
+            "default heartbeat margin must hold for reservation"
+        );
     }
     #[test]
     fn live_owner_is_never_reclaimed() {

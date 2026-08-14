@@ -236,6 +236,17 @@ pub(super) fn write_integrity_artifact(
     let path = evidence_dir.join("integrity.json");
     super::durable::atomic_write_json(&path, integrity).context("failed to write integrity.json")
 }
+
+/// Read a previously persisted validation record (written by
+/// [`write_validation_artifact`]). Used when resuming finalization after a
+/// late cancellation: validation is durable and must NOT be re-run.
+pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<ValidationRecord> {
+    let path = evidence_dir.join("validation.json");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read validation artifact {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("corrupt validation artifact {}", path.display()))
+}
 // ---------------------------------------------------------------------------
 // Markdown report
 // ---------------------------------------------------------------------------
