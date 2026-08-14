@@ -1,0 +1,239 @@
+{
+  "schema_version": "1.0.0",
+  "work": {
+    "work_id": "work-1",
+    "task_id": "task-1",
+    "objective": "Implement the PortableWorkState contract",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T01:00:00Z"
+  },
+  "repository": {
+    "identity": "https://github.com/prometheosai/prometheos-lite",
+    "branch": "main",
+    "revision": "0e756a38b6688d37c10eca190c7d8be8ac68a296"
+  },
+  "plan": {
+    "plan_id": "plan-1",
+    "title": "Portable work state contract",
+    "summary": "Define the portable durable contract between executions.",
+    "step_ids": ["step-1", "step-2", "step-3", "step-4"]
+  },
+  "steps": [
+    {
+      "step_id": "step-1",
+      "title": "Define schema",
+      "status": "completed",
+      "completed_at": "2026-08-14T00:10:00Z",
+      "notes": []
+    },
+    {
+      "step_id": "step-2",
+      "title": "Add canonical serialization",
+      "status": "completed",
+      "completed_at": "2026-08-14T00:40:00Z",
+      "notes": []
+    },
+    {
+      "step_id": "step-3",
+      "title": "Model decision provenance",
+      "status": "in_progress",
+      "started_at": "2026-08-14T00:45:00Z",
+      "notes": []
+    },
+    {
+      "step_id": "step-4",
+      "title": "Verify cross-harness resume",
+      "status": "pending",
+      "notes": []
+    }
+  ],
+  "decisions": [
+    {
+      "decision_id": "d-approach-unified-diff",
+      "subject": "Patch transport format",
+      "decision": "Use unified diff text as the portable patch transport.",
+      "status": "superseded",
+      "superseded_by": "d-approach-diffy",
+      "supersedes": [],
+      "conflicts_with": [],
+      "confidence": {
+        "value": 0.7,
+        "basis": "Initial trade-off analysis"
+      },
+      "created_at": "2026-08-14T00:05:00Z",
+      "provenance": [
+        {
+          "kind": "repository_source",
+          "summary": "Observed existing patch rendering helpers",
+          "recorded_at": "2026-08-14T00:05:00Z"
+        }
+      ]
+    },
+    {
+      "decision_id": "d-approach-diffy",
+      "subject": "Patch application library",
+      "decision": "Render and validate patches through the diffy crate.",
+      "status": "accepted",
+      "superseded_by": null,
+      "supersedes": ["d-approach-unified-diff"],
+      "conflicts_with": ["d-approach-git-apply"],
+      "confidence": {
+        "value": 0.9,
+        "basis": "Validated in isolated dry-run"
+      },
+      "created_at": "2026-08-14T00:30:00Z",
+      "provenance": [
+        {
+          "kind": "model_inference",
+          "summary": "Compared candidate patch libraries",
+          "recorded_at": "2026-08-14T00:30:00Z"
+        },
+        {
+          "kind": "human_decision",
+          "source": {
+            "kind": "review",
+            "uri": "reviews/work-1/review-1.json",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "application/json"
+          },
+          "summary": "Approved by human reviewer",
+          "recorded_at": "2026-08-14T00:50:00Z"
+        }
+      ]
+    },
+    {
+      "decision_id": "d-approach-git-apply",
+      "subject": "Patch application backend",
+      "decision": "Apply patches with git apply --check in an isolated worktree.",
+      "status": "accepted",
+      "superseded_by": null,
+      "supersedes": [],
+      "conflicts_with": ["d-approach-diffy"],
+      "confidence": null,
+      "created_at": "2026-08-14T00:30:00Z",
+      "provenance": []
+    },
+    {
+      "decision_id": "d-note-treesitter",
+      "subject": "Syntax-aware editing",
+      "decision": "Consider AST-based edits once the core path is stable.",
+      "status": "stale",
+      "superseded_by": null,
+      "supersedes": [],
+      "conflicts_with": [],
+      "confidence": null,
+      "created_at": "2026-08-14T00:20:00Z",
+      "provenance": []
+    }
+  ],
+  "context_refs": [
+    {
+      "kind": "context",
+      "uri": "context/work-1/requirements.md",
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "media_type": "text/markdown"
+    }
+  ],
+  "artifact_refs": [
+    {
+      "kind": "artifact",
+      "uri": "artifact/work-1/proposal-1.patch",
+      "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media_type": "text/x-diff"
+    }
+  ],
+  "proposal_ref": {
+    "kind": "proposal",
+    "uri": "artifact/work-1/proposal-1.json",
+    "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "media_type": "application/json"
+  },
+  "diff_ref": {
+    "kind": "diff",
+    "uri": "diff/work-1/change-1.patch",
+    "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "media_type": "text/x-diff"
+  },
+  "validation_results": [
+    {
+      "result_id": "val-1",
+      "passed": true,
+      "summary": "Patch applies cleanly and tests pass",
+      "executed_at": "2026-08-14T00:55:00Z",
+      "evidence": {
+        "kind": "validation",
+        "uri": "evidence/work-1/validation.json",
+        "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "media_type": "application/json"
+      }
+    }
+  ],
+  "review_results": [
+    {
+      "review_id": "review-1",
+      "decision": "approved",
+      "reviewer": "human-reviewer",
+      "notes": "Approved the approach",
+      "reviewed_at": "2026-08-14T00:50:00Z"
+    }
+  ],
+  "failures": [
+    {
+      "failure_id": "fail-1",
+      "class": "infrastructure",
+      "stage": "preflight",
+      "step_id": null,
+      "recoverable": true,
+      "occurred_at": "2026-08-14T00:12:00Z",
+      "detail": "Temporary checkout lock contention",
+      "evidence": null
+    },
+    {
+      "failure_id": "fail-2",
+      "class": "model",
+      "stage": "generation",
+      "step_id": "step-2",
+      "recoverable": true,
+      "occurred_at": "2026-08-14T00:35:00Z",
+      "detail": "Provider produced no usable candidate on first attempt",
+      "evidence": null
+    }
+  ],
+  "authority": {
+    "authority": "execute",
+    "allowed_paths": ["src/workflow"],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": 5,
+    "max_lines_changed": 200,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "execution_history": [
+    {
+      "execution_id": "exec-1",
+      "provider": "mock",
+      "model": "mock-model",
+      "harness": "harness-a",
+      "harness_version": "1.0.0",
+      "started_at": "2026-08-14T00:00:00Z",
+      "completed_at": "2026-08-14T00:45:00Z"
+    },
+    {
+      "execution_id": "exec-2",
+      "provider": "mock",
+      "model": "mock-model",
+      "harness": "harness-b",
+      "harness_version": "2.0.0",
+      "started_at": "2026-08-14T00:45:00Z",
+      "completed_at": "2026-08-14T01:00:00Z"
+    }
+  ],
+  "compatibility": {
+    "state_schema_version": "1.0.0",
+    "required_capabilities": ["canonical-json", "sha256-digest"],
+    "optional_capabilities": ["git-worktree"],
+    "resume_blockers": []
+  },
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T01:00:00Z"
+}
