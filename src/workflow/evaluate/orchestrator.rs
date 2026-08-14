@@ -8,6 +8,7 @@ use crate::workflow::{
     sanitize_provider_route,
 };
 
+use super::cancellation::CancellationToken;
 use super::cleanup::cleanup_worktree;
 use super::evidence::{
     EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, new_bundle, new_bundle_from_identity,
@@ -21,10 +22,11 @@ use super::identity::{
 };
 use super::integrity::{git_rev_parse_head, verify_repo_integrity};
 use super::preflight::{run_preflight, run_validation_preflight};
+use super::recovery::{RecoveryDisposition, determine_recovery_disposition};
 use super::registry::{
     FenceToken, LeaseConfig, ProposalState, ReserveResult, TakeoverResult, fenced_finalize,
-    is_entry_stale, lookup_entry, proposal_state_for_state, release_reservation, transition_entry,
-    try_reserve, try_take_ownership,
+    is_entry_stale, is_entry_stale_at, lookup_entry, proposal_state_for_state, release_reservation,
+    transition_entry, try_reserve, try_take_ownership,
 };
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
@@ -105,10 +107,60 @@ fn durable_transition(
     )
 }
 
+/// Durably record a cooperative cancellation at the state where the run
+/// stopped: a same-state journal event classified `"cancelled"`.
+///
+/// The reservation is intentionally KEPT (its heartbeat stops, so it goes
+/// stale). This fences further writes: a fresh run can never silently restart
+/// from scratch and violate append-only journal continuity, and the event
+/// gives a later run the audit trail it needs to resume safely.
+fn record_cancellation(
+    repo: &Path,
+    identity_path: &Path,
+    run_id: &str,
+    identity_key: &str,
+    repository_revision: &str,
+    fence: &FenceToken,
+    state: EvaluationState,
+    proposal_ref: Option<String>,
+    evidence_ref: Option<String>,
+) -> Result<u64> {
+    durable_transition(
+        repo,
+        identity_path,
+        run_id,
+        identity_key,
+        repository_revision,
+        fence,
+        state,
+        proposal_ref,
+        Some("cancelled".to_string()),
+        evidence_ref,
+    )
+}
 /// Run the full evaluation pipeline and return the evidence bundle.
 ///
 /// This is the primary entry point for the `workflow evaluate` command.
+/// Cancellation is not requested (the run is allowed to complete).
 pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
+    evaluate_with_cancellation(config, CancellationToken::new()).await
+}
+
+/// Run the full evaluation pipeline with cooperative cancellation support.
+///
+/// Cancellation is a distinct control-flow signal, NOT a failure. The pipeline
+/// stops at the next safe point, durably records where it stopped (a
+/// same-state journal event classified `"cancelled"`), stops its heartbeat,
+/// fences further writes, and never deletes the proposal, evidence, or any
+/// durable state. A later run resumes from the authoritative journal position.
+pub async fn evaluate_with_cancellation(
+    config: EvaluationConfig,
+    token: CancellationToken,
+) -> Result<EvidenceBundle> {
+    config
+        .lease_config
+        .validate()
+        .context("invalid lease configuration")?;
     let repo = config.manifest.repo.clone();
 
     if !is_git_repo(&repo) {
@@ -190,7 +242,7 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
                 // restart the pipeline fresh so generation re-runs (exactly-once
                 // still holds because the previous attempt left no proposal).
                 Err(e) if e.to_string().contains("caller should retry") => {
-                    Box::pin(evaluate(config)).await
+                    Box::pin(evaluate_with_cancellation(config, token.clone())).await
                 }
                 Err(e) => Err(e),
             };
@@ -242,6 +294,21 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     .context("failed to persist PreflightPassed transition")?;
 
     // ---- Stage: Generate (with heartbeat) ----
+    // Safe point: honour cancellation before the provider is invoked.
+    if token.is_cancelled() {
+        record_cancellation(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::PreflightPassed,
+            None,
+            Some(refs.dir.clone()),
+        )?;
+        bail!("evaluation cancelled by user request before generation");
+    }
     transition_entry(
         &repo,
         &identity_key,
@@ -308,6 +375,25 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
                 if let Some(msg) = hb_rx.borrow().as_ref() {
                     bail!("heartbeat failure during generation: {msg}");
                 }
+            }
+            // Safe point: cancellation may race an in-flight provider call. The
+            // provider future is dropped; its outcome is uncertain, so the run
+            // records a same-state "cancelled" event at Generating. Recovery
+            // later reports GenerationOutcomeUnknown instead of re-invoking.
+            _ = token.cancelled() => {
+                record_cancellation(
+                    &repo,
+                    &identity_path,
+                    &run_id,
+                    &identity_key,
+                    &commit_at_start,
+                    &fence,
+                    EvaluationState::Generating,
+                    None,
+                    Some(refs.dir.clone()),
+                )?;
+                heartbeat.shutdown(" evaluation cancelled during generation").await?;
+                bail!("evaluation cancelled by user request during generation");
             }
         }
     };
@@ -378,6 +464,27 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     )
     .context("failed to transition registry to ProposalGenerated")?;
 
+    // Safe point: the proposal is durable and published. Cancellation here is
+    // clean — a later run resumes from the durable proposal (ResumeFromProposal)
+    // and never re-invokes generation.
+    if token.is_cancelled() {
+        record_cancellation(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::ProposalGenerated,
+            Some(gen_result.id.clone()),
+            Some(refs.dir.clone()),
+        )?;
+        heartbeat
+            .shutdown(" evaluation cancelled after proposal generation")
+            .await?;
+        bail!("evaluation cancelled by user request after proposal generation");
+    }
+
     bundle.proposal = Some(ProposalRecord {
         id: proposal.id.clone(),
         patch_hash: gen_result.patch_hash.clone(),
@@ -416,6 +523,26 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
     )
     .context("failed to persist GovernancePassed transition")?;
 
+    // Safe point: cancellation before validation starts. A later run resumes
+    // validation (ResumeValidation) on the preserved proposal.
+    if token.is_cancelled() {
+        record_cancellation(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::GovernancePassed,
+            Some(gen_result.id.clone()),
+            Some(refs.dir.clone()),
+        )?;
+        heartbeat
+            .shutdown(" evaluation cancelled before validation")
+            .await?;
+        bail!("evaluation cancelled by user request before validation");
+    }
+
     // ---- Stage: Isolated dry-run validation (with heartbeat) ----
     transition_entry(
         &repo,
@@ -448,6 +575,27 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
 
     // Check heartbeat after validation — must still own the entry.
     heartbeat.check("")?;
+
+    // Safe point: cancellation after validation finished. The run records a
+    // same-state "cancelled" event at Validating; a later run resumes
+    // validation on the preserved proposal.
+    if token.is_cancelled() {
+        record_cancellation(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::Validating,
+            Some(gen_result.id.clone()),
+            Some(refs.dir.clone()),
+        )?;
+        heartbeat
+            .shutdown(" evaluation cancelled during validation")
+            .await?;
+        bail!("evaluation cancelled by user request during validation");
+    }
 
     // The validation record must be durable BEFORE the ValidationComplete
     // journal event references it.
@@ -563,12 +711,15 @@ pub async fn evaluate(config: EvaluationConfig) -> Result<EvidenceBundle> {
 
 /// Wait for another process to complete its reservation, then reuse the result.
 ///
-/// This handles five cases:
-/// 1. ValidationComplete → return preserved evidence.
-/// 2. ProposalGenerated → take ownership, resume validation.
-/// 3. Reserved stale → take ownership, run generation from scratch.
-/// 4. Generating stale heartbeat → take ownership, run generation from scratch.
-/// 5. Reserved/Generating fresh → wait and retry.
+/// The durable journal is authoritative; the registry is only a derived
+/// coordination snapshot and must never override it. Recovery derives the
+/// single allowed disposition (see [`RecoveryDisposition`]) and this function
+/// reconciles the registry to it — never above it:
+/// - terminal → return preserved evidence;
+/// - ProposalGenerated/GovernancePassed/Validating (claimable) → resume validation;
+/// - no journal + stale Reserved → clear and let the caller retry fresh;
+/// - a live owner (fresh heartbeat) is never reclaimed — wait;
+/// - Generating interrupted → fail closed (GenerationOutcomeUnknown).
 async fn wait_and_reuse(
     repo: &Path,
     commit_at_start: &str,
@@ -588,107 +739,85 @@ async fn wait_and_reuse(
     let mut elapsed = std::time::Duration::ZERO;
 
     loop {
-        // The durable journal is the authoritative source of truth. The registry
-        // is only a derived coordination snapshot and MUST NOT override it.
-        // Recovery first inspects the journal and derives the only allowed
-        // action; the registry is reconciled to (never above) the journal.
         let recovered = super::recovery::recover_evaluation(repo, identity_key, None, None)
             .context("durable state recovery failed; refusing to continue")?;
         let entry = lookup_entry(repo, identity_key);
 
-        match recovered {
-            None => {
-                // No durable journal history exists. Without any durable record
-                // there is no immortalized proposal to protect, so a stale
-                // Reserved entry is safe to clear and let a fresh run start.
-                match entry {
-                    None => {
-                        // The reservation vanished (another process released it).
-                        // Let the caller retry with a fresh ownership attempt.
-                        bail!(
-                            "identity reservation was released by another process; caller should retry"
-                        );
-                    }
-                    Some(e) => {
-                        let stale = is_entry_stale(&e, lease_config).with_context(|| {
-                            format!("failed to check staleness for {:?} entry", e.state)
-                        })?;
-                        if matches!(e.state, ProposalState::Reserved) && stale {
-                            // Safe to remove the stale reservation and start fresh.
-                            match try_take_ownership(repo, identity_key, run_id, lease_config)? {
-                                TakeoverResult::Taken(fence) => {
-                                    release_reservation(repo, identity_key, &fence).context(
-                                        "failed to release stale reservation after takeover",
-                                    )?;
-                                    bail!(
-                                        "stale Reserved entry cleared; caller should retry to start fresh"
-                                    );
-                                }
-                                TakeoverResult::StillLive => {
-                                    // Heartbeat renewed between check and lock; wait.
-                                }
+        match &recovered {
+            // No durable journal history exists. Without any durable record
+            // there is no immortalized proposal to protect, so a stale Reserved
+            // entry is safe to clear and let a fresh run start.
+            None => match &entry {
+                None => {
+                    // The reservation vanished (another process released it).
+                    // Let the caller retry with a fresh ownership attempt.
+                    bail!(
+                        "identity reservation was released by another process; caller should retry"
+                    );
+                }
+                Some(e) => {
+                    if matches!(e.state, ProposalState::Reserved)
+                        && is_entry_stale_at(e, lease_config, chrono::Utc::now())
+                            .with_context(|| "failed to check staleness for Reserved entry")?
+                    {
+                        // Safe to remove the stale reservation and start fresh.
+                        match try_take_ownership(repo, identity_key, run_id, lease_config)? {
+                            TakeoverResult::Taken(fence) => {
+                                release_reservation(repo, identity_key, &fence).context(
+                                    "failed to release stale reservation after takeover",
+                                )?;
+                                bail!(
+                                    "stale Reserved entry cleared; caller should retry to start fresh"
+                                );
+                            }
+                            TakeoverResult::StillLive | TakeoverResult::LostRace => {
+                                // Heartbeat renewed (or ownership changed) between
+                                // check and lock; wait for the owner.
                             }
                         }
-                        // Any other entry without a journal: wait for the owner
-                        // to make durable progress or release the reservation.
                     }
+                    // Any other entry without a journal: wait for the owner to
+                    // make durable progress or release the reservation.
                 }
-            }
-            Some(r) => match r.state {
-                EvaluationState::Created
-                | EvaluationState::PreflightPassed
-                | EvaluationState::Generating => {
-                    // The journal is authoritative. A crash during these early
-                    // stages cannot safely auto-restart generation: after a crash
-                    // mid provider-call we cannot know whether the external
-                    // provider already completed. #113 fails closed and defers
-                    // the restart/continuation policy to #114.
-                    //
-                    // A live (heartbeating) entry means another worker is still
-                    // progressing; we wait for it. A stale entry (or a missing
-                    // entry) means the worker died here: fail closed with an
-                    // actionable recovery message — never silently pretend the
-                    // durable history never happened.
-                    let stale = match &entry {
-                        Some(e) => is_entry_stale(e, lease_config).with_context(|| {
-                            format!("failed to check staleness for {:?} entry", e.state)
-                        })?,
-                        None => true,
-                    };
-                    if stale {
-                        bail!(
-                            "durable journal for {identity_key} records state {:?} after a crash; \
-                             re-running generation is unsafe because the external provider may have \
-                             already completed before the process died. Manual or #114-driven \
-                             recovery is required; refusing to auto-restart generation.",
-                            r.state
-                        );
+            },
+            Some(r) => {
+                let disposition = determine_recovery_disposition(
+                    r,
+                    entry.as_ref(),
+                    lease_config,
+                    chrono::Utc::now(),
+                );
+
+                match disposition {
+                    RecoveryDisposition::ReturnTerminalEvidence => {
+                        // Terminal outcome: never transition backward. Return the
+                        // preserved evidence; no provider call, no validation rerun,
+                        // no duplicate terminal publication.
+                        return return_journal_completed(
+                            r,
+                            repo,
+                            commit_at_start,
+                            run_id,
+                            manifest,
+                            config,
+                            governance_scope,
+                            identity_key,
+                            lease_config,
+                        )
+                        .await;
                     }
-                    // Live entry: wait for the owner to progress or release.
-                }
-                EvaluationState::ProposalGenerated | EvaluationState::Validating => {
-                    // Journal reached proposal generation (or validation). Resume
-                    // validation on the ORIGINAL proposal — never re-invoke
-                    // generation. Take ownership only when the entry is
-                    // claimable (ProposalGenerated is always claimable; a
-                    // Validating/Generating entry must be stale); otherwise wait
-                    // for the live owner to finish.
-                    let claimable = match &entry {
-                        Some(e) => {
-                            matches!(e.state, ProposalState::ProposalGenerated)
-                                || is_entry_stale(e, lease_config).with_context(|| {
-                                    format!("failed to check staleness for {:?} entry", e.state)
-                                })?
-                        }
-                        None => true,
-                    };
-                    if claimable {
-                        let fence = match entry {
+                    RecoveryDisposition::ResumeFromProposal
+                    | RecoveryDisposition::ResumeValidation
+                    | RecoveryDisposition::ReconcileSnapshots => {
+                        // Resume validation on the ORIGINAL proposal — never re-invoke
+                        // generation. Take ownership only when the entry is claimable
+                        // (stale or absent); a live owner is never reclaimed.
+                        let fence = match &entry {
                             Some(_) => {
                                 match try_take_ownership(repo, identity_key, run_id, lease_config)?
                                 {
                                     TakeoverResult::Taken(f) => Some(f),
-                                    TakeoverResult::StillLive => None,
+                                    TakeoverResult::StillLive | TakeoverResult::LostRace => None,
                                 }
                             }
                             None => match try_reserve(repo, identity_key, run_id)? {
@@ -698,8 +827,8 @@ async fn wait_and_reuse(
                         };
                         if let Some(fence) = fence {
                             let proposal_id = r.proposal_ref.as_deref().context(
-                                "journal records ProposalGenerated/Validating without a proposal reference",
-                            )?;
+                        "journal records ProposalGenerated/Validating without a proposal reference",
+                    )?;
                             let proposal = load_proposal_from_repo(repo, proposal_id)?;
                             return resume_validation(
                                 repo,
@@ -715,29 +844,43 @@ async fn wait_and_reuse(
                             )
                             .await;
                         }
-                        // StillLive / AlreadyExists race: fall through to wait.
+                        // StillLive / LostRace / AlreadyExists race: fall through to wait.
                     }
-                    // Not yet claimable: wait for the live owner.
+                    RecoveryDisposition::FreshReservation
+                    | RecoveryDisposition::ReclaimExpiredOwner => {
+                        // The journal reached only an early state (Created/PreflightPassed)
+                        // with no durable proposal. The journal is append-only and the
+                        // pipeline resumes from the journal tail, so a fresh run cannot
+                        // legally restart here; fail closed with an actionable message
+                        // rather than risk a fork or duplicate work.
+                        bail!(
+                            "durable journal for {identity_key} records state {:?} with no durable \
+                     proposal; generation cannot be restarted safely from the append-only \
+                     journal tail. Manual resolution is required.",
+                            r.state
+                        );
+                    }
+                    RecoveryDisposition::GenerationOutcomeUnknown => {
+                        // A crash/cancel during an in-flight provider call: the external
+                        // provider may have already completed before the process died.
+                        // Refuse to auto-restart generation; fail closed (auditable).
+                        bail!(
+                            "durable journal for {identity_key} records state {:?} after an \
+                     interruption; the external provider may have already completed before \
+                     the process died. Generation outcome is unknown; refusing to \
+                     auto-restart generation. Manual recovery is required.",
+                            r.state
+                        );
+                    }
+                    RecoveryDisposition::WaitForLiveOwner => {
+                        // A live (heartbeating) owner holds the entry; never reclaim a
+                        // live lease. Wait for it to progress or release.
+                    }
+                    RecoveryDisposition::FailClosed(msg) => {
+                        bail!("{msg}");
+                    }
                 }
-                _ => {
-                    // ValidationComplete / IntegrityVerified / terminal / failed:
-                    // never transition backward. Return the preserved evidence;
-                    // no provider call, no validation rerun, no duplicate
-                    // terminal publication.
-                    return return_journal_completed(
-                        &r,
-                        repo,
-                        commit_at_start,
-                        run_id,
-                        manifest,
-                        config,
-                        governance_scope,
-                        identity_key,
-                        lease_config,
-                    )
-                    .await;
-                }
-            },
+            }
         }
 
         if elapsed >= max_wait {

@@ -101,6 +101,46 @@ jobs:
           fi
           echo "OK: No direct LLM calls in API handlers"
 
+  cross-platform-lock-lease:
+    name: Locking, Leases & Interruption Recovery (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Registry lease and takeover unit tests
+        run: cargo test --lib workflow::evaluate::registry --quiet
+
+      - name: Heartbeat unit tests
+        run: cargo test --lib workflow::evaluate::heartbeat --quiet
+
+      - name: Recovery disposition unit tests
+        run: cargo test --lib workflow::evaluate::recovery --quiet
+
+      - name: Cross-process locking tests
+        run: cargo test --test locking_tests --quiet
+
+      - name: Interruption recovery tests
+        run: cargo test --test interruption_recovery_tests --quiet
+
+      - name: Cancellation tests
+        run: cargo test --test cancellation_tests --quiet
+
+      - name: Concurrency single-winner tests
+        run: cargo test --test concurrency_tests --quiet
+
   fullstack-smoke:
     name: Full-stack Compatibility Smoke
     runs-on: ubuntu-latest

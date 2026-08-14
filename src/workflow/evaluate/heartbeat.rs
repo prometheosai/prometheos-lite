@@ -167,6 +167,7 @@ mod tests {
         match try_take_ownership(&repo, &key, "thief", &lease).unwrap() {
             TakeoverResult::Taken(_) => {}
             TakeoverResult::StillLive => panic!("expected takeover"),
+            TakeoverResult::LostRace => panic!("expected takeover, lost the race"),
         }
 
         // The next heartbeat (at ~1s) must observe the ownership change and

@@ -14,7 +14,7 @@ use super::checkpoint::{build_checkpoint, checkpoint_path_for, read_checkpoint, 
 use super::identity::EvaluationState;
 use super::journal::{journal_dir_for, read_journal, validate_journal};
 use super::migration::migrate_document;
-use super::registry::FenceToken;
+use super::registry::{FenceToken, LeaseConfig, ProposalState, RegistryEntry, is_entry_stale_at};
 use super::schema::DocumentType;
 
 /// The reconstructed state of an evaluation after recovery.
@@ -29,6 +29,10 @@ pub struct RecoveredEvaluation {
     /// Evidence reference from the newest event that recorded one
     /// (repo-relative path to the evidence dir or `evidence.json`).
     pub evidence_ref: Option<String>,
+    /// Failure classification from the newest event that recorded one. A value
+    /// of `"cancelled"` means the run stopped cooperatively (issue #114) and
+    /// is distinct from a terminal failure.
+    pub last_failure_classification: Option<String>,
     /// True if the state was reconstructed from a checkpoint instead of the
     /// journal. Always `false` in the current format: a checkpoint without a
     /// journal fails closed.
@@ -58,6 +62,105 @@ pub fn ensure_resumable(
         bail!("journal proposal {journal_proposal} does not match resumed proposal {proposal_id}");
     }
     Ok(())
+}
+
+/// What a recovered run should do next, derived from the journal-authoritative
+/// recovered state plus a live read of the registry entry and its lease
+/// liveness (issue #114).
+///
+/// The registry is a derived coordination snapshot, never authoritative on its
+/// own. A live owner (fresh heartbeat) is never reclaimed regardless of
+/// journal position; an entry with no owner (or a stale one) is claimable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryDisposition {
+    /// The journal records a terminal outcome and preserved evidence; return
+    /// it and do NOT resume the run.
+    ReturnTerminalEvidence,
+    /// A proposal was durably generated; reuse it and resume.
+    ResumeFromProposal,
+    /// Validation is in flight or has been reached; resume validation.
+    ResumeValidation,
+    /// The proposal exists but the registry lags behind the journal; reconcile
+    /// the derived snapshot before resuming.
+    ReconcileSnapshots,
+    /// No registry entry exists; start a fresh reservation.
+    FreshReservation,
+    /// Another live owner holds the entry; wait (do not steal a live lease).
+    WaitForLiveOwner,
+    /// A stale owner can be safely taken over.
+    ReclaimExpiredOwner,
+    /// Generation was interrupted with an in-flight provider: the outcome is
+    /// uncertain. Fail closed (audit/resolve manually) rather than risk
+    /// duplicate generation or silent re-invocation.
+    GenerationOutcomeUnknown,
+    /// No safe disposition can be derived.
+    FailClosed(String),
+}
+
+/// Decide the recovery disposition from the durable journal state and the
+/// current registry observation, using a deterministic clock.
+pub fn determine_recovery_disposition(
+    recovered: &RecoveredEvaluation,
+    entry: Option<&RegistryEntry>,
+    lease_config: &LeaseConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> RecoveryDisposition {
+    if recovered.state.is_terminal() {
+        return RecoveryDisposition::ReturnTerminalEvidence;
+    }
+
+    match entry {
+        None => match recovered.state {
+            // No owner at all: nothing else can conflict.
+            EvaluationState::ProposalGenerated => RecoveryDisposition::ResumeFromProposal,
+            EvaluationState::GovernancePassed | EvaluationState::Validating => {
+                RecoveryDisposition::ResumeValidation
+            }
+            EvaluationState::Created | EvaluationState::PreflightPassed => {
+                RecoveryDisposition::FreshReservation
+            }
+            // In-flight provider: outcome uncertain.
+            EvaluationState::Generating => RecoveryDisposition::GenerationOutcomeUnknown,
+            // Any non-terminal state not explicitly listed stays fail-closed.
+            other => RecoveryDisposition::FailClosed(format!(
+                "no registry entry for recovered state {other:?}"
+            )),
+        },
+        Some(entry) => {
+            let stale = match is_entry_stale_at(entry, lease_config, now) {
+                Ok(stale) => stale,
+                Err(err) => {
+                    return RecoveryDisposition::FailClosed(format!(
+                        "cannot assess registry liveness: {err}"
+                    ));
+                }
+            };
+            if !stale {
+                // Binding acceptance: a live owner is never reclaimed.
+                return RecoveryDisposition::WaitForLiveOwner;
+            }
+            match recovered.state {
+                EvaluationState::ProposalGenerated => {
+                    if entry.state != ProposalState::ProposalGenerated {
+                        // Journal is ahead of the (stale) registry snapshot.
+                        RecoveryDisposition::ReconcileSnapshots
+                    } else {
+                        RecoveryDisposition::ResumeFromProposal
+                    }
+                }
+                EvaluationState::GovernancePassed | EvaluationState::Validating => {
+                    RecoveryDisposition::ResumeValidation
+                }
+                EvaluationState::Created | EvaluationState::PreflightPassed => {
+                    RecoveryDisposition::ReclaimExpiredOwner
+                }
+                EvaluationState::Generating => RecoveryDisposition::GenerationOutcomeUnknown,
+                other => RecoveryDisposition::FailClosed(format!(
+                    "no disposition for recovered state {other:?} with stale entry"
+                )),
+            }
+        }
+    }
 }
 
 /// Resolve a repo-relative `evidence_ref` to its evidence directory.
@@ -218,6 +321,7 @@ pub fn recover_evaluation(
     let mut last_seq = events[0].sequence;
     let mut proposal_ref: Option<String> = None;
     let mut evidence_ref: Option<String> = None;
+    let mut failure_classification: Option<String> = None;
     let mut revision: Option<String> = None;
 
     for (index, event) in events.iter().enumerate() {
@@ -254,6 +358,9 @@ pub fn recover_evaluation(
         }
         if event.evidence_ref.is_some() {
             evidence_ref = event.evidence_ref.clone();
+        }
+        if event.failure_classification.is_some() {
+            failure_classification = event.failure_classification.clone();
         }
     }
 
@@ -372,6 +479,7 @@ pub fn recover_evaluation(
         last_journal_sequence: last_seq,
         proposal_ref,
         evidence_ref,
+        last_failure_classification: failure_classification,
         recovered_from_checkpoint: false,
     }))
 }
@@ -1020,5 +1128,173 @@ mod tests {
         }
         let err = recover_evaluation(&repo, "key-1", None, None).unwrap_err();
         assert!(err.to_string().contains("evidence"));
+    }
+
+    fn stale_registry_entry(state: ProposalState) -> RegistryEntry {
+        RegistryEntry {
+            owner_run_id: "dead-owner".to_string(),
+            lease_epoch: 1,
+            state,
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
+            reserved_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn fresh_registry_entry(state: ProposalState) -> RegistryEntry {
+        RegistryEntry {
+            owner_run_id: "live-owner".to_string(),
+            lease_epoch: 1,
+            state,
+            heartbeat_at: super::super::identity::now_iso(),
+            reserved_at: super::super::identity::now_iso(),
+            ..Default::default()
+        }
+    }
+
+    fn recovered(state: EvaluationState) -> RecoveredEvaluation {
+        RecoveredEvaluation {
+            state,
+            last_journal_sequence: 1,
+            proposal_ref: None,
+            evidence_ref: None,
+            last_failure_classification: None,
+            recovered_from_checkpoint: false,
+        }
+    }
+
+    #[test]
+    fn terminal_state_returns_terminal_evidence() {
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::ReviewGate),
+            Some(&stale_registry_entry(ProposalState::Validating)),
+            &LeaseConfig::default(),
+            chrono::Utc::now(),
+        );
+        assert_eq!(d, RecoveryDisposition::ReturnTerminalEvidence);
+    }
+
+    #[test]
+    fn proposal_generated_reuses_durable_proposal() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Stale ProposalGenerated owner -> resume from the durable proposal.
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::ProposalGenerated),
+            Some(&stale_registry_entry(ProposalState::ProposalGenerated)),
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::ResumeFromProposal);
+        // No registry entry at all -> still resume from the durable proposal.
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::ProposalGenerated),
+            None,
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::ResumeFromProposal);
+    }
+
+    #[test]
+    fn proposal_generated_with_lagging_registry_reconciles() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::ProposalGenerated),
+            Some(&stale_registry_entry(ProposalState::Generating)),
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::ReconcileSnapshots);
+    }
+
+    #[test]
+    fn live_owner_is_never_reclaimed() {
+        // Fresh heartbeats on a ProposalGenerated entry block reclaim regardless
+        // of journal position: binding acceptance for #114.
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::ProposalGenerated),
+            Some(&fresh_registry_entry(ProposalState::ProposalGenerated)),
+            &LeaseConfig::default(),
+            chrono::Utc::now(),
+        );
+        assert_eq!(d, RecoveryDisposition::WaitForLiveOwner);
+    }
+
+    #[test]
+    fn generating_with_stale_owner_fails_closed() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::Generating),
+            Some(&stale_registry_entry(ProposalState::Generating)),
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::GenerationOutcomeUnknown);
+    }
+
+    #[test]
+    fn governance_passed_resumes_validation() {
+        // Latent bug fix: a crash at GovernancePassed must NOT fall into the
+        // terminal branch; it resumes validation.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::GovernancePassed),
+            Some(&stale_registry_entry(ProposalState::Validating)),
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::ResumeValidation);
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::GovernancePassed),
+            None,
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::ResumeValidation);
+    }
+
+    #[test]
+    fn created_with_stale_owner_reclaims() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::Created),
+            Some(&stale_registry_entry(ProposalState::Reserved)),
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::ReclaimExpiredOwner);
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::Created),
+            None,
+            &LeaseConfig::default(),
+            now,
+        );
+        assert_eq!(d, RecoveryDisposition::FreshReservation);
+    }
+
+    #[test]
+    fn malformed_registry_timestamp_fails_closed() {
+        let mut entry = stale_registry_entry(ProposalState::Generating);
+        entry.heartbeat_at = "not-a-timestamp".to_string();
+        let d = determine_recovery_disposition(
+            &recovered(EvaluationState::ProposalGenerated),
+            Some(&entry),
+            &LeaseConfig::default(),
+            chrono::Utc::now(),
+        );
+        match d {
+            RecoveryDisposition::FailClosed(msg) => assert!(msg.contains("liveness")),
+            other => panic!("expected FailClosed, got {other:?}"),
+        }
     }
 }
