@@ -1,0 +1,66 @@
+{
+  "work": {
+    "work_id": "work-legacy-1",
+    "task_id": "task-legacy-1",
+    "objective": "A legacy unversioned portable work state",
+    "created_at": "2026-06-01T00:00:00Z",
+    "updated_at": "2026-06-01T02:00:00Z"
+  },
+  "repository": {
+    "identity": "https://github.com/prometheosai/prometheos-lite",
+    "branch": "main",
+    "revision": "f6daa0e000000000000000000000000000000000"
+  },
+  "plan": {
+    "plan_id": "plan-legacy-1",
+    "title": "Legacy plan",
+    "summary": "Older state without schema versioning.",
+    "step_ids": ["step-1", "step-2"]
+  },
+  "steps": [
+    {
+      "step_id": "step-1",
+      "title": "Analyze",
+      "status": "completed",
+      "completed_at": "2026-06-01T00:30:00Z",
+      "notes": []
+    },
+    {
+      "step_id": "step-2",
+      "title": "Implement",
+      "status": "pending",
+      "notes": []
+    }
+  ],
+  "decisions": [
+    {
+      "decision_id": "d-legacy-transport",
+      "subject": "Patch transport format",
+      "decision": "Use unified diff text as the portable patch transport.",
+      "status": "accepted",
+      "superseded_by": null,
+      "supersedes": [],
+      "conflicts_with": [],
+      "confidence": null,
+      "created_at": "2026-06-01T00:05:00Z",
+      "provenance": []
+    }
+  ],
+  "authority": {
+    "authority": "execute",
+    "allowed_paths": ["src/workflow"],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": 5,
+    "max_lines_changed": 200,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "compatibility": {
+    "state_schema_version": "1.0.0",
+    "required_capabilities": ["canonical-json"],
+    "optional_capabilities": [],
+    "resume_blockers": []
+  },
+  "created_at": "2026-06-01T00:00:00Z",
+  "updated_at": "2026-06-01T02:00:00Z"
+}

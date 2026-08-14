@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "work": {
+    "work_id": "work-conflict-1",
+    "task_id": "task-conflict-1",
+    "objective": "Explicit, mutually-recorded conflict",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T00:00:00Z"
+  },
+  "repository": {
+    "identity": "https://github.com/prometheosai/prometheos-lite",
+    "branch": "main",
+    "revision": "0e756a38b6688d37c10eca190c7d8be8ac68a296"
+  },
+  "steps": [],
+  "decisions": [
+    {
+      "decision_id": "d-side-a",
+      "subject": "Renderer choice",
+      "decision": "Use diffy for rendering",
+      "status": "contested",
+      "supersedes": [],
+      "superseded_by": null,
+      "conflicts_with": ["d-side-b"],
+      "confidence": {
+        "value": 0.6,
+        "basis": "Rendered candidate comparison"
+      },
+      "provenance": [],
+      "created_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "decision_id": "d-side-b",
+      "subject": "Renderer choice",
+      "decision": "Use git diff for rendering",
+      "status": "contested",
+      "supersedes": [],
+      "superseded_by": null,
+      "conflicts_with": ["d-side-a"],
+      "confidence": null,
+      "provenance": [],
+      "created_at": "2026-08-14T00:01:00Z"
+    }
+  ],
+  "authority": {
+    "authority": "execute",
+    "allowed_paths": [],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": null,
+    "max_lines_changed": null,
+    "policy_digest": null
+  },
+  "compatibility": {
+    "state_schema_version": "1.0.0",
+    "required_capabilities": [],
+    "optional_capabilities": [],
+    "resume_blockers": []
+  },
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:01:00Z"
+}
