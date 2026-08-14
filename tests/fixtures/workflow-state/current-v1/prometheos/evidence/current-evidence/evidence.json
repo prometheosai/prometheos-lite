@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "current-run",
+  "task_id": "current-task",
+  "repo": "/tmp/repo",
+  "repo_pin_before": "current-head",
+  "repo_pin_after": "current-head",
+  "provider_provenance": {
+    "implementation": "mock",
+    "model": "mock",
+    "route": "mock",
+    "generated_at": "2026-01-01T00:00:01Z",
+    "input_digest": "current-digest",
+    "patch_hash": "current-patch"
+  },
+  "effective_governance": {
+    "allowed_paths": [],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": null,
+    "max_lines_changed": null,
+    "authority": "propose",
+    "validation_command": null
+  },
+  "proposal": {
+    "id": "current-proposal-1",
+    "patch_hash": "current-patch",
+    "changed_files": ["src/example.rs"],
+    "added_lines": 3,
+    "removed_lines": 1,
+    "base_sha": "current-head"
+  },
+  "validation": null,
+  "failure_classification": null,
+  "integrity": null,
+  "cleanup": null,
+  "raw_logs": {
+    "stdout": "prometheos/evidence/current-evidence/raw_stdout.log",
+    "stderr": null,
+    "validation_output": null
+  },
+  "final_state": "proposal_generated",
+  "completed_at": "2026-01-01T00:00:02Z"
+}

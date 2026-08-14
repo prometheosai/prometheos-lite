@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "corrupt-run",
+  "task_id": "corrupt-task",
+  "repo": "/tmp/repo",
+  "repo_pin": "corrupt-head",
+  "model": "mock",
+  "provider": "mock",
+  "governance_scope": {
+    "allowed_paths": [],
+    "forbidden_paths": [],
+    "allow_dependency_changes": false,
+    "max_files_changed": null,
+    "max_lines_changed": null,
+    "authority": "propose",
+    "validation_command": null
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "state": "not_a_real_state"
+}
