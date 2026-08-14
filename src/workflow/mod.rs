@@ -16,7 +16,14 @@
 
 pub mod durable;
 pub mod evaluate;
+pub mod portable_state;
 pub mod schema;
+
+pub use portable_state::{
+    CompatibilityMetadata, DecisionRecord, DecisionStatus, ExecutionProvenance, PortableRef,
+    PortableWorkState, RepositorySnapshot, WorkStep, WorkStepStatus, export_portable_state,
+    import_portable_state,
+};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
