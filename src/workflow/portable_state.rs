@@ -14,7 +14,15 @@
 //! Canonical form: [`to_canonical_json`] serializes a state deterministically
 //! (recursively sorted object keys, compact output), and [`state_digest`]
 //! produces a stable SHA-256 over that canonical form. Semantically identical
-//! states always produce identical canonical bytes and identical digests.
+//! states always produce identical canonical bytes and identical digests:
+//! set-like collections (capabilities, supersession/conflict edges, authority
+//! path lists) are normalized to sorted order, while ordered collections
+//! (steps, plan step order, execution history, refs, results) keep their
+//! original order. Canonicalization never mutates the caller's state.
+//!
+//! Canonicalization is **fail-closed**: [`to_canonical_json`],
+//! [`state_digest`], and [`export_portable_state`] first run full validation
+//! and refuse to emit bytes for an invalid state.
 //!
 //! Import ([`import_portable_state`]) runs a strict pipeline — parse →
 //! version → migrate legacy → typed-validate → invariants → refs → decision
@@ -364,17 +372,18 @@ pub struct PortableWorkState {
 
 /// Deterministic canonical JSON for `state`.
 ///
-/// Object keys are recursively sorted (serde_json's `Map` is `BTreeMap`
-/// backed, so keys are already ordered; the sort is defensive against future
-/// feature changes) and the output is compact, so semantically identical
-/// states produce byte-identical output regardless of key insertion order.
+/// Fail-closed: `state` is fully validated first, so an invalid state is never
+/// serialized. Object keys are recursively sorted and the output is compact,
+/// and set-like collections are normalized to sorted order, so semantically
+/// identical states produce byte-identical output regardless of key insertion
+/// or set element order. The caller's state is never mutated.
 pub fn to_canonical_json(state: &PortableWorkState) -> Result<String> {
-    let value = canonical_value(state)?;
+    let value = validated_canonical_value(state)?;
     serde_json::to_string(&value).context("failed to serialize canonical portable work state")
 }
 
 /// Stable SHA-256 digest over [`to_canonical_json`], matching the repository's
-/// existing sha256-hex convention.
+/// existing sha256-hex convention. Fail-closed: validates `state` first.
 pub fn state_digest(state: &PortableWorkState) -> Result<String> {
     let canonical = to_canonical_json(state)?;
     let mut hasher = Sha256::new();
@@ -435,12 +444,37 @@ pub fn import_portable_state(
 
 /// Export `state` as a deterministic, durable document at `path`.
 ///
-/// The on-disk form is the canonical value written through the same atomic
-/// publication used by every durable document, so a failed export is reported
-/// and never silently swallowed.
+/// The on-disk form is the validated canonical value written through the same
+/// atomic publication used by every durable document, so a failed export is
+/// reported and never silently swallowed. Fail-closed: an invalid state is
+/// refused before any bytes are written.
 pub fn export_portable_state(state: &PortableWorkState, path: &Path) -> Result<()> {
-    let value = canonical_value(state)?;
+    let value = validated_canonical_value(state)?;
     atomic_write_json(path, &value)
+}
+
+/// Full validation followed by canonical serialization — the single fail-closed
+/// output path used by [`to_canonical_json`], [`state_digest`], and
+/// [`export_portable_state`]. Invalid states are never serialized.
+fn validated_canonical_value(state: &PortableWorkState) -> Result<Value> {
+    validate_state(state)?;
+    let normalized = normalized_state(state);
+    canonical_value(&normalized)
+}
+
+/// Canonical form of a state: set-like collections sorted, ordered collections
+/// preserved. Never mutates the caller's state (operates on a clone).
+fn normalized_state(state: &PortableWorkState) -> PortableWorkState {
+    let mut clone = state.clone();
+    clone.compatibility.required_capabilities.sort();
+    clone.compatibility.optional_capabilities.sort();
+    clone.authority.allowed_paths.sort();
+    clone.authority.forbidden_paths.sort();
+    for d in &mut clone.decisions {
+        d.supersedes.sort();
+        d.conflicts_with.sort();
+    }
+    clone
 }
 
 fn canonical_value(state: &PortableWorkState) -> Result<Value> {
