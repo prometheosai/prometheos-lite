@@ -12,8 +12,8 @@ use super::cancellation::CancellationToken;
 use super::cleanup::cleanup_worktree;
 use super::evidence::{
     EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, new_bundle, new_bundle_from_identity,
-    prepare_evidence_dir, read_validation_artifact, write_bundle, write_integrity_artifact,
-    write_validation_artifact,
+    prepare_evidence_dir, read_integrity_artifact, read_validation_artifact, write_bundle,
+    write_integrity_artifact, write_validation_artifact,
 };
 use super::generation::{classify_generation_error, load_proposal_from_repo};
 use super::heartbeat::HeartbeatSession;
@@ -1461,12 +1461,19 @@ async fn resume_late_finalization(
     // The original run's evidence lives in the durable directory recorded at
     // reservation, which may differ from this run's fresh `evidence_dir` (a
     // second/final crash creates a new directory). Resolve the *source* evidence
-    // directory from the recovered durable reference and load durable validation
-    // from there, so late finalization never reads a brand-new empty directory.
-    let source_evidence_dir = match recovered.as_ref().and_then(|r| r.evidence_ref.as_deref()) {
-        Some(ref_str) => super::recovery::resolve_evidence_dir(repo, ref_str)
-            .unwrap_or_else(|| evidence_dir.to_path_buf()),
-        None => evidence_dir.to_path_buf(),
+    // directory from the recovered durable reference and load durable artifacts
+    // from there, so late finalization never reads a brand-new empty directory
+    // and never silently switches evidence universes.
+    let source_evidence_ref = recovered.as_ref().and_then(|r| r.evidence_ref.clone());
+    let source_evidence_dir = match source_evidence_ref.as_deref() {
+        Some(ref_str) => {
+            super::recovery::resolve_evidence_dir(repo, ref_str).with_context(|| {
+                format!("durable evidence_ref {ref_str} cannot be resolved for late finalization")
+            })?
+        }
+        None => bail!(
+            "late finalization has no durable evidence_ref; refusing to switch evidence universes"
+        ),
     };
 
     let start_state = recovered
@@ -1561,10 +1568,25 @@ async fn resume_late_finalization(
         "ownership lost during late finalization",
     );
 
-    // Integrity verification is read-only and idempotent; it is NOT validation.
-    let integrity = verify_repo_integrity(repo, commit_at_start, &proposal.id);
+    // Integrity handling depends on whether it was already completed durably.
+    //
+    // - `ResumeFinalization` (integrity_already_done): the `IntegrityVerified`
+    //   result is durable at `source_evidence_dir`. Consume it; do NOT recompute
+    //   integrity merely because another process resumed.
+    // - `ResumeAfterValidation`: integrity has not completed durably yet. Run it
+    //   exactly once and persist the artifact into the *authoritative source*
+    //   evidence directory so the `IntegrityVerified` journal event (which
+    //   references that directory) actually contains the artifact.
+    let integrity = if integrity_already_done {
+        read_integrity_artifact(&source_evidence_dir)
+            .context("failed to read durable integrity record for late finalization")?
+    } else {
+        let verified = verify_repo_integrity(repo, commit_at_start, &proposal.id);
+        write_integrity_artifact(&source_evidence_dir, &verified)
+            .context("failed to persist integrity artifact for late finalization")?;
+        verified
+    };
     bundle.integrity = Some(integrity.clone());
-    write_integrity_artifact(evidence_dir, &integrity)?;
     if !integrity_already_done {
         durable_transition(
             repo,
@@ -1580,10 +1602,7 @@ async fn resume_late_finalization(
             // directory (the repo-relative reference recovered from the journal)
             // so a later run resumes from the authoritative validation artifact
             // rather than this run's fresh (empty) directory.
-            recovered
-                .as_ref()
-                .and_then(|r| r.evidence_ref.clone())
-                .or_else(|| Some(source_evidence_dir.to_string_lossy().into_owned())),
+            recovered.as_ref().and_then(|r| r.evidence_ref.clone()),
         )
         .context("failed to persist resume IntegrityVerified transition")?;
     }
