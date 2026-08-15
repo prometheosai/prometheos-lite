@@ -399,7 +399,7 @@ async fn late_cancel_then_resume(
     goal: &str,
     validation_cmd: &str,
     trigger: CancelTrigger,
-) -> (usize, usize, usize) {
+) -> (usize, usize, usize, usize) {
     // Short lease: a cancelled run's entry goes stale quickly so the resume can
     // reclaim it promptly (the cancelled owner is gone but its registry entry
     // still looks live until it ages out).
@@ -554,10 +554,21 @@ async fn late_cancel_then_resume(
                 && e.failure_classification.as_deref() != Some("cancelled")
         })
         .count();
+    // Integrity verifications are recorded as `IntegrityVerified` journal events;
+    // count only durable (non-cancelled) completions. `ResumeFinalization` must
+    // reuse the durable integrity artifact, not re-run integrity.
+    let integrity_runs = events
+        .iter()
+        .filter(|e| {
+            e.to_state == EvaluationState::IntegrityVerified
+                && e.failure_classification.as_deref() != Some("cancelled")
+        })
+        .count();
     (
         provider_count.load(Ordering::SeqCst),
         validation_runs,
         terminal,
+        integrity_runs,
     )
 }
 
@@ -565,7 +576,7 @@ async fn late_cancel_then_resume(
 async fn cancel_after_validation_complete_is_resumable() {
     let (_dir, repo) = temp_repo();
     let cmd = marker_validation_cmd(&repo);
-    let (gen_count, val, term) = late_cancel_then_resume(
+    let (gen_count, val, term, integrity) = late_cancel_then_resume(
         &repo,
         "late-vc",
         &cmd,
@@ -575,13 +586,14 @@ async fn cancel_after_validation_complete_is_resumable() {
     assert_eq!(gen_count, 1, "generation must not repeat");
     assert_eq!(term, 1, "exactly one terminal event must be published");
     assert_eq!(val, 1, "validation must run once and not repeat on resume");
+    assert_eq!(integrity, 1, "integrity must run exactly once on resume");
 }
 
 #[tokio::test]
 async fn cancel_after_integrity_verified_is_resumable() {
     let (_dir, repo) = temp_repo();
     let cmd = marker_validation_cmd(&repo);
-    let (gen_count, val, term) = late_cancel_then_resume(
+    let (gen_count, val, term, integrity) = late_cancel_then_resume(
         &repo,
         "late-iv",
         &cmd,
@@ -591,13 +603,16 @@ async fn cancel_after_integrity_verified_is_resumable() {
     assert_eq!(gen_count, 1, "generation must not repeat");
     assert_eq!(term, 1, "exactly one terminal event must be published");
     assert_eq!(val, 1, "validation must run once and not repeat on resume");
+    // ResumeFinalization must reuse the durable integrity artifact (count stays 1),
+    // never recompute it.
+    assert_eq!(integrity, 1, "integrity must not be re-run on resume");
 }
 
 #[tokio::test]
 async fn late_cancel_does_not_repeat_generation() {
     let (_dir, repo) = temp_repo();
     let cmd = marker_validation_cmd(&repo);
-    let (gen_count, _, _) = late_cancel_then_resume(
+    let (gen_count, _, _, _) = late_cancel_then_resume(
         &repo,
         "late-noregen",
         &cmd,
@@ -611,7 +626,7 @@ async fn late_cancel_does_not_repeat_generation() {
 async fn late_cancel_does_not_repeat_validation() {
     let (_dir, repo) = temp_repo();
     let cmd = marker_validation_cmd(&repo);
-    let (_, val, _) = late_cancel_then_resume(
+    let (_, val, _, _) = late_cancel_then_resume(
         &repo,
         "late-noval",
         &cmd,
@@ -625,7 +640,7 @@ async fn late_cancel_does_not_repeat_validation() {
 async fn late_cancel_produces_single_terminal_event_after_resume() {
     let (_dir, repo) = temp_repo();
     let cmd = marker_validation_cmd(&repo);
-    let (_, _, term) = late_cancel_then_resume(
+    let (_, _, term, _) = late_cancel_then_resume(
         &repo,
         "late-oneterm",
         &cmd,
@@ -884,6 +899,13 @@ async fn second_crash_recovery_produces_one_terminal() {
                 && e.failure_classification.as_deref() != Some("cancelled")
         })
         .count();
+    let integrity_runs = events
+        .iter()
+        .filter(|e| {
+            e.to_state == EvaluationState::IntegrityVerified
+                && e.failure_classification.as_deref() != Some("cancelled")
+        })
+        .count();
 
     assert_eq!(
         provider_count.load(Ordering::SeqCst),
@@ -891,10 +913,332 @@ async fn second_crash_recovery_produces_one_terminal() {
         "generation runs exactly once"
     );
     assert_eq!(validation_runs, 1, "validation runs exactly once");
+    assert_eq!(integrity_runs, 1, "integrity runs exactly once");
     assert_eq!(terminal, 1, "exactly one terminal event is published");
     assert_eq!(
         bundle_c.proposal.as_ref().unwrap().id,
         proposal_id,
         "the original proposal id is preserved across the second crash"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable evidence-chain proof (issue #114, restart-path final bug).
+//
+// After recovering from `ValidationComplete`, run B must write its new
+// `integrity.json` into the SAME directory the `IntegrityVerified` journal event
+// references (the authoritative source evidence directory), so the artifact and
+// its reference are consistent. `ResumeFinalization` must then consume the
+// durable integrity artifact instead of recomputing it, and any missing or
+// corrupt durable evidence must fail closed rather than healing itself.
+// ---------------------------------------------------------------------------
+
+/// Run A to `ValidationComplete`, then cancel at the safe point. Returns the
+/// identity key and A's durable evidence directory (resolved from the journal).
+async fn run_a_cancel_at_validation_complete(repo: &Path) -> (String, PathBuf) {
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let hold = Arc::new(Barrier::new(2));
+    let token = CancellationToken::with_park_barrier(hold.clone());
+    let rt = token.clone();
+    let handle = tokio::spawn(async move { evaluate_with_cancellation(config, rt).await });
+    let key = wait_for_identity_key(repo, Duration::from_secs(30)).await;
+    let start = std::time::Instant::now();
+    loop {
+        let events = read_journal(repo, &key).unwrap();
+        if events
+            .iter()
+            .any(|e| e.to_state == EvaluationState::ValidationComplete)
+        {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "A: VC never reached"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    token.cancel();
+    hold.wait().await;
+    let _ = tokio::time::timeout(Duration::from_secs(60), handle).await;
+    let events = read_journal(repo, &key).unwrap();
+    let ref_str = events
+        .iter()
+        .rev()
+        .find_map(|e| e.evidence_ref.clone())
+        .expect("A must record an evidence_ref");
+    (key, repo.join(&ref_str))
+}
+
+/// Reclaim A and resume finalization: run integrity, park at the
+/// `IntegrityVerified` safe point, then abort (simulated crash) before
+/// finalization. The durable `integrity.json` is persisted into the source
+/// evidence directory by this point.
+async fn run_b_resume_to_integrity_then_crash(repo: &Path, key: &str) {
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let hold = Arc::new(Barrier::new(2));
+    let token = CancellationToken::with_park_barrier(hold.clone());
+    let rt = token.clone();
+    let handle = tokio::spawn(async move { evaluate_with_cancellation(config, rt).await });
+    let start = std::time::Instant::now();
+    loop {
+        let events = read_journal(repo, key).unwrap();
+        if events
+            .iter()
+            .any(|e| e.to_state == EvaluationState::IntegrityVerified)
+        {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "B: IntegrityVerified never reached"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Crash before finalization: abort while parked at the safe point.
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+/// Rewrite every journal event so its `evidence_ref` is null, simulating a
+/// recovered state with no durable evidence reference.
+fn null_out_evidence_refs(repo: &Path, key: &str) {
+    let dir = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("journal")
+        .join(key);
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().and_then(|e| e.to_str()) == Some("json") {
+            let text = std::fs::read_to_string(&p).unwrap();
+            let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            v["evidence_ref"] = serde_json::Value::Null;
+            std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn integrity_verified_evidence_ref_resolves_and_contains_artifacts() {
+    let (_dir, repo) = temp_repo();
+    let (key, a_dir) = run_a_cancel_at_validation_complete(&repo).await;
+    // Let A's entry age out so B can reclaim it deterministically.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    run_b_resume_to_integrity_then_crash(&repo, &key).await;
+
+    // The `IntegrityVerified` journal event must reference a directory that
+    // actually contains BOTH the durable validation and integrity artifacts.
+    let events = read_journal(&repo, &key).unwrap();
+    let iv_event = events
+        .iter()
+        .find(|e| e.to_state == EvaluationState::IntegrityVerified)
+        .expect("IntegrityVerified must be journaled");
+    let ref_str = iv_event
+        .evidence_ref
+        .as_ref()
+        .expect("IntegrityVerified must carry an evidence_ref");
+    let dir = repo.join(ref_str);
+    assert!(dir.exists(), "IntegrityVerified evidence_ref must resolve");
+    assert!(
+        dir.join("validation.json").exists(),
+        "resolved directory must contain validation.json"
+    );
+    assert!(
+        dir.join("integrity.json").exists(),
+        "resolved directory must contain integrity.json (written by B into the source dir)"
+    );
+    // The source directory is A's original durable evidence directory.
+    assert_eq!(
+        dir, a_dir,
+        "IntegrityVerified must reference the source evidence dir"
+    );
+}
+
+#[tokio::test]
+async fn resume_finalization_reuses_durable_integrity() {
+    let (_dir, repo) = temp_repo();
+    let (key, _a_dir) = run_a_cancel_at_validation_complete(&repo).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    run_b_resume_to_integrity_then_crash(&repo, &key).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // C resumes as `ResumeFinalization`: it must consume the durable integrity
+    // artifact WITHOUT re-running integrity, and finalize exactly once.
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(&repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let bundle = evaluate_with_cancellation(config, CancellationToken::new())
+        .await
+        .expect("C must finalize from the durable IntegrityVerified state");
+    assert!(bundle.proposal.is_some());
+
+    let events = read_journal(&repo, &key).unwrap();
+    let integrity_runs = events
+        .iter()
+        .filter(|e| {
+            e.to_state == EvaluationState::IntegrityVerified
+                && e.failure_classification.as_deref() != Some("cancelled")
+        })
+        .count();
+    assert_eq!(integrity_runs, 1, "integrity must not be re-run on resume");
+    assert_eq!(
+        events.iter().filter(|e| e.to_state.is_terminal()).count(),
+        1,
+        "exactly one terminal event after resume"
+    );
+}
+
+#[tokio::test]
+async fn missing_integrity_json_after_integrity_verified_fails_closed() {
+    let (_dir, repo) = temp_repo();
+    let (key, a_dir) = run_a_cancel_at_validation_complete(&repo).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    run_b_resume_to_integrity_then_crash(&repo, &key).await;
+    assert!(
+        a_dir.join("integrity.json").exists(),
+        "B must persist integrity into the source dir"
+    );
+    // Simulate loss of the durable integrity artifact.
+    std::fs::remove_file(a_dir.join("integrity.json")).unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(&repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let result = evaluate_with_cancellation(config, CancellationToken::new()).await;
+    assert!(
+        result.is_err(),
+        "ResumeFinalization must fail closed when the durable integrity artifact is missing: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_integrity_json_after_integrity_verified_fails_closed() {
+    let (_dir, repo) = temp_repo();
+    let (key, a_dir) = run_a_cancel_at_validation_complete(&repo).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    run_b_resume_to_integrity_then_crash(&repo, &key).await;
+    assert!(a_dir.join("integrity.json").exists());
+    std::fs::write(a_dir.join("integrity.json"), "this is not valid json {").unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(&repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let result = evaluate_with_cancellation(config, CancellationToken::new()).await;
+    assert!(
+        result.is_err(),
+        "ResumeFinalization must fail closed when the durable integrity artifact is corrupt: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn unresolvable_evidence_ref_fails_closed() {
+    let (_dir, repo) = temp_repo();
+    let (_key, a_dir) = run_a_cancel_at_validation_complete(&repo).await;
+    // Delete the entire source evidence directory so the durable reference cannot
+    // be resolved.
+    std::fs::remove_dir_all(&a_dir).unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(&repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let result = evaluate_with_cancellation(config, CancellationToken::new()).await;
+    assert!(
+        result.is_err(),
+        "late finalization must fail closed when the evidence_ref is unresolvable: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn missing_evidence_ref_fails_closed() {
+    let (_dir, repo) = temp_repo();
+    let (key, _a_dir) = run_a_cancel_at_validation_complete(&repo).await;
+    // Null out every journal evidence_ref so recovery yields none.
+    null_out_evidence_refs(&repo, &key);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    let mut manifest = make_manifest(&repo, "setup-vc");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short,
+    };
+    let result = evaluate_with_cancellation(config, CancellationToken::new()).await;
+    assert!(
+        result.is_err(),
+        "late finalization must fail closed when no durable evidence_ref exists: {result:?}"
     );
 }
