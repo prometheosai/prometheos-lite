@@ -247,6 +247,19 @@ pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<Validation
     serde_json::from_str(&text)
         .with_context(|| format!("corrupt validation artifact {}", path.display()))
 }
+
+/// Read a previously persisted integrity record (written by
+/// [`write_integrity_artifact`]). Used when resuming finalization after a
+/// durable `IntegrityVerified` state: the result is authoritative and must NOT
+/// be recomputed merely because another process resumed. A missing or corrupt
+/// artifact fails closed rather than healing itself by re-running integrity.
+pub(super) fn read_integrity_artifact(evidence_dir: &Path) -> Result<IntegrityRecord> {
+    let path = evidence_dir.join("integrity.json");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read integrity artifact {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("corrupt integrity artifact {}", path.display()))
+}
 // ---------------------------------------------------------------------------
 // Markdown report
 // ---------------------------------------------------------------------------
