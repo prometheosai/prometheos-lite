@@ -11,21 +11,26 @@ use super::identity::{EvaluationState, now_iso};
 
 /// Lease and heartbeat configuration for ownership fencing.
 ///
-/// Controls how long an entry may stay in `Reserved` or `Generating` before
-/// another worker may reclaim it. Defaults are conservative for production;
-/// tests inject shorter durations.
+/// Controls how long an entry may stay in `Reserved`, `Generating`,
+/// `ProposalGenerated`, or `Validating` before another worker may reclaim it.
+/// Defaults are conservative for production; tests inject shorter durations.
 #[derive(Debug, Clone)]
 pub struct LeaseConfig {
     /// How long a `Reserved` entry can exist before it is considered stale.
     /// Default: 120 seconds.
     pub stale_reservation_timeout: std::time::Duration,
-    /// How long a `Generating` entry may go without a heartbeat before it is
-    /// considered dead and reclaimable. Default: 600 seconds.
+    /// How long a live-workload entry (`Generating`, `ProposalGenerated`,
+    /// `Validating`) may go without a heartbeat before it is considered dead
+    /// and reclaimable. Default: 600 seconds.
     pub generation_lease_timeout: std::time::Duration,
     /// How often the heartbeat task renews the lease on behalf of a live
-    /// generation worker. Must be meaningfully shorter than
-    /// `generation_lease_timeout` — preferably ≤ ⅓ of it. Default: 180 seconds.
+    /// worker. Must be ≤ `generation_lease_timeout`; the production safety
+    /// ratio is ≤ ⅓ of it. Default: 180 seconds.
     pub heartbeat_interval: std::time::Duration,
+    /// Maximum tolerated clock skew between workers, used by the deterministic
+    /// lease clock: a timestamp in the future by more than this amount fails
+    /// closed (it can never silently make an entry immortal). Default: 5s.
+    pub tolerated_clock_skew: std::time::Duration,
 }
 
 impl LeaseConfig {
@@ -38,8 +43,58 @@ impl LeaseConfig {
             stale_reservation_timeout,
             generation_lease_timeout,
             heartbeat_interval,
+            tolerated_clock_skew: std::time::Duration::from_secs(5),
         }
     }
+
+    /// Validate lease configuration, fail-closed.
+    ///
+    /// Hard invariants (a violation makes false reclaim or immortal entries
+    /// possible):
+    /// - every timeout is strictly positive;
+    /// - the heartbeat interval is at most one third of the generation lease
+    ///   timeout AND at most one third of the reservation timeout.
+    ///
+    /// The margin guarantees a live worker always renews its heartbeat well
+    /// before a contender could observe it as stale, even accounting for normal
+    /// scheduling jitter and brief lock contention. Without the margin a slow
+    /// heartbeat renewal (or a long preflight before the first renewal) could
+    /// let a perfectly alive `Reserved`/`Generating` owner be falsely reclaimed.
+    pub fn validate(&self) -> Result<()> {
+        if self.stale_reservation_timeout.is_zero() {
+            bail!("stale_reservation_timeout must be greater than zero");
+        }
+        if self.generation_lease_timeout.is_zero() {
+            bail!("generation_lease_timeout must be greater than zero");
+        }
+        if self.heartbeat_interval.is_zero() {
+            bail!("heartbeat_interval must be greater than zero");
+        }
+        let Some(three_hb) = self.heartbeat_interval.checked_mul(3) else {
+            bail!("heartbeat_interval interval is absurdly large");
+        };
+        if three_hb > self.generation_lease_timeout {
+            bail!(
+                "heartbeat_interval {} exceeds one third of generation_lease_timeout {}; \
+                 a live worker would risk being reclaimed between renewals",
+                humantime_like(self.heartbeat_interval),
+                humantime_like(self.generation_lease_timeout),
+            );
+        }
+        if three_hb > self.stale_reservation_timeout {
+            bail!(
+                "heartbeat_interval {} exceeds one third of stale_reservation_timeout {}; \
+                 a live Reserved worker would risk being reclaimed during a long preflight",
+                humantime_like(self.heartbeat_interval),
+                humantime_like(self.stale_reservation_timeout),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn humantime_like(d: std::time::Duration) -> String {
+    format!("{}s", d.as_secs_f64())
 }
 
 impl Default for LeaseConfig {
@@ -47,7 +102,8 @@ impl Default for LeaseConfig {
         Self {
             stale_reservation_timeout: std::time::Duration::from_secs(120),
             generation_lease_timeout: std::time::Duration::from_secs(600),
-            heartbeat_interval: std::time::Duration::from_secs(180),
+            heartbeat_interval: std::time::Duration::from_secs(30),
+            tolerated_clock_skew: std::time::Duration::from_secs(5),
         }
     }
 }
@@ -125,12 +181,6 @@ fn registry_path(repo: &Path) -> PathBuf {
         .join("proposal_registry.json")
 }
 
-fn registry_lock_path(repo: &Path) -> PathBuf {
-    repo.join(".prometheos")
-        .join("workflow")
-        .join("proposal_registry.lock")
-}
-
 fn load_registry(repo: &Path) -> Result<ProposalRegistry> {
     let path = registry_path(repo);
     if !path.exists() {
@@ -164,49 +214,7 @@ pub(super) fn with_registry_lock<T>(
     repo: &Path,
     f: impl FnOnce(&mut ProposalRegistry) -> Result<T>,
 ) -> Result<T> {
-    let lock_path = registry_lock_path(repo);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            bail!("failed to acquire registry lock");
-        }
-    }
+    let _lock = super::lock::WorkflowFileLock::acquire(repo, "proposal_registry.lock")?;
 
     let mut registry = load_registry(repo).context("failed to load registry under lock")?;
     let result = f(&mut registry);
@@ -214,7 +222,7 @@ pub(super) fn with_registry_lock<T>(
     if save {
         save_registry(repo, &registry).context("failed to persist registry under lock")?;
     }
-    drop(lock_file);
+    drop(_lock);
     result
 }
 /// Result of attempting to reserve or reclaim an identity key.
@@ -233,63 +241,19 @@ pub(super) enum ReserveResult {
 /// Returns `AlreadyExists` if the entry already exists (caller should reuse or wait).
 /// Returns `Err` on I/O failure.
 pub(super) fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Result<ReserveResult> {
-    let lock_path = registry_lock_path(repo);
-
-    // Ensure the workflow directory exists before creating the lock file.
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
-
-    // Acquire an exclusive lock file.
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file")?;
-
-    // Use platform-exclusive lock (flock on Unix, LockFileEx on Windows).
-    // Check return value and fail closed on error.
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            // Lock held by another process.
-            drop(lock_file);
-            return Ok(ReserveResult::AlreadyExists);
-        }
-    }
+    // A held lock means another process is mutating the registry right now;
+    // the identity may be about to appear, so treat contention as
+    // AlreadyExists and let the caller wait and re-probe.
+    let Some(_lock) = super::lock::WorkflowFileLock::try_acquire(repo, "proposal_registry.lock")?
+    else {
+        return Ok(ReserveResult::AlreadyExists);
+    };
 
     // Now read the registry under the lock.
     let mut registry = load_registry(repo).context("failed to read registry under lock")?;
     if registry.entries.contains_key(identity_key) {
         // Another process reserved it first.
-        drop(lock_file);
+        drop(_lock);
         return Ok(ReserveResult::AlreadyExists);
     }
 
@@ -310,7 +274,7 @@ pub(super) fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Resu
     );
     save_registry(repo, &registry)?;
 
-    drop(lock_file);
+    drop(_lock);
     let token = FenceToken {
         owner_run_id: run_id.to_string(),
         lease_epoch: 1,
@@ -319,111 +283,113 @@ pub(super) fn try_reserve(repo: &Path, identity_key: &str, run_id: &str) -> Resu
 }
 /// Result of an attempted takeover.
 #[derive(Debug)]
-pub(super) enum TakeoverResult {
+pub enum TakeoverResult {
     /// Successfully took ownership. Contains the new fencing token.
     Taken(FenceToken),
-    /// Entry is still live (not stale or owned by another). Caller should wait.
+    /// Entry is still live (not stale) or owned by another worker. Caller should wait.
     StillLive,
+    /// The observed identity key/owner/epoch/state changed between the caller's
+    /// outer read and the takeover attempt under the lock — another worker
+    /// claimed it first. Caller should wait and re-observe.
+    LostRace,
+}
+
+/// The registry observation a takeover must verify before it is allowed to
+/// mutate the entry (compare-and-swap precondition).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnershipObservation {
+    pub owner_run_id: String,
+    pub lease_epoch: u64,
+    pub state: ProposalState,
 }
 
 /// Attempt an atomic takeover of a registry entry.
 ///
-/// Under the registry lock:
-/// 1. Re-validates staleness using `is_entry_stale`.
-/// 2. Confirms the entry's state, owner, and epoch haven't changed since the
-///    caller's outer stale check.
-/// 3. Increments the epoch and assigns the new owner.
-///
-/// Returns `Taken(FenceToken)` on success, `StillLive` if the entry is not
-/// stale (heartbeat renewed between check and lock), or if
-/// another worker already claimed it, or `Err` on I/O failure.
-pub(super) fn try_take_ownership(
+/// See [`try_take_ownership_cas`]; this is the non-CAS convenience form that
+/// revalidates only staleness under the lock.
+pub fn try_take_ownership(
     repo: &Path,
     identity_key: &str,
     new_owner: &str,
     lease_config: &LeaseConfig,
 ) -> Result<TakeoverResult> {
-    let lock_path = registry_lock_path(repo);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
+    try_take_ownership_cas(repo, identity_key, new_owner, lease_config, None)
+}
 
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file for takeover")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock for takeover: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            bail!("failed to acquire lock for registry takeover");
-        }
-    }
+/// Attempt an atomic takeover of a registry entry, fail-closed.
+///
+/// Under the registry lock:
+/// 1. Verifies the entry still matches the caller's last observation
+///    (`owner_run_id`, `lease_epoch`, `state`) when one is supplied — if not,
+///    another worker already changed it and we lost the race.
+/// 2. Re-validates staleness using the deterministic lease clock.
+/// 3. Increments the epoch (checked, overflow fails closed) and assigns the
+///    new owner.
+///
+/// A live owner is never reclaimed: `Reserved`, `Generating`, `ProposalGenerated`,
+/// and `Validating` are all claimable only when their entry is stale per
+/// [`is_entry_stale_at`]. `ValidationComplete` is never reclaimed.
+///
+/// Returns `Taken(FenceToken)` on success, `StillLive` if the entry is not
+/// stale (heartbeat renewed between check and lock), `LostRace` if the
+/// observed identity changed, or `Err` on I/O failure.
+pub fn try_take_ownership_cas(
+    repo: &Path,
+    identity_key: &str,
+    new_owner: &str,
+    lease_config: &LeaseConfig,
+    expected: Option<&OwnershipObservation>,
+) -> Result<TakeoverResult> {
+    // A held lock means another process is mutating the registry right now;
+    // the caller should wait and re-probe rather than race the mutation.
+    let Some(_lock) = super::lock::WorkflowFileLock::try_acquire(repo, "proposal_registry.lock")?
+    else {
+        return Ok(TakeoverResult::StillLive);
+    };
 
     let mut registry = load_registry(repo).context("failed to read registry for takeover")?;
-    let entry = registry
-        .entries
-        .get_mut(identity_key)
-        .context("registry entry not found during takeover")?;
+    let Some(entry) = registry.entries.get_mut(identity_key) else {
+        // Entry vanished between observation and lock — lost the race.
+        return Ok(TakeoverResult::LostRace);
+    };
+
+    if let Some(expected) = expected
+        && (entry.owner_run_id != expected.owner_run_id
+            || entry.lease_epoch != expected.lease_epoch
+            || entry.state != expected.state)
+    {
+        // The observed identity changed under the lock — another worker won.
+        return Ok(TakeoverResult::LostRace);
+    }
 
     // Re-validate stale status under the lock. A heartbeat may have renewed
-    // between the caller's outer stale check and this lock acquisition.
+    // between the caller's outer stale check and this lock acquisition. A
+    // live owner is never reclaimed, including in ProposalGenerated.
     match entry.state {
-        ProposalState::Reserved | ProposalState::Generating | ProposalState::Validating => {
+        ProposalState::Reserved
+        | ProposalState::Generating
+        | ProposalState::ProposalGenerated
+        | ProposalState::Validating => {
             let stale = is_entry_stale(entry, lease_config)
                 .context("failed to check entry staleness during takeover")?;
             if !stale {
                 // Entry is still live — another worker is actively renewing.
-                drop(lock_file);
+                drop(_lock);
                 return Ok(TakeoverResult::StillLive);
             }
         }
-        ProposalState::ProposalGenerated => {
-            // ProposalGenerated is always reclaimable: the previous owner has
-            // finished generation and hasn't entered Validating yet. No stale
-            // check needed — but we do verify the entry still exists.
-        }
         ProposalState::ValidationComplete => {
             // Terminal state — no takeover needed.
-            drop(lock_file);
+            drop(_lock);
             return Ok(TakeoverResult::StillLive);
         }
     }
 
-    // Verify this entry hasn't already been taken by another worker.
-    // We check that the current epoch matches what the caller last observed.
-    // If the caller doesn't have a previous observation, we just take it
-    // (the stale check above already validated the entry is reclaimable).
-    // Generate a new epoch and assign the new owner.
-    let new_epoch = entry.lease_epoch + 1;
+    // Generate a new epoch and assign the new owner. Overflow fails closed.
+    let new_epoch = entry
+        .lease_epoch
+        .checked_add(1)
+        .context("lease epoch overflow during takeover")?;
     let now = now_iso();
     entry.owner_run_id = new_owner.to_string();
     entry.lease_epoch = new_epoch;
@@ -438,7 +404,7 @@ pub(super) fn try_take_ownership(
     }
     save_registry(repo, &registry)?;
 
-    drop(lock_file);
+    drop(_lock);
     Ok(TakeoverResult::Taken(FenceToken {
         owner_run_id: new_owner.to_string(),
         lease_epoch: new_epoch,
@@ -450,50 +416,7 @@ pub(super) fn try_take_ownership(
 /// renew. Returns `Ok(true)` on success, `Ok(false)` if ownership was lost
 /// (another worker took over), or `Err` on I/O failure.
 pub(super) fn renew_heartbeat(repo: &Path, identity_key: &str, fence: &FenceToken) -> Result<bool> {
-    let lock_path = registry_lock_path(repo);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
-
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file for heartbeat")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock for heartbeat: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            bail!("failed to acquire lock for heartbeat renewal");
-        }
-    }
+    let _lock = super::lock::WorkflowFileLock::acquire(repo, "proposal_registry.lock")?;
 
     let mut registry = load_registry(repo).context("failed to read registry for heartbeat")?;
     let entry_option = registry.entries.get_mut(identity_key);
@@ -503,17 +426,17 @@ pub(super) fn renew_heartbeat(repo: &Path, identity_key: &str, fence: &FenceToke
             e.heartbeat_at = now_iso();
             e.updated_at = now_iso();
             save_registry(repo, &registry)?;
-            drop(lock_file);
+            drop(_lock);
             Ok(true)
         }
         Some(_) => {
             // Ownership has been taken by another worker.
-            drop(lock_file);
+            drop(_lock);
             Ok(false)
         }
         None => {
             // Entry was removed.
-            drop(lock_file);
+            drop(_lock);
             Ok(false)
         }
     }
@@ -546,53 +469,7 @@ fn transition_entry_with_evidence(
     evidence_dir: Option<&str>,
     fence: &FenceToken,
 ) -> Result<()> {
-    let lock_path = registry_lock_path(repo);
-
-    // Ensure the workflow directory exists before creating the lock file.
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
-
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file for transition")?;
-
-    // Check flock return value.
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock for transition: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            bail!("failed to acquire lock for registry transition");
-        }
-    }
+    let _lock = super::lock::WorkflowFileLock::acquire(repo, "proposal_registry.lock")?;
 
     let mut registry = load_registry(repo).context("failed to read registry for transition")?;
     let entry = registry
@@ -622,7 +499,7 @@ fn transition_entry_with_evidence(
     save_registry(repo, &registry)?;
 
     // Do NOT delete the lock file — just drop the handle to release.
-    drop(lock_file);
+    drop(_lock);
     Ok(())
 }
 /// Fenced finalization: acquire the registry lock, revalidate ownership and
@@ -649,49 +526,7 @@ pub(super) fn fenced_finalize(
     terminal_state: super::identity::EvaluationState,
     failure_classification: Option<String>,
 ) -> Result<()> {
-    let lock_path = registry_lock_path(repo);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file for finalization")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock for finalization: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            bail!("failed to acquire lock for finalization");
-        }
-    }
+    let _lock = super::lock::WorkflowFileLock::acquire(repo, "proposal_registry.lock")?;
 
     // Under lock: revalidate ownership and heartbeat health.
     let mut registry = load_registry(repo).context("failed to read registry for finalization")?;
@@ -773,7 +608,7 @@ pub(super) fn fenced_finalize(
 
     save_registry(repo, &registry).context("failed to save registry during finalization")?;
 
-    drop(lock_file);
+    drop(_lock);
     Ok(())
 }
 /// Release a reservation (remove the entry from the registry).
@@ -784,53 +619,7 @@ pub(super) fn release_reservation(
     identity_key: &str,
     fence: &FenceToken,
 ) -> Result<()> {
-    let lock_path = registry_lock_path(repo);
-
-    // Ensure the workflow directory exists before creating the lock file.
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create workflow dir for lock file")?;
-    }
-
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .context("failed to create registry lock file for release")?;
-
-    // Check flock return value.
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("failed to acquire registry lock for release: {err}");
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
-        };
-        let handle = lock_file.as_raw_handle();
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                handle as _,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result == 0 {
-            bail!("failed to acquire lock for reservation release");
-        }
-    }
+    let _lock = super::lock::WorkflowFileLock::acquire(repo, "proposal_registry.lock")?;
 
     let mut registry = load_registry(repo).context("failed to read registry for release")?;
     let entry = registry.entries.get_mut(identity_key);
@@ -858,7 +647,7 @@ pub(super) fn release_reservation(
     save_registry(repo, &registry)?;
 
     // Do NOT delete the lock file — just drop the handle to release.
-    drop(lock_file);
+    drop(_lock);
     Ok(())
 }
 // ---------------------------------------------------------------------------
@@ -881,9 +670,15 @@ pub(super) fn proposal_state_for_state(state: EvaluationState) -> Option<Proposa
         EvaluationState::GovernancePassed | EvaluationState::Validating => {
             ProposalState::Validating
         }
-        EvaluationState::ValidationComplete
-        | EvaluationState::IntegrityVerified
-        | EvaluationState::ReviewGate
+        // Late non-terminal safe points. These are reachable during a run's
+        // finalization window but are NOT yet terminal: a crash there must
+        // remain reclaimable, so they map to the renewable `Validating` state
+        // (stale via `generation_lease_timeout`). Terminal outcomes below map
+        // to `ValidationComplete`, which is never stale.
+        EvaluationState::ValidationComplete | EvaluationState::IntegrityVerified => {
+            ProposalState::Validating
+        }
+        EvaluationState::ReviewGate
         | EvaluationState::PreflightBlocked
         | EvaluationState::GenerationFailed
         | EvaluationState::GovernanceRejected
@@ -896,54 +691,71 @@ pub(super) fn proposal_state_for_state(state: EvaluationState) -> Option<Proposa
     })
 }
 
-/// Check whether a registry entry is stale according to its state and
-/// the given lease configuration.
+/// Check whether a registry entry is stale according to its state and the
+/// given lease configuration, using the supplied clock.
 ///
-/// - `Reserved`: stale when `reserved_at` is older than
+/// - `Reserved`: stale when `heartbeat_at` is older than
 ///   `stale_reservation_timeout`.
-/// - `Generating`: stale when `heartbeat_at` is older than
-///   `generation_lease_timeout`.
-/// - Other states: never stale (they should be consumed or returned).
+/// - `Generating`, `ProposalGenerated`, `Validating`: stale when `heartbeat_at`
+///   is older than `generation_lease_timeout`. A live owner is never reclaimed:
+///   `ProposalGenerated` is only claimable when its owner stopped heartbeating.
+/// - The terminal `ValidationComplete` registry state (published only by
+///   fenced finalization) is never stale. Late non-terminal safe points
+///   (`ValidationComplete`/`IntegrityVerified` evaluation states) map to the
+///   renewable `Validating` state so a crash during finalization stays
+///   reclaimable.
 ///
-/// Malformed timestamps fail closed (return an error) so that corrupt
-/// data cannot silently make an entry immortal.
+/// The clock is deterministic (injected) so tests can reason about exact
+/// thresholds. Malformed timestamps fail closed (return an error), and a
+/// timestamp in the future by more than `tolerated_clock_skew` also fails
+/// closed so forged/future data can never silently make an entry immortal.
 pub(super) fn is_entry_stale(entry: &RegistryEntry, lease_config: &LeaseConfig) -> Result<bool> {
-    match entry.state {
-        ProposalState::Reserved => {
-            let t = parse_rfc3339(&entry.reserved_at)
-                .context("malformed reserved_at timestamp in registry entry")?;
-            let age = chrono::Utc::now()
-                .signed_duration_since(t)
-                .to_std()
-                .unwrap_or(std::time::Duration::ZERO);
-            Ok(age > lease_config.stale_reservation_timeout)
+    is_entry_stale_at(entry, lease_config, chrono::Utc::now())
+}
+
+/// Deterministic staleness check. See [`is_entry_stale`] for semantics.
+pub fn is_entry_stale_at(
+    entry: &RegistryEntry,
+    lease_config: &LeaseConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let (ts, timeout) = match entry.state {
+        // Reserved liveness is renewable: the heartbeat task refreshes
+        // `heartbeat_at` from reservation through the whole non-terminal
+        // lifecycle, so a live Reserved owner is never reclaimed.
+        ProposalState::Reserved => (
+            entry.heartbeat_at.as_str(),
+            lease_config.stale_reservation_timeout,
+        ),
+        ProposalState::Generating
+        | ProposalState::ProposalGenerated
+        | ProposalState::Validating => (
+            entry.heartbeat_at.as_str(),
+            lease_config.generation_lease_timeout,
+        ),
+        ProposalState::ValidationComplete => return Ok(false),
+    };
+    let t = parse_rfc3339(ts)
+        .with_context(|| format!("malformed timestamp {ts:?} in registry entry"))?;
+    let age = now.signed_duration_since(t);
+    if age < chrono::Duration::zero() {
+        // Future timestamp: clock skew. Within the tolerated window treat it
+        // as fresh (it will age normally); beyond it fail closed so a future
+        // heartbeat cannot silently make the entry immortal.
+        let skew = -age;
+        if skew
+            > chrono::Duration::from_std(lease_config.tolerated_clock_skew)
+                .unwrap_or(chrono::Duration::zero())
+        {
+            bail!(
+                "registry timestamp {ts:?} is {skew:?} in the future, exceeding tolerated \
+                 clock skew of {:?}; refusing to treat the entry as live or stale",
+                lease_config.tolerated_clock_skew
+            );
         }
-        ProposalState::Generating => {
-            let t = parse_rfc3339(&entry.heartbeat_at)
-                .context("malformed heartbeat_at timestamp in registry entry")?;
-            let age = chrono::Utc::now()
-                .signed_duration_since(t)
-                .to_std()
-                .unwrap_or(std::time::Duration::ZERO);
-            Ok(age > lease_config.generation_lease_timeout)
-        }
-        ProposalState::ProposalGenerated => {
-            // ProposalGenerated is always reclaimable: the previous owner has
-            // finished generation. No heartbeat check needed.
-            Ok(false)
-        }
-        ProposalState::Validating => {
-            // Validating uses the same heartbeat-based stale check as Generating.
-            let t = parse_rfc3339(&entry.heartbeat_at)
-                .context("malformed heartbeat_at timestamp in registry entry")?;
-            let age = chrono::Utc::now()
-                .signed_duration_since(t)
-                .to_std()
-                .unwrap_or(std::time::Duration::ZERO);
-            Ok(age > lease_config.generation_lease_timeout)
-        }
-        ProposalState::ValidationComplete => Ok(false),
+        return Ok(false);
     }
+    Ok(age.to_std().unwrap_or(std::time::Duration::ZERO) > timeout)
 }
 
 /// Parse an RFC3339 timestamp string, returning the `chrono::DateTime<Utc>`.
@@ -970,9 +782,15 @@ mod tests {
             proposal_state_for_state(EvaluationState::Validating),
             Some(ProposalState::Validating)
         );
+        // Late non-terminal safe points map to the renewable Validating state
+        // so a crash during finalization stays reclaimable.
         assert_eq!(
             proposal_state_for_state(EvaluationState::ValidationComplete),
-            Some(ProposalState::ValidationComplete)
+            Some(ProposalState::Validating)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::IntegrityVerified),
+            Some(ProposalState::Validating)
         );
         // Every terminal outcome collapses to the registry's terminal state.
         assert_eq!(
@@ -1049,6 +867,7 @@ mod tests {
             lease_epoch: 1,
             state: ProposalState::Reserved,
             reserved_at: "2020-01-01T00:00:00Z".to_string(),
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
             ..Default::default()
         };
         let config = LeaseConfig::with_timeouts(
@@ -1081,17 +900,258 @@ mod tests {
         );
     }
     #[test]
-    fn proposal_generated_never_stale() {
+    fn proposal_generated_stale_when_owner_stops_heartbeating() {
         let entry = RegistryEntry {
             owner_run_id: "test".to_string(),
             lease_epoch: 1,
             state: ProposalState::ProposalGenerated,
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
             updated_at: "2020-01-01T00:00:00Z".to_string(),
             ..Default::default()
         };
         let config = LeaseConfig::default();
         let stale = is_entry_stale(&entry, &config).unwrap();
-        assert!(!stale, "ProposalGenerated must never be stale");
+        assert!(
+            stale,
+            "ProposalGenerated with an old heartbeat must be reclaimable"
+        );
+    }
+    #[test]
+    fn proposal_generated_fresh_heartbeat_not_stale() {
+        // Binding acceptance (#114): a ProposalGenerated entry whose owner is
+        // still heartbeating must NOT be reclaimable.
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::ProposalGenerated,
+            heartbeat_at: now_iso(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::default();
+        let stale = is_entry_stale(&entry, &config).unwrap();
+        assert!(
+            !stale,
+            "ProposalGenerated with a fresh heartbeat must not be reclaimable"
+        );
+    }
+    #[test]
+    fn future_heartbeat_beyond_skew_fails_closed() {
+        // A heartbeat 1 hour in the future must NOT make the entry immortal.
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Generating,
+            heartbeat_at: "2099-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let config = LeaseConfig::default();
+        let err = is_entry_stale(&entry, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("clock skew"),
+            "future heartbeat must fail closed with a skew diagnostic: {err}"
+        );
+    }
+    #[test]
+    fn future_heartbeat_within_skew_treated_fresh() {
+        // A slightly-future timestamp within the tolerated window is treated as
+        // fresh (never stale) but still ages normally once the clock catches up.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let entry = RegistryEntry {
+            owner_run_id: "test".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Generating,
+            heartbeat_at: "2026-01-01T00:00:03Z".to_string(), // 3s future, skew=5s
+            ..Default::default()
+        };
+        let config = LeaseConfig::default();
+        let stale = is_entry_stale_at(&entry, &config, now).unwrap();
+        assert!(!stale, "within-skew future heartbeat must be treated fresh");
+    }
+    #[test]
+    fn lease_config_validation_rejects_invalid_configs() {
+        let zero = std::time::Duration::ZERO;
+        assert!(
+            LeaseConfig::with_timeouts(zero, zero, zero)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            LeaseConfig::with_timeouts(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(30),
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(LeaseConfig::default().validate().is_ok());
+    }
+    #[test]
+    fn lease_rejects_heartbeat_equal_to_timeout() {
+        // The reviewer's original red example: heartbeat == generation timeout
+        // leaves no margin for renewal jitter and permits false reclaim.
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(
+            config.validate().is_err(),
+            "heartbeat equal to the timeout must be rejected"
+        );
+    }
+    #[test]
+    fn lease_rejects_unsafe_reservation_ratio() {
+        // Heartbeat well under the generation timeout but above one third of the
+        // reservation timeout: a long preflight could make a live Reserved owner
+        // look stale.
+        let config = LeaseConfig::with_timeouts(
+            std::time::Duration::from_secs(90),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(40),
+        );
+        assert!(
+            config.validate().is_err(),
+            "heartbeat above one third of the reservation timeout must be rejected"
+        );
+    }
+    #[test]
+    fn default_lease_configuration_is_safe() {
+        // The shipped defaults must satisfy the safety ratio.
+        let config = LeaseConfig::default();
+        assert!(
+            config.validate().is_ok(),
+            "default lease configuration must pass the safety ratio"
+        );
+        let three_hb = config.heartbeat_interval * 3;
+        assert!(
+            three_hb <= config.generation_lease_timeout,
+            "default heartbeat margin must hold for generation"
+        );
+        assert!(
+            three_hb <= config.stale_reservation_timeout,
+            "default heartbeat margin must hold for reservation"
+        );
+    }
+    #[test]
+    fn live_owner_is_never_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // A fresh heartbeating ProposalGenerated owner.
+        let entry = RegistryEntry {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::ProposalGenerated,
+            proposal_id: Some("proposal-9".to_string()),
+            heartbeat_at: now_iso(),
+            ..Default::default()
+        };
+        let mut registry = ProposalRegistry::default();
+        registry.entries.insert("test-key".to_string(), entry);
+        save_registry(&repo, &registry).unwrap();
+
+        let config = LeaseConfig::default();
+        let observed = OwnershipObservation {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::ProposalGenerated,
+        };
+        let result =
+            try_take_ownership_cas(&repo, "test-key", "worker-2", &config, Some(&observed))
+                .unwrap();
+        assert!(
+            matches!(result, TakeoverResult::StillLive),
+            "a live ProposalGenerated owner must never be reclaimed: {result:?}"
+        );
+        // Proposal id preserved, owner unchanged.
+        let registry = load_registry(&repo).unwrap();
+        let entry = registry.entries.get("test-key").unwrap();
+        assert_eq!(entry.owner_run_id, "worker-1");
+        assert_eq!(entry.lease_epoch, 1);
+        assert_eq!(entry.proposal_id.as_deref(), Some("proposal-9"));
+    }
+    #[test]
+    fn takeover_cas_detects_observed_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let entry = RegistryEntry {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Reserved,
+            reserved_at: "2020-01-01T00:00:00Z".to_string(),
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let mut registry = ProposalRegistry::default();
+        registry.entries.insert("test-key".to_string(), entry);
+        save_registry(&repo, &registry).unwrap();
+
+        let config = LeaseConfig::default();
+        // The caller observed epoch 1/worker-1, but the entry now belongs to
+        // worker-2 at epoch 3 (another worker already claimed it).
+        let observed = OwnershipObservation {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Reserved,
+        };
+        {
+            let mut registry = load_registry(&repo).unwrap();
+            let e = registry.entries.get_mut("test-key").unwrap();
+            e.owner_run_id = "worker-2".to_string();
+            e.lease_epoch = 3;
+            save_registry(&repo, &registry).unwrap();
+        }
+        let result =
+            try_take_ownership_cas(&repo, "test-key", "worker-3", &config, Some(&observed))
+                .unwrap();
+        assert!(
+            matches!(result, TakeoverResult::LostRace),
+            "takeover must fail closed when the observed identity changed: {result:?}"
+        );
+        let registry = load_registry(&repo).unwrap();
+        let entry = registry.entries.get("test-key").unwrap();
+        assert_eq!(entry.owner_run_id, "worker-2");
+        assert_eq!(entry.lease_epoch, 3);
+    }
+    #[test]
+    fn stale_takeover_increments_epoch_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let entry = RegistryEntry {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: 1,
+            state: ProposalState::Generating,
+            proposal_id: None,
+            heartbeat_at: "2020-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let mut registry = ProposalRegistry::default();
+        registry.entries.insert("test-key".to_string(), entry);
+        save_registry(&repo, &registry).unwrap();
+
+        let config = LeaseConfig::default();
+        let taken = try_take_ownership(&repo, "test-key", "worker-2", &config).unwrap();
+        match taken {
+            TakeoverResult::Taken(fence) => {
+                assert_eq!(fence.owner_run_id, "worker-2");
+                assert_eq!(fence.lease_epoch, 2);
+            }
+            other => panic!("expected takeover, got {other:?}"),
+        }
+        // Second takeover of the now-owned entry is blocked: owner changed.
+        let result = try_take_ownership(&repo, "test-key", "worker-3", &config).unwrap();
+        assert!(
+            matches!(result, TakeoverResult::StillLive),
+            "a just-taken (fresh) entry must not be reclaimable again: {result:?}"
+        );
     }
     #[test]
     fn generating_state_fresh_heartbeat_not_stale() {

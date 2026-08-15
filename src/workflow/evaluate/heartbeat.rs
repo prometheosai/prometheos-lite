@@ -17,7 +17,22 @@ use super::registry::{FenceToken, renew_heartbeat};
 pub(super) struct HeartbeatSession {
     stop_tx: tokio::sync::watch::Sender<bool>,
     status_rx: tokio::sync::watch::Receiver<Option<String>>,
-    handle: tokio::task::JoinHandle<()>,
+    // `Option` so both `Drop` and `shutdown` can take the handle without moving
+    // out of the whole struct (which a `Drop` type forbids).
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for HeartbeatSession {
+    fn drop(&mut self) {
+        // Final safety net: if `shutdown` was never called (panic path,
+        // cancellation before generation, or any early return that drops the
+        // session), the renewal task must not outlive the session. Signal stop
+        // and abort the task so a dead owner cannot keep its reservation alive.
+        let _ = self.stop_tx.send(true);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl HeartbeatSession {
@@ -37,14 +52,13 @@ impl HeartbeatSession {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {}
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() {
-                            break;
-                        }
-                    }
-                }
-                if *stop_rx.borrow() {
-                    break;
+                    // The stop sender is dropped when the owning HeartbeatSession
+                    // is dropped without an explicit shutdown(); `changed()` then
+                    // returns Err. Either an explicit stop (value flips to true)
+                    // or the sender disappearing must terminate the task so a
+                    // cancelled run cannot keep its reservation artificially
+                    // alive by continuing to renew.
+                    _ = stop_rx.changed() => break,
                 }
                 match renew_heartbeat(&repo, &identity_key, &fence) {
                     Err(e) => {
@@ -62,7 +76,7 @@ impl HeartbeatSession {
         Self {
             stop_tx,
             status_rx,
-            handle,
+            handle: Some(handle),
         }
     }
 
@@ -82,15 +96,12 @@ impl HeartbeatSession {
     }
 
     /// Stop the heartbeat task, await it, and surface any error it reported.
-    pub(super) async fn shutdown(self, context: &str) -> Result<()> {
-        let Self {
-            stop_tx,
-            status_rx,
-            handle,
-        } = self;
-        let _ = stop_tx.send(true);
-        let _ = handle.await;
-        if let Some(msg) = status_rx.borrow().as_ref() {
+    pub(super) async fn shutdown(&mut self, context: &str) -> Result<()> {
+        let _ = self.stop_tx.send(true);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+        if let Some(msg) = self.status_rx.borrow().as_ref() {
             bail!("heartbeat failure{context}: {msg}");
         }
         Ok(())
@@ -103,7 +114,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::workflow::evaluate::registry::{
-        LeaseConfig, lookup_entry, try_reserve, try_take_ownership,
+        LeaseConfig, OwnershipObservation, ProposalState, lookup_entry, try_reserve,
+        try_take_ownership, try_take_ownership_cas,
     };
     use crate::workflow::evaluate::registry::{ReserveResult, TakeoverResult};
 
@@ -121,7 +133,7 @@ mod tests {
         let key = "test-key".to_string();
         let fence = fresh_entry(&repo, &key, "worker-1");
 
-        let session = HeartbeatSession::start(
+        let mut session = HeartbeatSession::start(
             repo.clone(),
             key.clone(),
             fence,
@@ -146,7 +158,7 @@ mod tests {
         let key = "test-key".to_string();
         let fence = fresh_entry(&repo, &key, "worker-1");
 
-        let session = HeartbeatSession::start(
+        let mut session = HeartbeatSession::start(
             repo.clone(),
             key.clone(),
             fence,
@@ -167,6 +179,7 @@ mod tests {
         match try_take_ownership(&repo, &key, "thief", &lease).unwrap() {
             TakeoverResult::Taken(_) => {}
             TakeoverResult::StillLive => panic!("expected takeover"),
+            TakeoverResult::LostRace => panic!("expected takeover, lost the race"),
         }
 
         // The next heartbeat (at ~1s) must observe the ownership change and
@@ -186,5 +199,86 @@ mod tests {
         }
 
         session.shutdown("test").await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_stops_when_session_is_dropped() {
+        // Regression: dropping the session without an explicit shutdown must
+        // stop the renewal task, so a cancelled run cannot keep its reservation
+        // alive by continuing to renew from a detached task.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let key = "test-key".to_string();
+        let fence = fresh_entry(&repo, &key, "worker-1");
+
+        let session = HeartbeatSession::start(
+            repo.clone(),
+            key.clone(),
+            fence,
+            Duration::from_millis(20),
+            "ownership lost",
+        );
+        // Let it renew at least once so heartbeat_at advances.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        drop(session);
+        // Give any in-flight renewal a chance to finish, then sample.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let hb1 = lookup_entry(&repo, &key).unwrap().heartbeat_at.clone();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let hb2 = lookup_entry(&repo, &key).unwrap().heartbeat_at.clone();
+        assert_eq!(
+            hb1, hb2,
+            "heartbeat must stop advancing after the session is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn long_live_reserved_owner_is_not_reclaimed() {
+        // Regression for a live `Reserved` owner surviving a long preflight.
+        // The heartbeat starts the moment the reservation is taken, so a slow
+        // preflight must never let a contender observe the owner as stale and
+        // reclaim it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let key = "test-key".to_string();
+        let fence = fresh_entry(&repo, &key, "worker-1");
+
+        // Short but SAFE lease: heartbeat * 3 <= reservation timeout.
+        let lease = LeaseConfig::with_timeouts(
+            Duration::from_secs(1),     // stale_reservation_timeout
+            Duration::from_secs(1),     // generation_lease_timeout
+            Duration::from_millis(100), // heartbeat_interval
+        );
+        assert!(lease.validate().is_ok());
+
+        let mut session = HeartbeatSession::start(
+            repo.clone(),
+            key.clone(),
+            fence.clone(),
+            Duration::from_millis(100),
+            "ownership lost",
+        );
+
+        let observed = OwnershipObservation {
+            owner_run_id: "worker-1".to_string(),
+            lease_epoch: fence.lease_epoch,
+            state: ProposalState::Reserved,
+        };
+
+        // Sample across many stale windows. The heartbeat keeps renewing, so a
+        // contender that observed the owner must always back off as StillLive.
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let result =
+                try_take_ownership_cas(&repo, &key, "thief", &lease, Some(&observed)).unwrap();
+            assert!(
+                matches!(result, TakeoverResult::StillLive),
+                "a live Reserved owner must never be reclaimed: {result:?}"
+            );
+            let entry = lookup_entry(&repo, &key).unwrap();
+            assert_eq!(entry.owner_run_id, "worker-1");
+        }
+
+        session.shutdown("test").await.unwrap();
     }
 }

@@ -1093,13 +1093,14 @@ async fn crash_after_reservation_is_recoverable() {
     let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
 
-    // Find the entry and set its state to Reserved with an old timestamp
-    // (simulating a crashed process).
+    // Find the entry and set its state to Reserved with an old heartbeat
+    // (simulating a crashed process). Liveness is renewable, so the stale
+    // marker lives in `heartbeat_at`, not `reserved_at`.
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::Reserved;
         entry.proposal_id = None;
-        // Set reserved_at to 5 minutes ago so stale detection triggers.
-        entry.reserved_at = "2020-01-01T00:00:00Z".to_string();
+        // Set heartbeat_at to the past so stale detection triggers.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -1168,6 +1169,10 @@ async fn crash_after_generation_is_recoverable() {
 
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated;
+        // #114: ProposalGenerated is only claimable when its owner stopped
+        // heartbeating. A completed run left a fresh heartbeat, so simulate the
+        // crash/abandonment by aging the heartbeat past the lease timeout.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -1276,6 +1281,10 @@ async fn resumed_validation_performs_preflight() {
 
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated;
+        // #114: ProposalGenerated is only claimable when its owner stopped
+        // heartbeating. A completed run left a fresh heartbeat, so simulate the
+        // crash/abandonment by aging the heartbeat past the lease timeout.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -1641,6 +1650,7 @@ async fn slow_generation_not_reclaimed_during_heartbeat() {
         stale_reservation_timeout: Duration::from_secs(1),
         generation_lease_timeout: Duration::from_secs(60),
         heartbeat_interval: Duration::from_millis(100),
+        tolerated_clock_skew: Duration::from_secs(5),
     };
     let short_lease2 = short_lease.clone();
 
@@ -1855,6 +1865,8 @@ async fn stale_worker_is_fenced() {
             serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
         if let Some(e) = registry.entries.get_mut(&identity_key) {
             e.state = prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated;
+            // #114: age the heartbeat so the stale owner is claimable.
+            e.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
         }
         std::fs::write(
             &registry_path,
@@ -1873,9 +1885,10 @@ async fn stale_worker_is_fenced() {
         provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
         route_info: None,
         lease_config: LeaseConfig {
-            stale_reservation_timeout: Duration::from_secs(1),
-            generation_lease_timeout: Duration::from_secs(60),
+            stale_reservation_timeout: Duration::from_secs(120),
+            generation_lease_timeout: Duration::from_secs(300),
             heartbeat_interval: Duration::from_secs(30),
+            tolerated_clock_skew: Duration::from_secs(5),
         },
     };
 
@@ -1939,6 +1952,10 @@ async fn transition_failures_propagate() {
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated;
+        // #114: ProposalGenerated is only claimable when its owner stopped
+        // heartbeating. A completed run left a fresh heartbeat, so simulate the
+        // crash/abandonment by aging the heartbeat past the lease timeout.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -1956,9 +1973,10 @@ async fn transition_failures_propagate() {
     // If the entry was stolen again during validation, it would fail.
     // To test: simulate a theft DURING validation by racing.
     let short_lease = LeaseConfig {
-        stale_reservation_timeout: Duration::from_secs(1),
-        generation_lease_timeout: Duration::from_secs(60),
-        heartbeat_interval: Duration::from_secs(30),
+        stale_reservation_timeout: Duration::from_secs(60),
+        generation_lease_timeout: Duration::from_secs(120),
+        heartbeat_interval: Duration::from_secs(15),
+        tolerated_clock_skew: Duration::from_secs(5),
     };
 
     let config2 = EvaluationConfig {
@@ -1982,6 +2000,8 @@ async fn transition_failures_propagate() {
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
     for entry in registry2.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated;
+        // #114: age the heartbeat so the stale owner is claimable.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -2034,6 +2054,10 @@ async fn ownership_mismatch_fails_closed() {
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
     for entry in registry.entries.values_mut() {
         entry.state = prometheos_lite::workflow::evaluate::ProposalState::ProposalGenerated;
+        // #114: ProposalGenerated is only claimable when its owner stopped
+        // heartbeating. A completed run left a fresh heartbeat, so simulate the
+        // crash/abandonment by aging the heartbeat past the lease timeout.
+        entry.heartbeat_at = "2020-01-01T00:00:00Z".to_string();
     }
     std::fs::write(
         &registry_path,
@@ -2129,7 +2153,7 @@ async fn stale_validating_reuses_proposal() {
         lease_config: LeaseConfig::with_timeouts(
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(300),
         ),
     };
     let bundle2 = evaluate::evaluate(config2).await.unwrap();
@@ -2199,7 +2223,7 @@ async fn provider_invocation_exactly_once_via_stale_validating() {
         lease_config: LeaseConfig::with_timeouts(
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(300),
         ),
     };
     let bundle2 = evaluate::evaluate(config2).await.unwrap();
@@ -2517,6 +2541,7 @@ fn short_lease() -> LeaseConfig {
         stale_reservation_timeout: Duration::from_secs(1),
         generation_lease_timeout: Duration::from_secs(1),
         heartbeat_interval: Duration::from_millis(100),
+        tolerated_clock_skew: Duration::from_secs(5),
     }
 }
 

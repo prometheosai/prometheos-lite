@@ -1,7 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
-use std::process::Command;
+use std::process::Stdio;
 
+use tokio::process::Command as AsyncCommand;
+
+use super::cancellation::CancellationToken;
 use super::evidence::ValidationRecord;
 use super::generation::load_proposal_from_repo;
 use super::identity::{EvaluationState, now_iso};
@@ -11,11 +14,21 @@ use super::integrity::run_git_cmd;
 // Validation (isolated worktree)
 // ---------------------------------------------------------------------------
 
-pub(super) fn run_isolated_validation(
+/// Run isolated validation, cooperatively cancellable.
+///
+/// The validation subprocess is a long-running external workload. This function
+/// races the child wait against `token.cancelled()`: when cancellation is
+/// requested the entire child process tree is terminated and the run returns an
+/// error classified as a cooperative cancellation (it records no failed
+/// validation, and recovery can later resume finalization without re-running
+/// validation). Cancellation is a control-flow signal, NOT a validation
+/// failure.
+pub(super) async fn run_isolated_validation(
     repo: &Path,
     proposal_id: &str,
     validation_command: Option<&str>,
     evidence_dir: &Path,
+    token: &CancellationToken,
 ) -> Result<ValidationRecord> {
     let proposal = load_proposal_from_repo(repo, proposal_id)?;
     let start_time = now_iso();
@@ -85,18 +98,41 @@ pub(super) fn run_isolated_validation(
     // Apply the patch.
     let _ = run_git_cmd(&wt_root, &["apply", patch_file.to_str().unwrap()]);
 
-    // Step 2: Run validation command if present.
+    // Step 2: Run validation command if present — cooperatively cancellable.
     let (exit_code, stdout, stderr) = match validation_command {
         Some(cmd) => {
-            let output = validation_shell(cmd)
+            let child = validation_shell_async(cmd)
                 .current_dir(&wt_root)
-                .output()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
                 .context("failed to execute validation command")?;
-            (
-                Some(output.status.code().unwrap_or(-1)),
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            )
+            // Capture the pid up front so cancellation can signal the whole
+            // process group even after the child is moved into the waiter task.
+            let pid = child.id();
+            let mut waiter = tokio::spawn(async move { child.wait_with_output().await });
+            tokio::select! {
+                res = &mut waiter => {
+                    let output = res
+                        .context("validation waiter task failed")?
+                        .context("failed to wait on validation command")?;
+                    (
+                        Some(output.status.code().unwrap_or(-1)),
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                    )
+                }
+                _ = token.cancelled() => {
+                    // Terminate the whole validation subtree by pid, then stop
+                    // waiting. `kill_on_drop` cleans up the spawned child too.
+                    if let Some(pid) = pid {
+                        kill_child_tree(pid).await;
+                    }
+                    waiter.abort();
+                    return Err(anyhow!("validation cancelled by user request"));
+                }
+            }
         }
         None => (None, String::new(), String::new()),
     };
@@ -334,20 +370,50 @@ pub(super) fn failure_to_terminal_state(classification: &str) -> EvaluationState
         _ => EvaluationState::InternalError,
     }
 }
-/// Platform-aware shell for validation commands.
-fn validation_shell(command: &str) -> Command {
+
+/// Async, platform-aware shell for validation commands. On unix the child is
+/// placed in its own process group so the entire subtree can be signalled when
+/// the run is cancelled.
+fn validation_shell_async(command: &str) -> AsyncCommand {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd");
+        let mut cmd = AsyncCommand::new("cmd");
         cmd.arg("/C").arg(command);
         cmd
     }
     #[cfg(not(windows))]
     {
-        let mut cmd = Command::new("sh");
+        let mut cmd = AsyncCommand::new("sh");
         cmd.arg("-c").arg(command);
+        // Own process group so cancellation can signal the whole subtree.
+        cmd.process_group(0);
         cmd
     }
+}
+
+/// Terminate a validation child process tree given its pid, and wait a moment
+/// for the kill to take effect.
+///
+/// On unix the child was spawned in its own process group, so signalling the
+/// negative pid reaches the shell and every descendant. On windows `taskkill
+/// /T` kills the tree. `kill_on_drop` on the spawned child cleans up the
+/// `Child` handle itself once its waiter task is aborted.
+async fn kill_child_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill with SIGKILL on a process group we just created.
+        unsafe {
+            let _ = libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    // Give the OS a brief moment to reap the tree before the caller continues.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
 #[cfg(test)]

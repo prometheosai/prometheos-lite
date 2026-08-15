@@ -13,6 +13,7 @@
 /dist/
 /build/
 /.cargo-target/
+tests/fixtures/**/.cargo-target/
 
 # Logs and temporary files
 logs/

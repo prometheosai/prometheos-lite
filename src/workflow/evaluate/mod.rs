@@ -17,6 +17,7 @@
 //! No automatic approval, patch application, commit creation, push, or
 //! pull-request creation.
 
+mod cancellation;
 mod checkpoint;
 mod cleanup;
 mod durable;
@@ -26,6 +27,7 @@ mod heartbeat;
 mod identity;
 mod integrity;
 mod journal;
+mod lock;
 mod migration;
 mod orchestrator;
 mod preflight;
@@ -35,6 +37,7 @@ mod schema;
 mod transition;
 mod validation;
 
+pub use cancellation::CancellationToken;
 pub use checkpoint::{EvaluationCheckpoint, read_checkpoint, write_checkpoint};
 pub use evidence::{
     CleanupRecord, EvidenceBundle, IntegrityRecord, ProposalRecord, ProviderProvenanceRecord,
@@ -46,9 +49,16 @@ pub use identity::{
 };
 pub use integrity::verify_repo_integrity;
 pub use journal::{JournalEvent, read_journal};
-pub use orchestrator::{EvaluationConfig, evaluate};
+pub use lock::WorkflowFileLock;
+pub use orchestrator::{EvaluationConfig, evaluate, evaluate_with_cancellation};
 pub use preflight::{DiskSpaceStatus, PreflightResult, available_disk_bytes};
-pub use recovery::{RecoveredEvaluation, ensure_resumable, recover_evaluation};
-pub use registry::{FenceToken, LeaseConfig, ProposalRegistry, ProposalState, RegistryEntry};
+pub use recovery::{
+    RecoveredEvaluation, RecoveryDisposition, determine_recovery_disposition, ensure_resumable,
+    recover_evaluation,
+};
+pub use registry::{
+    FenceToken, LeaseConfig, OwnershipObservation, ProposalRegistry, ProposalState, RegistryEntry,
+    TakeoverResult, is_entry_stale_at, try_take_ownership, try_take_ownership_cas,
+};
 pub use transition::validate_transition;
 pub use validation::classify_validation_failure;
