@@ -12,12 +12,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use chrono::Utc;
 use prometheos_lite::harness::patch_provider::{
     BlockingProposalProvider, CountingProposalProvider, MockProposalMode, MockProposalProvider,
 };
 use prometheos_lite::workflow::evaluate::{
-    CancellationToken, EvaluationConfig, EvaluationState, LeaseConfig, TaskManifest,
-    evaluate_with_cancellation, read_journal,
+    CancellationToken, EvaluationConfig, EvaluationState, LeaseConfig, ProposalRegistry,
+    ProposalState, RegistryEntry, TakeoverResult, TaskManifest, evaluate_with_cancellation,
+    is_entry_stale_at, read_journal, try_take_ownership,
 };
 use tempfile::TempDir;
 use tokio::sync::Barrier;
@@ -386,6 +388,12 @@ enum CancelTrigger {
 /// Run an evaluation, cancel at a pre-finalization safe point, then run again to
 /// resume and finalize. Returns (generation count, validation marker lines,
 /// terminal event count).
+///
+/// Cancellation is made deterministic with a test-only barrier: the first run
+/// parks at the chosen late safe point until the test cancels the token and
+/// releases it. This removes the race between a test observing durable progress
+/// and cancelling a run that might otherwise race ahead and publish a terminal
+/// event before the cancel arrives.
 async fn late_cancel_then_resume(
     repo: &Path,
     goal: &str,
@@ -411,7 +419,11 @@ async fn late_cancel_then_resume(
         route_info: None,
         lease_config: short.clone(),
     };
-    let token = CancellationToken::new();
+
+    // Install a rendezvous barrier on the token so the first run parks at the
+    // late safe point until the test cancels and releases it.
+    let hold = Arc::new(Barrier::new(2));
+    let token = CancellationToken::with_park_barrier(hold.clone());
     let run_token = token.clone();
     let handle = tokio::spawn(async move { evaluate_with_cancellation(config, run_token).await });
 
@@ -433,9 +445,31 @@ async fn late_cancel_then_resume(
                 );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            // Parked at the ValidationComplete safe point. Cancel, then release
+            // the hold so the run proceeds into the cancellation path.
+            token.cancel();
+            hold.wait().await;
         }
         CancelTrigger::JournalIntegrityVerified => {
+            // Release the ValidationComplete park first (no cancel yet), let the
+            // run run integrity, then park at the IntegrityVerified safe point.
             let start = std::time::Instant::now();
+            loop {
+                let events = read_journal(repo, &key).unwrap();
+                if events
+                    .iter()
+                    .any(|e| e.to_state == EvaluationState::ValidationComplete)
+                {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(30),
+                    "validation complete never reached"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            hold.wait().await;
+            let start2 = std::time::Instant::now();
             loop {
                 let events = read_journal(repo, &key).unwrap();
                 if events
@@ -445,15 +479,49 @@ async fn late_cancel_then_resume(
                     break;
                 }
                 assert!(
-                    start.elapsed() < Duration::from_secs(30),
+                    start2.elapsed() < Duration::from_secs(30),
                     "integrity verified never reached"
                 );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            // Parked at the IntegrityVerified safe point. Cancel, then release.
+            token.cancel();
+            hold.wait().await;
         }
     }
-    token.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(60), handle).await;
+    let result = tokio::time::timeout(Duration::from_secs(60), handle)
+        .await
+        .expect("first run must stop at the cancellation safe point")
+        .expect("first run must not panic");
+    let err = result.expect_err("cancellation must surface as a distinct error");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "distinct cancellation error expected: {err}"
+    );
+
+    // The journal tail must be exactly the nonterminal same-state cancellation.
+    let events = read_journal(repo, &key).unwrap();
+    let tail = events.last().expect("cancellation must be journaled");
+    let expected = match &trigger {
+        CancelTrigger::JournalValidationComplete => EvaluationState::ValidationComplete,
+        CancelTrigger::JournalIntegrityVerified => EvaluationState::IntegrityVerified,
+    };
+    assert_eq!(
+        tail.to_state, expected,
+        "journal tail state must match the safe point"
+    );
+    assert_eq!(
+        tail.from_state, expected,
+        "cancellation is a same-state event"
+    );
+    assert_eq!(
+        tail.failure_classification.as_deref(),
+        Some("cancelled"),
+        "journal tail must be the nonterminal same-state cancellation"
+    );
+    // No terminal event has been published before the resume.
+    let terminal_before = events.iter().filter(|e| e.to_state.is_terminal()).count();
+    assert_eq!(terminal_before, 0, "no terminal event before resume");
 
     // Resume: must complete exactly once, never re-invoking generation or
     // re-running validation.
@@ -481,7 +549,10 @@ async fn late_cancel_then_resume(
     // re-run validation (exactly 1).
     let validation_runs = events
         .iter()
-        .filter(|e| e.to_state == EvaluationState::ValidationComplete)
+        .filter(|e| {
+            e.to_state == EvaluationState::ValidationComplete
+                && e.failure_classification.as_deref() != Some("cancelled")
+        })
         .count();
     (
         provider_count.load(Ordering::SeqCst),
@@ -562,4 +633,268 @@ async fn late_cancel_produces_single_terminal_event_after_resume() {
     )
     .await;
     assert_eq!(term, 1, "exactly one terminal event must be published");
+}
+
+// ---------------------------------------------------------------------------
+// Blocker re-check: the heartbeat must actually STOP when a run is cancelled
+// before generation. A detached, still-renewing heartbeat would keep a dead
+// owner's reservation immortal and prevent any later reclaim.
+// ---------------------------------------------------------------------------
+
+fn read_registry_entry(repo: &Path) -> RegistryEntry {
+    let path = repo
+        .join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json");
+    let reg: ProposalRegistry =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    reg.entries
+        .into_values()
+        .next()
+        .expect("registry entry must exist")
+}
+
+#[tokio::test]
+async fn cancel_before_generation_stops_heartbeat() {
+    let (_dir, repo) = temp_repo();
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+    );
+    assert!(short.validate().is_ok());
+
+    let mut manifest = make_manifest(&repo, "cancel-before-gen-heartbeat");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short.clone(),
+    };
+    // Cancel before the run starts so it deterministically bails at the
+    // before-generation safe point, leaving a Reserved (reclaimable) entry and
+    // a heartbeat that must stop once the run exits.
+    let token = CancellationToken::new();
+    token.cancel();
+    let run_token = token.clone();
+    let handle = tokio::spawn(async move { evaluate_with_cancellation(config, run_token).await });
+
+    let _key = wait_for_identity_key(&repo, Duration::from_secs(30)).await;
+    let hb0 = read_registry_entry(&repo).heartbeat_at;
+    let result = tokio::time::timeout(Duration::from_secs(60), handle)
+        .await
+        .expect("run must stop at the cancellation safe point")
+        .expect("run must not panic");
+    let err = result.expect_err("cancellation must surface as an error");
+    assert!(err.to_string().contains("cancelled"), "{err}");
+
+    let hb1 = read_registry_entry(&repo).heartbeat_at;
+    assert!(
+        hb1 >= hb0,
+        "heartbeat should advance while the run is live (hb0={hb0:?} hb1={hb1:?})"
+    );
+    // Wait several heartbeat intervals past the cancelled run; the dead owner
+    // must NOT keep renewing.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let hb2 = read_registry_entry(&repo).heartbeat_at;
+    assert_eq!(
+        hb1, hb2,
+        "heartbeat must stop advancing after cancel-before-generation"
+    );
+
+    // Prove it becomes stale at an injected deterministic time: a timestamp
+    // after the frozen heartbeat plus the stale reservation timeout is stale.
+    let entry = read_registry_entry(&repo);
+    assert_eq!(entry.state, ProposalState::Reserved);
+    let injected_now = Utc::now()
+        + chrono::Duration::from_std(short.stale_reservation_timeout + Duration::from_secs(5))
+            .unwrap();
+    assert!(
+        is_entry_stale_at(&entry, &short, injected_now).unwrap(),
+        "cancelled Reserved entry must be stale at the injected time"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_reserved_entry_eventually_becomes_reclaimable() {
+    let (_dir, repo) = temp_repo();
+    // Short stale reservation timeout so the frozen heartbeat ages out quickly
+    // after cancellation, proving the entry becomes reclaimable. Heartbeat*3
+    // (150ms) <= stale timeout (200ms) keeps the lease valid.
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_millis(200),
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+    );
+    assert!(short.validate().is_ok());
+
+    let mut manifest = make_manifest(&repo, "cancel-before-gen-reclaim");
+    manifest.validation_command = Some(marker_validation_cmd(&repo));
+    let config = EvaluationConfig {
+        manifest,
+        provider: Box::new(MockProposalProvider::with_mode(MockProposalMode::Safe)),
+        route_info: None,
+        lease_config: short.clone(),
+    };
+    // Cancel before the run starts so it bails at the before-generation safe
+    // point deterministically, leaving a Reserved (reclaimable) entry.
+    let token = CancellationToken::new();
+    token.cancel();
+    let run_token = token.clone();
+    let handle = tokio::spawn(async move { evaluate_with_cancellation(config, run_token).await });
+    let _ = tokio::time::timeout(Duration::from_secs(60), handle).await;
+
+    let key = wait_for_identity_key(&repo, Duration::from_secs(30)).await;
+    // Wait for the frozen heartbeat to age past the stale threshold.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    match try_take_ownership(&repo, &key, "reclaimer", &short).unwrap() {
+        TakeoverResult::Taken(_) => {}
+        other => panic!("cancelled Reserved entry must be reclaimable, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocker re-check (issue #114, restart-path): a second crash during late
+// finalization must be recoverable. Three operations reuse the same durable
+// proposal: generation and validation run exactly once, and exactly one
+// terminal event is ever published.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn second_crash_recovery_produces_one_terminal() {
+    let (_dir, repo) = temp_repo();
+    let short = LeaseConfig::with_timeouts(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+    );
+    assert!(short.validate().is_ok());
+
+    let provider_count = Arc::new(AtomicUsize::new(0));
+
+    // --- RUN A: generate + validate, cancel at the ValidationComplete safe point.
+    let a_hold = Arc::new(Barrier::new(2));
+    let ta = CancellationToken::with_park_barrier(a_hold.clone());
+    let mut ma = make_manifest(&repo, "second-crash");
+    ma.validation_command = Some(marker_validation_cmd(&repo));
+    let ca = EvaluationConfig {
+        manifest: ma,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: short.clone(),
+    };
+    let rta = ta.clone();
+    let ha = tokio::spawn(async move { evaluate_with_cancellation(ca, rta).await });
+    let key = wait_for_identity_key(&repo, Duration::from_secs(30)).await;
+    let start = std::time::Instant::now();
+    loop {
+        let events = read_journal(&repo, &key).unwrap();
+        if events
+            .iter()
+            .any(|e| e.to_state == EvaluationState::ValidationComplete)
+        {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "A: VC never reached"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    ta.cancel();
+    a_hold.wait().await;
+    let ra = tokio::time::timeout(Duration::from_secs(60), ha)
+        .await
+        .expect("A must stop")
+        .expect("A must not panic");
+    assert!(ra.is_err() && ra.unwrap_err().to_string().contains("cancelled"));
+
+    let events_a = read_journal(&repo, &key).unwrap();
+    let proposal_id = events_a
+        .iter()
+        .find(|e| e.to_state == EvaluationState::ValidationComplete)
+        .and_then(|e| e.proposal_ref.clone())
+        .expect("A must record a proposal reference");
+    assert!(!proposal_id.is_empty());
+    let term_a = events_a.iter().filter(|e| e.to_state.is_terminal()).count();
+    assert_eq!(term_a, 0, "no terminal before the resume");
+
+    // Let A's entry age out so B can reclaim it deterministically.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // --- RUN B: reclaim A, resume, run integrity, then CRASH before finalization.
+    let b_hold = Arc::new(Barrier::new(2));
+    let rb = CancellationToken::with_park_barrier(b_hold.clone());
+    let mut mb = make_manifest(&repo, "second-crash");
+    mb.validation_command = Some(marker_validation_cmd(&repo));
+    let cb = EvaluationConfig {
+        manifest: mb,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: short.clone(),
+    };
+    let rtb = rb.clone();
+    let hb = tokio::spawn(async move { evaluate_with_cancellation(cb, rtb).await });
+    let start_b = std::time::Instant::now();
+    loop {
+        let events = read_journal(&repo, &key).unwrap();
+        if events
+            .iter()
+            .any(|e| e.to_state == EvaluationState::IntegrityVerified)
+        {
+            break;
+        }
+        assert!(
+            start_b.elapsed() < Duration::from_secs(30),
+            "B: IntegrityVerified never reached"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Simulate a crash (process killed) while parked at the pre-finalization
+    // hold. The barrier is never released, so B stays parked until aborted.
+    hb.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Let B's entry age out so C can reclaim it deterministically.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // --- RUN C: reclaim B, publish the terminal outcome exactly once.
+    let mut mc = make_manifest(&repo, "second-crash");
+    mc.validation_command = Some(marker_validation_cmd(&repo));
+    let cc = EvaluationConfig {
+        manifest: mc,
+        provider: Box::new(CountingProposalProvider::new(provider_count.clone())),
+        route_info: None,
+        lease_config: short.clone(),
+    };
+    let bundle_c = evaluate_with_cancellation(cc, CancellationToken::new())
+        .await
+        .expect("C must finalize");
+    assert!(
+        bundle_c.proposal.is_some(),
+        "C must complete with the original proposal"
+    );
+
+    let events = read_journal(&repo, &key).unwrap();
+    let terminal = events.iter().filter(|e| e.to_state.is_terminal()).count();
+    let validation_runs = events
+        .iter()
+        .filter(|e| {
+            e.to_state == EvaluationState::ValidationComplete
+                && e.failure_classification.as_deref() != Some("cancelled")
+        })
+        .count();
+
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        1,
+        "generation runs exactly once"
+    );
+    assert_eq!(validation_runs, 1, "validation runs exactly once");
+    assert_eq!(terminal, 1, "exactly one terminal event is published");
+    assert_eq!(
+        bundle_c.proposal.as_ref().unwrap().id,
+        proposal_id,
+        "the original proposal id is preserved across the second crash"
+    );
 }

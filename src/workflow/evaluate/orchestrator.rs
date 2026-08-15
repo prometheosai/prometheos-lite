@@ -257,7 +257,7 @@ pub async fn evaluate_with_cancellation(
     // owner must never be falsely reclaimed because of immutable reservation
     // metadata. The heartbeat spans the entire nonterminal lifecycle and is
     // stopped on every exit path.
-    let heartbeat = HeartbeatSession::start(
+    let mut heartbeat = HeartbeatSession::start(
         repo.clone(),
         identity_key.clone(),
         fence.clone(),
@@ -324,6 +324,11 @@ pub async fn evaluate_with_cancellation(
             None,
             Some(refs.dir.clone()),
         )?;
+        // Stop the renewal task so the reservation becomes reclaimable rather
+        // than kept alive by a detached heartbeat after this run bails.
+        heartbeat
+            .shutdown("evaluation cancelled before generation")
+            .await?;
         bail!("evaluation cancelled by user request before generation");
     }
     transition_entry(
@@ -644,6 +649,12 @@ pub async fn evaluate_with_cancellation(
     // Safe point: validation is durable but the terminal event has not been
     // published. A later run resumes finalization (integrity + publication)
     // WITHOUT re-running validation.
+    //
+    // Test-only pause point: when a deterministic test installs a park barrier
+    // on the token, the run parks here so the test can cancel the token at a
+    // known, stable position (after ValidationComplete is durably journaled) and
+    // then release. No-op in production (no barrier installed).
+    token.park_at_safe_point().await;
     if token.is_cancelled() {
         record_cancellation(
             &repo,
@@ -685,6 +696,11 @@ pub async fn evaluate_with_cancellation(
     // Safe point: integrity is durable but the terminal event has not been
     // published. A later run publishes the terminal outcome WITHOUT re-running
     // validation or integrity.
+    //
+    // Test-only pause point: see the earlier safe point. Parks the run here so a
+    // test can cancel deterministically after IntegrityVerified is durably
+    // journaled.
+    token.park_at_safe_point().await;
     if token.is_cancelled() {
         record_cancellation(
             &repo,
@@ -786,6 +802,10 @@ async fn wait_and_reuse(
 ) -> Result<EvidenceBundle> {
     // Run validation-specific preflight first.
     run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
+
+    if token.is_cancelled() {
+        bail!("cancelled by caller before waiting for live owner on identity {identity_key}");
+    }
 
     let max_wait = std::time::Duration::from_secs(300); // 5 minutes
     let poll_interval = std::time::Duration::from_millis(500);
@@ -968,6 +988,7 @@ async fn wait_and_reuse(
                                 &proposal,
                                 identity_key,
                                 &fence,
+                                token,
                                 matches!(disposition, RecoveryDisposition::ResumeFinalization),
                             )
                             .await;
@@ -1018,7 +1039,16 @@ async fn wait_and_reuse(
                 max_wait.as_secs()
             );
         }
-        tokio::time::sleep(poll_interval).await;
+        // Wait for the live owner to progress or release, but bail promptly if
+        // the caller cancels while we are parking.
+        tokio::select! {
+            _ = tokio::time::sleep(poll_interval) => {}
+            _ = token.cancelled() => {
+                bail!(
+                    "cancelled by caller while waiting for live owner on identity {identity_key}"
+                );
+            }
+        }
         elapsed += poll_interval;
     }
 }
@@ -1252,7 +1282,7 @@ async fn resume_validation(
     .context("failed to persist resume Validating transition")?;
 
     // Spawn a heartbeat task to protect validation from stale-reclaim.
-    let hb = HeartbeatSession::start(
+    let mut hb = HeartbeatSession::start(
         repo.to_path_buf(),
         identity_key.to_string(),
         fence.clone(),
@@ -1412,10 +1442,9 @@ async fn resume_late_finalization(
     proposal: &ProposalArtifact,
     identity_key: &str,
     fence: &FenceToken,
+    token: &CancellationToken,
     integrity_already_done: bool,
 ) -> Result<EvidenceBundle> {
-    let refs = EvidenceRefs::of(repo, evidence_dir);
-
     // Recover with the newly acquired fence against the current revision.
     let recovered =
         super::recovery::recover_evaluation(repo, identity_key, Some(commit_at_start), Some(fence))
@@ -1428,6 +1457,17 @@ async fn resume_late_finalization(
         )
         .context("durable journal conflicts with late resume")?;
     }
+
+    // The original run's evidence lives in the durable directory recorded at
+    // reservation, which may differ from this run's fresh `evidence_dir` (a
+    // second/final crash creates a new directory). Resolve the *source* evidence
+    // directory from the recovered durable reference and load durable validation
+    // from there, so late finalization never reads a brand-new empty directory.
+    let source_evidence_dir = match recovered.as_ref().and_then(|r| r.evidence_ref.as_deref()) {
+        Some(ref_str) => super::recovery::resolve_evidence_dir(repo, ref_str)
+            .unwrap_or_else(|| evidence_dir.to_path_buf()),
+        None => evidence_dir.to_path_buf(),
+    };
 
     let start_state = recovered
         .as_ref()
@@ -1451,8 +1491,9 @@ async fn resume_late_finalization(
         evidence_dir,
     );
 
-    // Validation is durable; load it, never re-run it.
-    let vr = read_validation_artifact(evidence_dir)
+    // Validation is durable; load it from the original run's evidence directory,
+    // never re-run it.
+    let vr = read_validation_artifact(&source_evidence_dir)
         .context("failed to read durable validation record for late finalization")?;
     bundle.validation = Some(vr.clone());
     if vr.validation_passed {
@@ -1512,7 +1553,7 @@ async fn resume_late_finalization(
     }
 
     // Spawn a heartbeat to protect finalization from stale-reclaim.
-    let hb = HeartbeatSession::start(
+    let mut hb = HeartbeatSession::start(
         repo.to_path_buf(),
         identity_key.to_string(),
         fence.clone(),
@@ -1535,7 +1576,14 @@ async fn resume_late_finalization(
             EvaluationState::IntegrityVerified,
             Some(proposal.id.clone()),
             None,
-            Some(refs.dir.clone()),
+            // Point the durable evidence reference at the ORIGINAL run's evidence
+            // directory (the repo-relative reference recovered from the journal)
+            // so a later run resumes from the authoritative validation artifact
+            // rather than this run's fresh (empty) directory.
+            recovered
+                .as_ref()
+                .and_then(|r| r.evidence_ref.clone())
+                .or_else(|| Some(source_evidence_dir.to_string_lossy().into_owned())),
         )
         .context("failed to persist resume IntegrityVerified transition")?;
     }
@@ -1568,6 +1616,12 @@ async fn resume_late_finalization(
     if let Ok(head) = git_rev_parse_head(repo) {
         bundle.repo_pin_after = head;
     }
+
+    // Test-only pause point: a deterministic test can park the run here, before
+    // the terminal event is published, to simulate a crash/interrupt during late
+    // finalization and prove a later run reclaims and finishes. No-op in
+    // production (no barrier installed).
+    token.park_at_safe_point().await;
 
     // Fenced finalization under the registry lock: final evidence → terminal
     // event → identity → checkpoint → registry. No validation re-run.

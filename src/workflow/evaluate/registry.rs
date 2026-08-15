@@ -670,9 +670,15 @@ pub(super) fn proposal_state_for_state(state: EvaluationState) -> Option<Proposa
         EvaluationState::GovernancePassed | EvaluationState::Validating => {
             ProposalState::Validating
         }
-        EvaluationState::ValidationComplete
-        | EvaluationState::IntegrityVerified
-        | EvaluationState::ReviewGate
+        // Late non-terminal safe points. These are reachable during a run's
+        // finalization window but are NOT yet terminal: a crash there must
+        // remain reclaimable, so they map to the renewable `Validating` state
+        // (stale via `generation_lease_timeout`). Terminal outcomes below map
+        // to `ValidationComplete`, which is never stale.
+        EvaluationState::ValidationComplete | EvaluationState::IntegrityVerified => {
+            ProposalState::Validating
+        }
+        EvaluationState::ReviewGate
         | EvaluationState::PreflightBlocked
         | EvaluationState::GenerationFailed
         | EvaluationState::GovernanceRejected
@@ -693,7 +699,11 @@ pub(super) fn proposal_state_for_state(state: EvaluationState) -> Option<Proposa
 /// - `Generating`, `ProposalGenerated`, `Validating`: stale when `heartbeat_at`
 ///   is older than `generation_lease_timeout`. A live owner is never reclaimed:
 ///   `ProposalGenerated` is only claimable when its owner stopped heartbeating.
-/// - `ValidationComplete`: never stale.
+/// - The terminal `ValidationComplete` registry state (published only by
+///   fenced finalization) is never stale. Late non-terminal safe points
+///   (`ValidationComplete`/`IntegrityVerified` evaluation states) map to the
+///   renewable `Validating` state so a crash during finalization stays
+///   reclaimable.
 ///
 /// The clock is deterministic (injected) so tests can reason about exact
 /// thresholds. Malformed timestamps fail closed (return an error), and a
@@ -772,9 +782,15 @@ mod tests {
             proposal_state_for_state(EvaluationState::Validating),
             Some(ProposalState::Validating)
         );
+        // Late non-terminal safe points map to the renewable Validating state
+        // so a crash during finalization stays reclaimable.
         assert_eq!(
             proposal_state_for_state(EvaluationState::ValidationComplete),
-            Some(ProposalState::ValidationComplete)
+            Some(ProposalState::Validating)
+        );
+        assert_eq!(
+            proposal_state_for_state(EvaluationState::IntegrityVerified),
+            Some(ProposalState::Validating)
         );
         // Every terminal outcome collapses to the registry's terminal state.
         assert_eq!(

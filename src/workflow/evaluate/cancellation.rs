@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Barrier;
 
 /// A shareable, awaitable cancellation signal.
 ///
@@ -23,12 +24,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct CancellationToken {
     flag: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+    // Optional test-only rendezvous barrier. When present, the pipeline parks at
+    // each safe point until the test releases it, making cancellation
+    // deterministic in tests. Always `None` in production.
+    park: Option<Arc<Barrier>>,
 }
 
 impl CancellationToken {
     /// A token that is never cancelled (the default for plain `evaluate`).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test-only: create a token that parks the run at each safe point until the
+    /// test releases the barrier. This removes the race between a test observing
+    /// durable progress and cancelling a run that might otherwise race ahead and
+    /// publish a terminal event before the cancel arrives.
+    pub fn with_park_barrier(barrier: Arc<Barrier>) -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            park: Some(barrier),
+        }
     }
 
     /// Cancel the operation. Idempotent; wakes all awaiters.
@@ -54,6 +71,14 @@ impl CancellationToken {
             return;
         }
         notified.await;
+    }
+
+    /// Park the run at a safe point if a test barrier is installed. No-op in
+    /// production (no barrier).
+    pub async fn park_at_safe_point(&self) {
+        if let Some(b) = &self.park {
+            b.wait().await;
+        }
     }
 }
 
