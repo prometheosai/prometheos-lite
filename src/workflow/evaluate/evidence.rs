@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::identity::{ExecutionIdentity, GovernanceScopeSnapshot};
 use super::integrity::git_rev_parse_head;
-use crate::workflow::artifact_integrity::{
-    ArtifactKind, publish_with_integrity, read_verified_or_legacy,
-};
+use crate::workflow::artifact_integrity::{ArtifactKind, publish_with_integrity, read_verified};
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -117,9 +115,9 @@ pub(super) fn find_existing_evidence(
     // Look for evidence.json in the evidence directory.
     let evidence_path = evidence_dir.join("evidence.json");
     if evidence_path.exists() {
-        // Verify the #115-format checksum sidecar when present; tolerate legacy.
-        let bytes =
-            read_verified_or_legacy(evidence_dir, &evidence_path, ArtifactKind::Evidence).ok()?;
+        // Verify the #115-format checksum sidecar. A missing or corrupt sidecar
+        // fails closed: we do not silently trust a legacy/unverified artifact.
+        let bytes = read_verified(evidence_dir, &evidence_path, ArtifactKind::Evidence).ok()?;
         let bundle: EvidenceBundle = serde_json::from_slice(&bytes).ok()?;
         if bundle.proposal.as_ref().map(|p| p.id.as_str()) == Some(proposal_id) {
             return Some(bundle);
@@ -275,7 +273,7 @@ pub(super) fn write_integrity_artifact(
 /// #115-format checksum sidecar before trusting the bytes.
 pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<ValidationRecord> {
     let path = evidence_dir.join("validation.json");
-    let bytes = read_verified_or_legacy(evidence_dir, &path, ArtifactKind::Validation)
+    let bytes = read_verified(evidence_dir, &path, ArtifactKind::Validation)
         .with_context(|| format!("failed to read validation artifact {}", path.display()))?;
     serde_json::from_slice(&bytes)
         .with_context(|| format!("corrupt validation artifact {}", path.display()))
@@ -288,7 +286,7 @@ pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<Validation
 /// artifact fails closed rather than healing itself by re-running integrity.
 pub(super) fn read_integrity_artifact(evidence_dir: &Path) -> Result<IntegrityRecord> {
     let path = evidence_dir.join("integrity.json");
-    let bytes = read_verified_or_legacy(evidence_dir, &path, ArtifactKind::Integrity)
+    let bytes = read_verified(evidence_dir, &path, ArtifactKind::Integrity)
         .with_context(|| format!("failed to read integrity artifact {}", path.display()))?;
     serde_json::from_slice(&bytes)
         .with_context(|| format!("corrupt integrity artifact {}", path.display()))

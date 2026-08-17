@@ -34,6 +34,8 @@ use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
     run_isolated_validation,
 };
+use crate::workflow::redaction::collect_known_secrets;
+use crate::workflow::retention::{ProtectedReferences, reclaim_orphan_artifacts};
 
 // ---------------------------------------------------------------------------
 // Pipeline orchestration
@@ -580,14 +582,17 @@ pub async fn evaluate_with_cancellation(
     )
     .context("failed to persist Validating transition")?;
 
+    let limits =
+        ResourceLimits::from_environment().with_manifest_disk(config.manifest.min_disk_bytes);
+    let known_secrets = collect_known_secrets(&repo);
     let validation_result = run_isolated_validation(
         &repo,
         &gen_result.id,
         config.manifest.validation_command.as_deref(),
         &evidence_dir,
         &token,
-        &ResourceLimits::default(),
-        &[],
+        &limits,
+        &known_secrets,
     )
     .await;
 
@@ -770,6 +775,15 @@ pub async fn evaluate_with_cancellation(
         bundle.failure_classification.clone(),
     )
     .context("fenced finalization failed")?;
+
+    // Best-effort orphan reclamation of stale evaluation artifacts. Only
+    // unreferenced orphans older than the retention window are removed, each
+    // together with its checksum sidecar; fresh runs are never touched.
+    let _ = reclaim_orphan_artifacts(
+        &repo,
+        std::time::Duration::from_secs(7 * 24 * 3600),
+        &ProtectedReferences::new(),
+    );
 
     // Stop heartbeat and check for errors that occurred during finalization.
     heartbeat.shutdown("").await?;
@@ -1078,12 +1092,12 @@ fn load_preserved_evidence(
     }
     // Validate the durable document (immutable evidence is validated in memory,
     // never blindly rewritten) before returning it unchanged. Then verify the
-    // #115-format checksum sidecar when present; tolerate legacy artifacts.
+    // #115-format checksum sidecar; a missing or corrupt sidecar fails closed.
     super::migration::migrate_document(
         &evidence_path,
         super::schema::DocumentType::EvidenceBundle,
     )?;
-    let bytes = crate::workflow::artifact_integrity::read_verified_or_legacy(
+    let bytes = crate::workflow::artifact_integrity::read_verified(
         evidence_dir,
         &evidence_path,
         crate::workflow::artifact_integrity::ArtifactKind::Evidence,
@@ -1299,14 +1313,16 @@ async fn resume_validation(
     );
 
     // Run validation on the existing proposal.
+    let limits = ResourceLimits::from_environment().with_manifest_disk(manifest.min_disk_bytes);
+    let known_secrets = collect_known_secrets(repo);
     let validation_result = run_isolated_validation(
         repo,
         &proposal.id,
         manifest.validation_command.as_deref(),
         evidence_dir,
         token,
-        &ResourceLimits::default(),
-        &[],
+        &limits,
+        &known_secrets,
     )
     .await;
 

@@ -44,6 +44,29 @@ pub(super) async fn run_isolated_validation(
     let proposal = load_proposal_from_repo(repo, proposal_id)?;
     let start_time = now_iso();
 
+    // Fail closed on patch tampering: the applied patch MUST match the recorded
+    // patch hash (and any recorded approval hash). This rejects a swapped or
+    // mutated patch before it ever touches the worktree.
+    verify_patch_integrity(&proposal)?;
+
+    // Disk-pressure preflight: refuse to run if the filesystem hosting the repo
+    // cannot satisfy the configured free-space reserve. Fails closed.
+    if let Some(required) = resource_limits.min_free_disk_bytes {
+        match super::preflight::available_disk_bytes(repo) {
+            super::preflight::DiskSpaceStatus::Available(free) if free >= required => {}
+            super::preflight::DiskSpaceStatus::Available(free) => bail!(
+                "{}: disk pressure: {} free bytes available < {} required",
+                CLASSIFICATION_DISK,
+                free,
+                required
+            ),
+            _ => bail!(
+                "{}: could not determine free disk space before validation",
+                CLASSIFICATION_DISK
+            ),
+        }
+    }
+
     // Diagnostics (including command, stdout, stderr) are redacted at the
     // persistence boundary. The command is still *executed* verbatim.
     let redactor = Redactor::new().with_known_secrets(known_secrets);
@@ -120,6 +143,8 @@ pub(super) async fn run_isolated_validation(
         Some(cmd) => {
             let (code, raw_out, raw_err) =
                 bounded_run(cmd, &wt_root, resource_limits, token).await?;
+            // Enforce the output cap before persisting anything unbounded.
+            check_output_budget(&raw_out, &raw_err, resource_limits)?;
             // Redact diagnostics before they become persisted evidence.
             let out = redactor.redact(&raw_out);
             let err = redactor.redact(&raw_err);
@@ -193,14 +218,53 @@ async fn bounded_run(
     limits: &ResourceLimits,
     token: &CancellationToken,
 ) -> Result<(Option<i32>, String, String)> {
-    let mut child = validation_shell_async(command)
-        .current_dir(cwd)
+    let mut cmd = validation_shell_async(command);
+    cmd.current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // Best-effort OS-enforced memory/CPU caps (POSIX setrlimit in the child's
+    // pre-exec; the limit applies to the shell and its descendants).
+    #[cfg(unix)]
+    {
+        let mem = limits.max_memory_bytes;
+        let cpu = limits.max_cpu_time.map(|d| d.as_secs());
+        cmd.pre_exec(move || {
+            if let Some(bytes) = mem {
+                let rlim = libc::rlimit {
+                    rlim_cur: bytes,
+                    rlim_max: bytes,
+                };
+                unsafe {
+                    libc::setrlimit(libc::RLIMIT_AS, &rlim);
+                }
+            }
+            if let Some(secs) = cpu {
+                let rlim = libc::rlimit {
+                    rlim_cur: secs,
+                    rlim_max: secs,
+                };
+                unsafe {
+                    libc::setrlimit(libc::RLIMIT_CPU, &rlim);
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd
         .spawn()
         .context("failed to execute validation command")?;
     let pid = child.id();
+    // Best-effort OS-enforced memory/CPU caps on Windows via a Job Object.
+    #[cfg(windows)]
+    {
+        if (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some())
+            && let Some(pid) = pid
+            && let Err(e) = apply_job_limits(pid, limits)
+        {
+            eprintln!("warning: failed to apply windows job limits: {e}");
+        }
+    }
     let stdout = child
         .stdout
         .take()
@@ -267,9 +331,8 @@ async fn bounded_run(
 
     tokio::select! {
         status = child.wait() => {
-            let code = status
-                .context("failed to wait on validation command")?
-                .code();
+            let status = status.context("failed to wait on validation command")?;
+            let code = status.code();
             let out = out_task.await.unwrap_or_default();
             let err = err_task.await.unwrap_or_default();
             if exceeded.load(Ordering::SeqCst) {
@@ -277,6 +340,31 @@ async fn bounded_run(
                     "{}: validation output exceeded the configured cap",
                     CLASSIFICATION_OUTPUT
                 );
+            }
+            // The OS terminated the process tree because a CPU/memory cap was
+            // hit (Unix delivers a signal; on Windows a Job Object kill yields a
+            // non-zero exit while such a cap is configured). Classify as the
+            // matching resource exhaustion so recovery maps it to InfraBlocked.
+            #[cfg(unix)]
+            let os_killed = code.is_none()
+                && (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some());
+            #[cfg(windows)]
+            let os_killed = code != Some(0)
+                && (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some());
+            #[cfg(not(any(unix, windows)))]
+            let os_killed = false;
+            if os_killed {
+                if limits.max_memory_bytes.is_some() {
+                    bail!(
+                        "{}: validation exceeded the configured memory budget",
+                        CLASSIFICATION_MEMORY
+                    );
+                } else {
+                    bail!(
+                        "{}: validation exceeded the configured cpu time budget",
+                        CLASSIFICATION_CPU
+                    );
+                }
             }
             Ok((code, out, err))
         }
@@ -308,6 +396,115 @@ async fn maybe_timeout(f: Option<tokio::time::Sleep>) {
     if let Some(s) = f {
         s.await;
     }
+}
+
+/// Fail closed if the proposal's patch does not match its recorded hash (or the
+/// hash recorded in its approval). A mismatch means the patch was swapped or
+/// mutated after the proposal/approval was written, and it must never be applied
+/// to the validation worktree.
+/// Reject validation output that exceeds the configured cap. This is the
+/// enforcement counterpart to the preview-only `truncate`: it guarantees we
+/// never persist (or feed into evidence) unbounded validation output, and that
+/// a runaway command is surfaced as a resource violation rather than silently
+/// accepted.
+fn check_output_budget(stdout: &str, stderr: &str, limits: &ResourceLimits) -> Result<()> {
+    if let Some(cap) = limits.max_output_bytes {
+        let total = stdout.len() + stderr.len();
+        if total > cap as usize {
+            bail!(
+                "{}: validation produced {} bytes exceeding cap {}",
+                CLASSIFICATION_OUTPUT,
+                total,
+                cap
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_patch_integrity(proposal: &crate::workflow::ProposalArtifact) -> Result<()> {
+    let computed = crate::workflow::artifact_integrity::sha256_hex(proposal.patch.as_bytes());
+    if !proposal.patch_hash.is_empty() && proposal.patch_hash != computed {
+        bail!(
+            "patch integrity verification failed: patch does not match recorded patch_hash \
+             (possible tampering or corruption)"
+        );
+    }
+    if let Some(ref approval) = proposal.approved
+        && !approval.patch_hash.is_empty()
+        && approval.patch_hash != computed
+    {
+        bail!(
+            "patch integrity verification failed: patch does not match approval patch_hash \
+             (candidate may be stale or tampered)"
+        );
+    }
+    Ok(())
+}
+
+/// Apply OS-enforced CPU/memory caps to a freshly spawned validation process via
+/// a Windows Job Object. Best-effort: callers treat a failure as a warning and
+/// still rely on timeout/output enforcement.
+#[cfg(windows)]
+fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
+    use std::mem;
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::jobapi2::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+    };
+    use winapi::um::processthreadsapi::OpenProcess;
+    use winapi::um::winnt::{
+        JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_WORKINGSET,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        PROCESS_ALL_ACCESS,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut());
+        if job.is_null() {
+            bail!("CreateJobObjectW failed");
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
+        let mut flags: u32 = 0;
+        if let Some(mem) = limits.max_memory_bytes {
+            info.ProcessMemoryLimit = mem as usize;
+            flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+            info.BasicLimitInformation.MaximumWorkingSetSize = mem as usize;
+            flags |= JOB_OBJECT_LIMIT_WORKINGSET;
+        }
+        if let Some(cpu) = limits.max_cpu_time {
+            // JOBOBJECT BasicLimitInformation.PerJobUserTimeLimit is in 100ns units.
+            *info
+                .BasicLimitInformation
+                .PerJobUserTimeLimit
+                .QuadPart_mut() = (cpu.as_secs() * 10_000_000) as i64;
+            flags |= JOB_OBJECT_LIMIT_JOB_TIME;
+        }
+        info.BasicLimitInformation.LimitFlags = flags;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *mut _,
+            mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok == 0 {
+            CloseHandle(job);
+            bail!("SetInformationJobObject failed");
+        }
+        let hproc = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+        if hproc.is_null() {
+            CloseHandle(job);
+            bail!("OpenProcess failed");
+        }
+        let assigned = AssignProcessToJobObject(job, hproc);
+        CloseHandle(hproc);
+        CloseHandle(job);
+        if assigned == 0 {
+            bail!("AssignProcessToJobObject failed");
+        }
+        let _ = INVALID_HANDLE_VALUE;
+    }
+    Ok(())
 }
 // ---------------------------------------------------------------------------
 // Test evidence parsing
@@ -697,7 +894,10 @@ mod tests {
         std::fs::write(dir.join("seed.txt"), "x").unwrap();
         run_git_cmd(&dir, &["add", "."]).unwrap();
         run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
-        let base_sha = run_git_cmd(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let base_sha = run_git_cmd(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
 
         let id = "canary-run";
         let proposal = ProposalArtifact {
@@ -716,7 +916,10 @@ mod tests {
                 max_lines_changed: None,
             },
             patch: "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n".to_string(),
-            patch_hash: "h".to_string(),
+            patch_hash: crate::workflow::artifact_integrity::sha256_hex(
+                b"diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+            )
+            .to_string(),
             changed_files: vec![],
             added_lines: 0,
             removed_lines: 0,
@@ -779,6 +982,261 @@ mod tests {
         assert!(
             !raw.contains(&canary),
             "raw stdout log leaked the known secret"
+        );
+    }
+
+    use crate::workflow::artifact_integrity::{ArtifactKind, publish_with_integrity, sha256_hex};
+    use crate::workflow::evaluate::cancellation::CancellationToken;
+    use crate::workflow::evaluate::integrity::run_git_cmd;
+    use crate::workflow::evaluate::resource::ResourceLimits;
+    use crate::workflow::{ApprovalRecord, AuthorityLevel, ProposalArtifact, ScopeContract};
+
+    const PATCH: &str = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n";
+
+    fn init_test_repo(name: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "prometheos-valtest-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git_cmd(&dir, &["init"]).unwrap();
+        run_git_cmd(&dir, &["config", "user.email", "t@example.com"]).unwrap();
+        run_git_cmd(&dir, &["config", "user.name", "t"]).unwrap();
+        std::fs::write(dir.join("seed.txt"), "x").unwrap();
+        run_git_cmd(&dir, &["add", "."]).unwrap();
+        run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
+        let base = run_git_cmd(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        (dir, base)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_proposal(
+        dir: &std::path::Path,
+        id: &str,
+        base_sha: &str,
+        patch: &str,
+        patch_hash: &str,
+        approved: Option<ApprovalRecord>,
+    ) {
+        let proposal = ProposalArtifact {
+            id: id.to_string(),
+            repo: dir.to_string_lossy().to_string(),
+            base_sha: base_sha.to_string(),
+            goal: "g".to_string(),
+            authority: AuthorityLevel::Propose,
+            scope: ScopeContract {
+                goal: "g".to_string(),
+                authority: AuthorityLevel::Propose,
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: None,
+                max_lines_changed: None,
+            },
+            patch: patch.to_string(),
+            patch_hash: patch_hash.to_string(),
+            changed_files: vec![],
+            added_lines: 0,
+            removed_lines: 0,
+            approved,
+            dry_run_passed: None,
+            applied: None,
+            validation_command: None,
+            provider_provenance: None,
+            dry_run_validation: None,
+            apply_validation: None,
+            checkpoint_ref: None,
+            rollback_status: None,
+        };
+        let prop_path = dir
+            .join(".prometheos")
+            .join("workflow")
+            .join(id)
+            .join("proposal.json");
+        std::fs::create_dir_all(prop_path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&proposal).unwrap();
+        publish_with_integrity(dir, &prop_path, &bytes, ArtifactKind::Proposal).unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_timeout_is_enforced_as_resource_violation() {
+        let (dir, base) = init_test_repo("timeout");
+        let id = "timeout-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let sleep_cmd = if cfg!(windows) {
+            "ping -n 31 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        };
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_millis(300)),
+            ..ResourceLimits::default()
+        };
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some(sleep_cmd),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect_err("timeout must fail validation");
+        assert!(
+            err.to_string().contains(CLASSIFICATION_TIMEOUT),
+            "expected timeout classification, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_preflight_blocks_validation_when_unsatisfied() {
+        let (dir, base) = init_test_repo("disk");
+        let id = "disk-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        // Require far more free space than any real filesystem can provide.
+        let limits = ResourceLimits {
+            min_free_disk_bytes: Some(u64::MAX),
+            ..ResourceLimits::default()
+        };
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("echo ok"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect_err("disk preflight must fail validation");
+        assert!(
+            err.to_string().contains(CLASSIFICATION_DISK),
+            "expected disk classification, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_output_budget_enforces_cap() {
+        let capped = ResourceLimits {
+            max_output_bytes: Some(10),
+            ..ResourceLimits::default()
+        };
+        assert!(check_output_budget("0123456789", "", &capped).is_ok());
+        assert!(check_output_budget("", "0123456789", &capped).is_ok());
+        assert!(check_output_budget("0123456789A", "", &capped).is_err());
+        assert!(check_output_budget("a", &"a".repeat(100), &capped).is_err());
+        // With the default 8 MiB cap, a 1 MiB payload is allowed.
+        assert!(
+            check_output_budget(&"a".repeat(1_000_000), "", &ResourceLimits::default()).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_integrity_rejects_tampered_patch_hash() {
+        let (dir, base) = init_test_repo("patch");
+        let id = "patch-run";
+        // Deliberately wrong recorded hash.
+        write_proposal(&dir, id, &base, PATCH, "deadbeefdeadbeef", None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("echo ok"),
+            &evidence_dir,
+            &token,
+            &ResourceLimits::default(),
+            &[],
+        )
+        .await
+        .expect_err("tampered patch_hash must fail validation");
+        assert!(
+            err.to_string().contains("patch integrity"),
+            "expected patch integrity error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_integrity_rejects_mismatched_approval_hash() {
+        let (dir, base) = init_test_repo("patch-approval");
+        let id = "patch-run-approval";
+        let approved = ApprovalRecord {
+            approver: "lead".to_string(),
+            approved_at: "now".to_string(),
+            patch_hash: "wrongapproval".to_string(),
+        };
+        write_proposal(
+            &dir,
+            id,
+            &base,
+            PATCH,
+            &sha256_hex(PATCH.as_bytes()),
+            Some(approved),
+        );
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("echo ok"),
+            &evidence_dir,
+            &token,
+            &ResourceLimits::default(),
+            &[],
+        )
+        .await
+        .expect_err("mismatched approval patch_hash must fail validation");
+        assert!(
+            err.to_string().contains("patch integrity"),
+            "expected patch integrity error, got: {err}"
+        );
+    }
+
+    // CPU/memory enforcement via OS setrlimit / Job Objects. These are
+    // exercised on platforms that support them; the wall-clock timeout must not
+    // mask the resource kill, so it is set generously here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpu_limit_kills_runaway_process() {
+        let (dir, base) = init_test_repo("cpu");
+        let id = "cpu-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            max_cpu_time: Some(std::time::Duration::from_secs(1)),
+            ..ResourceLimits::default()
+        };
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("while true; do :; done"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect_err("cpu limit must fail validation");
+        assert!(
+            err.to_string().contains(CLASSIFICATION_CPU),
+            "expected cpu classification, got: {err}"
         );
     }
 }

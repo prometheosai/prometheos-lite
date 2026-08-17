@@ -124,7 +124,9 @@ fn ensure_inside_repo(repo: &Path, path: &Path) -> Result<PathBuf> {
 }
 
 /// Collect every regular file under `root` (recursively). Fails closed if
-/// `root` escapes the repository.
+/// `root` escapes the repository. Checksum sidecar files (`*.sidecar.json`) are
+/// never standalone candidates: they are always managed together with the
+/// artifact they describe, so they must not be deleted independently.
 pub fn collect_candidates(repo: &Path, root: &Path) -> Result<Vec<PathBuf>> {
     let _ = ensure_inside_repo(repo, root)?;
     let mut out = Vec::new();
@@ -141,7 +143,13 @@ pub fn collect_candidates(repo: &Path, root: &Path) -> Result<Vec<PathBuf>> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.is_file() {
-                out.push(p);
+                let is_sidecar = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().ends_with(".sidecar.json"))
+                    .unwrap_or(false);
+                if !is_sidecar {
+                    out.push(p);
+                }
             }
         }
     }
@@ -198,8 +206,13 @@ pub fn plan_retention(
 }
 
 /// Apply a retention plan, removing only planned, unprotected, in-repo
-/// candidates. Each removal revalidates safety immediately before deleting and
-/// also removes the artifact's checksum sidecar when present.
+/// candidates. Each removal revalidates safety immediately before deleting.
+///
+/// Atomicity guarantee: the artifact is removed first, and its checksum sidecar
+/// is only removed afterwards. If the artifact cannot be removed, the sidecar is
+/// deliberately left in place so the artifact remains verifiable (we never strand
+/// an artifact without its checksum). A sidecar is never deleted while its
+/// artifact survives.
 pub fn apply_retention(repo: &Path, plan: &RetentionPlan) -> Result<RetentionOutcome> {
     let mut outcome = RetentionOutcome::default();
     for entry in &plan.entries {
@@ -214,10 +227,18 @@ pub fn apply_retention(repo: &Path, plan: &RetentionPlan) -> Result<RetentionOut
         // Revalidate safety at removal time: never follow an escape.
         match ensure_inside_repo(repo, &entry.path) {
             Ok(safe) => {
-                let sidecar = sidecar_for(&safe);
-                let _ = std::fs::remove_file(&sidecar);
-                let _ = std::fs::remove_file(&safe);
-                outcome.removed += 1;
+                // Artifact first; sidecar only after the artifact is gone.
+                match std::fs::remove_file(&safe) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(sidecar_for(&safe));
+                        outcome.removed += 1;
+                    }
+                    Err(_) => {
+                        // Could not remove the artifact; leave the sidecar so the
+                        // artifact stays verifiable. Count as rejected (not removed).
+                        outcome.rejected += 1;
+                    }
+                }
             }
             Err(_) => {
                 outcome.rejected += 1;
@@ -225,6 +246,21 @@ pub fn apply_retention(repo: &Path, plan: &RetentionPlan) -> Result<RetentionOut
         }
     }
     Ok(outcome)
+}
+
+/// Reclaim unreferenced, expired evaluation artifacts under
+/// `<repo>/.prometheos/workflow`, removing each together with its checksum
+/// sidecar. Referenced/protected artifacts (and anything within the retention
+/// window) are preserved. This is the production integration entry point called
+/// by the orchestrator after a run finalizes.
+pub fn reclaim_orphan_artifacts(
+    repo: &Path,
+    orphan_ttl: Duration,
+    protected: &ProtectedReferences,
+) -> Result<RetentionOutcome> {
+    let root = repo.join(".prometheos").join("workflow");
+    let plan = plan_retention(repo, &root, protected, SystemTime::now(), orphan_ttl)?;
+    apply_retention(repo, &plan)
 }
 
 /// Mtime of a path as a `SystemTime`, used by callers to inject a clock.
@@ -271,8 +307,9 @@ mod tests {
         let plan = plan_retention(repo, repo, &prot, clock, Duration::from_secs(10)).unwrap();
         assert!(plan.entries.iter().any(|e| e.deletion_candidate));
         let out = apply_retention(repo, &plan).unwrap();
-        // Both the artifact and its checksum sidecar are removed.
-        assert_eq!(out.removed, 2);
+        // The artifact (and, as a consequence, its checksum sidecar) is removed;
+        // the sidecar is never counted as a separate removal.
+        assert_eq!(out.removed, 1);
         assert!(!orphan.exists());
         assert!(!sidecar_for(&orphan).exists());
     }
@@ -317,5 +354,73 @@ mod tests {
         let plan = plan_retention(repo, repo, &prot, SystemTime::now(), Duration::ZERO).unwrap();
         let _ = apply_retention(repo, &plan);
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn sidecar_preserved_when_artifact_removal_fails() {
+        let dir = tmp();
+        let repo = dir.path();
+        // If the artifact cannot be removed, its checksum sidecar must survive:
+        // we must never strand a (still-present) artifact without its checksum.
+        let missing = repo.join("gone.json");
+        let sidecar = sidecar_for(&missing);
+        fs::write(&sidecar, "{}").unwrap();
+        let plan = RetentionPlan {
+            entries: vec![RetentionEntry {
+                path: missing.clone(),
+                protected: false,
+                reason: "orphan".to_string(),
+                age_seconds: Some(1000),
+                size_bytes: Some(1),
+                deletion_candidate: true,
+            }],
+        };
+        let out = apply_retention(repo, &plan).unwrap();
+        assert_eq!(out.rejected, 1);
+        assert!(
+            sidecar.exists(),
+            "sidecar must survive when its artifact cannot be removed"
+        );
+    }
+
+    #[test]
+    fn reclaim_orphan_artifacts_scoped_to_workflow_tree() {
+        let dir = tmp();
+        let repo = dir.path();
+        // An expired orphan under .prometheos/workflow must be reclaimed (with its
+        // sidecar); a fresh artifact under the same tree must be preserved.
+        let orphan = repo
+            .join(".prometheos")
+            .join("workflow")
+            .join("old")
+            .join("a.log");
+        fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, "x").unwrap();
+        fs::write(sidecar_for(&orphan), "{}").unwrap();
+        let past = SystemTime::now() - Duration::from_secs(3600);
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&orphan)
+            .and_then(|f| f.set_modified(past));
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(sidecar_for(&orphan))
+            .and_then(|f| f.set_modified(past));
+
+        let fresh = repo
+            .join(".prometheos")
+            .join("workflow")
+            .join("fresh")
+            .join("b.log");
+        fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+        fs::write(&fresh, "y").unwrap();
+
+        let out =
+            reclaim_orphan_artifacts(repo, Duration::from_secs(10), &ProtectedReferences::new())
+                .unwrap();
+        assert_eq!(out.removed, 1);
+        assert!(!orphan.exists());
+        assert!(!sidecar_for(&orphan).exists());
+        assert!(fresh.exists());
     }
 }

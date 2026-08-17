@@ -127,16 +127,24 @@ impl ResourceLimits {
         {
             bail!("validation_timeout must be positive");
         }
-        if let Some(n) = self.max_output_bytes && n == 0 {
+        if let Some(n) = self.max_output_bytes
+            && n == 0
+        {
             bail!("max_output_bytes must be positive");
         }
-        if let Some(n) = self.max_memory_bytes && n == 0 {
+        if let Some(n) = self.max_memory_bytes
+            && n == 0
+        {
             bail!("max_memory_bytes must be positive");
         }
-        if let Some(t) = self.max_cpu_time && t.is_zero() {
+        if let Some(t) = self.max_cpu_time
+            && t.is_zero()
+        {
             bail!("max_cpu_time must be positive");
         }
-        if let Some(n) = self.min_free_disk_bytes && n == 0 {
+        if let Some(n) = self.min_free_disk_bytes
+            && n == 0
+        {
             bail!("min_free_disk_bytes must be positive");
         }
         Ok(())
@@ -151,6 +159,53 @@ impl ResourceLimits {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         }
+    }
+
+    /// Merge the manifest's `min_disk_bytes` into this policy (taking the larger
+    /// reserve) and return the resolved policy. Convenience for callers that hold
+    /// a `TaskManifest`.
+    pub fn with_manifest_disk(mut self, manifest_min: u64) -> Self {
+        self.min_free_disk_bytes = self.effective_min_free_disk_bytes(Some(manifest_min));
+        self
+    }
+
+    /// Build the effective policy: start from the safe [`Default`] production
+    /// limits and override individual bounds from environment variables when
+    /// present. Defaults remain fail-safe even if no variable is set, and an
+    /// operator can tighten or relax any single bound without code changes.
+    pub fn from_environment() -> Self {
+        let mut limits = ResourceLimits::default();
+        if let Some(secs) = std::env::var("PROMETHEOS_VALIDATION_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            limits.validation_timeout = Some(Duration::from_secs(secs));
+        }
+        if let Some(n) = std::env::var("PROMETHEOS_MAX_OUTPUT_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            limits.max_output_bytes = Some(n);
+        }
+        if let Some(n) = std::env::var("PROMETHEOS_MAX_MEMORY_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            limits.max_memory_bytes = Some(n);
+        }
+        if let Some(secs) = std::env::var("PROMETHEOS_MAX_CPU_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            limits.max_cpu_time = Some(Duration::from_secs(secs));
+        }
+        if let Some(n) = std::env::var("PROMETHEOS_MIN_FREE_DISK_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            limits.min_free_disk_bytes = Some(n);
+        }
+        limits
     }
 }
 

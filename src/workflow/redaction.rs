@@ -16,6 +16,7 @@
 use anyhow::{Result, bail};
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Stable placeholder substituted for any redacted secret.
@@ -149,6 +150,43 @@ pub fn redact_diagnostics(text: &str, known_secrets: &[String]) -> String {
     Redactor::new()
         .with_known_secrets(known_secrets)
         .redact(text)
+}
+
+/// Collect the known secrets that must be redacted from persisted diagnostics.
+///
+/// Sources, in order:
+/// 1. `PROMETHEOS_KNOWN_SECRETS` — comma/newline/semicolon separated values.
+/// 2. A repo-local `.prometheos/known_secrets` file (one value per line, `#`
+///    comments and blank lines ignored). This file is operator-maintained and
+///    must be git-ignored by the user; it is never persisted by this tool.
+///
+/// This is the production wiring for [`Redactor::with_known_secrets`]: the
+/// orchestrator passes the result into isolated validation so that any secret the
+/// operator has declared never reaches persisted evidence or raw logs.
+pub fn collect_known_secrets(repo: &Path) -> Vec<String> {
+    let mut secrets: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if !s.is_empty() && !secrets.contains(&s.to_string()) {
+            secrets.push(s.to_string());
+        }
+    };
+    if let Ok(v) = std::env::var("PROMETHEOS_KNOWN_SECRETS") {
+        for part in v.split(|c| [',', '\n', ';'].contains(&c)) {
+            push(part);
+        }
+    }
+    let file = repo.join(".prometheos").join("known_secrets");
+    if let Ok(content) = std::fs::read_to_string(&file) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            push(line);
+        }
+    }
+    secrets
 }
 
 #[cfg(test)]
