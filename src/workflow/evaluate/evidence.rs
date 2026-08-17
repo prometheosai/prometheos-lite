@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use super::identity::{ExecutionIdentity, GovernanceScopeSnapshot};
 use super::integrity::git_rev_parse_head;
+use crate::workflow::artifact_integrity::{
+    ArtifactKind, publish_with_integrity, read_verified_or_legacy,
+};
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -114,8 +117,10 @@ pub(super) fn find_existing_evidence(
     // Look for evidence.json in the evidence directory.
     let evidence_path = evidence_dir.join("evidence.json");
     if evidence_path.exists() {
-        let text = std::fs::read_to_string(&evidence_path).ok()?;
-        let bundle: EvidenceBundle = serde_json::from_str(&text).ok()?;
+        // Verify the #115-format checksum sidecar when present; tolerate legacy.
+        let bytes =
+            read_verified_or_legacy(evidence_dir, &evidence_path, ArtifactKind::Evidence).ok()?;
+        let bundle: EvidenceBundle = serde_json::from_slice(&bytes).ok()?;
         if bundle.proposal.as_ref().map(|p| p.id.as_str()) == Some(proposal_id) {
             return Some(bundle);
         }
@@ -206,8 +211,17 @@ pub(super) fn write_bundle(evidence_dir: &Path, bundle: &EvidenceBundle) -> Resu
     }
 
     let json_path = evidence_dir.join("evidence.json");
-    super::durable::atomic_write_json(&json_path, &bundle)
-        .context("failed to write evidence.json")?;
+    let json =
+        serde_json::to_string_pretty(&bundle).context("failed to serialize evidence.json")?;
+    // Artifact before visibility: publish the evidence bytes, then its checksum
+    // sidecar, before any journal event references it.
+    publish_with_integrity(
+        evidence_dir,
+        &json_path,
+        json.as_bytes(),
+        ArtifactKind::Evidence,
+    )
+    .context("failed to write evidence.json")?;
 
     // Write Markdown report.
     let md_path = evidence_dir.join("evidence.md");
@@ -218,33 +232,52 @@ pub(super) fn write_bundle(evidence_dir: &Path, bundle: &EvidenceBundle) -> Resu
 }
 
 /// Persist the validation record durably, BEFORE the `ValidationComplete`
-/// journal event that references it.
+/// journal event that references it. A checksum sidecar is published alongside.
 pub(super) fn write_validation_artifact(
     evidence_dir: &Path,
     validation: &ValidationRecord,
 ) -> Result<()> {
     let path = evidence_dir.join("validation.json");
-    super::durable::atomic_write_json(&path, validation).context("failed to write validation.json")
+    let json =
+        serde_json::to_string_pretty(validation).context("failed to serialize validation.json")?;
+    publish_with_integrity(
+        evidence_dir,
+        &path,
+        json.as_bytes(),
+        ArtifactKind::Validation,
+    )
+    .context("failed to write validation.json")?;
+    Ok(())
 }
 
 /// Persist the integrity record durably, BEFORE the `IntegrityVerified`
-/// journal event that references it.
+/// journal event that references it. A checksum sidecar is published alongside.
 pub(super) fn write_integrity_artifact(
     evidence_dir: &Path,
     integrity: &IntegrityRecord,
 ) -> Result<()> {
     let path = evidence_dir.join("integrity.json");
-    super::durable::atomic_write_json(&path, integrity).context("failed to write integrity.json")
+    let json =
+        serde_json::to_string_pretty(integrity).context("failed to serialize integrity.json")?;
+    publish_with_integrity(
+        evidence_dir,
+        &path,
+        json.as_bytes(),
+        ArtifactKind::Integrity,
+    )
+    .context("failed to write integrity.json")?;
+    Ok(())
 }
 
 /// Read a previously persisted validation record (written by
 /// [`write_validation_artifact`]). Used when resuming finalization after a
-/// late cancellation: validation is durable and must NOT be re-run.
+/// late cancellation: validation is durable and must NOT be re-run. Verifies the
+/// #115-format checksum sidecar before trusting the bytes.
 pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<ValidationRecord> {
     let path = evidence_dir.join("validation.json");
-    let text = std::fs::read_to_string(&path)
+    let bytes = read_verified_or_legacy(evidence_dir, &path, ArtifactKind::Validation)
         .with_context(|| format!("failed to read validation artifact {}", path.display()))?;
-    serde_json::from_str(&text)
+    serde_json::from_slice(&bytes)
         .with_context(|| format!("corrupt validation artifact {}", path.display()))
 }
 
@@ -255,9 +288,9 @@ pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<Validation
 /// artifact fails closed rather than healing itself by re-running integrity.
 pub(super) fn read_integrity_artifact(evidence_dir: &Path) -> Result<IntegrityRecord> {
     let path = evidence_dir.join("integrity.json");
-    let text = std::fs::read_to_string(&path)
+    let bytes = read_verified_or_legacy(evidence_dir, &path, ArtifactKind::Integrity)
         .with_context(|| format!("failed to read integrity artifact {}", path.display()))?;
-    serde_json::from_str(&text)
+    serde_json::from_slice(&bytes)
         .with_context(|| format!("corrupt integrity artifact {}", path.display()))
 }
 // ---------------------------------------------------------------------------

@@ -14,9 +14,12 @@
 //! (or generated upstream by a `PatchProvider`). The safety value is the gating, not the
 //! generation.
 
+pub mod artifact_integrity;
 pub mod durable;
 pub mod evaluate;
 pub mod portable_state;
+pub mod redaction;
+pub mod retention;
 pub mod schema;
 
 pub use portable_state::{
@@ -359,16 +362,30 @@ fn workflow_dir(repo: &Path, id: &str) -> PathBuf {
 
 fn load_proposal(repo: &Path, id: &str) -> Result<ProposalArtifact> {
     let path = workflow_dir(repo, id).join("proposal.json");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read proposal {id} at {}", path.display()))?;
-    serde_json::from_str(&text).context("failed to parse proposal artifact")
+    // Verify the #115-format checksum sidecar when present; tolerate genuinely
+    // legacy (pre-#115) artifacts that carry no checksum.
+    let bytes = crate::workflow::artifact_integrity::read_verified_or_legacy(
+        repo,
+        &path,
+        crate::workflow::artifact_integrity::ArtifactKind::Proposal,
+    )
+    .with_context(|| format!("cannot read proposal {id} at {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("failed to parse proposal artifact")
 }
 
 fn save_proposal(repo: &Path, proposal: &ProposalArtifact) -> Result<()> {
     let dir = workflow_dir(repo, &proposal.id);
     std::fs::create_dir_all(&dir).context("failed to create workflow dir")?;
     let text = serde_json::to_string_pretty(proposal).context("failed to serialize proposal")?;
-    std::fs::write(dir.join("proposal.json"), text).context("failed to write proposal")?;
+    // Publish the proposal bytes first, then its checksum sidecar, so the
+    // artifact is durable before its integrity metadata is visible.
+    crate::workflow::artifact_integrity::publish_with_integrity(
+        repo,
+        &dir.join("proposal.json"),
+        text.as_bytes(),
+        crate::workflow::artifact_integrity::ArtifactKind::Proposal,
+    )
+    .context("failed to write proposal")?;
     Ok(())
 }
 

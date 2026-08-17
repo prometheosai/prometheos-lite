@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::workflow::ProposalArtifact;
+use crate::workflow::artifact_integrity::{ArtifactKind, read_verified_or_legacy};
 
 // ---------------------------------------------------------------------------
 // Failure classification
@@ -28,9 +29,11 @@ pub(super) fn load_proposal_from_repo(repo: &Path, id: &str) -> Result<ProposalA
         .join("workflow")
         .join(id)
         .join("proposal.json");
-    let text = std::fs::read_to_string(&path)
+    // Trusted read: verify the #115-format checksum sidecar before the proposal
+    // becomes input to recovery. Genuinely legacy artifacts are tolerated.
+    let bytes = read_verified_or_legacy(repo, &path, ArtifactKind::Proposal)
         .with_context(|| format!("cannot read proposal {id} at {}", path.display()))?;
-    serde_json::from_str(&text).context("failed to parse proposal artifact")
+    serde_json::from_slice(&bytes).context("failed to parse proposal artifact")
 }
 
 #[cfg(test)]

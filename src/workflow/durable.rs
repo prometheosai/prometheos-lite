@@ -52,6 +52,30 @@ pub fn versioned_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> 
     atomic_write_json(path, &v)
 }
 
+/// Write `bytes` to `path` atomically and durably (temp file → fsync → rename →
+/// fsync dir). Used for non-JSON artifacts such as raw validation logs that
+/// still require crash-safe publication.
+pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create dir {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp)
+        .with_context(|| format!("failed to create temp file {}", tmp.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync temp file {}", tmp.display()))?;
+    drop(file);
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to atomically rename into {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
 /// Fsync a directory so a rename inside it is durable.
 ///
 /// On this windows build `std::fs::File::open` cannot open a directory handle

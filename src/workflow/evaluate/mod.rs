@@ -33,6 +33,7 @@ mod orchestrator;
 mod preflight;
 mod recovery;
 mod registry;
+mod resource;
 mod schema;
 mod transition;
 mod validation;
@@ -60,5 +61,6 @@ pub use registry::{
     FenceToken, LeaseConfig, OwnershipObservation, ProposalRegistry, ProposalState, RegistryEntry,
     TakeoverResult, is_entry_stale_at, try_take_ownership, try_take_ownership_cas,
 };
+pub use resource::{ResourceLimitKind, ResourceLimits, classification_for_resource};
 pub use transition::validate_transition;
 pub use validation::classify_validation_failure;

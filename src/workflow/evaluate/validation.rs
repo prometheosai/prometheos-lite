@@ -1,14 +1,23 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as AsyncCommand;
+
+use crate::workflow::redaction::Redactor;
 
 use super::cancellation::CancellationToken;
 use super::evidence::ValidationRecord;
 use super::generation::load_proposal_from_repo;
 use super::identity::{EvaluationState, now_iso};
 use super::integrity::run_git_cmd;
+use super::resource::{
+    CLASSIFICATION_CPU, CLASSIFICATION_DISK, CLASSIFICATION_MEMORY, CLASSIFICATION_OUTPUT,
+    CLASSIFICATION_TIMEOUT, ResourceLimits,
+};
 
 // ---------------------------------------------------------------------------
 // Validation (isolated worktree)
@@ -29,9 +38,15 @@ pub(super) async fn run_isolated_validation(
     validation_command: Option<&str>,
     evidence_dir: &Path,
     token: &CancellationToken,
+    resource_limits: &ResourceLimits,
+    known_secrets: &[String],
 ) -> Result<ValidationRecord> {
     let proposal = load_proposal_from_repo(repo, proposal_id)?;
     let start_time = now_iso();
+
+    // Diagnostics (including command, stdout, stderr) are redacted at the
+    // persistence boundary. The command is still *executed* verbatim.
+    let redactor = Redactor::new().with_known_secrets(known_secrets);
 
     let wt_root = std::env::temp_dir().join(format!("prometheos-eval-{proposal_id}"));
     // Clean any stale state.
@@ -78,7 +93,7 @@ pub(super) async fn run_isolated_validation(
 
         let completion_time = now_iso();
         return Ok(ValidationRecord {
-            validation_command: validation_command.map(|s| s.to_string()),
+            validation_command: validation_command.map(|s| redactor.redact(s)),
             exit_code: None,
             stdout_preview: String::new(),
             stderr_preview: "patch does not apply cleanly".to_string(),
@@ -98,41 +113,17 @@ pub(super) async fn run_isolated_validation(
     // Apply the patch.
     let _ = run_git_cmd(&wt_root, &["apply", patch_file.to_str().unwrap()]);
 
-    // Step 2: Run validation command if present — cooperatively cancellable.
+    // Step 2: Run validation command if present — cooperatively cancellable and
+    // resource-bounded (timeout + output cap). Cancellation wins over resource
+    // violation (it is a control-flow signal, not a failure).
     let (exit_code, stdout, stderr) = match validation_command {
         Some(cmd) => {
-            let child = validation_shell_async(cmd)
-                .current_dir(&wt_root)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .context("failed to execute validation command")?;
-            // Capture the pid up front so cancellation can signal the whole
-            // process group even after the child is moved into the waiter task.
-            let pid = child.id();
-            let mut waiter = tokio::spawn(async move { child.wait_with_output().await });
-            tokio::select! {
-                res = &mut waiter => {
-                    let output = res
-                        .context("validation waiter task failed")?
-                        .context("failed to wait on validation command")?;
-                    (
-                        Some(output.status.code().unwrap_or(-1)),
-                        String::from_utf8_lossy(&output.stdout).to_string(),
-                        String::from_utf8_lossy(&output.stderr).to_string(),
-                    )
-                }
-                _ = token.cancelled() => {
-                    // Terminate the whole validation subtree by pid, then stop
-                    // waiting. `kill_on_drop` cleans up the spawned child too.
-                    if let Some(pid) = pid {
-                        kill_child_tree(pid).await;
-                    }
-                    waiter.abort();
-                    return Err(anyhow!("validation cancelled by user request"));
-                }
-            }
+            let (code, raw_out, raw_err) =
+                bounded_run(cmd, &wt_root, resource_limits, token).await?;
+            // Redact diagnostics before they become persisted evidence.
+            let out = redactor.redact(&raw_out);
+            let err = redactor.redact(&raw_err);
+            (code, out, err)
         }
         None => (None, String::new(), String::new()),
     };
@@ -145,11 +136,23 @@ pub(super) async fn run_isolated_validation(
 
     let validation_passed = exit_code.map(|c| c == 0).unwrap_or(true) && patch_applies;
 
-    // Save raw logs.
+    // Save raw logs (redacted, with checksum sidecar).
     let stdout_path = evidence_dir.join("validation_stdout.log");
     let stderr_path = evidence_dir.join("validation_stderr.log");
-    let _ = std::fs::write(&stdout_path, &stdout);
-    let _ = std::fs::write(&stderr_path, &stderr);
+    crate::workflow::artifact_integrity::publish_with_integrity(
+        repo,
+        &stdout_path,
+        stdout.as_bytes(),
+        crate::workflow::artifact_integrity::ArtifactKind::RawLog,
+    )
+    .context("failed to write redacted validation stdout log")?;
+    crate::workflow::artifact_integrity::publish_with_integrity(
+        repo,
+        &stderr_path,
+        stderr.as_bytes(),
+        crate::workflow::artifact_integrity::ArtifactKind::RawLog,
+    )
+    .context("failed to write redacted validation stderr log")?;
 
     // Clean up worktree.
     let _ = run_git_cmd(
@@ -160,7 +163,7 @@ pub(super) async fn run_isolated_validation(
     let _ = std::fs::remove_file(&patch_file);
 
     Ok(ValidationRecord {
-        validation_command: validation_command.map(|s| s.to_string()),
+        validation_command: validation_command.map(|s| redactor.redact(s)),
         exit_code,
         stdout_preview: truncate(&stdout, 4096),
         stderr_preview: truncate(&stderr, 4096),
@@ -175,6 +178,136 @@ pub(super) async fn run_isolated_validation(
         patch_applies_cleanly: patch_applies,
         validation_passed,
     })
+}
+
+/// Run `command` in `cwd` as one shell expression, capturing stdout/stderr with
+/// a bounded total budget and an optional wall-clock timeout. The entire
+/// process tree is terminated on cancellation, timeout, or output overflow, and
+/// the run fails closed with a `resource_*` classification.
+///
+/// Returns the exit code and the (still unredacted) captured output. Redaction
+/// happens after this returns, so the executed command is never altered.
+async fn bounded_run(
+    command: &str,
+    cwd: &Path,
+    limits: &ResourceLimits,
+    token: &CancellationToken,
+) -> Result<(Option<i32>, String, String)> {
+    let mut child = validation_shell_async(command)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to execute validation command")?;
+    let pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .context("validation stdout pipe unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("validation stderr pipe unavailable")?;
+
+    let total = Arc::new(AtomicU64::new(0));
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let cap = limits.max_output_bytes;
+
+    // Bounded reader: accumulate up to a hard safety cap, and flag (and kill)
+    // when the configured budget is exceeded.
+    async fn read_bounded(
+        stream: impl AsyncReadExt + Unpin,
+        total: Arc<AtomicU64>,
+        exceeded: Arc<AtomicBool>,
+        cap: Option<u64>,
+        pid: Option<u32>,
+    ) -> String {
+        let mut stream = stream;
+        let mut s = String::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Some(c) = cap {
+                        let cur = total.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
+                        if cur > c && !exceeded.swap(true, Ordering::SeqCst) {
+                            // Stop the workload; the main select observes
+                            // `exceeded` once the process tree exits.
+                            if let Some(pid) = pid {
+                                kill_child_tree(pid).await;
+                            }
+                        }
+                    }
+                    // Never grow past a hard safety cap regardless of config.
+                    if s.len() < 64 * 1024 * 1024 {
+                        s.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        s
+    }
+
+    let out_task = {
+        let total = total.clone();
+        let exceeded = exceeded.clone();
+        tokio::spawn(read_bounded(stdout, total, exceeded, cap, pid))
+    };
+    let err_task = {
+        let total = total.clone();
+        let exceeded = exceeded.clone();
+        tokio::spawn(read_bounded(stderr, total, exceeded, cap, pid))
+    };
+
+    // Race the process exit against cancellation and the wall-clock timeout.
+    let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
+
+    tokio::select! {
+        status = child.wait() => {
+            let code = status
+                .context("failed to wait on validation command")?
+                .code();
+            let out = out_task.await.unwrap_or_default();
+            let err = err_task.await.unwrap_or_default();
+            if exceeded.load(Ordering::SeqCst) {
+                bail!(
+                    "{}: validation output exceeded the configured cap",
+                    CLASSIFICATION_OUTPUT
+                );
+            }
+            Ok((code, out, err))
+        }
+        _ = token.cancelled() => {
+            if let Some(pid) = pid {
+                kill_child_tree(pid).await;
+            }
+            out_task.abort();
+            err_task.abort();
+            Err(anyhow!("validation cancelled by user request"))
+        }
+        _ = maybe_timeout(timeout_arm), if timeout_arm.is_some() => {
+            if let Some(pid) = pid {
+                kill_child_tree(pid).await;
+            }
+            out_task.abort();
+            err_task.abort();
+            bail!(
+                "{}: validation exceeded the configured wall-clock timeout",
+                CLASSIFICATION_TIMEOUT
+            );
+        }
+    }
+}
+
+/// Helper that awaits an optional timeout future (resolves immediately to
+/// `()` when `None`). Used to conditionally arm the timeout select branch.
+async fn maybe_timeout(f: Option<tokio::time::Sleep>) {
+    if let Some(s) = f {
+        s.await;
+    }
 }
 // ---------------------------------------------------------------------------
 // Test evidence parsing
@@ -309,7 +442,15 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 pub(super) fn classify_dry_run_error(msg: &str) -> String {
-    if msg.contains("disk") || msg.contains("ENOSPC") {
+    if msg.starts_with(CLASSIFICATION_TIMEOUT)
+        || msg.starts_with(CLASSIFICATION_OUTPUT)
+        || msg.starts_with(CLASSIFICATION_CPU)
+        || msg.starts_with(CLASSIFICATION_MEMORY)
+        || msg.starts_with(CLASSIFICATION_DISK)
+    {
+        // Resource exhaustion is infrastructure failure.
+        msg.split(':').next().unwrap_or("infra_blocked").to_string()
+    } else if msg.contains("disk") || msg.contains("ENOSPC") {
         "infra_blocked".to_string()
     } else if msg.contains("compiler") || msg.contains("cargo") || msg.contains("rustc") {
         "candidate_compile_failed".to_string()
@@ -367,6 +508,11 @@ pub(super) fn failure_to_terminal_state(classification: &str) -> EvaluationState
         "infra_blocked" => EvaluationState::InfraBlocked,
         "integrity_failed" => EvaluationState::IntegrityFailed,
         "validation_passed_review_required" => EvaluationState::ReviewGate,
+        CLASSIFICATION_TIMEOUT
+        | CLASSIFICATION_OUTPUT
+        | CLASSIFICATION_CPU
+        | CLASSIFICATION_MEMORY
+        | CLASSIFICATION_DISK => EvaluationState::InfraBlocked,
         _ => EvaluationState::InternalError,
     }
 }
@@ -527,6 +673,112 @@ mod tests {
         assert_eq!(
             failure_to_terminal_state("validation_passed_review_required"),
             EvaluationState::ReviewGate
+        );
+    }
+
+    // Leak-safety gate: a known secret echoed by the validation command must
+    // never reach persisted diagnostics or raw logs. This drives the real
+    // `run_isolated_validation` persistence path.
+    #[tokio::test]
+    async fn known_secret_is_redacted_from_persisted_validation() {
+        use crate::workflow::artifact_integrity::{ArtifactKind, publish_with_integrity};
+        use crate::workflow::evaluate::cancellation::CancellationToken;
+        use crate::workflow::evaluate::integrity::run_git_cmd;
+        use crate::workflow::redaction::SECRET_CANARY;
+        use crate::workflow::{AuthorityLevel, ProposalArtifact, ScopeContract};
+
+        let dir = std::env::temp_dir().join(format!("prometheos-canary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        run_git_cmd(&dir, &["init"]).unwrap();
+        run_git_cmd(&dir, &["config", "user.email", "t@example.com"]).unwrap();
+        run_git_cmd(&dir, &["config", "user.name", "t"]).unwrap();
+        std::fs::write(dir.join("seed.txt"), "x").unwrap();
+        run_git_cmd(&dir, &["add", "."]).unwrap();
+        run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
+        let base_sha = run_git_cmd(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        let id = "canary-run";
+        let proposal = ProposalArtifact {
+            id: id.to_string(),
+            repo: dir.to_string_lossy().to_string(),
+            base_sha: base_sha.clone(),
+            goal: "g".to_string(),
+            authority: AuthorityLevel::Propose,
+            scope: ScopeContract {
+                goal: "g".to_string(),
+                authority: AuthorityLevel::Propose,
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: None,
+                max_lines_changed: None,
+            },
+            patch: "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n".to_string(),
+            patch_hash: "h".to_string(),
+            changed_files: vec![],
+            added_lines: 0,
+            removed_lines: 0,
+            approved: None,
+            dry_run_passed: None,
+            applied: None,
+            validation_command: None,
+            provider_provenance: None,
+            dry_run_validation: None,
+            apply_validation: None,
+            checkpoint_ref: None,
+            rollback_status: None,
+        };
+        let prop_path = dir
+            .join(".prometheos")
+            .join("workflow")
+            .join(id)
+            .join("proposal.json");
+        std::fs::create_dir_all(prop_path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&proposal).unwrap();
+        publish_with_integrity(&dir, &prop_path, &bytes, ArtifactKind::Proposal).unwrap();
+
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+
+        let token = CancellationToken::new();
+        let canary = SECRET_CANARY.to_string();
+        let known = vec![canary.clone()];
+        let record = run_isolated_validation(
+            &dir,
+            id,
+            Some(&format!("echo {canary}")),
+            &evidence_dir,
+            &token,
+            &ResourceLimits::default(),
+            &known,
+        )
+        .await
+        .expect("validation run should succeed");
+
+        assert!(
+            record.patch_applies_cleanly,
+            "patch must apply for the validation command to run"
+        );
+        assert!(
+            !record.stdout_preview.contains(&canary),
+            "stdout preview leaked the known secret"
+        );
+        assert!(
+            !record
+                .validation_command
+                .as_deref()
+                .unwrap_or("")
+                .contains(&canary),
+            "validation command leaked the known secret"
+        );
+
+        let raw = std::fs::read_to_string(evidence_dir.join("validation_stdout.log"))
+            .expect("raw stdout log must be persisted");
+        assert!(
+            !raw.contains(&canary),
+            "raw stdout log leaked the known secret"
         );
     }
 }

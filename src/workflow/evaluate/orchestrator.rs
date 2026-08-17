@@ -29,6 +29,7 @@ use super::registry::{
     fenced_finalize, is_entry_stale, is_entry_stale_at, lookup_entry, proposal_state_for_state,
     release_reservation, transition_entry, try_reserve, try_take_ownership_cas,
 };
+use super::resource::ResourceLimits;
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
     run_isolated_validation,
@@ -585,6 +586,8 @@ pub async fn evaluate_with_cancellation(
         config.manifest.validation_command.as_deref(),
         &evidence_dir,
         &token,
+        &ResourceLimits::default(),
+        &[],
     )
     .await;
 
@@ -1074,14 +1077,19 @@ fn load_preserved_evidence(
         );
     }
     // Validate the durable document (immutable evidence is validated in memory,
-    // never blindly rewritten) before returning it unchanged.
+    // never blindly rewritten) before returning it unchanged. Then verify the
+    // #115-format checksum sidecar when present; tolerate legacy artifacts.
     super::migration::migrate_document(
         &evidence_path,
         super::schema::DocumentType::EvidenceBundle,
     )?;
-    let text = std::fs::read_to_string(&evidence_path)
-        .with_context(|| format!("failed to read evidence {}", evidence_path.display()))?;
-    let bundle: EvidenceBundle = serde_json::from_str(&text).with_context(|| {
+    let bytes = crate::workflow::artifact_integrity::read_verified_or_legacy(
+        evidence_dir,
+        &evidence_path,
+        crate::workflow::artifact_integrity::ArtifactKind::Evidence,
+    )
+    .with_context(|| format!("failed to read evidence {}", evidence_path.display()))?;
+    let bundle: EvidenceBundle = serde_json::from_slice(&bytes).with_context(|| {
         format!(
             "corrupt preserved evidence bundle {}",
             evidence_path.display()
@@ -1297,6 +1305,8 @@ async fn resume_validation(
         manifest.validation_command.as_deref(),
         evidence_dir,
         token,
+        &ResourceLimits::default(),
+        &[],
     )
     .await;
 
