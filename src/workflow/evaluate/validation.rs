@@ -49,6 +49,11 @@ pub(super) async fn run_isolated_validation(
     // mutated patch before it ever touches the worktree.
     verify_patch_integrity(&proposal)?;
 
+    // Reject patches that embed a known secret. Secrets must never be written
+    // into a proposed patch; this fails closed before the patch touches the
+    // worktree.
+    verify_patch_free_of_secrets(&proposal, known_secrets)?;
+
     // Disk-pressure preflight: refuse to run if the filesystem hosting the repo
     // cannot satisfy the configured free-space reserve. Fails closed.
     if let Some(required) = resource_limits.min_free_disk_bytes {
@@ -223,46 +228,55 @@ async fn bounded_run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // Best-effort OS-enforced memory/CPU caps (POSIX setrlimit in the child's
-    // pre-exec; the limit applies to the shell and its descendants).
+    // OS-enforced memory/CPU caps (POSIX setrlimit in the child's pre-exec;
+    // the limit applies to the shell and its descendants).
     #[cfg(unix)]
     {
         let mem = limits.max_memory_bytes;
         let cpu = limits.max_cpu_time.map(|d| d.as_secs());
-        cmd.pre_exec(move || {
-            if let Some(bytes) = mem {
-                let rlim = libc::rlimit {
-                    rlim_cur: bytes,
-                    rlim_max: bytes,
-                };
-                unsafe {
-                    libc::setrlimit(libc::RLIMIT_AS, &rlim);
+        // SAFETY: `pre_exec` runs in the child process immediately after fork
+        // and before exec. We only invoke async-signal-safe libc setters, and if
+        // a configured limit cannot be applied the spawn fails (fail closed: a
+        // resource cap we cannot enforce must not silently pass).
+        unsafe {
+            cmd.pre_exec(move || {
+                if let Some(bytes) = mem {
+                    let rlim = libc::rlimit {
+                        rlim_cur: bytes,
+                        rlim_max: bytes,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_AS, &rlim) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
-            }
-            if let Some(secs) = cpu {
-                let rlim = libc::rlimit {
-                    rlim_cur: secs,
-                    rlim_max: secs,
-                };
-                unsafe {
-                    libc::setrlimit(libc::RLIMIT_CPU, &rlim);
+                if let Some(secs) = cpu {
+                    let rlim = libc::rlimit {
+                        rlim_cur: secs,
+                        rlim_max: secs,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CPU, &rlim) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            });
+        }
     }
     let mut child = cmd
         .spawn()
         .context("failed to execute validation command")?;
     let pid = child.id();
-    // Best-effort OS-enforced memory/CPU caps on Windows via a Job Object.
+    // OS-enforced memory/CPU caps on Windows via a Job Object. Fail closed: if
+    // limits are configured but cannot be applied, the validation must not run
+    // unbounded — the child is killed (drop) and the run is rejected.
     #[cfg(windows)]
     {
         if (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some())
             && let Some(pid) = pid
-            && let Err(e) = apply_job_limits(pid, limits)
         {
-            eprintln!("warning: failed to apply windows job limits: {e}");
+            apply_job_limits(pid, limits).context(
+                "failed to apply Windows Job Object resource limits (CPU/memory enforcement unavailable)",
+            )?;
         }
     }
     let stdout = child
@@ -422,6 +436,26 @@ fn check_output_budget(stdout: &str, stderr: &str, limits: &ResourceLimits) -> R
     Ok(())
 }
 
+/// Reject a proposal whose recorded patch embeds a known secret. This is an
+/// independent control from patch-hash integrity: it prevents operator secrets
+/// from entering the codebase via a proposed diff, even when the hash matches.
+fn verify_patch_free_of_secrets(
+    proposal: &crate::workflow::ProposalArtifact,
+    known_secrets: &[String],
+) -> Result<()> {
+    for secret in known_secrets {
+        if secret.is_empty() {
+            continue;
+        }
+        if proposal.patch.contains(secret) {
+            bail!(
+                "patch rejected: contains a known secret; secrets must not be embedded in patches"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn verify_patch_integrity(proposal: &crate::workflow::ProposalArtifact) -> Result<()> {
     let computed = crate::workflow::artifact_integrity::sha256_hex(proposal.patch.as_bytes());
     if !proposal.patch_hash.is_empty() && proposal.patch_hash != computed {
@@ -443,8 +477,9 @@ fn verify_patch_integrity(proposal: &crate::workflow::ProposalArtifact) -> Resul
 }
 
 /// Apply OS-enforced CPU/memory caps to a freshly spawned validation process via
-/// a Windows Job Object. Best-effort: callers treat a failure as a warning and
-/// still rely on timeout/output enforcement.
+/// a Windows Job Object. Fails closed: callers reject the run if limits are
+/// configured but cannot be applied, so a resource cap is never silently
+/// unenforced.
 #[cfg(windows)]
 fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
     use std::mem;
@@ -1203,6 +1238,34 @@ mod tests {
         assert!(
             err.to_string().contains("patch integrity"),
             "expected patch integrity error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_containing_known_secret_is_rejected() {
+        let (dir, base) = init_test_repo("secret-patch");
+        let id = "secret-patch-run";
+        let secret = "SUPERSECRETXYZ";
+        let patch =
+            format!("diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n+{secret}\n");
+        write_proposal(&dir, id, &base, &patch, &sha256_hex(patch.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("echo ok"),
+            &evidence_dir,
+            &token,
+            &ResourceLimits::default(),
+            &[secret.to_string()],
+        )
+        .await
+        .expect_err("secret-bearing patch must be rejected");
+        assert!(
+            err.to_string().contains("known secret"),
+            "expected secret rejection, got: {err}"
         );
     }
 

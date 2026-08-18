@@ -196,6 +196,13 @@ fn load_registry(repo: &Path) -> Result<ProposalRegistry> {
     serde_json::from_str(&text).context("corrupted proposal registry (invalid JSON)")
 }
 
+/// Load the current proposal registry (read-only). Retention uses this to
+/// discover referenced, authoritative workflow directories so reclamation never
+/// touches evidence that is still referenced.
+pub fn read_registry(repo: &Path) -> Result<ProposalRegistry> {
+    load_registry(repo)
+}
+
 fn save_registry(repo: &Path, registry: &ProposalRegistry) -> Result<()> {
     let path = registry_path(repo);
     // Current-format write: the schema version is embedded in the document.

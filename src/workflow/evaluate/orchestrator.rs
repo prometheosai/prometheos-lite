@@ -11,9 +11,9 @@ use crate::workflow::{
 use super::cancellation::CancellationToken;
 use super::cleanup::cleanup_worktree;
 use super::evidence::{
-    EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, new_bundle, new_bundle_from_identity,
-    prepare_evidence_dir, read_integrity_artifact, read_validation_artifact, write_bundle,
-    write_integrity_artifact, write_validation_artifact,
+    EvidenceBundle, ProposalRecord, ProviderProvenanceRecord, ValidationRecord, new_bundle,
+    new_bundle_from_identity, prepare_evidence_dir, read_integrity_artifact,
+    read_validation_artifact, write_bundle, write_integrity_artifact, write_validation_artifact,
 };
 use super::generation::{classify_generation_error, load_proposal_from_repo};
 use super::heartbeat::HeartbeatSession;
@@ -27,14 +27,14 @@ use super::recovery::{RecoveryDisposition, determine_recovery_disposition};
 use super::registry::{
     FenceToken, LeaseConfig, OwnershipObservation, ProposalState, ReserveResult, TakeoverResult,
     fenced_finalize, is_entry_stale, is_entry_stale_at, lookup_entry, proposal_state_for_state,
-    release_reservation, transition_entry, try_reserve, try_take_ownership_cas,
+    read_registry, release_reservation, transition_entry, try_reserve, try_take_ownership_cas,
 };
 use super::resource::ResourceLimits;
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
     run_isolated_validation,
 };
-use crate::workflow::redaction::collect_known_secrets;
+use crate::workflow::redaction::{Redactor, collect_known_secrets};
 use crate::workflow::retention::{ProtectedReferences, reclaim_orphan_artifacts};
 
 // ---------------------------------------------------------------------------
@@ -637,6 +637,18 @@ pub async fn evaluate_with_cancellation(
         Err(e) => {
             let msg = e.to_string();
             let classification = classify_dry_run_error(&msg);
+            // Durably record the failure BEFORE the ValidationComplete journal
+            // event references it, so a resource/integrity rejection is never
+            // lost and recovery maps it correctly.
+            let redactor = Redactor::new().with_known_secrets(&known_secrets);
+            let cmd = config
+                .manifest
+                .validation_command
+                .as_deref()
+                .map(|c| redactor.redact(c));
+            let rec = ValidationRecord::resource_failure(cmd, &msg, now_iso(), now_iso());
+            write_validation_artifact(&evidence_dir, &rec)?;
+            bundle.validation = Some(rec);
             bundle.failure_classification = Some(classification);
         }
     }
@@ -776,13 +788,25 @@ pub async fn evaluate_with_cancellation(
     )
     .context("fenced finalization failed")?;
 
-    // Best-effort orphan reclamation of stale evaluation artifacts. Only
-    // unreferenced orphans older than the retention window are removed, each
-    // together with its checksum sidecar; fresh runs are never touched.
+    // Orphan reclamation of stale evaluation artifacts. Only unreferenced orphans
+    // older than the retention window are removed (together with their checksum
+    // sidecars). Authoritative state is explicitly protected so reclamation can
+    // never delete referenced evidence: the registry + journal control metadata,
+    // every referenced proposal workflow directory, and the run we just produced.
+    let mut protection = ProtectedReferences::new();
+    let wf = repo.join(".prometheos").join("workflow");
+    let _ = protection.insert(&wf.join("proposal_registry.json"));
+    let _ = protection.insert_dir(&wf.join("journal"));
+    if let Ok(reg) = read_registry(&repo) {
+        for id in reg.entries.keys() {
+            let _ = protection.insert_dir(&wf.join(id));
+        }
+    }
+    let _ = protection.insert_dir(&repo.join(&refs.dir));
     let _ = reclaim_orphan_artifacts(
         &repo,
         std::time::Duration::from_secs(7 * 24 * 3600),
-        &ProtectedReferences::new(),
+        &protection,
     );
 
     // Stop heartbeat and check for errors that occurred during finalization.

@@ -261,7 +261,7 @@ pub fn read_verified_or_legacy(
 
 /// Verify already-read `bytes` against the sidecar at `sidecar_path`.
 pub fn verify_with_sidecar(
-    _repo: &Path,
+    repo: &Path,
     absolute_path: &Path,
     expected_kind: ArtifactKind,
     bytes: &[u8],
@@ -281,6 +281,17 @@ pub fn verify_with_sidecar(
             absolute_path.display(),
             expected_kind.as_str(),
             digest.artifact_kind.as_str()
+        );
+    }
+    // Bind the integrity metadata to the artifact path: the sidecar must describe
+    // exactly this artifact and must never verify a relocated or swapped file.
+    let expected_path = durable::repo_relative_path(repo, absolute_path);
+    if digest.path != expected_path {
+        bail!(
+            "integrity sidecar path mismatch for {}: sidecar describes '{}' but artifact is '{}'",
+            absolute_path.display(),
+            digest.path,
+            expected_path
         );
     }
     digest.verify_against(bytes).with_context(|| {
@@ -368,5 +379,22 @@ mod tests {
         let sidecar = sidecar_for(&path);
         std::fs::write(&sidecar, "not json").unwrap();
         assert!(read_verified(repo, &path, ArtifactKind::Other).is_err());
+    }
+
+    #[test]
+    fn integrity_metadata_is_bound_to_artifact_path() {
+        let dir = tmp();
+        let repo = dir.path();
+        let path = repo.join("a.json");
+        let bytes = b"data".to_vec();
+        publish_with_integrity(repo, &path, &bytes, ArtifactKind::Other).unwrap();
+        let sidecar = sidecar_for(&path);
+        // Verification with the correct artifact path succeeds.
+        assert!(verify_with_sidecar(repo, &path, ArtifactKind::Other, &bytes, &sidecar).is_ok());
+        // The same bytes verified against a *different* artifact path must fail:
+        // the sidecar is bound to the original path and cannot validate a
+        // relocated or swapped file.
+        let other = repo.join("b.json");
+        assert!(verify_with_sidecar(repo, &other, ArtifactKind::Other, &bytes, &sidecar).is_err());
     }
 }

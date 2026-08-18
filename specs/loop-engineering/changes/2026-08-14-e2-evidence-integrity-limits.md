@@ -2,7 +2,7 @@
 
 - **PR:** #170 (DRAFT)
 - **Branch:** `feat/e2-evidence-integrity-limits`
-- **Status:** review-blocker revision complete and pushed (`91ccdd1..b7a1a71`); local verification passing; returned to REVIEW_GATE. Do **not** merge or begin #152.
+- **Status:** round-2 review-blocker revision complete and pushed; local verification passing; returned to REVIEW_GATE. Do **not** merge or begin #152.
 
 ## Summary
 
@@ -133,6 +133,48 @@ The review blockers raised on `91ccdd1` are addressed in `b7a1a71`:
 
 No benchmark or autonomous-execution claims. This change is confined to the
 alpha-stable `prometheos work` surface. Do not merge or begin #152.
+
+## REVIEW_GATE — round 2 (on `40a15d2`)
+
+The reviewer's `#pullrequestreview-4952312004` (7 PRIMARY BLOCKERS) on
+`40a15d252850ea100a838c3372283a6b664d0c03` are addressed in this revision:
+
+1. **Unix CI fails to compile (unsafe `pre_exec`).** `tokio::process::Command::pre_exec`
+   is an `unsafe fn`; the call is now wrapped in `unsafe { cmd.pre_exec(...) }`.
+   Additionally the `setrlimit` calls inside `pre_exec` now return `Err` on
+   failure (fail-closed) instead of logging. CI compiles on both Unix and Windows.
+2. **Empty retention protection can delete authoritative state.** `reclaim_orphan_artifacts`
+   is now invoked with a **populated** `ProtectedReferences`: the proposal registry
+   file, the journal subtree (`insert_dir`), every referenced proposal directory
+   discovered via the new public `read_registry`, and the current run dir. Added
+   `ProtectedReferences::insert_dir` (recursive, skips `.sidecar.json`) and
+   `pub fn read_registry` in `registry.rs`. Tests: `insert_dir_protects_subtree_
+   including_sidecars`, `reclaim_preserves_referenced_dir_and_reclaims_orphans`.
+3. **Resource failures not durably recorded before `ValidationComplete`.** On the
+   validation `Err` branch, a `ValidationRecord::resource_failure(...)` is written
+   durably via `write_validation_artifact` **before** the `ValidationComplete`
+   journal transition, and `bundle.validation` is set so recovery maps it to the
+   correct terminal state. Added `ValidationRecord::resource_failure`. Test:
+   `resource_failure_record_is_a_terminal_failure`.
+4. **Integrity metadata not bound to artifact path; evidence parsed before
+   verification.** `verify_with_sidecar` now requires `digest.path ==
+   durable::repo_relative_path(repo, absolute_path)` and bails before any record
+   deserialization. The path itself is read only as a string from the sidecar
+   bytes, never as a deserialized record. Test: `integrity_metadata_is_bound_
+   to_artifact_path`.
+5. **Secret-bearing patch rejection remains unwired.** Added
+   `verify_patch_free_of_secrets(&proposal, known_secrets)?`, invoked immediately
+   after `verify_patch_integrity` in `run_isolated_validation`; the run fails
+   closed with a "known secret" error. Test: `patch_containing_known_secret_is_
+   rejected`.
+6. **CPU/memory/disk enforcement not fail-closed / cross-platform.** Windows
+   `apply_job_limits` is now `...?` (fail-closed) instead of a best-effort
+   `eprintln`; Unix `setrlimit` fails closed; disk preflight fails closed. CPU/mem
+   rejection is verified by `#[cfg(unix)] cpu_limit_kills_runaway_process`.
+7. **Test coverage + PR metadata incomplete/stale.** Added the tests above;
+   PR description refreshed on push. The `heartbeat_loss_*` parallel-load flake
+   remains pre-existing (passes single-threaded / in isolation) and is not part
+   of this change.
 
 ## Follow-ups (post-merge, not in this PR)
 

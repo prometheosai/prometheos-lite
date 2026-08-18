@@ -78,6 +78,37 @@ pub struct ValidationRecord {
     pub validation_passed: bool,
 }
 
+impl ValidationRecord {
+    /// Build a durable record for a validation that failed before or during
+    /// execution for a non-candidate reason (e.g., a resource violation or a
+    /// rejected patch). The caller writes this durably BEFORE the
+    /// `ValidationComplete` journal event so the failure is never lost and
+    /// recovery maps it to the correct terminal state.
+    pub(super) fn resource_failure(
+        validation_command: Option<String>,
+        message: &str,
+        start_time: String,
+        completion_time: String,
+    ) -> Self {
+        ValidationRecord {
+            validation_command,
+            exit_code: None,
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+            start_time,
+            completion_time,
+            test_discovered: false,
+            test_executed: false,
+            test_names_found: Vec::new(),
+            test_count: 0,
+            warnings: Vec::new(),
+            failures: vec![message.to_string()],
+            patch_applies_cleanly: false,
+            validation_passed: false,
+        }
+    }
+}
+
 /// Repository integrity verification record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityRecord {
@@ -542,5 +573,22 @@ mod tests {
         assert!(md.contains("**Schema:** `1.0.0`"));
         assert!(md.contains("## Outcome"));
         assert!(md.contains("## Governance"));
+    }
+
+    #[test]
+    fn resource_failure_record_is_a_terminal_failure() {
+        let rec = ValidationRecord::resource_failure(
+            Some("validate --fail".to_string()),
+            "resource_cpu: validation exceeded CPU budget",
+            "2026-08-18T00:00:00Z".to_string(),
+            "2026-08-18T00:00:01Z".to_string(),
+        );
+        assert!(!rec.validation_passed);
+        assert!(!rec.patch_applies_cleanly);
+        assert_eq!(rec.failures.len(), 1);
+        assert_eq!(
+            rec.failures[0],
+            "resource_cpu: validation exceeded CPU budget"
+        );
     }
 }

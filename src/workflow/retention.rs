@@ -59,6 +59,36 @@ impl ProtectedReferences {
         self.set.contains(&abs) || self.set.contains(&sidecar_for(&abs))
     }
 
+    /// Protect every regular file under `dir` (recursively), together with each
+    /// file's checksum sidecar. Used to protect an entire referenced proposal
+    /// workflow directory so reclamation never touches authoritative evidence.
+    pub fn insert_dir(&mut self, dir: &Path) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let entries = std::fs::read_dir(&d)
+                .with_context(|| format!("failed to read protected dir {}", d.display()))?;
+            for entry in entries {
+                let entry = entry?;
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.is_file() {
+                    let is_sidecar = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().ends_with(".sidecar.json"))
+                        .unwrap_or(false);
+                    if !is_sidecar {
+                        let _ = self.insert(&p);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Add every repo-local artifact referenced by a `PortableWorkState`.
     ///
     /// This deliberately does NOT scan the repository or perform memory
@@ -422,5 +452,57 @@ mod tests {
         assert!(!orphan.exists());
         assert!(!sidecar_for(&orphan).exists());
         assert!(fresh.exists());
+    }
+
+    #[test]
+    fn insert_dir_protects_subtree_including_sidecars() {
+        let dir = tmp();
+        let repo = dir.path();
+        let sub = repo.join("workflow").join("proposal-abc");
+        fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("evidence.json");
+        fs::write(&file, "auth").unwrap();
+        fs::write(sidecar_for(&file), "{}").unwrap();
+        let mut prot = ProtectedReferences::new();
+        prot.insert_dir(&sub).unwrap();
+        assert!(prot.contains(&file));
+        assert!(prot.contains(&sidecar_for(&file)));
+        // A sibling that is not inside the protected subtree must remain
+        // unprotected.
+        let loose = repo.join("loose.json");
+        fs::write(&loose, "y").unwrap();
+        assert!(!prot.contains(&loose));
+    }
+
+    #[test]
+    fn reclaim_preserves_referenced_dir_and_reclaims_orphans() {
+        let dir = tmp();
+        let repo = dir.path();
+        let wf = repo.join(".prometheos").join("workflow");
+        // A referenced (protected) proposal directory.
+        let referenced = wf.join("referenced");
+        fs::create_dir_all(&referenced).unwrap();
+        let ref_file = referenced.join("evidence.json");
+        fs::write(&ref_file, "auth").unwrap();
+        // An expired orphan directory.
+        let orphan = wf.join("orphan");
+        fs::create_dir_all(&orphan).unwrap();
+        let orphan_file = orphan.join("evidence.json");
+        fs::write(&orphan_file, "x").unwrap();
+        let past = SystemTime::now() - Duration::from_secs(3600);
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&orphan_file)
+            .and_then(|f| f.set_modified(past));
+
+        let mut prot = ProtectedReferences::new();
+        prot.insert_dir(&referenced).unwrap();
+        let out = reclaim_orphan_artifacts(repo, Duration::from_secs(10), &prot).unwrap();
+        assert!(
+            ref_file.exists(),
+            "referenced evidence must survive reclamation"
+        );
+        assert!(!orphan_file.exists(), "orphan evidence must be reclaimed");
+        assert_eq!(out.removed, 1);
     }
 }
