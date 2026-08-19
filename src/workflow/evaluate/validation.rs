@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as AsyncCommand;
@@ -43,6 +43,12 @@ pub(super) async fn run_isolated_validation(
 ) -> Result<ValidationRecord> {
     let proposal = load_proposal_from_repo(repo, proposal_id)?;
     let start_time = now_iso();
+
+    // Fail closed on absurd or invalid resource configuration. A misconfigured
+    // limit must never silently weaken enforcement.
+    resource_limits
+        .validate()
+        .context("invalid resource limits configuration")?;
 
     // Fail closed on patch tampering: the applied patch MUST match the recorded
     // patch hash (and any recorded approval hash). This rejects a swapped or
@@ -135,6 +141,7 @@ pub(super) async fn run_isolated_validation(
             failures: vec!["patch apply check failed".to_string()],
             patch_applies_cleanly: false,
             validation_passed: false,
+            failure_classification: None,
         });
     }
 
@@ -207,6 +214,7 @@ pub(super) async fn run_isolated_validation(
         failures,
         patch_applies_cleanly: patch_applies,
         validation_passed,
+        failure_classification: None,
     })
 }
 
@@ -279,6 +287,41 @@ async fn bounded_run(
             )?;
         }
     }
+    // Aggregate, process-tree resource enforcement on Unix: a monitor thread walks
+    // the validation process group and kills the entire tree the moment the
+    // aggregate CPU time, aggregate RSS, or free disk space crosses a budget. This
+    // is true process-tree accounting, not per-process `setrlimit` (which each
+    // descendant could otherwise consume independently). The per-process
+    // `setrlimit` above remains as defense in depth.
+    let monitor_done = Arc::new(AtomicBool::new(false));
+    let monitor_kind = Arc::new(AtomicU8::new(0));
+    let monitor_handle: Option<std::thread::JoinHandle<()>> = {
+        #[cfg(unix)]
+        {
+            if limits.max_cpu_time.is_some()
+                || limits.max_memory_bytes.is_some()
+                || limits.min_free_disk_bytes.is_some()
+            {
+                if let Some(pid) = pid {
+                    Some(spawn_resource_monitor(
+                        pid,
+                        *limits,
+                        cwd.to_path_buf(),
+                        monitor_done.clone(),
+                        monitor_kind.clone(),
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
     let stdout = child
         .stdout
         .take()
@@ -343,7 +386,7 @@ async fn bounded_run(
     // Race the process exit against cancellation and the wall-clock timeout.
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
 
-    tokio::select! {
+    let outcome: Result<(Option<i32>, String, String)> = tokio::select! {
         status = child.wait() => {
             let status = status.context("failed to wait on validation command")?;
             let code = status.code();
@@ -401,7 +444,34 @@ async fn bounded_run(
                 CLASSIFICATION_TIMEOUT
             );
         }
+    };
+
+    // Stop the aggregate monitor and collect its verdict.
+    monitor_done.store(true, Ordering::SeqCst);
+    if let Some(h) = monitor_handle {
+        let _ = h.join();
     }
+    let kind = monitor_kind.load(Ordering::SeqCst);
+    if kind != 0 {
+        // The aggregate monitor caught a resource breach; report it precisely
+        // (cpu/memory/disk) so recovery maps it to InfraBlocked.
+        return Err(match kind {
+            1 => anyhow!(
+                "{}: validation exceeded the configured cpu time budget (process tree)",
+                CLASSIFICATION_CPU
+            ),
+            2 => anyhow!(
+                "{}: validation exceeded the configured memory budget (process tree)",
+                CLASSIFICATION_MEMORY
+            ),
+            3 => anyhow!(
+                "{}: disk pressure during validation (free space below reserve)",
+                CLASSIFICATION_DISK
+            ),
+            _ => anyhow!("validation resource limit exceeded"),
+        });
+    }
+    outcome
 }
 
 /// Helper that awaits an optional timeout future (resolves immediately to
@@ -480,16 +550,21 @@ fn verify_patch_integrity(proposal: &crate::workflow::ProposalArtifact) -> Resul
 /// a Windows Job Object. Fails closed: callers reject the run if limits are
 /// configured but cannot be applied, so a resource cap is never silently
 /// unenforced.
+///
+/// Limits are applied at the **job** (process-tree aggregate) level:
+/// - `JobMemoryLimit` caps the total committed memory of the whole job
+///   (aggregate across all child processes), not per-process.
+/// - `PerJobUserTimeLimit` caps the aggregate user-mode CPU time of the job.
 #[cfg(windows)]
 fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
     use std::mem;
-    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::handleapi::CloseHandle;
     use winapi::um::jobapi2::{
         AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
     };
     use winapi::um::processthreadsapi::OpenProcess;
     use winapi::um::winnt::{
-        JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_WORKINGSET,
+        JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_JOB_TIME,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         PROCESS_ALL_ACCESS,
     };
@@ -502,10 +577,9 @@ fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
         let mut flags: u32 = 0;
         if let Some(mem) = limits.max_memory_bytes {
-            info.ProcessMemoryLimit = mem as usize;
-            flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-            info.BasicLimitInformation.MaximumWorkingSetSize = mem as usize;
-            flags |= JOB_OBJECT_LIMIT_WORKINGSET;
+            // Aggregate job memory limit (total committed memory across the tree).
+            info.JobMemoryLimit = mem as usize;
+            flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
         }
         if let Some(cpu) = limits.max_cpu_time {
             // JOBOBJECT BasicLimitInformation.PerJobUserTimeLimit is in 100ns units.
@@ -537,7 +611,6 @@ fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
         if assigned == 0 {
             bail!("AssignProcessToJobObject failed");
         }
-        let _ = INVALID_HANDLE_VALUE;
     }
     Ok(())
 }
@@ -698,6 +771,12 @@ pub(super) fn classify_dry_run_error(msg: &str) -> String {
 }
 
 pub fn classify_validation_failure(vr: &ValidationRecord) -> String {
+    // Trust an authoritative classification carried by the durable record so
+    // recovery/replay never re-derives a resource rejection as a candidate test
+    // failure.
+    if let Some(ref fc) = vr.failure_classification {
+        return fc.clone();
+    }
     // Infrastructure classification must be supported by concrete evidence.
     let stderr = &vr.stderr_preview;
     let lower = stderr.to_lowercase();
@@ -794,6 +873,136 @@ async fn kill_child_tree(pid: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
+/// Spawn the aggregate, process-tree resource monitor for a Unix validation run.
+///
+/// The monitor walks `/proc` for every process in the validation process group
+/// (`pgid == pid`, because the shell was spawned into its own group) and, on each
+/// tick, sums the **aggregate** user+system CPU time and **aggregate** RSS across
+/// the whole tree. If the aggregate CPU, aggregate RSS, or free disk space crosses
+/// the configured budget it kills the entire group (SIGKILL) and records which
+/// resource was breached in `kind` (1=cpu, 2=memory, 3=disk). This is true
+/// process-tree accounting, independent of (and in addition to) the per-process
+/// `setrlimit` applied in the child's `pre_exec`.
+#[cfg(unix)]
+fn spawn_resource_monitor(
+    pid: u32,
+    limits: ResourceLimits,
+    cwd: PathBuf,
+    done: Arc<AtomicBool>,
+    kind: Arc<AtomicU8>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let pgid = pid as i32;
+        // Clock ticks per second, for converting /proc stat times to seconds.
+        let tick = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        let tick = if tick <= 0 { 100 } else { tick as u64 };
+        while !done.load(Ordering::SeqCst) {
+            let mut cpu_ticks: u64 = 0;
+            let mut rss_bytes: u64 = 0;
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if !name.chars().all(|c| c.is_ascii_digit()) {
+                        continue;
+                    }
+                    let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if !proc_in_group(&stat, pgid) {
+                        continue;
+                    }
+                    if let Some((ut, st)) = proc_cpu_ticks(&stat) {
+                        cpu_ticks += ut + st;
+                    }
+                    if let Some(rss) = proc_rss(&entry.path()) {
+                        rss_bytes += rss;
+                    }
+                }
+            }
+            if let Some(secs) = limits.max_cpu_time {
+                if cpu_ticks / tick >= secs.as_secs() {
+                    kind.store(1, Ordering::SeqCst);
+                    kill_group(pgid);
+                    return;
+                }
+            }
+            if let Some(mem) = limits.max_memory_bytes {
+                if rss_bytes >= mem {
+                    kind.store(2, Ordering::SeqCst);
+                    kill_group(pgid);
+                    return;
+                }
+            }
+            if let Some(min_free) = limits.min_free_disk_bytes {
+                if let super::preflight::DiskSpaceStatus::Available(free) =
+                    super::preflight::available_disk_bytes(&cwd)
+                {
+                    if free < min_free {
+                        kind.store(3, Ordering::SeqCst);
+                        kill_group(pgid);
+                        return;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    })
+}
+
+#[cfg(unix)]
+fn kill_group(pgid: i32) {
+    // SAFETY: kill the whole process group we created with SIGKILL.
+    unsafe {
+        let _ = libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+/// True if the process described by `/proc/<pid>/stat` belongs to process group
+/// `pgid`. Robust to the comm field containing spaces or parentheses.
+#[cfg(unix)]
+fn proc_in_group(stat: &str, pgid: i32) -> bool {
+    let Some(idx) = stat.rfind(')') else {
+        return false;
+    };
+    let rest = &stat[idx + 1..];
+    let mut it = rest.split_whitespace();
+    // Fields after ')': state ppid pgrp ...
+    let _state = it.next();
+    let _ppid = it.next();
+    let pgrp = it.next();
+    pgrp.and_then(|p| p.parse::<i32>().ok()) == Some(pgid)
+}
+
+/// Parse the (utime, stime) pair (in clock ticks) from `/proc/<pid>/stat`.
+#[cfg(unix)]
+fn proc_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
+    let Some(idx) = stat.rfind(')') else {
+        return None;
+    };
+    let rest = &stat[idx + 1..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // state(0) ppid(1) pgrp(2) session(3) tty(4) tpgid(5) flags(6) minflt(7)
+    // cminflt(8) majflt(9) cmajflt(10) utime(11) stime(12)
+    let utime = fields.get(11)?.parse::<u64>().ok()?;
+    let stime = fields.get(12)?.parse::<u64>().ok()?;
+    Some((utime, stime))
+}
+
+/// Parse the resident set size (bytes) from `/proc/<pid>/status` (`VmRSS`).
+#[cfg(unix)]
+fn proc_rss(proc_path: &Path) -> Option<u64> {
+    let status = std::fs::read_to_string(proc_path.join("status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb = rest.trim().split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +1037,7 @@ mod tests {
             failures: Vec::new(),
             patch_applies_cleanly: true,
             validation_passed: false,
+            failure_classification: None,
         };
         assert_eq!(classify_validation_failure(&vr), "candidate_compile_failed");
     }
@@ -848,6 +1058,7 @@ mod tests {
             failures: vec!["assertion failed".to_string()],
             patch_applies_cleanly: true,
             validation_passed: false,
+            failure_classification: None,
         };
         assert_ne!(classify_validation_failure(&vr), "infra_blocked");
     }
@@ -1299,6 +1510,80 @@ mod tests {
         .expect_err("cpu limit must fail validation");
         assert!(
             err.to_string().contains(CLASSIFICATION_CPU),
+            "expected cpu classification, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn memory_limit_kills_runaway_process() {
+        // Skip when python3 is unavailable in this environment.
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (dir, base) = init_test_repo("mem");
+        let id = "mem-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        // No disk budget here so only the memory breach is observed.
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            max_memory_bytes: Some(64 * 1024 * 1024),
+            min_free_disk_bytes: None,
+            ..ResourceLimits::default()
+        };
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("python3 -c 'import time; b=bytearray(256*1024*1024); [b.__setitem__(i,1) for i in range(0,len(b),4096)]; time.sleep(10)'"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect_err("memory limit must fail validation");
+        assert!(
+            err.to_string().contains(CLASSIFICATION_MEMORY),
+            "expected memory classification, got: {err}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cpu_limit_kills_runaway_process_windows() {
+        let (dir, base) = init_test_repo("wincpu");
+        let id = "wincpu-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            max_cpu_time: Some(std::time::Duration::from_secs(1)),
+            min_free_disk_bytes: None,
+            ..ResourceLimits::default()
+        };
+        let err = run_isolated_validation(
+            &dir,
+            id,
+            Some("for /l %i in (0,0,1) do @rem"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect_err("cpu limit must fail validation");
+        assert!(
+            err.to_string().contains(CLASSIFICATION_CPU)
+                || err.to_string().contains("Windows Job Object"),
             "expected cpu classification, got: {err}"
         );
     }

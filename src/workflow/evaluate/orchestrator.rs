@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::harness::patch_provider::{PatchProvider, PatchProviderContext};
@@ -646,10 +646,16 @@ pub async fn evaluate_with_cancellation(
                 .validation_command
                 .as_deref()
                 .map(|c| redactor.redact(c));
-            let rec = ValidationRecord::resource_failure(cmd, &msg, now_iso(), now_iso());
+            let rec = ValidationRecord::resource_failure(
+                cmd,
+                &classification,
+                &msg,
+                now_iso(),
+                now_iso(),
+            );
             write_validation_artifact(&evidence_dir, &rec)?;
             bundle.validation = Some(rec);
-            bundle.failure_classification = Some(classification);
+            bundle.failure_classification = Some(classification.clone());
         }
     }
     durable_transition(
@@ -661,7 +667,7 @@ pub async fn evaluate_with_cancellation(
         &fence,
         EvaluationState::ValidationComplete,
         Some(gen_result.id.clone()),
-        None,
+        bundle.failure_classification.clone(),
         Some(refs.dir.clone()),
     )
     .context("failed to persist ValidationComplete transition")?;
@@ -792,27 +798,63 @@ pub async fn evaluate_with_cancellation(
     // older than the retention window are removed (together with their checksum
     // sidecars). Authoritative state is explicitly protected so reclamation can
     // never delete referenced evidence: the registry + journal control metadata,
-    // every referenced proposal workflow directory, and the run we just produced.
-    let mut protection = ProtectedReferences::new();
-    let wf = repo.join(".prometheos").join("workflow");
-    let _ = protection.insert(&wf.join("proposal_registry.json"));
-    let _ = protection.insert_dir(&wf.join("journal"));
-    if let Ok(reg) = read_registry(&repo) {
-        for id in reg.entries.keys() {
-            let _ = protection.insert_dir(&wf.join(id));
+    // every referenced proposal directory (keyed by proposal id in the registry)
+    // and evidence directory, and the run we just produced. Protection is built
+    // fail-closed: if it cannot be computed, reclamation is SKIPPED entirely
+    // rather than risk deleting authoritative state.
+    match build_retention_protection(&repo, &refs.dir) {
+        Ok(protection) => {
+            let _ = reclaim_orphan_artifacts(
+                &repo,
+                std::time::Duration::from_secs(7 * 24 * 3600),
+                &protection,
+            );
+        }
+        Err(e) => {
+            // Fail closed: refuse to delete anything if we cannot enumerate what
+            // must be preserved.
+            eprintln!("retention skipped: could not build protected set: {e}");
         }
     }
-    let _ = protection.insert_dir(&repo.join(&refs.dir));
-    let _ = reclaim_orphan_artifacts(
-        &repo,
-        std::time::Duration::from_secs(7 * 24 * 3600),
-        &protection,
-    );
 
     // Stop heartbeat and check for errors that occurred during finalization.
     heartbeat.shutdown("").await?;
 
     Ok(bundle)
+}
+
+/// Build the set of artifact paths reclamation must never delete.
+///
+/// Covers the control metadata (proposal registry + journal), every proposal
+/// directory and evidence directory referenced by a live/completed registry
+/// entry, and the run that was just produced. Returns `Err` if the protected set
+/// cannot be determined (e.g. the registry is unreadable or a referenced path
+/// cannot be resolved) so the caller can skip reclamation rather than delete
+/// authoritative state with an incomplete protection set.
+fn build_retention_protection(repo: &Path, current_run_dir: &str) -> Result<ProtectedReferences> {
+    let mut protection = ProtectedReferences::new();
+    let wf = repo.join(".prometheos").join("workflow");
+    // Control metadata.
+    protection.insert(&wf.join("proposal_registry.json"))?;
+    protection.insert_dir(&wf.join("journal"))?;
+    // Referenced proposal + evidence directories from the registry.
+    let reg = read_registry(repo)?;
+    for entry in reg.entries.values() {
+        if let Some(pid) = &entry.proposal_id {
+            protection.insert_dir(&wf.join(pid))?;
+        }
+        if let Some(ed) = &entry.evidence_dir {
+            let p = if Path::new(ed).is_absolute() {
+                PathBuf::from(ed)
+            } else {
+                repo.join(ed)
+            };
+            protection.insert_dir(&p)?;
+        }
+    }
+    // The run we just produced.
+    protection.insert_dir(&repo.join(current_run_dir))?;
+    Ok(protection)
 }
 // ---------------------------------------------------------------------------
 // Wait and reuse (exactly-once resume after concurrent or restart)
@@ -1387,7 +1429,24 @@ async fn resume_validation(
         Err(e) => {
             let msg = e.to_string();
             let classification = classify_dry_run_error(&msg);
-            bundle.failure_classification = Some(classification);
+            // Durably record the failure BEFORE the ValidationComplete journal
+            // event (same as the fresh path) so a resumed resource/integrity
+            // rejection is never lost and recovery maps it correctly.
+            let redactor = Redactor::new().with_known_secrets(&known_secrets);
+            let cmd = manifest
+                .validation_command
+                .as_deref()
+                .map(|c| redactor.redact(c));
+            let rec = ValidationRecord::resource_failure(
+                cmd,
+                &classification,
+                &msg,
+                now_iso(),
+                now_iso(),
+            );
+            write_validation_artifact(evidence_dir, &rec)?;
+            bundle.validation = Some(rec);
+            bundle.failure_classification = Some(classification.clone());
         }
     }
     durable_transition(
@@ -1399,7 +1458,7 @@ async fn resume_validation(
         fence,
         EvaluationState::ValidationComplete,
         Some(proposal.id.clone()),
-        None,
+        bundle.failure_classification.clone(),
         Some(refs.dir.clone()),
     )
     .context("failed to persist resume ValidationComplete transition")?;

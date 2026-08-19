@@ -362,9 +362,10 @@ fn workflow_dir(repo: &Path, id: &str) -> PathBuf {
 
 fn load_proposal(repo: &Path, id: &str) -> Result<ProposalArtifact> {
     let path = workflow_dir(repo, id).join("proposal.json");
-    // Verify the #115-format checksum sidecar when present; tolerate genuinely
-    // legacy (pre-#115) artifacts that carry no checksum.
-    let bytes = crate::workflow::artifact_integrity::read_verified_or_legacy(
+    // Fail-closed read: require the #115-format checksum sidecar and verify the
+    // artifact before parsing. Critical dry-run/apply loaders must never trust an
+    // artifact whose integrity cannot be confirmed.
+    let bytes = crate::workflow::artifact_integrity::read_verified(
         repo,
         &path,
         crate::workflow::artifact_integrity::ArtifactKind::Proposal,
@@ -453,6 +454,17 @@ fn propose_with_meta(
     }
     reject_unsupported_patch(patch)?;
     require_unified_diff(patch)?;
+    // Fail closed on a secret-bearing patch BEFORE it is persisted as a proposal
+    // artifact. This prevents operator/model secrets from ever being written to
+    // `proposal.json`; the evaluate-time check is retained as defense in depth.
+    let known_secrets = crate::workflow::redaction::collect_known_secrets(repo);
+    for secret in &known_secrets {
+        if !secret.is_empty() && patch.contains(secret) {
+            bail!(
+                "proposal rejected: patch embeds a known secret; secrets must not be persisted in a proposal"
+            );
+        }
+    }
     let base_sha = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
     let patch_hash = hash_str(patch);
     let (changed_files, added, removed) = analyze_diff(patch);

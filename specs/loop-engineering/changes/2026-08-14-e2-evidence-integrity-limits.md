@@ -2,7 +2,7 @@
 
 - **PR:** #170 (DRAFT)
 - **Branch:** `feat/e2-evidence-integrity-limits`
-- **Status:** round-2 review-blocker revision complete and pushed; local verification passing; returned to REVIEW_GATE. Do **not** merge or begin #152.
+- **Status:** round-3 review-blocker revision complete and pushed; local verification passing; returned to REVIEW_GATE. Do **not** merge or begin #152.
 
 ## Summary
 
@@ -181,3 +181,74 @@ The reviewer's `#pullrequestreview-4952312004` (7 PRIMARY BLOCKERS) on
 - CLI flags / `EvaluationConfig` fields for `ResourceLimits` and known secrets
   (currently wired via `from_environment()` + `collect_known_secrets`).
 - Static acceptance fixtures under `tests/fixtures/e2-evidence-integrity/`.
+
+## REVIEW_GATE — round 3 (on `f75173d`)
+
+The reviewer's `#pullrequestreview-4960748239` (6 PRIMARY BLOCKERS) on
+`f75173d96c21d5187f29b4cd82ec008faf8f609e` are addressed in this revision:
+
+1. **Retention protected identity-key dirs, not referenced dirs, and continued
+   after failure.** The orchestrator now builds protection with
+   `build_retention_protection(repo, &refs.dir)`: it inserts the `proposal_registry.json`,
+   the journal subtree (`insert_dir`), and for every `reg.entries` value the
+   referenced proposal directory (`workflow/<proposal_id>`, when present) and the
+   referenced evidence directory (`entry.evidence_dir`, absolute or repo-joined,
+   when present), plus the current run dir. The build is `Result`-returning and
+   **fail-closed**: reclamation is skipped (with an `eprintln`) if protection
+   construction fails, so authoritative state can never be reclaimed on a failure.
+2. **Resumed / fresh resource failures lacked durable classification.**
+   `ValidationRecord` gained `failure_classification: Option<String>`;
+   `resource_failure(.., classification, ..)` stores it; `classify_validation_failure`
+   returns it verbatim when present (else the prior heuristic). Both orchestrator
+   `Err` branches (evaluate + resume) now durably write
+   `ValidationRecord::resource_failure(.., classification, ..)` **before**
+   `ValidationComplete` and pass `bundle.failure_classification` into the durable
+   transition, so resumed resource failures carry the correct classification (not
+   `candidate_test_failed`) and fresh failures stay `InfraBlocked`.
+3. **Secret-bearing patch rejected only after `proposal.json` persisted.**
+   `propose_with_meta` now calls `collect_known_secrets(repo)` and bails with a
+   "patch embeds a known secret" error **before** `save_proposal`, so the proposal
+   is never persisted. `verify_patch_free_of_secrets` remains as defense-in-depth
+   at evaluation time.
+4. **Critical dry-run/apply loaders trusted missing sidecars; evidence parsed
+   before verification.** `load_proposal` (dry-run and apply paths) now uses
+   `read_verified` instead of `read_verified_or_legacy`, so it fails closed on a
+   missing/tampered sidecar. (`load_proposal_from_repo` and `run_isolated_validation`
+   already used `read_verified`.)
+5. **CPU/memory not aggregate process-tree enforcement; incomplete config
+   validation / ongoing disk enforcement / cross-platform proofs.** Added
+   `resource_limits.validate().context("invalid resource limits configuration")?`
+   at the top of `run_isolated_validation` (config errors now fail closed via
+   `ResourceLimits::validate`). Windows `apply_job_limits` switched from
+   per-process `ProcessMemoryLimit` to aggregate `JobMemoryLimit` +
+   `JOB_OBJECT_LIMIT_JOB_MEMORY` (job-level commit cap). Added a Unix aggregate
+   process-tree monitor (`spawn_resource_monitor`) that walks `/proc`, sums the
+   **aggregate** CPU ticks and RSS across the whole validation process group, and
+   kills the group (SIGKILL) on CPU / memory / free-disk breach — independent of
+   and in addition to per-process `setrlimit`. Ongoing disk enforcement is now
+   continuous (monitor polls every 100ms) rather than preflight-only. Cross-platform
+   proof: `#[cfg(windows)] cpu_limit_kills_runaway_process_windows` passes locally
+   (aggregate Job Object); `#[cfg(unix)] cpu_limit_kills_runaway_process` and
+   `#[cfg(unix)] memory_limit_kills_runaway_process` cover Unix (memory test
+   python3-gated). Note: Windows Job Objects cannot nest under a parent job that
+   forbids breakaway, which may affect CI runners that already place the test
+   process in a job; the fail-closed path (`apply_job_limits` errors) is still
+   safe and never persists a tampered/unbounded result.
+6. **PR body lacked `Closes #115`.** Added `Closes #115` to the PR description.
+
+### Round-3 verification evidence (local, Windows dev env)
+
+- `cargo fmt --check` — clean
+- `cargo clippy --lib --all-features -- -D warnings` — clean
+- `cargo test --lib --all-features` — relevant suites pass:
+  - `workflow::retention::tests` (protection scoping + sidecar atomicity)
+  - `workflow::artifact_integrity::tests::publish_then_read_verified_round_trips`
+  - `workflow::evaluate::evidence::tests::resource_failure_record_is_a_terminal_failure`
+  - `workflow::evaluate::recovery::tests::governance_passed_resumes_validation`
+  - `workflow::evaluate::validation::tests::patch_containing_known_secret_is_rejected`
+  - `workflow::evaluate::validation::tests::disk_preflight_blocks_validation_when_unsatisfied`
+  - `workflow::evaluate::validation::tests::cpu_limit_kills_runaway_process_windows` (passes — aggregate Job Object)
+- Known pre-existing flake `known_secret_is_redacted_from_persisted_validation`
+  uses a non-unique temp dir (`prometheos-canary-<pid>`) shared across parallel
+  tests; passes single-threaded / in isolation (confirmed by isolated run). Not
+  introduced by this change.

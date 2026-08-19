@@ -76,16 +76,24 @@ pub struct ValidationRecord {
     pub failures: Vec<String>,
     pub patch_applies_cleanly: bool,
     pub validation_passed: bool,
+    /// Authoritative failure classification for this record, when known. Set by
+    /// `resource_failure` so recovery/replay reconstruct the correct terminal
+    /// state without re-deriving from free-text diagnostics. `None` means the
+    /// classification must be derived (e.g. from `failures`/`exit_code`).
+    pub failure_classification: Option<String>,
 }
 
 impl ValidationRecord {
     /// Build a durable record for a validation that failed before or during
     /// execution for a non-candidate reason (e.g., a resource violation or a
-    /// rejected patch). The caller writes this durably BEFORE the
-    /// `ValidationComplete` journal event so the failure is never lost and
-    /// recovery maps it to the correct terminal state.
+    /// rejected patch). `classification` is the authoritative terminal
+    /// classification (e.g. `resource_cpu_exhausted` or `infra_blocked`) so
+    /// recovery/replay reconstructs the correct terminal state. The caller
+    /// writes this durably BEFORE the `ValidationComplete` journal event so the
+    /// failure is never lost.
     pub(super) fn resource_failure(
         validation_command: Option<String>,
+        classification: &str,
         message: &str,
         start_time: String,
         completion_time: String,
@@ -105,6 +113,7 @@ impl ValidationRecord {
             failures: vec![message.to_string()],
             patch_applies_cleanly: false,
             validation_passed: false,
+            failure_classification: Some(classification.to_string()),
         }
     }
 }
@@ -579,6 +588,7 @@ mod tests {
     fn resource_failure_record_is_a_terminal_failure() {
         let rec = ValidationRecord::resource_failure(
             Some("validate --fail".to_string()),
+            "resource_cpu_exhausted",
             "resource_cpu: validation exceeded CPU budget",
             "2026-08-18T00:00:00Z".to_string(),
             "2026-08-18T00:00:01Z".to_string(),
@@ -589,6 +599,10 @@ mod tests {
         assert_eq!(
             rec.failures[0],
             "resource_cpu: validation exceeded CPU budget"
+        );
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some("resource_cpu_exhausted")
         );
     }
 }
