@@ -1,0 +1,43 @@
+name: E2 Resource Enforcement (#115)
+
+# Focused gate for issue #115: OS-enforced resource limits (CPU/memory/disk/timeout
+# /output) plus durable, classified evidence for resource breaches. Runs the
+# validation resource tests on every supported platform so a Linux-only or
+# Windows-only regression cannot slip through (the original macOS/watchdog gap).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2-resource-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resource-enforcement:
+    name: Resource limits & durable evidence (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resource-limit & durable-evidence tests
+        run: cargo test --lib workflow::evaluate::validation --quiet -- --nocapture

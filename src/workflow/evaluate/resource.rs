@@ -16,7 +16,7 @@
 //!   only monitors, it terminates-and-records rather than claiming a hard
 //!   sandbox.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -173,39 +173,46 @@ impl ResourceLimits {
     /// limits and override individual bounds from environment variables when
     /// present. Defaults remain fail-safe even if no variable is set, and an
     /// operator can tighten or relax any single bound without code changes.
-    pub fn from_environment() -> Self {
+    ///
+    /// Malformed environment values fail closed (they are rejected, not silently
+    /// replaced by the default) so a typo in configuration cannot silently weaken
+    /// enforcement.
+    pub fn from_environment() -> Result<Self> {
         let mut limits = ResourceLimits::default();
-        if let Some(secs) = std::env::var("PROMETHEOS_VALIDATION_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        if let Ok(v) = std::env::var("PROMETHEOS_VALIDATION_TIMEOUT_SECS") {
+            let secs = v
+                .parse::<u64>()
+                .map_err(|_| anyhow!("invalid PROMETHEOS_VALIDATION_TIMEOUT_SECS: {v:?}"))?;
             limits.validation_timeout = Some(Duration::from_secs(secs));
         }
-        if let Some(n) = std::env::var("PROMETHEOS_MAX_OUTPUT_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        if let Ok(v) = std::env::var("PROMETHEOS_MAX_OUTPUT_BYTES") {
+            let n = v
+                .parse::<u64>()
+                .map_err(|_| anyhow!("invalid PROMETHEOS_MAX_OUTPUT_BYTES: {v:?}"))?;
             limits.max_output_bytes = Some(n);
         }
-        if let Some(n) = std::env::var("PROMETHEOS_MAX_MEMORY_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        if let Ok(v) = std::env::var("PROMETHEOS_MAX_MEMORY_BYTES") {
+            let n = v
+                .parse::<u64>()
+                .map_err(|_| anyhow!("invalid PROMETHEOS_MAX_MEMORY_BYTES: {v:?}"))?;
             limits.max_memory_bytes = Some(n);
         }
-        if let Some(secs) = std::env::var("PROMETHEOS_MAX_CPU_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        if let Ok(v) = std::env::var("PROMETHEOS_MAX_CPU_SECS") {
+            let secs = v
+                .parse::<u64>()
+                .map_err(|_| anyhow!("invalid PROMETHEOS_MAX_CPU_SECS: {v:?}"))?;
             limits.max_cpu_time = Some(Duration::from_secs(secs));
         }
-        if let Some(n) = std::env::var("PROMETHEOS_MIN_FREE_DISK_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        if let Ok(v) = std::env::var("PROMETHEOS_MIN_FREE_DISK_BYTES") {
+            let n = v
+                .parse::<u64>()
+                .map_err(|_| anyhow!("invalid PROMETHEOS_MIN_FREE_DISK_BYTES: {v:?}"))?;
             limits.min_free_disk_bytes = Some(n);
         }
         limits
+            .validate()
+            .context("environment resource limits invalid")?;
+        Ok(limits)
     }
 }
 

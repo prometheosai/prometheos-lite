@@ -81,6 +81,22 @@ pub struct ValidationRecord {
     /// state without re-deriving from free-text diagnostics. `None` means the
     /// classification must be derived (e.g. from `failures`/`exit_code`).
     pub failure_classification: Option<String>,
+    /// Typed resource-breach evidence, populated only when the record is produced
+    /// by a resource violation. `resource_kind` is one of
+    /// `cpu|memory|disk|timeout|output`; the remaining fields capture the
+    /// configured budget, the observed value at breach, the pipeline stage that
+    /// detected it, and a meaningful event timestamp so recovery never has to
+    /// re-derive a classification from free text.
+    #[serde(default)]
+    pub resource_kind: Option<String>,
+    #[serde(default)]
+    pub configured_limit: Option<String>,
+    #[serde(default)]
+    pub observed_value: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub event_timestamp: Option<String>,
 }
 
 impl ValidationRecord {
@@ -97,6 +113,10 @@ impl ValidationRecord {
         message: &str,
         start_time: String,
         completion_time: String,
+        resource_kind: Option<&str>,
+        configured_limit: Option<&str>,
+        observed_value: Option<&str>,
+        stage: Option<&str>,
     ) -> Self {
         ValidationRecord {
             validation_command,
@@ -104,7 +124,8 @@ impl ValidationRecord {
             stdout_preview: String::new(),
             stderr_preview: String::new(),
             start_time,
-            completion_time,
+            completion_time: completion_time.clone(),
+            event_timestamp: Some(completion_time),
             test_discovered: false,
             test_executed: false,
             test_names_found: Vec::new(),
@@ -114,6 +135,10 @@ impl ValidationRecord {
             patch_applies_cleanly: false,
             validation_passed: false,
             failure_classification: Some(classification.to_string()),
+            resource_kind: resource_kind.map(|s| s.to_string()),
+            configured_limit: configured_limit.map(|s| s.to_string()),
+            observed_value: observed_value.map(|s| s.to_string()),
+            stage: stage.map(|s| s.to_string()),
         }
     }
 }
@@ -592,6 +617,10 @@ mod tests {
             "resource_cpu: validation exceeded CPU budget",
             "2026-08-18T00:00:00Z".to_string(),
             "2026-08-18T00:00:01Z".to_string(),
+            Some("cpu"),
+            Some("30s"),
+            Some(">=30s aggregate"),
+            Some("aggregate_monitor"),
         );
         assert!(!rec.validation_passed);
         assert!(!rec.patch_applies_cleanly);
@@ -604,5 +633,10 @@ mod tests {
             rec.failure_classification.as_deref(),
             Some("resource_cpu_exhausted")
         );
+        assert_eq!(rec.resource_kind.as_deref(), Some("cpu"));
+        assert_eq!(rec.configured_limit.as_deref(), Some("30s"));
+        assert_eq!(rec.observed_value.as_deref(), Some(">=30s aggregate"));
+        assert_eq!(rec.stage.as_deref(), Some("aggregate_monitor"));
+        assert_eq!(rec.event_timestamp.as_deref(), Some("2026-08-18T00:00:01Z"));
     }
 }

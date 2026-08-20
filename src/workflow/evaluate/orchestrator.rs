@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 use crate::harness::patch_provider::{PatchProvider, PatchProviderContext};
@@ -582,8 +582,9 @@ pub async fn evaluate_with_cancellation(
     )
     .context("failed to persist Validating transition")?;
 
-    let limits =
-        ResourceLimits::from_environment().with_manifest_disk(config.manifest.min_disk_bytes);
+    let limits = ResourceLimits::from_environment()
+        .context("failed to resolve resource limits from environment")?
+        .with_manifest_disk(config.manifest.min_disk_bytes);
     let known_secrets = collect_known_secrets(&repo);
     let validation_result = run_isolated_validation(
         &repo,
@@ -635,12 +636,14 @@ pub async fn evaluate_with_cancellation(
             }
         }
         Err(e) => {
-            let msg = e.to_string();
+            // Redact the diagnostic message before persisting it; provider/process
+            // errors must never write a raw secret into the evidence bundle.
+            let redactor = Redactor::new().with_known_secrets(&known_secrets);
+            let msg = redactor.redact(&e.to_string());
             let classification = classify_dry_run_error(&msg);
             // Durably record the failure BEFORE the ValidationComplete journal
             // event references it, so a resource/integrity rejection is never
             // lost and recovery maps it correctly.
-            let redactor = Redactor::new().with_known_secrets(&known_secrets);
             let cmd = config
                 .manifest
                 .validation_command
@@ -652,6 +655,10 @@ pub async fn evaluate_with_cancellation(
                 &msg,
                 now_iso(),
                 now_iso(),
+                None,
+                None,
+                None,
+                None,
             );
             write_validation_artifact(&evidence_dir, &rec)?;
             bundle.validation = Some(rec);
@@ -802,7 +809,7 @@ pub async fn evaluate_with_cancellation(
     // and evidence directory, and the run we just produced. Protection is built
     // fail-closed: if it cannot be computed, reclamation is SKIPPED entirely
     // rather than risk deleting authoritative state.
-    match build_retention_protection(&repo, &refs.dir) {
+    match build_retention_protection(&repo, &identity_key, &refs.dir) {
         Ok(protection) => {
             let _ = reclaim_orphan_artifacts(
                 &repo,
@@ -825,18 +832,26 @@ pub async fn evaluate_with_cancellation(
 
 /// Build the set of artifact paths reclamation must never delete.
 ///
-/// Covers the control metadata (proposal registry + journal), every proposal
-/// directory and evidence directory referenced by a live/completed registry
-/// entry, and the run that was just produced. Returns `Err` if the protected set
-/// cannot be determined (e.g. the registry is unreadable or a referenced path
-/// cannot be resolved) so the caller can skip reclamation rather than delete
-/// authoritative state with an incomplete protection set.
-fn build_retention_protection(repo: &Path, current_run_dir: &str) -> Result<ProtectedReferences> {
+/// Covers the control metadata (proposal registry + journal + checkpoint), every
+/// proposal directory and evidence directory referenced by a live/completed
+/// registry entry, every evidence directory referenced by a durable journal
+/// event or checkpoint, and the run that was just produced. References are
+/// resolved fail-closed via [`resolve_repo_relative`]: an out-of-repository
+/// reference is a hard error (so the caller skips reclamation rather than delete
+/// authoritative state with an incomplete protection set, and to refuse to
+/// "protect" attacker-controlled out-of-repo paths). Returns `Err` if the
+/// protected set cannot be determined so reclamation is skipped entirely.
+fn build_retention_protection(
+    repo: &Path,
+    identity_key: &str,
+    current_run_dir: &str,
+) -> Result<ProtectedReferences> {
     let mut protection = ProtectedReferences::new();
     let wf = repo.join(".prometheos").join("workflow");
     // Control metadata.
     protection.insert(&wf.join("proposal_registry.json"))?;
     protection.insert_dir(&wf.join("journal"))?;
+    protection.insert_dir(&wf.join("checkpoint"))?;
     // Referenced proposal + evidence directories from the registry.
     let reg = read_registry(repo)?;
     for entry in reg.entries.values() {
@@ -844,17 +859,46 @@ fn build_retention_protection(repo: &Path, current_run_dir: &str) -> Result<Prot
             protection.insert_dir(&wf.join(pid))?;
         }
         if let Some(ed) = &entry.evidence_dir {
-            let p = if Path::new(ed).is_absolute() {
-                PathBuf::from(ed)
-            } else {
-                repo.join(ed)
-            };
+            // Fail closed: a referenced evidence dir MUST stay inside the repo.
+            let p = super::durable::resolve_repo_relative(repo, ed)?;
             protection.insert_dir(&p)?;
         }
+    }
+    // Evidence referenced by durable journal events (authoritative log).
+    for ev in super::journal::read_journal(repo, identity_key)? {
+        if let Some(er) = ev.evidence_ref.as_deref() {
+            protect_evidence_ref(&mut protection, repo, er)?;
+        }
+    }
+    // Evidence referenced by the durable checkpoint snapshot.
+    if let Some(cp) = super::checkpoint::read_checkpoint(repo, identity_key)?
+        && let Some(er) = cp.evidence_ref.as_deref()
+    {
+        protect_evidence_ref(&mut protection, repo, er)?;
     }
     // The run we just produced.
     protection.insert_dir(&repo.join(current_run_dir))?;
     Ok(protection)
+}
+
+/// Resolve an `evidence_ref` (a repo-relative directory or `evidence.json` file)
+/// and protect its directory, fail-closed if the reference escapes the repo.
+fn protect_evidence_ref(
+    protection: &mut ProtectedReferences,
+    repo: &Path,
+    evidence_ref: &str,
+) -> Result<()> {
+    let resolved = super::durable::resolve_repo_relative(repo, evidence_ref)?;
+    let dir = if resolved.file_name().and_then(|n| n.to_str()) == Some("evidence.json") {
+        resolved
+            .parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(|| resolved.clone())
+    } else {
+        resolved
+    };
+    protection.insert_dir(&dir)?;
+    Ok(())
 }
 // ---------------------------------------------------------------------------
 // Wait and reuse (exactly-once resume after concurrent or restart)
@@ -1156,19 +1200,21 @@ fn load_preserved_evidence(
             evidence_path.display()
         );
     }
-    // Validate the durable document (immutable evidence is validated in memory,
-    // never blindly rewritten) before returning it unchanged. Then verify the
-    // #115-format checksum sidecar; a missing or corrupt sidecar fails closed.
-    super::migration::migrate_document(
-        &evidence_path,
-        super::schema::DocumentType::EvidenceBundle,
-    )?;
+    // Verify the #115-format checksum sidecar and path binding FIRST: untrusted
+    // bytes must be authenticated before they reach any parser or migration. A
+    // missing or corrupt sidecar fails closed.
     let bytes = crate::workflow::artifact_integrity::read_verified(
         evidence_dir,
         &evidence_path,
         crate::workflow::artifact_integrity::ArtifactKind::Evidence,
     )
     .with_context(|| format!("failed to read evidence {}", evidence_path.display()))?;
+    // Validate the durable document format (immutable evidence is validated in
+    // memory, never blindly rewritten) only after integrity is confirmed.
+    super::migration::migrate_document(
+        &evidence_path,
+        super::schema::DocumentType::EvidenceBundle,
+    )?;
     let bundle: EvidenceBundle = serde_json::from_slice(&bytes).with_context(|| {
         format!(
             "corrupt preserved evidence bundle {}",
@@ -1379,7 +1425,9 @@ async fn resume_validation(
     );
 
     // Run validation on the existing proposal.
-    let limits = ResourceLimits::from_environment().with_manifest_disk(manifest.min_disk_bytes);
+    let limits = ResourceLimits::from_environment()
+        .context("failed to resolve resource limits from environment")?
+        .with_manifest_disk(manifest.min_disk_bytes);
     let known_secrets = collect_known_secrets(repo);
     let validation_result = run_isolated_validation(
         repo,
@@ -1427,12 +1475,14 @@ async fn resume_validation(
             }
         }
         Err(e) => {
-            let msg = e.to_string();
+            // Redact the diagnostic message before persisting it; provider/process
+            // errors must never write a raw secret into the evidence bundle.
+            let redactor = Redactor::new().with_known_secrets(&known_secrets);
+            let msg = redactor.redact(&e.to_string());
             let classification = classify_dry_run_error(&msg);
             // Durably record the failure BEFORE the ValidationComplete journal
             // event (same as the fresh path) so a resumed resource/integrity
             // rejection is never lost and recovery maps it correctly.
-            let redactor = Redactor::new().with_known_secrets(&known_secrets);
             let cmd = manifest
                 .validation_command
                 .as_deref()
@@ -1443,6 +1493,10 @@ async fn resume_validation(
                 &msg,
                 now_iso(),
                 now_iso(),
+                None,
+                None,
+                None,
+                None,
             );
             write_validation_artifact(evidence_dir, &rec)?;
             bundle.validation = Some(rec);

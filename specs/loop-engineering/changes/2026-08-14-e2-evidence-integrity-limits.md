@@ -2,7 +2,7 @@
 
 - **PR:** #170 (DRAFT)
 - **Branch:** `feat/e2-evidence-integrity-limits`
-- **Status:** round-3 review-blocker revision complete and pushed; local verification passing; returned to REVIEW_GATE. Do **not** merge or begin #152.
+- **Status:** round-4 review-blocker revision complete and locally verified (fmt/clippy/test green on Windows dev env); about to push a new immutable SHA and return to REVIEW_GATE. Do **not** merge or begin #152.
 
 ## Summary
 
@@ -252,3 +252,79 @@ The reviewer's `#pullrequestreview-4960748239` (6 PRIMARY BLOCKERS) on
   uses a non-unique temp dir (`prometheos-canary-<pid>`) shared across parallel
   tests; passes single-threaded / in isolation (confirmed by isolated run). Not
   introduced by this change.
+
+## REVIEW_GATE — round 4 (on `afa113e`)
+
+The reviewer's `#pullrequestreview-4972248424` (6 PRIMARY BLOCKERS) on
+`afa113e3b1062f578528aedb18705f679b283072` are addressed in this revision:
+
+1. **Unix CI compile failure (`PathBuf` missing).** `validation.rs` now imports
+   `PathBuf` (used by the Unix monitor signatures); the Windows-only `*mut c_void`
+   uses inline `winapi::ctypes::c_void` so the lib compiles on all targets.
+2. **Retention protection incomplete + sidecar suffix + out-of-repo acceptance.**
+   - `retention.rs` now uses `artifact_integrity::sidecar_for`'s real suffix
+     `.integrity.json` (was `.sidecar.json`), so checksums are matched by the
+     actual writer.
+   - `build_retention_protection` now also scans the durable **journal** and
+     **checkpoint** for `evidence_ref` values and protects those evidence dirs
+     (via `protect_evidence_ref`), so evidence referenced only by the log/checkpoint
+     is never reclaimed.
+   - Registry-referenced `evidence_dir` values are resolved fail-closed via
+     `resolve_repo_relative` (rejects absolute / parent-escape paths); an
+     out-of-repo reference is a hard error that skips reclamation rather than
+     "protecting" an attacker-controlled path.
+3. **Evidence parsed before verification.** `load_preserved_evidence` now calls
+   `read_verified` (fail-closed) **before** `migrate_document`, so tampered evidence
+   is rejected before any migration side effect.
+4. **Secret coverage + unredacted persisted errors.**
+   - `collect_known_secrets` now seeds configured provider credential values: for
+     each `llm_routing.providers[*].api_key_env` it resolves the env var and adds
+     the value (best-effort; missing config/env is skipped).
+   - Both orchestrator `Err` branches (evaluate + resume) build the `Redactor` and
+     pass `redactor.redact(&e.to_string())` into `resource_failure`, so provider
+     error text can never persist an unredacted key.
+   - `known_secret_is_redacted_from_persisted_validation` now **recursively** walks
+     every file under `.prometheos` and asserts the canary appears zero times.
+5. **Durable resource-failure evidence + recovery tests.**
+   - `ValidationRecord` gained typed fields `resource_kind`, `configured_limit`,
+     `observed_value`, `stage`, `event_timestamp` (all `#[serde(default)]`).
+   - `bounded_run` now returns `Result<(Option<i32>,String,String), BoundedRunError>`
+     where `BoundedRunError::{ResourceExceeded(ResourceExceeded), Fatal(anyhow::Error)}`
+     and `ResourceExceeded` carries `classification/kind/configured_limit/observed_value/
+     stage/code/stdout/stderr`. On a breach the caller builds a durable, classified
+     `ValidationRecord` (typed fields + redacted raw logs) and returns it as a
+     completed failure — diagnostics are never discarded.
+   - Added `resource_failure_record_is_durable_and_maps_to_infra_blocked`,
+     `output_cap_breach_is_durable_and_classified`, and updated the cpu/memory/windows
+     breach tests to expect `Ok(record)` with `failure_classification` and assert
+     `failure_to_terminal_state(..) == InfraBlocked` (recovery never re-derives a
+     candidate-test-failure).
+6. **Cross-platform enforcement.**
+   - `from_environment` is now `Result<Self>` (fail-closed on malformed env values);
+     call sites use `?`.
+   - Windows: `apply_job_limits` returns the live job `HANDLE`; the child is assigned
+     to the Job Object at spawn; `spawn_resource_monitor_win` polls
+     `JobObjectExtendedLimitInformation.PeakJobMemoryUsed` and
+     `JobObjectBasicAccountingInformation.TotalUserTime`, terminates the job on
+     breach (carrying `kind` 1/2), and **closes the handle on thread exit** so the
+     async future stays `Send`. The windows breach now produces a real classified
+     record (`resource_cpu_exhausted`), no false `infra_blocked` from a non-zero exit.
+   - macOS: added `spawn_resource_monitor_macos` using `proc_listpids` /
+     `proc_pidinfo` (`PROC_PIDTBSDINFO` usertime+systime, `PROC_PIDTASKINFO`
+     `pti_resident_size`) to sum aggregate CPU/RSS per process group (the prior
+     Linux-only `/proc` monitor did not run on macOS).
+   - Added focused CI workflow `.github/workflows/e2-resource-enforcement.yml`
+     (#115) running the validation resource tests on `ubuntu-latest`,
+     `macos-latest`, and `windows-latest`.
+
+### Round-4 verification evidence (local, Windows dev env)
+
+- `cargo fmt --all -- --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean
+- `cargo test --lib workflow::evaluate::validation --quiet` — 21 passed
+  (incl. `cpu_limit_kills_runaway_process_windows`, `output_cap_breach_is_durable_
+  and_classified`, `resource_failure_record_is_durable_and_maps_to_infra_blocked`,
+  `known_secret_is_redacted_from_persisted_validation`)
+- `cargo test --lib workflow::redaction --quiet` — 6 passed
+- macOS monitor compiles only under `target_os = "macos"`; not exercised locally
+  (Windows dev env). CI workflow `#115` is the cross-platform gate.

@@ -78,7 +78,7 @@ impl ProtectedReferences {
                 } else if p.is_file() {
                     let is_sidecar = p
                         .file_name()
-                        .map(|n| n.to_string_lossy().ends_with(".sidecar.json"))
+                        .map(|n| n.to_string_lossy().ends_with(".integrity.json"))
                         .unwrap_or(false);
                     if !is_sidecar {
                         let _ = self.insert(&p);
@@ -154,7 +154,7 @@ fn ensure_inside_repo(repo: &Path, path: &Path) -> Result<PathBuf> {
 }
 
 /// Collect every regular file under `root` (recursively). Fails closed if
-/// `root` escapes the repository. Checksum sidecar files (`*.sidecar.json`) are
+/// `root` escapes the repository. Checksum sidecar files (`*.integrity.json`) are
 /// never standalone candidates: they are always managed together with the
 /// artifact they describe, so they must not be deleted independently.
 pub fn collect_candidates(repo: &Path, root: &Path) -> Result<Vec<PathBuf>> {
@@ -175,7 +175,7 @@ pub fn collect_candidates(repo: &Path, root: &Path) -> Result<Vec<PathBuf>> {
             } else if p.is_file() {
                 let is_sidecar = p
                     .file_name()
-                    .map(|n| n.to_string_lossy().ends_with(".sidecar.json"))
+                    .map(|n| n.to_string_lossy().ends_with(".integrity.json"))
                     .unwrap_or(false);
                 if !is_sidecar {
                     out.push(p);

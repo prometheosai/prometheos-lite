@@ -142,6 +142,11 @@ pub(super) async fn run_isolated_validation(
             patch_applies_cleanly: false,
             validation_passed: false,
             failure_classification: None,
+            resource_kind: None,
+            configured_limit: None,
+            observed_value: None,
+            stage: None,
+            event_timestamp: None,
         });
     }
 
@@ -149,19 +154,73 @@ pub(super) async fn run_isolated_validation(
     let _ = run_git_cmd(&wt_root, &["apply", patch_file.to_str().unwrap()]);
 
     // Step 2: Run validation command if present — cooperatively cancellable and
-    // resource-bounded (timeout + output cap). Cancellation wins over resource
-    // violation (it is a control-flow signal, not a failure).
+    // resource-bounded (timeout + output cap + aggregate CPU/memory/disk). A
+    // resource breach returns a durable, classified `ValidationRecord` carrying the
+    // captured (redacted) diagnostics; cancellation is a control-flow signal, not a
+    // failure and is surfaced as a fatal error.
     let (exit_code, stdout, stderr) = match validation_command {
-        Some(cmd) => {
-            let (code, raw_out, raw_err) =
-                bounded_run(cmd, &wt_root, resource_limits, token).await?;
-            // Enforce the output cap before persisting anything unbounded.
-            check_output_budget(&raw_out, &raw_err, resource_limits)?;
-            // Redact diagnostics before they become persisted evidence.
-            let out = redactor.redact(&raw_out);
-            let err = redactor.redact(&raw_err);
-            (code, out, err)
-        }
+        Some(cmd) => match bounded_run(cmd, &wt_root, resource_limits, token).await {
+            Ok((code, raw_out, raw_err)) => {
+                // Enforce the output cap before persisting anything unbounded.
+                check_output_budget(&raw_out, &raw_err, resource_limits)?;
+                // Redact diagnostics before they become persisted evidence.
+                let out = redactor.redact(&raw_out);
+                let err = redactor.redact(&raw_err);
+                (code, out, err)
+            }
+            Err(BoundedRunError::ResourceExceeded(re)) => {
+                // Build a durable, classified record with the captured (redacted)
+                // diagnostics and typed resource evidence, then return it as a
+                // completed failure so recovery never re-derives the classification.
+                let out = redactor.redact(&re.stdout);
+                let err = redactor.redact(&re.stderr);
+                let completion_time = now_iso();
+                let base = ValidationRecord::resource_failure(
+                    validation_command.map(|s| redactor.redact(s)),
+                    re.classification,
+                    &format!(
+                        "{}: validation breached {} budget",
+                        re.classification,
+                        re.kind.unwrap_or("resource")
+                    ),
+                    start_time.clone(),
+                    completion_time.clone(),
+                    re.kind,
+                    re.configured_limit.as_deref(),
+                    re.observed_value.as_deref(),
+                    Some(re.stage),
+                );
+                let rec = ValidationRecord {
+                    stdout_preview: truncate(&out, 4096),
+                    stderr_preview: truncate(&err, 4096),
+                    failure_classification: Some(re.classification.to_string()),
+                    exit_code: re.code,
+                    ..base
+                };
+                // Persist the redacted raw logs so recovery/audit can inspect them.
+                let _ = crate::workflow::artifact_integrity::publish_with_integrity(
+                    repo,
+                    &evidence_dir.join("validation_stdout.log"),
+                    out.as_bytes(),
+                    crate::workflow::artifact_integrity::ArtifactKind::RawLog,
+                );
+                let _ = crate::workflow::artifact_integrity::publish_with_integrity(
+                    repo,
+                    &evidence_dir.join("validation_stderr.log"),
+                    err.as_bytes(),
+                    crate::workflow::artifact_integrity::ArtifactKind::RawLog,
+                );
+                // Clean up the validation worktree before returning.
+                let _ = run_git_cmd(
+                    repo,
+                    &["worktree", "remove", "--force", wt_root.to_str().unwrap()],
+                );
+                let _ = std::fs::remove_dir_all(&wt_root);
+                let _ = std::fs::remove_file(&patch_file);
+                return Ok(rec);
+            }
+            Err(BoundedRunError::Fatal(e)) => return Err(e),
+        },
         None => (None, String::new(), String::new()),
     };
 
@@ -215,6 +274,11 @@ pub(super) async fn run_isolated_validation(
         patch_applies_cleanly: patch_applies,
         validation_passed,
         failure_classification: None,
+        resource_kind: None,
+        configured_limit: None,
+        observed_value: None,
+        stage: None,
+        event_timestamp: None,
     })
 }
 
@@ -225,12 +289,41 @@ pub(super) async fn run_isolated_validation(
 ///
 /// Returns the exit code and the (still unredacted) captured output. Redaction
 /// happens after this returns, so the executed command is never altered.
+/// Authoritative resource-breach evidence produced by [`bounded_run`]. Carries the
+/// captured (still-unredacted) stdout/stderr so the caller can durably persist
+/// redacted diagnostics instead of discarding them on a resource failure.
+pub(super) struct ResourceExceeded {
+    pub classification: &'static str,
+    pub kind: Option<&'static str>,
+    pub configured_limit: Option<String>,
+    pub observed_value: Option<String>,
+    pub stage: &'static str,
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Error returned by [`bounded_run`]: either a resource breach (with typed
+/// evidence) or a fatal control-flow error (cancellation, spawn failure, disk
+/// preflight). The resource variant is matched by the caller so it can build a
+/// durable, classified `ValidationRecord`.
+pub(super) enum BoundedRunError {
+    ResourceExceeded(ResourceExceeded),
+    Fatal(anyhow::Error),
+}
+
+impl From<anyhow::Error> for BoundedRunError {
+    fn from(e: anyhow::Error) -> Self {
+        BoundedRunError::Fatal(e)
+    }
+}
+
 async fn bounded_run(
     command: &str,
     cwd: &Path,
     limits: &ResourceLimits,
     token: &CancellationToken,
-) -> Result<(Option<i32>, String, String)> {
+) -> Result<(Option<i32>, String, String), BoundedRunError> {
     let mut cmd = validation_shell_async(command);
     cmd.current_dir(cwd)
         .stdout(Stdio::piped())
@@ -274,54 +367,58 @@ async fn bounded_run(
         .spawn()
         .context("failed to execute validation command")?;
     let pid = child.id();
-    // OS-enforced memory/CPU caps on Windows via a Job Object. Fail closed: if
-    // limits are configured but cannot be applied, the validation must not run
-    // unbounded — the child is killed (drop) and the run is rejected.
+    // OS-enforced memory/CPU caps via a Job Object on Windows (aggregate across the
+    // whole process tree). Fail closed: if limits are configured but cannot be
+    // applied, the validation must not run unbounded. The job handle is retained
+    // so the aggregate monitor can poll it; the monitor is the authoritative
+    // resource-breach detector on Windows (it sets `monitor_kind` precisely and
+    // never infers a breach from an ordinary non-zero exit code).
+    let monitor_done = Arc::new(AtomicBool::new(false));
+    let monitor_kind = Arc::new(AtomicU8::new(0));
+    let mut monitor_handle: Option<std::thread::JoinHandle<()>> = None;
+
     #[cfg(windows)]
     {
         if (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some())
             && let Some(pid) = pid
         {
-            apply_job_limits(pid, limits).context(
+            let job = apply_job_limits(pid, limits).context(
                 "failed to apply Windows Job Object resource limits (CPU/memory enforcement unavailable)",
             )?;
+            // Ownership of the job handle is transferred to the monitor thread,
+            // which closes it on exit. The async future therefore never holds a
+            // raw pointer across an await (keeps it `Send` for `tokio::spawn`).
+            monitor_handle = Some(spawn_resource_monitor_win(
+                job as isize,
+                *limits,
+                monitor_done.clone(),
+                monitor_kind.clone(),
+            ));
         }
     }
+
     // Aggregate, process-tree resource enforcement on Unix: a monitor thread walks
     // the validation process group and kills the entire tree the moment the
     // aggregate CPU time, aggregate RSS, or free disk space crosses a budget. This
     // is true process-tree accounting, not per-process `setrlimit` (which each
     // descendant could otherwise consume independently). The per-process
     // `setrlimit` above remains as defense in depth.
-    let monitor_done = Arc::new(AtomicBool::new(false));
-    let monitor_kind = Arc::new(AtomicU8::new(0));
-    let monitor_handle: Option<std::thread::JoinHandle<()>> = {
-        #[cfg(unix)]
+    #[cfg(unix)]
+    {
+        if (limits.max_cpu_time.is_some()
+            || limits.max_memory_bytes.is_some()
+            || limits.min_free_disk_bytes.is_some())
+            && let Some(pid) = pid
         {
-            if limits.max_cpu_time.is_some()
-                || limits.max_memory_bytes.is_some()
-                || limits.min_free_disk_bytes.is_some()
-            {
-                if let Some(pid) = pid {
-                    Some(spawn_resource_monitor(
-                        pid,
-                        *limits,
-                        cwd.to_path_buf(),
-                        monitor_done.clone(),
-                        monitor_kind.clone(),
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            monitor_handle = Some(spawn_resource_monitor(
+                pid,
+                *limits,
+                cwd.to_path_buf(),
+                monitor_done.clone(),
+                monitor_kind.clone(),
+            ));
         }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    };
+    }
     let stdout = child
         .stdout
         .take()
@@ -386,63 +483,29 @@ async fn bounded_run(
     // Race the process exit against cancellation and the wall-clock timeout.
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
 
-    let outcome: Result<(Option<i32>, String, String)> = tokio::select! {
+    let status_result: Result<Option<i32>, BoundedRunError> = tokio::select! {
         status = child.wait() => {
             let status = status.context("failed to wait on validation command")?;
-            let code = status.code();
-            let out = out_task.await.unwrap_or_default();
-            let err = err_task.await.unwrap_or_default();
-            if exceeded.load(Ordering::SeqCst) {
-                bail!(
-                    "{}: validation output exceeded the configured cap",
-                    CLASSIFICATION_OUTPUT
-                );
-            }
-            // The OS terminated the process tree because a CPU/memory cap was
-            // hit (Unix delivers a signal; on Windows a Job Object kill yields a
-            // non-zero exit while such a cap is configured). Classify as the
-            // matching resource exhaustion so recovery maps it to InfraBlocked.
-            #[cfg(unix)]
-            let os_killed = code.is_none()
-                && (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some());
-            #[cfg(windows)]
-            let os_killed = code != Some(0)
-                && (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some());
-            #[cfg(not(any(unix, windows)))]
-            let os_killed = false;
-            if os_killed {
-                if limits.max_memory_bytes.is_some() {
-                    bail!(
-                        "{}: validation exceeded the configured memory budget",
-                        CLASSIFICATION_MEMORY
-                    );
-                } else {
-                    bail!(
-                        "{}: validation exceeded the configured cpu time budget",
-                        CLASSIFICATION_CPU
-                    );
-                }
-            }
-            Ok((code, out, err))
+            Ok(status.code())
         }
         _ = token.cancelled() => {
             if let Some(pid) = pid {
                 kill_child_tree(pid).await;
             }
-            out_task.abort();
-            err_task.abort();
-            Err(anyhow!("validation cancelled by user request"))
+            Err(BoundedRunError::Fatal(anyhow!(
+                "validation cancelled by user request"
+            )))
         }
         _ = maybe_timeout(timeout_arm), if timeout_arm.is_some() => {
             if let Some(pid) = pid {
                 kill_child_tree(pid).await;
             }
-            out_task.abort();
-            err_task.abort();
-            bail!(
-                "{}: validation exceeded the configured wall-clock timeout",
-                CLASSIFICATION_TIMEOUT
-            );
+            let secs = limits.validation_timeout.map(|d| d.as_secs()).unwrap_or(0);
+            Err(BoundedRunError::Fatal(anyhow!(
+                "{}: validation exceeded the configured wall-clock timeout ({}s)",
+                CLASSIFICATION_TIMEOUT,
+                secs
+            )))
         }
     };
 
@@ -451,27 +514,76 @@ async fn bounded_run(
     if let Some(h) = monitor_handle {
         let _ = h.join();
     }
-    let kind = monitor_kind.load(Ordering::SeqCst);
-    if kind != 0 {
-        // The aggregate monitor caught a resource breach; report it precisely
-        // (cpu/memory/disk) so recovery maps it to InfraBlocked.
-        return Err(match kind {
-            1 => anyhow!(
-                "{}: validation exceeded the configured cpu time budget (process tree)",
-                CLASSIFICATION_CPU
+    let monitor_kind = monitor_kind.load(Ordering::SeqCst);
+
+    // Drain the bounded readers so partial output survives resource breaches and
+    // timeouts (the pipes close once the tree is killed). Diagnostics are
+    // redacted later by the caller before they become persisted evidence.
+    let out = out_task.await.unwrap_or_default();
+    let err = err_task.await.unwrap_or_default();
+
+    if monitor_kind != 0 {
+        // The aggregate monitor caught a process-tree breach; report it precisely
+        // (cpu/memory/disk) with the captured diagnostics so recovery maps it to
+        // InfraBlocked and the durable record carries typed evidence.
+        let (cls, kind, configured, observed) = match monitor_kind {
+            1 => (
+                CLASSIFICATION_CPU,
+                Some("cpu"),
+                limits.max_cpu_time.map(|d| format!("{}s", d.as_secs())),
+                Some(format!(
+                    ">={}s aggregate",
+                    limits.max_cpu_time.unwrap_or_default().as_secs()
+                )),
             ),
-            2 => anyhow!(
-                "{}: validation exceeded the configured memory budget (process tree)",
-                CLASSIFICATION_MEMORY
+            2 => (
+                CLASSIFICATION_MEMORY,
+                Some("memory"),
+                limits.max_memory_bytes.map(|b| b.to_string()),
+                Some(format!(
+                    ">={}b aggregate",
+                    limits.max_memory_bytes.unwrap_or_default()
+                )),
             ),
-            3 => anyhow!(
-                "{}: disk pressure during validation (free space below reserve)",
-                CLASSIFICATION_DISK
+            3 => (
+                CLASSIFICATION_DISK,
+                Some("disk"),
+                limits.min_free_disk_bytes.map(|b| b.to_string()),
+                Some("free space below reserve".to_string()),
             ),
-            _ => anyhow!("validation resource limit exceeded"),
-        });
+            _ => (CLASSIFICATION_OUTPUT, Some("resource"), None, None),
+        };
+        return Err(BoundedRunError::ResourceExceeded(ResourceExceeded {
+            classification: cls,
+            kind,
+            configured_limit: configured,
+            observed_value: observed,
+            stage: "aggregate_monitor",
+            code: None,
+            stdout: out,
+            stderr: err,
+        }));
     }
-    outcome
+
+    match status_result {
+        Ok(code) => {
+            if exceeded.load(Ordering::SeqCst) {
+                let cap = limits.max_output_bytes.unwrap_or(0);
+                return Err(BoundedRunError::ResourceExceeded(ResourceExceeded {
+                    classification: CLASSIFICATION_OUTPUT,
+                    kind: Some("output"),
+                    configured_limit: Some(cap.to_string()),
+                    observed_value: Some(format!(">{}b", cap)),
+                    stage: "output_cap",
+                    code,
+                    stdout: out,
+                    stderr: err,
+                }));
+            }
+            Ok((code, out, err))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Helper that awaits an optional timeout future (resolves immediately to
@@ -555,8 +667,11 @@ fn verify_patch_integrity(proposal: &crate::workflow::ProposalArtifact) -> Resul
 /// - `JobMemoryLimit` caps the total committed memory of the whole job
 ///   (aggregate across all child processes), not per-process.
 /// - `PerJobUserTimeLimit` caps the aggregate user-mode CPU time of the job.
+///
+/// Returns the live job `HANDLE` so the aggregate monitor can poll it. The caller
+/// closes the handle after the monitor has joined.
 #[cfg(windows)]
-fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
+fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<*mut winapi::ctypes::c_void> {
     use std::mem;
     use winapi::um::handleapi::CloseHandle;
     use winapi::um::jobapi2::{
@@ -607,12 +722,12 @@ fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<()> {
         }
         let assigned = AssignProcessToJobObject(job, hproc);
         CloseHandle(hproc);
-        CloseHandle(job);
         if assigned == 0 {
+            CloseHandle(job);
             bail!("AssignProcessToJobObject failed");
         }
+        Ok(job)
     }
-    Ok(())
 }
 // ---------------------------------------------------------------------------
 // Test evidence parsing
@@ -875,19 +990,43 @@ async fn kill_child_tree(pid: u32) {
 
 /// Spawn the aggregate, process-tree resource monitor for a Unix validation run.
 ///
-/// The monitor walks `/proc` for every process in the validation process group
+/// The monitor walks the process group for every process in the validation tree
 /// (`pgid == pid`, because the shell was spawned into its own group) and, on each
 /// tick, sums the **aggregate** user+system CPU time and **aggregate** RSS across
 /// the whole tree. If the aggregate CPU, aggregate RSS, or free disk space crosses
-/// the configured budget it kills the entire group (SIGKILL) and records which
-/// resource was breached in `kind` (1=cpu, 2=memory, 3=disk). This is true
-/// process-tree accounting, independent of (and in addition to) the per-process
-/// `setrlimit` applied in the child's `pre_exec`.
+/// the configured budget it kills the entire group and records which resource was
+/// breached in `kind` (1=cpu, 2=memory, 3=disk). This is true process-tree
+/// accounting, independent of (and in addition to) the per-process `setrlimit`
+/// applied in the child's `pre_exec`. The platform-specific enumeration differs
+/// (Linux `/proc` vs macOS `proc_pidinfo`).
 #[cfg(unix)]
 fn spawn_resource_monitor(
     pid: u32,
     limits: ResourceLimits,
-    cwd: PathBuf,
+    cwd: std::path::PathBuf,
+    done: Arc<AtomicBool>,
+    kind: Arc<AtomicU8>,
+) -> std::thread::JoinHandle<()> {
+    #[cfg(target_os = "linux")]
+    {
+        spawn_resource_monitor_linux(pid, limits, cwd, done, kind)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        spawn_resource_monitor_macos(pid, limits, cwd, done, kind)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (pid, limits, cwd, done, kind);
+        std::thread::spawn(move || {})
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_resource_monitor_linux(
+    pid: u32,
+    limits: ResourceLimits,
+    cwd: std::path::PathBuf,
     done: Arc<AtomicBool>,
     kind: Arc<AtomicU8>,
 ) -> std::thread::JoinHandle<()> {
@@ -947,6 +1086,167 @@ fn spawn_resource_monitor(
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_resource_monitor_macos(
+    pid: u32,
+    limits: ResourceLimits,
+    cwd: std::path::PathBuf,
+    done: Arc<AtomicBool>,
+    kind: Arc<AtomicU8>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let pgid = pid as i32;
+        while !done.load(Ordering::SeqCst) {
+            let mut cpu_us: u64 = 0;
+            let mut rss_bytes: u64 = 0;
+            // Enumerate every process and sum those in our process group.
+            let n = unsafe { libc::proc_listpids(libc::PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+            if n > 0 {
+                let mut pids: Vec<i32> = vec![0i32; (n as usize) / std::mem::size_of::<i32>()];
+                let _ = unsafe {
+                    libc::proc_listpids(
+                        libc::PROC_ALL_PIDS,
+                        0,
+                        pids.as_mut_ptr() as *mut libc::c_void,
+                        n,
+                    )
+                };
+                for &p in &pids {
+                    if p <= 0 {
+                        continue;
+                    }
+                    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+                    let sz = unsafe {
+                        libc::proc_pidinfo(
+                            p,
+                            libc::PROC_PIDTBSDINFO,
+                            0,
+                            &mut info as *mut _ as *mut libc::c_void,
+                            std::mem::size_of::<libc::proc_bsdshortinfo>() as i32,
+                        )
+                    };
+                    if sz <= 0 {
+                        continue;
+                    }
+                    if info.pbsd_pgid != pgid {
+                        continue;
+                    }
+                    // proc_bsdshortinfo user/system times are in microseconds.
+                    cpu_us += info.pbsd_usertime + info.pbsd_systime;
+                    let mut task: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+                    let tsz = unsafe {
+                        libc::proc_pidinfo(
+                            p,
+                            libc::PROC_PIDTASKINFO,
+                            0,
+                            &mut task as *mut _ as *mut libc::c_void,
+                            std::mem::size_of::<libc::proc_taskinfo>() as i32,
+                        )
+                    };
+                    if tsz > 0 {
+                        rss_bytes += task.pti_resident_size;
+                    }
+                }
+            }
+            if let Some(secs) = limits.max_cpu_time {
+                if cpu_us / 1_000_000 >= secs.as_secs() {
+                    kind.store(1, Ordering::SeqCst);
+                    kill_group(pgid);
+                    return;
+                }
+            }
+            if let Some(mem) = limits.max_memory_bytes {
+                if rss_bytes >= mem {
+                    kind.store(2, Ordering::SeqCst);
+                    kill_group(pgid);
+                    return;
+                }
+            }
+            if let Some(min_free) = limits.min_free_disk_bytes {
+                if let super::preflight::DiskSpaceStatus::Available(free) =
+                    super::preflight::available_disk_bytes(&cwd)
+                {
+                    if free < min_free {
+                        kind.store(3, Ordering::SeqCst);
+                        kill_group(pgid);
+                        return;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    })
+}
+
+#[cfg(windows)]
+fn spawn_resource_monitor_win(
+    job: isize,
+    limits: ResourceLimits,
+    done: Arc<AtomicBool>,
+    kind: Arc<AtomicU8>,
+) -> std::thread::JoinHandle<()> {
+    use std::mem;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::jobapi2::{QueryInformationJobObject, TerminateJobObject};
+    use winapi::um::winnt::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    };
+    std::thread::spawn(move || {
+        let job_handle = job as *mut winapi::ctypes::c_void;
+        while !done.load(Ordering::SeqCst) {
+            unsafe {
+                // Memory: compare the job's peak committed memory against the limit.
+                if limits.max_memory_bytes.is_some() {
+                    let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
+                    let ok = QueryInformationJobObject(
+                        job_handle as *mut _,
+                        JobObjectExtendedLimitInformation,
+                        &mut ext as *mut _ as *mut winapi::ctypes::c_void,
+                        mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                        std::ptr::null_mut(),
+                    );
+                    if ok != 0
+                        && ext.JobMemoryLimit > 0
+                        && ext.PeakJobMemoryUsed >= ext.JobMemoryLimit
+                    {
+                        kind.store(2, Ordering::SeqCst);
+                        TerminateJobObject(job_handle, 0xC000_0142u32);
+                        return;
+                    }
+                }
+                // CPU: compare the job's aggregate user time against the limit.
+                if limits.max_cpu_time.is_some() {
+                    let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = mem::zeroed();
+                    let ok = QueryInformationJobObject(
+                        job_handle as *mut _,
+                        JobObjectBasicAccountingInformation,
+                        &mut acct as *mut _ as *mut winapi::ctypes::c_void,
+                        mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                        std::ptr::null_mut(),
+                    );
+                    if ok != 0
+                        && let Some(cpu) = limits.max_cpu_time
+                    {
+                        let limit_100ns = cpu.as_secs() * 10_000_000;
+                        if (*acct.TotalUserTime.QuadPart() as u64) >= limit_100ns {
+                            kind.store(1, Ordering::SeqCst);
+                            TerminateJobObject(job_handle, 0xC000_0142u32);
+                            return;
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Ownership transferred here: close the job handle now that the tree is
+        // stopped and the caller has joined.
+        unsafe {
+            CloseHandle(job_handle);
         }
     })
 }
@@ -1038,6 +1338,11 @@ mod tests {
             patch_applies_cleanly: true,
             validation_passed: false,
             failure_classification: None,
+            resource_kind: None,
+            configured_limit: None,
+            observed_value: None,
+            stage: None,
+            event_timestamp: None,
         };
         assert_eq!(classify_validation_failure(&vr), "candidate_compile_failed");
     }
@@ -1059,6 +1364,11 @@ mod tests {
             patch_applies_cleanly: true,
             validation_passed: false,
             failure_classification: None,
+            resource_kind: None,
+            configured_limit: None,
+            observed_value: None,
+            stage: None,
+            event_timestamp: None,
         };
         assert_ne!(classify_validation_failure(&vr), "infra_blocked");
     }
@@ -1228,6 +1538,170 @@ mod tests {
         assert!(
             !raw.contains(&canary),
             "raw stdout log leaked the known secret"
+        );
+
+        // Recursively assert the canary never reaches ANY persisted `.prometheos`
+        // file (journal, evidence, raw logs, registry, checkpoint, ...).
+        let prom_dir = dir.join(".prometheos");
+        let mut leaked = false;
+        if prom_dir.exists() {
+            let mut stack = vec![prom_dir];
+            while let Some(p) = stack.pop() {
+                let md = std::fs::metadata(&p).expect("metadata readable");
+                if md.is_dir() {
+                    for e in std::fs::read_dir(&p).expect("dir readable") {
+                        stack.push(e.expect("entry").path());
+                    }
+                } else if let Ok(content) = std::fs::read_to_string(&p)
+                    && content.contains(&canary)
+                {
+                    leaked = true;
+                    eprintln!("LEAK: canary found in {}", p.display());
+                }
+            }
+        }
+        assert!(
+            !leaked,
+            "known secret canary leaked into a persisted .prometheos file"
+        );
+    }
+
+    // A resource breach must produce a DURABLE, classified ValidationRecord whose
+    // typed evidence survives recovery: classify_validation_failure must honor the
+    // authoritative classification (InfraBlocked) rather than re-deriving it from
+    // the (redacted) stderr as a candidate test failure.
+    #[tokio::test]
+    async fn resource_failure_record_is_durable_and_maps_to_infra_blocked() {
+        use crate::workflow::evaluate::evidence::ValidationRecord;
+
+        let rec = ValidationRecord::resource_failure(
+            None,
+            CLASSIFICATION_CPU,
+            "aggregate cpu time exceeded the configured budget",
+            "start".to_string(),
+            "end".to_string(),
+            Some("cpu"),
+            Some("5s"),
+            Some(">=5s aggregate"),
+            Some("aggregate_monitor"),
+        );
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU)
+        );
+        assert_eq!(rec.resource_kind.as_deref(), Some("cpu"));
+        assert_eq!(rec.configured_limit.as_deref(), Some("5s"));
+        assert_eq!(rec.observed_value.as_deref(), Some(">=5s aggregate"));
+        assert_eq!(rec.stage.as_deref(), Some("aggregate_monitor"));
+        // Authoritative classification is preserved verbatim across recovery/replay.
+        assert_eq!(classify_validation_failure(&rec), CLASSIFICATION_CPU);
+        // ...and recovery maps it to InfraBlocked (never a candidate test failure).
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_CPU),
+            crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
+        );
+    }
+
+    // The output cap breach must be caught and reported as a classified resource
+    // failure carrying typed evidence, independent of the OS, so recovery maps it
+    // to InfraBlocked (never a candidate test failure).
+    #[tokio::test]
+    async fn output_cap_breach_is_durable_and_classified() {
+        use crate::workflow::artifact_integrity::{ArtifactKind, publish_with_integrity};
+        use crate::workflow::evaluate::cancellation::CancellationToken;
+        use crate::workflow::evaluate::integrity::run_git_cmd;
+        use crate::workflow::evaluate::resource::ResourceLimits;
+        use crate::workflow::{AuthorityLevel, ProposalArtifact, ScopeContract};
+
+        let dir = std::env::temp_dir().join(format!("prometheos-outcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git_cmd(&dir, &["init"]).unwrap();
+        run_git_cmd(&dir, &["config", "user.email", "t@example.com"]).unwrap();
+        run_git_cmd(&dir, &["config", "user.name", "t"]).unwrap();
+        std::fs::write(dir.join("seed.txt"), "x").unwrap();
+        run_git_cmd(&dir, &["add", "."]).unwrap();
+        run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
+        let base_sha = run_git_cmd(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let id = "outcap-run";
+        let proposal = ProposalArtifact {
+            id: id.to_string(),
+            repo: dir.to_string_lossy().to_string(),
+            base_sha: base_sha.clone(),
+            goal: "g".to_string(),
+            authority: AuthorityLevel::Propose,
+            scope: ScopeContract {
+                goal: "g".to_string(),
+                authority: AuthorityLevel::Propose,
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+                allow_dependency_changes: false,
+                max_files_changed: None,
+                max_lines_changed: None,
+            },
+            patch: "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n".to_string(),
+            patch_hash: crate::workflow::artifact_integrity::sha256_hex(
+                b"diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+            )
+            .to_string(),
+            changed_files: vec![],
+            added_lines: 0,
+            removed_lines: 0,
+            approved: None,
+            dry_run_passed: None,
+            applied: None,
+            validation_command: None,
+            provider_provenance: None,
+            dry_run_validation: None,
+            apply_validation: None,
+            checkpoint_ref: None,
+            rollback_status: None,
+        };
+        let prop_path = dir
+            .join(".prometheos")
+            .join("workflow")
+            .join(id)
+            .join("proposal.json");
+        std::fs::create_dir_all(prop_path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&proposal).unwrap();
+        publish_with_integrity(&dir, &prop_path, &bytes, ArtifactKind::Proposal).unwrap();
+
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+
+        // Generate a file whose contents far exceed the output cap.
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "a".repeat(200_000)).unwrap();
+        let dump = if cfg!(windows) {
+            format!("type {}", big.display())
+        } else {
+            format!("cat {}", big.display())
+        };
+
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            max_output_bytes: Some(64),
+            ..ResourceLimits::default()
+        };
+        let record =
+            run_isolated_validation(&dir, id, Some(&dump), &evidence_dir, &token, &limits, &[])
+                .await
+                .expect("validation run should complete");
+
+        assert_eq!(
+            record.failure_classification.as_deref(),
+            Some(CLASSIFICATION_OUTPUT),
+            "output breach must be classified as a resource failure"
+        );
+        assert_eq!(record.resource_kind.as_deref(), Some("output"));
+        assert_eq!(classify_validation_failure(&record), CLASSIFICATION_OUTPUT);
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_OUTPUT),
+            crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
         );
     }
 
@@ -1507,10 +1981,17 @@ mod tests {
             &[],
         )
         .await
-        .expect_err("cpu limit must fail validation");
-        assert!(
-            err.to_string().contains(CLASSIFICATION_CPU),
-            "expected cpu classification, got: {err}"
+        .expect("cpu limit must be enforced");
+        assert_eq!(
+            err.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "cpu breach must be classified as a resource failure"
+        );
+        assert_eq!(err.resource_kind.as_deref(), Some("cpu"));
+        assert_eq!(classify_validation_failure(&err), CLASSIFICATION_CPU);
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_CPU),
+            crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
         );
     }
 
@@ -1548,10 +2029,17 @@ mod tests {
             &[],
         )
         .await
-        .expect_err("memory limit must fail validation");
-        assert!(
-            err.to_string().contains(CLASSIFICATION_MEMORY),
-            "expected memory classification, got: {err}"
+        .expect("memory limit must be enforced");
+        assert_eq!(
+            err.failure_classification.as_deref(),
+            Some(CLASSIFICATION_MEMORY),
+            "memory breach must be classified as a resource failure"
+        );
+        assert_eq!(err.resource_kind.as_deref(), Some("memory"));
+        assert_eq!(classify_validation_failure(&err), CLASSIFICATION_MEMORY);
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_MEMORY),
+            crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
         );
     }
 
@@ -1580,11 +2068,17 @@ mod tests {
             &[],
         )
         .await
-        .expect_err("cpu limit must fail validation");
-        assert!(
-            err.to_string().contains(CLASSIFICATION_CPU)
-                || err.to_string().contains("Windows Job Object"),
-            "expected cpu classification, got: {err}"
+        .expect("cpu limit must be enforced via Windows Job Object");
+        assert_eq!(
+            err.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "cpu breach must be classified as a resource failure (Job Object setup must succeed)"
+        );
+        assert_eq!(err.resource_kind.as_deref(), Some("cpu"));
+        assert_eq!(classify_validation_failure(&err), CLASSIFICATION_CPU);
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_CPU),
+            crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
         );
     }
 }

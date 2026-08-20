@@ -452,6 +452,12 @@ async fn disk_full_classified_as_infra() {
         failures: Vec::new(),
         patch_applies_cleanly: true,
         validation_passed: false,
+        failure_classification: None,
+        resource_kind: None,
+        configured_limit: None,
+        observed_value: None,
+        stage: None,
+        event_timestamp: None,
     };
 
     let classification = prometheos_lite::workflow::evaluate::classify_validation_failure(&vr);
@@ -482,6 +488,12 @@ async fn compile_failure_not_infra() {
         failures: Vec::new(),
         patch_applies_cleanly: true,
         validation_passed: false,
+        failure_classification: None,
+        resource_kind: None,
+        configured_limit: None,
+        observed_value: None,
+        stage: None,
+        event_timestamp: None,
     };
 
     let classification = prometheos_lite::workflow::evaluate::classify_validation_failure(&vr);

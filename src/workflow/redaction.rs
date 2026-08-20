@@ -16,7 +16,7 @@
 use anyhow::{Result, bail};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Stable placeholder substituted for any redacted secret.
@@ -159,6 +159,11 @@ pub fn redact_diagnostics(text: &str, known_secrets: &[String]) -> String {
 /// 2. A repo-local `.prometheos/known_secrets` file (one value per line, `#`
 ///    comments and blank lines ignored). This file is operator-maintained and
 ///    must be git-ignored by the user; it is never persisted by this tool.
+/// 3. Configured provider credentials. Every configured provider declares the
+///    *name* of an environment variable holding its secret (`api_key_env`); the
+///    secret is resolved from the environment and seeded so a provider error
+///    message that echoes the key is redacted before persistence. Best-effort:
+///    if no config file is found, or a variable is unset, it is simply skipped.
 ///
 /// This is the production wiring for [`Redactor::with_known_secrets`]: the
 /// orchestrator passes the result into isolated validation so that any secret the
@@ -184,6 +189,22 @@ pub fn collect_known_secrets(repo: &Path) -> Vec<String> {
                 continue;
             }
             push(line);
+        }
+    }
+    // Seed configured provider credential values (best-effort).
+    for cfg_path in [
+        repo.join("prometheos.config.json"),
+        PathBuf::from("prometheos.config.json"),
+    ] {
+        if let Ok(app) = crate::config::settings::AppConfig::load_from(&cfg_path) {
+            for p in app.llm_routing.providers {
+                if let Some(env_name) = p.api_key_env
+                    && let Ok(val) = std::env::var(&env_name)
+                {
+                    push(&val);
+                }
+            }
+            break;
         }
     }
     secrets
