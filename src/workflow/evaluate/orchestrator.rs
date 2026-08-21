@@ -3,6 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::harness::patch_provider::{PatchProvider, PatchProviderContext};
+use crate::workflow::portable_state::PortableWorkState;
 use crate::workflow::{
     AuthorityLevel, GenerateScope, ProposalArtifact, ProviderRouteInfo, is_git_repo,
     sanitize_provider_route,
@@ -809,7 +810,7 @@ pub async fn evaluate_with_cancellation(
     // and evidence directory, and the run we just produced. Protection is built
     // fail-closed: if it cannot be computed, reclamation is SKIPPED entirely
     // rather than risk deleting authoritative state.
-    match build_retention_protection(&repo, &identity_key, &refs.dir) {
+    match build_retention_protection(&repo, &identity_key, &refs.dir, None) {
         Ok(protection) => {
             let _ = reclaim_orphan_artifacts(
                 &repo,
@@ -845,6 +846,7 @@ fn build_retention_protection(
     repo: &Path,
     identity_key: &str,
     current_run_dir: &str,
+    pws: Option<&PortableWorkState>,
 ) -> Result<ProtectedReferences> {
     let mut protection = ProtectedReferences::new();
     let wf = repo.join(".prometheos").join("workflow");
@@ -864,17 +866,28 @@ fn build_retention_protection(
             protection.insert_dir(&p)?;
         }
     }
-    // Evidence referenced by durable journal events (authoritative log).
+    // Authoritative proposal directories recorded by durable journal events and
+    // the checkpoint snapshot (the journal is the source of truth for what ran).
     for ev in super::journal::read_journal(repo, identity_key)? {
+        if let Some(pr) = ev.proposal_ref.as_deref() {
+            protection.insert_dir(&wf.join(pr))?;
+        }
         if let Some(er) = ev.evidence_ref.as_deref() {
             protect_evidence_ref(&mut protection, repo, er)?;
         }
     }
-    // Evidence referenced by the durable checkpoint snapshot.
-    if let Some(cp) = super::checkpoint::read_checkpoint(repo, identity_key)?
-        && let Some(er) = cp.evidence_ref.as_deref()
-    {
-        protect_evidence_ref(&mut protection, repo, er)?;
+    if let Some(cp) = super::checkpoint::read_checkpoint(repo, identity_key)? {
+        if let Some(pr) = cp.proposal_ref.as_deref() {
+            protection.insert_dir(&wf.join(pr))?;
+        }
+        if let Some(er) = cp.evidence_ref.as_deref() {
+            protect_evidence_ref(&mut protection, repo, er)?;
+        }
+    }
+    // Every repo-local artifact referenced by the portable work state, so an
+    // exported PWS boundary never loses referenced evidence to reclamation.
+    if let Some(pws) = pws {
+        protection.extend_from_portable_work_state(repo, pws);
     }
     // The run we just produced.
     protection.insert_dir(&repo.join(current_run_dir))?;
@@ -1210,10 +1223,13 @@ fn load_preserved_evidence(
     )
     .with_context(|| format!("failed to read evidence {}", evidence_path.display()))?;
     // Validate the durable document format (immutable evidence is validated in
-    // memory, never blindly rewritten) only after integrity is confirmed.
-    super::migration::migrate_document(
+    // memory, never blindly rewritten) only after integrity is confirmed, and
+    // operate on the verified bytes so migration never re-reads untrusted file
+    // content.
+    super::migration::migrate_document_bytes(
         &evidence_path,
         super::schema::DocumentType::EvidenceBundle,
+        &bytes,
     )?;
     let bundle: EvidenceBundle = serde_json::from_slice(&bytes).with_context(|| {
         format!(

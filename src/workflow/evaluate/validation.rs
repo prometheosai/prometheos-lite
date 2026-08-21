@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -501,11 +503,16 @@ async fn bounded_run(
                 kill_child_tree(pid).await;
             }
             let secs = limits.validation_timeout.map(|d| d.as_secs()).unwrap_or(0);
-            Err(BoundedRunError::Fatal(anyhow!(
-                "{}: validation exceeded the configured wall-clock timeout ({}s)",
-                CLASSIFICATION_TIMEOUT,
-                secs
-            )))
+            Err(BoundedRunError::ResourceExceeded(ResourceExceeded {
+                classification: CLASSIFICATION_TIMEOUT,
+                kind: Some("timeout"),
+                configured_limit: Some(format!("{}s", secs)),
+                observed_value: None,
+                stage: "wall_clock_timeout",
+                code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            }))
         }
     };
 
@@ -582,7 +589,16 @@ async fn bounded_run(
             }
             Ok((code, out, err))
         }
-        Err(e) => Err(e),
+        Err(e) => match e {
+            // The wall-clock timeout arm is raised before the readers are drained;
+            // attach the captured diagnostics so the durable record carries them.
+            BoundedRunError::ResourceExceeded(mut re) => {
+                re.stdout = out;
+                re.stderr = err;
+                Err(BoundedRunError::ResourceExceeded(re))
+            }
+            other => Err(other),
+        },
     }
 }
 
@@ -1031,46 +1047,36 @@ fn spawn_resource_monitor_linux(
     kind: Arc<AtomicU8>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let pgid = pid as i32;
+        let root = pid as i32;
         // Clock ticks per second, for converting /proc stat times to seconds.
         let tick = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
         let tick = if tick <= 0 { 100 } else { tick as u64 };
         while !done.load(Ordering::SeqCst) {
+            let tree = process_tree_subtree(root);
             let mut cpu_ticks: u64 = 0;
             let mut rss_bytes: u64 = 0;
-            if let Ok(entries) = std::fs::read_dir("/proc") {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if !name.chars().all(|c| c.is_ascii_digit()) {
-                        continue;
-                    }
-                    let stat = match std::fs::read_to_string(entry.path().join("stat")) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    if !proc_in_group(&stat, pgid) {
-                        continue;
-                    }
+            for &p in &tree {
+                let proc_path = std::path::Path::new("/proc").join(p.to_string());
+                if let Ok(stat) = std::fs::read_to_string(proc_path.join("stat")) {
                     if let Some((ut, st)) = proc_cpu_ticks(&stat) {
                         cpu_ticks += ut + st;
                     }
-                    if let Some(rss) = proc_rss(&entry.path()) {
-                        rss_bytes += rss;
-                    }
+                }
+                if let Some(rss) = proc_rss(&proc_path) {
+                    rss_bytes += rss;
                 }
             }
             if let Some(secs) = limits.max_cpu_time {
                 if cpu_ticks / tick >= secs.as_secs() {
                     kind.store(1, Ordering::SeqCst);
-                    kill_group(pgid);
+                    kill_process_tree(root);
                     return;
                 }
             }
             if let Some(mem) = limits.max_memory_bytes {
                 if rss_bytes >= mem {
                     kind.store(2, Ordering::SeqCst);
-                    kill_group(pgid);
+                    kill_process_tree(root);
                     return;
                 }
             }
@@ -1080,7 +1086,7 @@ fn spawn_resource_monitor_linux(
                 {
                     if free < min_free {
                         kind.store(3, Ordering::SeqCst);
-                        kill_group(pgid);
+                        kill_process_tree(root);
                         return;
                     }
                 }
@@ -1099,70 +1105,39 @@ fn spawn_resource_monitor_macos(
     kind: Arc<AtomicU8>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let pgid = pid as i32;
+        let root = pid as i32;
         while !done.load(Ordering::SeqCst) {
+            let tree = process_tree_subtree(root);
             let mut cpu_us: u64 = 0;
             let mut rss_bytes: u64 = 0;
-            // Enumerate every process and sum those in our process group.
-            let n = unsafe { libc::proc_listpids(libc::PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
-            if n > 0 {
-                let mut pids: Vec<i32> = vec![0i32; (n as usize) / std::mem::size_of::<i32>()];
-                let _ = unsafe {
-                    libc::proc_listpids(
-                        libc::PROC_ALL_PIDS,
+            for &p in &tree {
+                let mut task: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+                let sz = unsafe {
+                    libc::proc_pidinfo(
+                        p,
+                        libc::PROC_PIDTASKINFO,
                         0,
-                        pids.as_mut_ptr() as *mut libc::c_void,
-                        n,
+                        &mut task as *mut _ as *mut libc::c_void,
+                        std::mem::size_of::<libc::proc_taskinfo>() as i32,
                     )
                 };
-                for &p in &pids {
-                    if p <= 0 {
-                        continue;
-                    }
-                    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
-                    let sz = unsafe {
-                        libc::proc_pidinfo(
-                            p,
-                            libc::PROC_PIDTBSDINFO,
-                            0,
-                            &mut info as *mut _ as *mut libc::c_void,
-                            std::mem::size_of::<libc::proc_bsdshortinfo>() as i32,
-                        )
-                    };
-                    if sz <= 0 {
-                        continue;
-                    }
-                    if info.pbsd_pgid != pgid {
-                        continue;
-                    }
-                    // proc_bsdshortinfo user/system times are in microseconds.
-                    cpu_us += info.pbsd_usertime + info.pbsd_systime;
-                    let mut task: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-                    let tsz = unsafe {
-                        libc::proc_pidinfo(
-                            p,
-                            libc::PROC_PIDTASKINFO,
-                            0,
-                            &mut task as *mut _ as *mut libc::c_void,
-                            std::mem::size_of::<libc::proc_taskinfo>() as i32,
-                        )
-                    };
-                    if tsz > 0 {
-                        rss_bytes += task.pti_resident_size;
-                    }
+                if sz > 0 {
+                    // proc_taskinfo user/system times are in microseconds.
+                    cpu_us += task.pti_total_user + task.pti_total_system;
+                    rss_bytes += task.pti_resident_size;
                 }
             }
             if let Some(secs) = limits.max_cpu_time {
                 if cpu_us / 1_000_000 >= secs.as_secs() {
                     kind.store(1, Ordering::SeqCst);
-                    kill_group(pgid);
+                    kill_process_tree(root);
                     return;
                 }
             }
             if let Some(mem) = limits.max_memory_bytes {
                 if rss_bytes >= mem {
                     kind.store(2, Ordering::SeqCst);
-                    kill_group(pgid);
+                    kill_process_tree(root);
                     return;
                 }
             }
@@ -1172,7 +1147,7 @@ fn spawn_resource_monitor_macos(
                 {
                     if free < min_free {
                         kind.store(3, Ordering::SeqCst);
-                        kill_group(pgid);
+                        kill_process_tree(root);
                         return;
                     }
                 }
@@ -1252,31 +1227,118 @@ fn spawn_resource_monitor_win(
 }
 
 #[cfg(unix)]
-fn kill_group(pgid: i32) {
-    // SAFETY: kill the whole process group we created with SIGKILL.
-    unsafe {
-        let _ = libc::kill(-pgid, libc::SIGKILL);
+/// Enumerate the validation process subtree rooted at `root` by walking the OS
+/// parent->child map. PID-based enumeration is robust to how the shell assigns
+/// process groups, which is fragile inside containers/CI, and therefore reliably
+/// captures every descendant regardless of `setpgid` behaviour.
+#[cfg(unix)]
+fn process_tree_subtree(root: i32) -> Vec<i32> {
+    #[cfg(target_os = "linux")]
+    let children = linux_ppid_map();
+    #[cfg(target_os = "macos")]
+    let children = macos_ppid_map();
+    let mut visited: Vec<i32> = Vec::new();
+    let mut queue = vec![root];
+    while let Some(p) = queue.pop() {
+        if visited.contains(&p) {
+            continue;
+        }
+        visited.push(p);
+        if let Some(kids) = children.get(&p) {
+            for k in kids {
+                queue.push(*k);
+            }
+        }
+    }
+    visited
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ppid_map() -> HashMap<i32, Vec<i32>> {
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let p = match name.parse::<i32>() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let stat = match std::fs::read_to_string(e.path().join("stat")) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Some(pp) = stat_ppid(&stat) {
+                children.entry(pp).or_default().push(p);
+            }
+        }
+    }
+    children
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ppid_map() -> HashMap<i32, Vec<i32>> {
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut pids: Vec<i32> = if n > 0 {
+        vec![0i32; (n as usize) / std::mem::size_of::<i32>()]
+    } else {
+        Vec::new()
+    };
+    if n > 0 {
+        unsafe {
+            libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, n);
+        }
+    }
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for &p in &pids {
+        if p <= 0 {
+            continue;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let sz = unsafe {
+            libc::proc_pidinfo(
+                p,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        if sz <= 0 {
+            continue;
+        }
+        children.entry(info.pbi_ppid as i32).or_default().push(p);
+    }
+    children
+}
+
+/// Parse the parent pid from a `/proc/<pid>/stat` line (robust to the comm field
+/// containing spaces or parentheses).
+#[cfg(target_os = "linux")]
+fn stat_ppid(stat: &str) -> Option<i32> {
+    let idx = stat.rfind(')')?;
+    let rest = &stat[idx + 1..];
+    let mut it = rest.split_whitespace();
+    let _state = it.next();
+    it.next().and_then(|p| p.parse::<i32>().ok())
+}
+
+/// Kill the whole validation process subtree (rooted at the validation child) by
+/// sending SIGKILL to every descendant. Robust to process-group assignment
+/// quirks because it enumerates the PID tree directly.
+#[cfg(unix)]
+fn kill_process_tree(root: i32) {
+    for p in process_tree_subtree(root) {
+        unsafe {
+            let _ = libc::kill(p, libc::SIGKILL);
+        }
     }
 }
 
-/// True if the process described by `/proc/<pid>/stat` belongs to process group
-/// `pgid`. Robust to the comm field containing spaces or parentheses.
-#[cfg(unix)]
-fn proc_in_group(stat: &str, pgid: i32) -> bool {
-    let Some(idx) = stat.rfind(')') else {
-        return false;
-    };
-    let rest = &stat[idx + 1..];
-    let mut it = rest.split_whitespace();
-    // Fields after ')': state ppid pgrp ...
-    let _state = it.next();
-    let _ppid = it.next();
-    let pgrp = it.next();
-    pgrp.and_then(|p| p.parse::<i32>().ok()) == Some(pgid)
-}
-
 /// Parse the (utime, stime) pair (in clock ticks) from `/proc/<pid>/stat`.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn proc_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
     let Some(idx) = stat.rfind(')') else {
         return None;
@@ -1291,7 +1353,7 @@ fn proc_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
 }
 
 /// Parse the resident set size (bytes) from `/proc/<pid>/status` (`VmRSS`).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn proc_rss(proc_path: &Path) -> Option<u64> {
     let status = std::fs::read_to_string(proc_path.join("status")).ok()?;
     for line in status.lines() {
@@ -1800,7 +1862,7 @@ mod tests {
             validation_timeout: Some(std::time::Duration::from_millis(300)),
             ..ResourceLimits::default()
         };
-        let err = run_isolated_validation(
+        let rec = run_isolated_validation(
             &dir,
             id,
             Some(sleep_cmd),
@@ -1810,10 +1872,16 @@ mod tests {
             &[],
         )
         .await
-        .expect_err("timeout must fail validation");
-        assert!(
-            err.to_string().contains(CLASSIFICATION_TIMEOUT),
-            "expected timeout classification, got: {err}"
+        .expect("timeout returns a durable, classified record");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_TIMEOUT),
+            "expected timeout classification, got: {rec:?}"
+        );
+        assert_eq!(
+            rec.resource_kind.as_deref(),
+            Some("timeout"),
+            "expected timeout resource kind, got: {rec:?}"
         );
     }
 

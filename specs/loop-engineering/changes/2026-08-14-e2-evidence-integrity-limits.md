@@ -2,7 +2,7 @@
 
 - **PR:** #170 (DRAFT)
 - **Branch:** `feat/e2-evidence-integrity-limits`
-- **Status:** round-4 review-blocker revision complete and locally verified (fmt/clippy/test green on Windows dev env); about to push a new immutable SHA and return to REVIEW_GATE. Do **not** merge or begin #152.
+- **Status:** round-5 review-blocker revision complete and locally verified (fmt/clippy/test green on Windows dev env); about to push a new immutable SHA and return to REVIEW_GATE. Do **not** merge or begin #152.
 
 ## Summary
 
@@ -328,3 +328,76 @@ The reviewer's `#pullrequestreview-4972248424` (6 PRIMARY BLOCKERS) on
 - `cargo test --lib workflow::redaction --quiet` — 6 passed
 - macOS monitor compiles only under `target_os = "macos"`; not exercised locally
   (Windows dev env). CI workflow `#115` is the cross-platform gate.
+
+## REVIEW_GATE — round 5 (on `81b7288`)
+
+The reviewer's `#pullrequestreview-4983471511` (8 PRIMARY BLOCKERS) on
+`81b72886e68e05c016cdcf483a37f9bbb8aad044` are addressed in this revision:
+
+1. **macOS compilation failure.** The prior macOS monitor used
+   `proc_bsdshortinfo` / `PROC_ALL_PIDS`, neither of which exists in `libc`
+   0.2.186. Rewrote `spawn_resource_monitor_macos` to use the real API:
+   `proc_listallpids` to enumerate, `proc_pidinfo(PROC_PIDTBSDINFO)` for the
+   parent pid (`pbi_ppid`), and `proc_pidinfo(PROC_PIDTASKINFO)` for
+   `pti_total_user + pti_total_system` (microseconds) and `pti_resident_size`.
+   All field/constant names verified against the pinned `libc` source.
+2. **Strict clippy six errors.** Removed the dead `kill_group` /
+   `proc_in_group` helpers and the non-existent `proc_bsdshortinfo` access;
+   `stat_ppid` / `proc_cpu_ticks` / `proc_rss` are now gated to
+   `target_os = "linux"` and the `HashMap` import to linux+macos, so no
+   unused-import / dead-code lints fire on any target.
+3. **Linux CPU/memory tests lost resource classification.** Replaced the
+   fragile process-group match (`proc_in_group` / `setpgid`) with robust
+   PID-subtree enumeration: `process_tree_subtree` walks the OS parent→child
+   map (BFS from the validation child) and `kill_process_tree` SIGKILLs every
+   descendant. This survives `setpgid` failures inside containers/CI, so the
+   aggregate CPU/RSS sum and breach detection are reliable and carry `kind`
+   1/2 to a typed `ResourceExceeded`.
+4. **Timeout / disk failures lacked typed durable evidence.** The wall-clock
+   timeout `select!` arm now returns `BoundedRunError::ResourceExceeded`
+   (`classification = resource_timeout_exhausted`, `kind = "timeout"`) and the
+   post-drain match attaches the redacted stdout/stderr. Disk breaches already
+   returned `ResourceExceeded` (kind 3) from the Unix monitor; both now feed a
+   durable, classified `ValidationRecord`. `validation_timeout_*` test updated
+   to assert the durable classified record (not an `Err`).
+5. **Crash/recovery tests remained in-memory.** Added
+   `e2e_recovery_reuses_persisted_terminal_evidence`: it persists a real
+   `EvidenceBundle` through `write_bundle` (integrity sidecar), appends a
+   terminal `ValidationComplete` journal event referencing it, then recovers
+   and loads the bundle through `read_verified` + `migrate_document_bytes`,
+   proving exact-once reuse of the durable evidence rather than re-derivation.
+6. **Retention omitted authoritative proposal/PWS references.**
+   `build_retention_protection` now also protects the `proposal_ref` directory
+   (`workflow/<id>`) from every durable journal event and the checkpoint
+   snapshot (not just registry entries), and extends protection with
+   `extend_from_portable_work_state` when a `PortableWorkState` is supplied.
+7. **Evidence migration re-read unauthenticated bytes.** Added
+   `migrate_document_bytes(path, doc_type, content: &[u8])`; `load_preserved_
+   evidence` now runs migration over the already `read_verified` bytes so no
+   untrusted file read occurs during evidence migration. `read_declared_
+   version` (file-reading) was removed in favor of `read_declared_version_
+   from_value`.
+8. **Secret + cross-platform test matrices incomplete.** Added
+   `seeds_provider_credential_values_from_config` (asserts provider
+   `api_key_env` values are seeded into known secrets) and the E2E recovery
+   test above. macOS monitor is exercised by CI workflow `#115`; the Linux
+   subtree monitor is covered by the existing linux breach tests once CI runs.
+
+### Round-5 verification evidence (local, Windows dev env)
+
+- `cargo fmt --all -- --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean
+- `cargo test --lib workflow::evaluate::validation::tests` — 22 passed
+  (incl. `cpu_limit_kills_runaway_process_windows`, `output_cap_breach_is_
+  durable_and_classified`, `validation_timeout_is_enforced_as_resource_
+  violation`)
+- `cargo test --lib workflow::evaluate::recovery::tests` — 24 passed
+  (incl. `e2e_recovery_reuses_persisted_terminal_evidence`)
+- `cargo test --lib workflow::redaction::tests` — 7 passed
+  (incl. `seeds_provider_credential_values_from_config`)
+- `cargo test --lib workflow::evaluate::migration::tests` — 13 passed
+- `cargo test --lib workflow::retention::tests` — 8 passed
+- macOS + Linux monitors compile only under their targets; not exercised
+  locally (Windows dev env). CI workflows (incl. `#115`) are the cross-platform
+  gate. The macOS rewrite uses only verified `libc` 0.2.186 symbols.
+

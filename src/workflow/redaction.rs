@@ -279,4 +279,29 @@ mod tests {
                 .is_ok()
         );
     }
+
+    #[test]
+    fn seeds_provider_credential_values_from_config() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cfg = dir.path().join("prometheos.config.json");
+        std::fs::write(
+            &cfg,
+            r#"{"llm_routing":{"providers":[{"name":"p","provider_type":"openai","enabled":true,"base_url":"https://api.example.com","model":"m","api_key_env":"PROMETHEOS_TEST_PROVIDER_KEY"}]}}"#,
+        )
+        .expect("write config");
+        unsafe {
+            std::env::set_var(
+                "PROMETHEOS_TEST_PROVIDER_KEY",
+                "super-secret-provider-value",
+            );
+        }
+        let secrets = collect_known_secrets(dir.path());
+        unsafe {
+            std::env::remove_var("PROMETHEOS_TEST_PROVIDER_KEY");
+        }
+        assert!(
+            secrets.iter().any(|s| s == "super-secret-provider-value"),
+            "provider credential value was not seeded into known secrets: {secrets:?}"
+        );
+    }
 }
