@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as AsyncCommand;
