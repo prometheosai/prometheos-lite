@@ -2169,7 +2169,9 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            "while true; do :; done"
+            // Wrapped so the preflight availability probe (`which`) resolves
+            // the first token to a real executable, not a shell keyword.
+            "sh -c 'while true; do :; done'"
         }
     }
 
