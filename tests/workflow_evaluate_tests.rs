@@ -129,11 +129,20 @@ async fn preflight_stops_on_low_disk_space() {
     };
 
     let bundle = evaluate::evaluate(config).await.unwrap();
-    assert_eq!(bundle.final_state, "PREFLIGHT_BLOCKED");
+    // A disk-space preflight breach is a TYPED resource failure: the terminal
+    // state is InfraBlocked with classification resource_disk_exhausted (and a
+    // typed validation record), not a generic preflight block.
+    assert_eq!(bundle.final_state, "INFRA_BLOCKED");
     assert_eq!(
         bundle.failure_classification.as_deref(),
-        Some("preflight_blocked")
+        Some("resource_disk_exhausted")
     );
+    let rec = bundle
+        .validation
+        .as_ref()
+        .expect("typed disk record persisted");
+    assert_eq!(rec.resource_kind.as_deref(), Some("disk"));
+    assert_eq!(rec.stage.as_deref(), Some("preflight_disk"));
     // No proposal should have been generated.
     assert!(bundle.proposal.is_none());
 }
@@ -898,8 +907,8 @@ async fn preflight_blocks_on_very_high_disk_requirement() {
 
     let bundle = evaluate::evaluate(config).await.unwrap();
     assert_eq!(
-        bundle.final_state, "PREFLIGHT_BLOCKED",
-        "u64::MAX disk requirement must block preflight"
+        bundle.final_state, "INFRA_BLOCKED",
+        "u64::MAX disk requirement must block as a typed resource breach"
     );
 }
 
