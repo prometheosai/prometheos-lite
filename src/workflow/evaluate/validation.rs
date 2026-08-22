@@ -338,14 +338,46 @@ async fn bounded_run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // NOTE: per-child `setrlimit(RLIMIT_CPU/RLIMIT_AS)` is deliberately NOT
-    // applied here. The kernel enforces those limits *before* the aggregate
-    // monitor can observe the breach (RLIMIT_CPU SIGKILLs at exactly the soft
-    // limit; RLIMIT_AS makes large allocations fail with a plain non-zero
-    // exit), so a resource breach would surface as an ordinary exit and lose
-    // its typed classification. The aggregate process-tree monitor below is
-    // the single authoritative detector: it observes, classifies (kind 1/2/3),
-    // kills the whole tree, and the caller persists typed durable evidence.
+    // OS-enforced CPU cap (kernel hard limit): POSIX `RLIMIT_CPU` in the
+    // child's pre-exec. The kernel SIGXCPU/SIGKILLs the tree at the soft limit,
+    // so CPU enforcement never depends on polling. A signal death by SIGXCPU is
+    // classified deterministically below (`rlimit_cpu` stage).
+    //
+    // Memory/disk deliberately have NO child-side rlimit: `RLIMIT_AS` makes
+    // large allocations fail with an ordinary non-zero exit (no classifiable
+    // signal, and on macOS it fails outright), so those budgets are enforced and
+    // classified by the aggregate process-tree monitor below.
+    #[cfg(unix)]
+    {
+        let cpu = limits.max_cpu_time.map(|d| d.as_secs());
+        // SAFETY: `pre_exec` runs in the child immediately after fork and before
+        // exec; we only call async-signal-safe libc setters. If the configured
+        // cap cannot be applied the spawn fails (fail closed: a resource cap we
+        // cannot enforce must not run unbounded).
+        unsafe {
+            cmd.pre_exec(move || {
+                if let Some(secs) = cpu {
+                    let rlim = libc::rlimit {
+                        rlim_cur: secs,
+                        rlim_max: secs,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CPU, &rlim) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Start the shell SUSPENDED so no descendant can be created before the
+        // Job Object is assigned: children inherit the job, so anything spawned
+        // after assignment is covered by tree-wide termination, and a fast
+        // pre-assignment grandchild (the spawn/assign race) cannot exist.
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        cmd.creation_flags(CREATE_SUSPENDED);
+    }
     let mut child = cmd
         .spawn()
         .context("failed to execute validation command")?;
@@ -363,11 +395,24 @@ async fn bounded_run(
     #[cfg(windows)]
     {
         if (limits.max_memory_bytes.is_some() || limits.max_cpu_time.is_some())
-            && let Some(pid) = pid
+            && let Some(win_pid) = pid
         {
-            let job = apply_job_limits(pid, limits).context(
-                "failed to apply Windows Job Object resource limits (CPU/memory enforcement unavailable)",
-            )?;
+            let job = match apply_job_limits(win_pid, limits) {
+                Ok(job) => job,
+                Err(e) => {
+                    let err = e.context(
+                        "failed to apply Windows Job Object resource limits (CPU/memory enforcement unavailable)",
+                    );
+                    // Fail closed. The shell is still suspended (it never ran,
+                    // so it has no descendants); kill it synchronously — never
+                    // across an await while the raw job-pointer scrutinee is
+                    // live, which would make this future !Send.
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/PID", &win_pid.to_string()])
+                        .output();
+                    return Err(Box::new(BoundedRunError::Fatal(err)));
+                }
+            };
             // Ownership of the job handle is transferred to the monitor thread,
             // which closes it on exit. The async future therefore never holds a
             // raw pointer across an await (keeps it `Send` for `tokio::spawn`).
@@ -377,6 +422,13 @@ async fn bounded_run(
                 monitor_done.clone(),
                 monitor_kind.clone(),
             ));
+        }
+        // The shell was created suspended; every descendant it spawns from now
+        // on inherits the already-assigned Job Object, so tree-wide termination
+        // cannot be escaped by a pre-assignment grandchild.
+        if let Some(win_pid) = pid {
+            resume_suspended_process_windows(win_pid)
+                .context("failed to resume suspended validation process")?;
         }
     }
 
@@ -465,10 +517,21 @@ async fn bounded_run(
 
     // Race the process exit against cancellation and the wall-clock timeout.
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
+    #[cfg(unix)]
+    let killed_by_sigxcpu = Arc::new(AtomicBool::new(false));
 
     let status_result: Result<Option<i32>, Box<BoundedRunError>> = tokio::select! {
         status = child.wait() => {
             let status = status.context("failed to wait on validation command")?;
+            // A death by SIGXCPU is the kernel's deterministic verdict that the
+            // OS-enforced RLIMIT_CPU cap fired; record it for typed
+            // classification below (the monitor may not have polled in time).
+            #[cfg(unix)]
+            if limits.max_cpu_time.is_some()
+                && status.signal() == Some(libc::SIGXCPU)
+            {
+                killed_by_sigxcpu.store(true, Ordering::SeqCst);
+            }
             Ok(status.code())
         }
         _ = token.cancelled() => {
@@ -548,6 +611,28 @@ async fn bounded_run(
                 configured_limit: configured,
                 observed_value: observed,
                 stage: "aggregate_monitor",
+                code: None,
+                stdout: out,
+                stderr: err,
+            },
+        )));
+    }
+
+    // Kernel-enforced CPU verdict: the child died by SIGXCPU under an
+    // OS-enforced RLIMIT_CPU cap. This is deterministic kernel evidence, not a
+    // sampling result.
+    #[cfg(unix)]
+    if limits.max_cpu_time.is_some() && killed_by_sigxcpu.load(Ordering::SeqCst) {
+        return Err(Box::new(BoundedRunError::ResourceExceeded(
+            ResourceExceeded {
+                classification: CLASSIFICATION_CPU,
+                kind: Some("cpu"),
+                configured_limit: Some(format!(
+                    "{}s",
+                    limits.max_cpu_time.unwrap_or_default().as_secs()
+                )),
+                observed_value: Some("SIGXCPU (RLIMIT_CPU)".to_string()),
+                stage: "rlimit_cpu",
                 code: None,
                 stdout: out,
                 stderr: err,
@@ -729,6 +814,49 @@ fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<*mut winapi::ct
         }
         Ok(job)
     }
+}
+
+/// Resume the primary (and any other) threads of a process that was created
+/// with `CREATE_SUSPENDED`. The validation shell is spawned suspended so the
+/// Job Object can be assigned before it executes a single instruction; this
+/// closes the spawn→assign race where a fast grandchild could escape
+/// tree-wide job termination.
+#[cfg(windows)]
+fn resume_suspended_process_windows(pid: u32) -> Result<()> {
+    use std::mem;
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::processthreadsapi::{OpenThread, ResumeThread};
+    use winapi::um::tlhelp32::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use winapi::um::winnt::THREAD_SUSPEND_RESUME;
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            bail!("CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD) failed");
+        }
+        let mut entry: THREADENTRY32 = mem::zeroed();
+        entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
+        if Thread32First(snap, &mut entry) == 0 {
+            CloseHandle(snap);
+            bail!("Thread32First failed");
+        }
+        loop {
+            if entry.th32OwnerProcessID == pid {
+                let h = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if !h.is_null() {
+                    ResumeThread(h);
+                    CloseHandle(h);
+                }
+            }
+            if Thread32Next(snap, &mut entry) == 0 {
+                break;
+            }
+        }
+        CloseHandle(snap);
+    }
+    Ok(())
 }
 // ---------------------------------------------------------------------------
 // Test evidence parsing
@@ -991,15 +1119,15 @@ async fn kill_child_tree(pid: u32) {
 
 /// Spawn the aggregate, process-tree resource monitor for a Unix validation run.
 ///
-/// The monitor walks the process group for every process in the validation tree
-/// (`pgid == pid`, because the shell was spawned into its own group) and, on each
+/// The monitor enumerates the validation process SUBTREE (parent→child walk from
+/// the shell pid; robust to `setpgid` behaviour in containers/CI) and, on each
 /// tick, sums the **aggregate** user+system CPU time and **aggregate** RSS across
 /// the whole tree. If the aggregate CPU, aggregate RSS, or free disk space crosses
-/// the configured budget it kills the entire group and records which resource was
-/// breached in `kind` (1=cpu, 2=memory, 3=disk). This is true process-tree
-/// accounting, independent of (and in addition to) the per-process `setrlimit`
-/// applied in the child's `pre_exec`. The platform-specific enumeration differs
-/// (Linux `/proc` vs macOS `proc_pidinfo`).
+/// the configured budget it kills the entire subtree and records which resource
+/// was breached in `kind` (1=cpu, 2=memory, 3=disk). CPU additionally carries a
+/// kernel hard cap via the child's `RLIMIT_CPU` (`pre_exec`); memory/disk are
+/// enforced by this monitor. Platform-specific enumeration differs (Linux
+/// `/proc` vs macOS `proc_pidinfo`).
 #[cfg(unix)]
 fn spawn_resource_monitor(
     pid: u32,
@@ -1258,19 +1386,28 @@ fn linux_ppid_map() -> HashMap<i32, Vec<i32>> {
 
 #[cfg(target_os = "macos")]
 fn macos_ppid_map() -> HashMap<i32, Vec<i32>> {
-    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    let mut pids: Vec<i32> = if n > 0 {
-        vec![0i32; (n as usize) / std::mem::size_of::<i32>()]
-    } else {
-        Vec::new()
+    // `proc_listallpids(NULL, 0)` returns the number of PIDs in the table
+    // (NOT a byte count). Size the buffer for that many PIDs and pass its byte
+    // capacity on the second call; then honor the second call's returned PID
+    // count, which can be lower than the probe if processes exited meanwhile.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return HashMap::new();
+    }
+    let mut pids: Vec<i32> = vec![0; count as usize];
+    let written = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr() as *mut libc::c_void,
+            (count as usize)
+                .saturating_mul(std::mem::size_of::<i32>())
+                .min(i32::MAX as usize) as i32,
+        )
     };
-    if n > 0 {
-        unsafe {
-            libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, n);
-        }
+    if written <= 0 {
+        return HashMap::new();
     }
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-    for &p in &pids {
+    for &p in &pids[..written as usize] {
         if p <= 0 {
             continue;
         }
@@ -2121,6 +2258,186 @@ mod tests {
         );
         assert_eq!(err.resource_kind.as_deref(), Some("cpu"));
         assert_eq!(classify_validation_failure(&err), CLASSIFICATION_CPU);
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_CPU),
+            crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn memory_limit_kills_runaway_process_windows() {
+        // Skip when PowerShell is unavailable in this environment.
+        if std::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("$null")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (dir, base) = init_test_repo("winmem");
+        let id = "winmem-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(60)),
+            max_memory_bytes: Some(64 * 1024 * 1024),
+            min_free_disk_bytes: None,
+            ..ResourceLimits::default()
+        };
+        // Write the burner as a script file: this sidesteps every layer of
+        // cmd/PowerShell quoting ambiguity in the wrapped command string.
+        let ps1 = dir.join("mem_burn.ps1");
+        std::fs::write(
+            &ps1,
+            "$b=New-Object byte[] (300MB); $b[0]=1; Start-Sleep 30\r\n",
+        )
+        .unwrap();
+        let rec = run_isolated_validation(
+            &dir,
+            id,
+            Some(&format!(
+                // Bare path: temp paths have no spaces, and cmd/PS quoting
+                // layers mangle embedded quotes.
+                "powershell -NoProfile -ExecutionPolicy Bypass -File {}",
+                ps1.display()
+            )),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect("memory limit must be enforced");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_MEMORY),
+            "memory breach must be classified as a resource failure: {rec:?}"
+        );
+        assert_eq!(rec.resource_kind.as_deref(), Some("memory"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn descendant_tree_is_cleaned_after_output_cap_breach_windows() {
+        use std::time::{Duration, Instant};
+        let (dir, base) = init_test_repo("windesc");
+        let id = "windesc-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(60)),
+            max_output_bytes: Some(1024),
+            ..ResourceLimits::default()
+        };
+        // The command spawns a long-lived background descendant and then floods
+        // stdout past the cap. The whole tree must be terminated; the marker
+        // descendant must not outlive the run.
+        let cmd = "start /b cmd /c \"ping -n 60 10.255.255.1 -w 1000 >nul\" & for /L %i in (1,1,200) do @echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let rec = run_isolated_validation(&dir, id, Some(cmd), &evidence_dir, &token, &limits, &[])
+            .await
+            .expect("output cap must be enforced");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_OUTPUT),
+            "output-cap breach must be classified as a resource failure: {rec:?}"
+        );
+        // Poll briefly for the descendant to be reaped by the tree kill.
+        let mut sys = sysinfo::System::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            sys.refresh_processes();
+            let alive = sys
+                .processes()
+                .values()
+                .any(|p| p.cmd().iter().any(|c| c.contains("10.255.255.1")));
+            if !alive || Instant::now() > deadline {
+                assert!(!alive, "background descendant survived the tree-wide kill");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_subtree_enumeration_includes_descendants() {
+        // Regression guard for proc_listallpids sizing: spawn a shell that
+        // forks two children, then verify the enumerated subtree contains more
+        // than the root alone. The previous implementation probed the table
+        // size as a PID count but sized the buffer as PIDs/4, inspecting only
+        // a fraction of the table.
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30 & sleep 30; wait")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        let root = child.id() as i32;
+        // Give the shell a moment to fork its children.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let tree = process_tree_subtree(root);
+        kill_process_tree(root);
+        let _ = child.wait();
+        assert!(
+            tree.len() >= 3,
+            "subtree must include the shell and both sleep descendants, got {tree:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpu_limit_sigxcpu_is_kernel_classified() {
+        // RLIMIT_CPU is a kernel hard cap: even if the aggregate monitor never
+        // polls, a death by SIGXCPU must classify the run as
+        // resource_cpu_exhausted with typed evidence (stage rlimit_cpu).
+        let (dir, base) = init_test_repo("sigxcpu");
+        let id = "sigxcpu-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(60)),
+            max_cpu_time: Some(std::time::Duration::from_secs(1)),
+            ..ResourceLimits::default()
+        };
+        let rec = run_isolated_validation(
+            &dir,
+            id,
+            Some("while true; do :; done"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect("cpu limit must be enforced");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "kernel SIGXCPU death must classify as cpu exhaustion: {rec:?}"
+        );
+        // Either the kernel verdict (RLIMIT_CPU/SIGXCPU) or the monitor's
+        // aggregate observation wins the race; both are deterministic,
+        // OS-derived evidence.
+        assert!(
+            matches!(
+                rec.stage.as_deref(),
+                Some("rlimit_cpu") | Some("aggregate_monitor")
+            ),
+            "unexpected stage: {rec:?}"
+        );
+        assert_eq!(rec.configured_limit.as_deref(), Some("1s"));
+        assert_eq!(rec.resource_kind.as_deref(), Some("cpu"));
         assert_eq!(
             failure_to_terminal_state(CLASSIFICATION_CPU),
             crate::workflow::evaluate::identity::EvaluationState::InfraBlocked

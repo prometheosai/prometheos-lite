@@ -35,8 +35,8 @@ E2 worktree controls from the product surface inventory:
   classification constants, `classification_for_resource`. In-module tests.
 - `src/workflow/evaluate/validation.rs`: `run_isolated_validation` now takes
   `&ResourceLimits` and `&[String]` (known secrets). Adds `bounded_run`
-  (timeout + output cap, process-tree kill on timeout/cancel, OS CPU/memory
-  caps via Unix `setrlimit` / Windows Job Object), `verify_patch_integrity`
+  (timeout + output cap, process-tree kill on timeout/cancel, kernel
+  `RLIMIT_CPU` on Unix / Job Object limits on Windows), `verify_patch_integrity`
   (rejects mismatched `patch_hash` and `approved.patch_hash`),
   `check_output_budget`, disk-pressure preflight, redaction of
   stdout/stderr/validation command, and raw-log persistence via
@@ -65,9 +65,12 @@ E2 worktree controls from the product surface inventory:
       `known_secrets` and asserts persisted record + raw logs contain zero
       canary bytes; `collect_known_secrets` is wired into the capture path.
 - [x] Validation is bounded (timeout + output cap) and kills the process tree.
-- [x] CPU/memory enforced at the OS level: Unix `setrlimit` (RLIMIT_AS /
-      RLIMIT_CPU) in `bounded_run` pre_exec, Windows Job Object
-      (`apply_job_limits`) for commit + working-set + job-time limits.
+- [x] CPU is enforced at the OS level: Unix kernel `RLIMIT_CPU`
+      (`setrlimit` in `bounded_run` pre_exec; a SIGXCPU death is the
+      deterministic typed verdict) and Windows Job Object job-time; memory is
+      enforced by the aggregate process-tree monitor (Unix) and the Windows
+      Job Object commit limit — memory has NO child-side rlimit by design
+      (see round-6 section for why `RLIMIT_AS` is deliberately not used).
 - [x] Disk-pressure preflight via `preflight::available_disk_bytes` before
       `bounded_run`; fails closed when free space < `min_free_disk_bytes`.
 - [x] Output-cap enforced by `check_output_budget` (validation rejected if
@@ -102,8 +105,11 @@ The review blockers raised on `91ccdd1` are addressed in `b7a1a71`:
    `read_verified` (requires the SHA-256 sidecar; fails closed). The
    legacy-tolerant `read_verified_or_legacy` is no longer on the critical path.
    Covered by `artifact_integrity::tests::missing_sidecar_fails_closed`.
-2. **CPU / memory / disk enforcement.** Implemented: Unix `setrlimit` and Windows
-   Job Object for CPU/memory; disk-pressure preflight; output-cap budget. Tests:
+ 2. **CPU / memory / disk enforcement.** Implemented: kernel `RLIMIT_CPU` on
+    Unix plus Windows Job Object job-time for CPU; aggregate process-tree
+    monitor (Unix) / Job Object commit limit (Windows) for memory;
+    disk-pressure preflight with typed breach evidence; output-cap budget.
+    Tests:
    `validation_timeout_is_enforced_as_resource_violation`,
    `disk_preflight_blocks_validation_when_unsatisfied`,
    `check_output_budget_enforces_cap`, and `#[cfg(unix)]
@@ -444,5 +450,106 @@ all traced to the same two defects):
 - `cargo test --lib workflow::retention::tests` — 8 passed
 - Linux/macOS monitor behavior is verified by CI (`#115` + golden-path); the
   breach-classification race is eliminated by construction (single detector).
+
+## REVIEW_GATE — round 6 (on `83049fd`)
+
+The reviewer's `#pullrequestreview-5000028739` (7 PRIMARY BLOCKERS) are
+addressed as follows:
+
+1. **Unix OS enforcement restored, claims rescoped to match.** CPU is again a
+   kernel hard cap on Unix: `setrlimit(RLIMIT_CPU)` in `bounded_run`'s
+   `pre_exec` (fail-closed on failure), with a death by SIGXCPU classified
+   deterministically (`stage = "rlimit_cpu"`, observed `"SIGXCPU
+   (RLIMIT_CPU)"`) — no polling involved. The aggregate monitor remains for
+   tree accounting and as the memory/disk enforcer. Every prior
+   `RLIMIT_AS`/OS-enforced-memory claim in this spec and the PR body has been
+   removed or rescoped: memory on Unix is enforced by the process-tree
+   monitor (50 ms), because `RLIMIT_AS` produces no classifiable signal
+   (plain non-zero exit) and fails outright on macOS. Windows CPU/memory
+   remain Job-Object limits + monitor classification.
+2. **macOS process-table enumeration fixed.** `proc_listallpids(NULL, 0)`
+   returns a PID *count*; `macos_ppid_map` now allocates that many entries,
+   passes `count × size_of::<pid_t>()` bytes as capacity, and honors the
+   second call's returned PID count. Added a macOS regression test spawning a
+   shell with two children and asserting subtree enumeration finds all three.
+3. **Windows spawn→assign race closed.** The validation shell now starts
+   `CREATE_SUSPENDED`; the Job Object is configured/assigned while suspended;
+   then every thread is resumed via a toolhelp thread walk
+   (`resume_suspended_process_windows`). A fast grandchild can no longer be
+   created before assignment (children inherit the job). If job setup fails,
+   the still-suspended child is killed synchronously (no await while the raw
+   job pointer scrutinee lives — keeps the future `Send`). Tests: descendant
+   cleanup after an output-cap tree kill (process-scan assertion), Windows
+   memory classification, plus existing windows cpu test. NOTE: this adds the
+   `tlhelp32` feature to the pinned `winapi` dependency (same crate/version).
+4. **Disk preflight carries typed durable evidence.** New typed error
+   `preflight::DiskPreflightBreach { required_bytes, observed_free_bytes }`
+   returned fail-fast from both preflights. The orchestrator's fresh path
+   persists a typed `ValidationRecord` (`resource_kind="disk"`,
+   configured reserve, observed free bytes, `stage="preflight_disk"`,
+   classification `resource_disk_exhausted`), journals it on the legal
+   `Created → PreflightBlocked` edge carrying that classification (recovery's
+   `failure_to_terminal_state` maps DISK → InfraBlocked), and returns the
+   classified bundle. The resume path persists the same typed artifact before
+   failing (it holds no fence there, so it does not fabricate a terminal
+   journal transition). Both fatal-Err persist sites also downcast the typed
+   breach. Tests: typed downcast unit tests (insufficient + unmeasurable),
+   full-pipeline disk breach asserting persisted record fields, journal
+   classification, recovery mapping, preserved-bundle readback via
+   `read_verified`, and retry-after-terminal failing closed on append-only
+   continuity with the provider counter still at zero.
+5. **Orchestrator-level exact-once coverage added** (mock `PatchProvider`
+   harness driving the real pipeline): completed-run reuse returns preserved
+   evidence with provider-call and validation-marker counters proving zero
+   re-execution; a park-barrier crash after IntegrityVerified leaves the
+   designed cancelled-tail state (durable invariants asserted: tail state/
+   classification/evidence-ref, unpublished evidence.json, counters at 1);
+   env-driven `PROMETHEOS_MAX_CPU_SECS` / `_VALIDATION_TIMEOUT_SECS` runs
+   carry typed cpu/timeout records through the FULL pipeline including reuse.
+   Honest scope note: a second orchestrator run resuming mid-crash is gated
+   on owner staleness by design (it waits for the live-owner window rather
+   than acting immediately); that resume semantics remain covered by the
+   recovery unit suite and the e2e recovery test rather than being forced
+   through a 300 s wait here.
+6. **Retention/PWS wiring + confinement.** `build_retention_protection` now
+   loads the REAL portable work state from
+   `.prometheos/workflow/portable_work_state.json` (missing ⇒ none; corrupt ⇒
+   fail closed, reclamation skipped). All registry/journal/checkpoint
+   proposal references resolve through the new
+   `durable::confined_workflow_dir` (rejects empty/absolute/`.`/`..`),
+   evidence refs through `resolve_repo_relative`, and
+   `extend_from_portable_work_state` now returns `Result<()>`, resolves each
+   URI inside the repo and propagates insertion errors. Tests: hostile
+   journal proposal_ref rejected; missing control documents tolerated;
+   corrupt PWS fails closed; valid PWS artifact protected end-to-end; PWS
+   import itself already rejects absolute/traversal URIs (asserted).
+7. **Orchestrator-level secret canary runs added.** Surface A: provider
+   error embedding the canary in plain/URL-userinfo/query forms — full
+   pipeline run, then a recursive scan of everything under `.prometheos`
+   asserts ZERO occurrences. Surface B: validation stderr echoes the canary
+   at runtime (via an env var so the user-supplied command text stays clean);
+   stderr preview, raw logs, markdown, journal all scanned zero. Disclosed
+   follow-up (found BY this test): a secret embedded in the user-supplied
+   `validation_command` text itself would be persisted into proposal/
+   identity/bundle artifacts verbatim — redaction of manifest-supplied
+   command strings is proposed as its own follow-up change, not silently
+   claimed fixed here.
+
+### Round-6 verification evidence (local, Windows dev env, rustc 1.98.0)
+
+- `cargo fmt --all -- --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean
+- `cargo test --lib` — 803 passed, 0 failed
+- `cargo test --tests` — all suites green except the pre-existing
+  Windows-local failure `provider_governed_proposal_tests::
+  report_exposes_lifecycle_evidence` (uses validation command `true`, which
+  does not exist on Windows; reproduced identically on unmodified `83049fd`
+  via `git stash`, so it predates this round and CI's ubuntu gate passes it)
+- New tests: macOS subtree enumeration; Windows mem classification +
+  descendant-cleanup scan; SIGXCPU kernel verdict; preflight typed-breach
+  units; retention confinement/PWS units; orchestrator exact-once reuse,
+  crash durability, cpu/timeout/disk typed-evidence pipelines, provider-error
+  + stderr canary scans.
+
 
 

@@ -2,14 +2,14 @@
 //!
 //! Evidence directories accumulate durable artifacts (proposal, validation,
 //! integrity, raw logs, terminal evidence). Retention must never delete a
-//! referenced artifact — terminal, nonterminal/recoverable, journal-referenced,
-//! checkpoint-referenced, or `PortableWorkState`-referenced — and must never
+//! referenced artifact â€” terminal, nonterminal/recoverable, journal-referenced,
+//! checkpoint-referenced, or `PortableWorkState`-referenced â€” and must never
 //! follow a reference outside the repository.
 //!
 //! This module provides the deterministic building blocks:
-//! - [`ProtectedReferences`] — the set of artifact paths that must survive.
-//! - [`plan_retention`] — classify every candidate under a root.
-//! - [`apply_retention`] — remove only planned, unprotected, in-repo candidates
+//! - [`ProtectedReferences`] â€” the set of artifact paths that must survive.
+//! - [`plan_retention`] â€” classify every candidate under a root.
+//! - [`apply_retention`] â€” remove only planned, unprotected, in-repo candidates
 //!   (revalidating safety immediately before each removal).
 //!
 //! Corrupted-but-referenced evidence is still protected: fail closed and
@@ -94,12 +94,25 @@ impl ProtectedReferences {
     /// This deliberately does NOT scan the repository or perform memory
     /// retrieval; it only protects what an exported portable state explicitly
     /// references (per #115's PortableWorkState retention boundary). Each
-    /// reference URI is resolved against `repo` and must stay inside it.
-    pub fn extend_from_portable_work_state(&mut self, repo: &Path, pws: &PortableWorkState) {
+    /// reference URI is resolved against `repo` and MUST stay inside it:
+    /// absolute or parent-traversing URIs are rejected (fail closed).
+    pub fn extend_from_portable_work_state(
+        &mut self,
+        repo: &Path,
+        pws: &PortableWorkState,
+    ) -> Result<()> {
         for r in &pws.artifact_refs {
-            let path = repo.join(&r.uri);
-            let _ = self.insert(&path);
+            let path = crate::workflow::durable::resolve_repo_relative(repo, &r.uri).with_context(
+                || {
+                    format!(
+                        "portable work state artifact ref escapes repository: {}",
+                        r.uri
+                    )
+                },
+            )?;
+            self.insert(&path)?;
         }
+        Ok(())
     }
 }
 
@@ -504,5 +517,100 @@ mod tests {
         );
         assert!(!orphan_file.exists(), "orphan evidence must be reclaimed");
         assert_eq!(out.removed, 1);
+    }
+
+    fn pws_with_refs(uris: &[&str]) -> crate::workflow::portable_state::PortableWorkState {
+        let refs: Vec<serde_json::Value> = uris
+            .iter()
+            .map(|u| serde_json::json!({"kind": "artifact", "uri": u}))
+            .collect();
+        let doc = serde_json::json!({
+            "schema_version": crate::workflow::schema::CURRENT_SCHEMA_VERSION.to_string_owned(),
+            "work": {
+                "work_id": "w", "task_id": "t", "objective": "o",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            },
+            "repository": {"identity": "origin", "branch": "main", "revision": "abc"},
+            "artifact_refs": refs,
+            "authority": {
+                "authority": "propose",
+                "allow_dependency_changes": false
+            },
+            "compatibility": {
+                "state_schema_version":
+                    crate::workflow::schema::PORTABLE_WORK_STATE_SCHEMA_VERSION
+                        .to_string_owned()
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+        crate::workflow::portable_state::from_json(&doc.to_string()).expect("valid pws")
+    }
+
+    #[test]
+    fn pws_artifact_refs_are_protected() {
+        let dir = tmp();
+        let repo = dir.path();
+        let target = repo.join("artifacts").join("keep.bin");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "x").unwrap();
+        let pws = pws_with_refs(&["artifacts/keep.bin"]);
+        let mut prot = ProtectedReferences::new();
+        prot.extend_from_portable_work_state(repo, &pws)
+            .expect("in-repo refs must resolve");
+        assert!(
+            prot.contains(&target),
+            "PWS-referenced artifact must be protected"
+        );
+    }
+
+    #[test]
+    fn pws_traversal_ref_fails_closed() {
+        let dir = tmp();
+        let _repo = dir.path();
+        // Import itself rejects parent-traversing refs, so a hostile PWS can
+        // never reach the protection layer.
+        let refs = serde_json::json!([{"kind": "artifact", "uri": "../escape.bin"}]);
+        let doc = serde_json::json!({
+            "schema_version": crate::workflow::schema::CURRENT_SCHEMA_VERSION.to_string_owned(),
+            "work": {"work_id":"w","task_id":"t","objective":"o",
+                     "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+            "repository": {"identity":"origin","branch":"main","revision":"abc"},
+            "artifact_refs": refs,
+            "authority": {"authority":"propose","allow_dependency_changes":false},
+            "compatibility": {"state_schema_version":
+                crate::workflow::schema::PORTABLE_WORK_STATE_SCHEMA_VERSION.to_string_owned()},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+        let err = crate::workflow::portable_state::from_json(&doc.to_string())
+            .expect_err("parent-traversing ref must fail closed at import");
+        assert!(err.to_string().contains("escapes the repository"), "{err}");
+    }
+
+    #[test]
+    fn pws_absolute_ref_fails_closed() {
+        let dir = tmp();
+        let _repo = dir.path();
+        #[cfg(windows)]
+        let abs = r"C:\Windows\evil.bin";
+        #[cfg(not(windows))]
+        let abs = "/etc/passwd";
+        let refs = serde_json::json!([{"kind": "artifact", "uri": abs}]);
+        let doc = serde_json::json!({
+            "schema_version": crate::workflow::schema::CURRENT_SCHEMA_VERSION.to_string_owned(),
+            "work": {"work_id":"w","task_id":"t","objective":"o",
+                     "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+            "repository": {"identity":"origin","branch":"main","revision":"abc"},
+            "artifact_refs": refs,
+            "authority": {"authority":"propose","allow_dependency_changes":false},
+            "compatibility": {"state_schema_version":
+                crate::workflow::schema::PORTABLE_WORK_STATE_SCHEMA_VERSION.to_string_owned()},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+        let err = crate::workflow::portable_state::from_json(&doc.to_string())
+            .expect_err("absolute ref must fail closed at import");
+        assert!(err.to_string().contains("escapes the repository"), "{err}");
     }
 }

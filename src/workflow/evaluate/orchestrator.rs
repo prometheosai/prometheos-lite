@@ -1,9 +1,8 @@
-use anyhow::{Context, Result, bail};
+﻿use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::str::FromStr;
 
 use crate::harness::patch_provider::{PatchProvider, PatchProviderContext};
-use crate::workflow::portable_state::PortableWorkState;
 use crate::workflow::{
     AuthorityLevel, GenerateScope, ProposalArtifact, ProviderRouteInfo, is_git_repo,
     sanitize_provider_route,
@@ -24,13 +23,13 @@ use super::identity::{
 };
 use super::integrity::{git_rev_parse_head, verify_repo_integrity};
 use super::preflight::{run_preflight, run_validation_preflight};
-use super::recovery::{RecoveryDisposition, determine_recovery_disposition};
+use super::recovery::{RecoveryDisposition, determine_recovery_disposition, recover_evaluation};
 use super::registry::{
     FenceToken, LeaseConfig, OwnershipObservation, ProposalState, ReserveResult, TakeoverResult,
     fenced_finalize, is_entry_stale, is_entry_stale_at, lookup_entry, proposal_state_for_state,
     read_registry, release_reservation, transition_entry, try_reserve, try_take_ownership_cas,
 };
-use super::resource::ResourceLimits;
+use super::resource::{CLASSIFICATION_DISK, ResourceLimits};
 use super::validation::{
     classify_dry_run_error, classify_validation_failure, failure_to_terminal_state,
     run_isolated_validation,
@@ -273,7 +272,59 @@ pub async fn evaluate_with_cancellation(
     let preflight = run_preflight(&repo, &commit_at_start, &config.manifest, &evidence_dir);
     let mut bundle = new_bundle(&identity, &commit_at_start, &repo, &evidence_dir);
 
-    if let Err(_e) = &preflight {
+    if let Err(e) = &preflight {
+        // A typed disk breach persists typed durable evidence (resource_kind,
+        // configured reserve, observed free bytes, stage) and terminates as an
+        // InfraBlocked resource outcome Ã¢â‚¬â€ not a generic preflight failure.
+        if let Some(breach) = e.downcast_ref::<super::preflight::DiskPreflightBreach>() {
+            let redactor = Redactor::new().with_known_secrets(&collect_known_secrets(&repo));
+            let msg = redactor.redact(&e.to_string());
+            let rec = ValidationRecord::resource_failure(
+                config
+                    .manifest
+                    .validation_command
+                    .as_deref()
+                    .map(|c| redactor.redact(c)),
+                CLASSIFICATION_DISK,
+                &msg,
+                now_iso(),
+                now_iso(),
+                Some("disk"),
+                Some(&breach.required_bytes.to_string()),
+                breach.observed_free_bytes.map(|v| v.to_string()).as_deref(),
+                Some("preflight_disk"),
+            );
+            write_validation_artifact(&evidence_dir, &rec)?;
+            bundle.validation = Some(rec);
+            bundle.failure_classification = Some(CLASSIFICATION_DISK.to_string());
+            bundle.final_state = EvaluationState::InfraBlocked.outcome_label().to_string();
+            bundle.completed_at = now_iso();
+            // Failure evidence is durable BEFORE the terminal event references it.
+            write_bundle(&evidence_dir, &bundle)?;
+            // Journal edge legality: a preflight disk breach is journaled as
+            // PreflightBlocked carrying the typed resource classification;
+            // recovery maps that classification to InfraBlocked.
+            durable_transition(
+                &repo,
+                &identity_path,
+                &run_id,
+                &identity_key,
+                &commit_at_start,
+                &fence,
+                EvaluationState::PreflightBlocked,
+                None,
+                Some(CLASSIFICATION_DISK.to_string()),
+                // refs.dir exists by now and is repo-relative; final_json may
+                // not exist yet at this point (its frozen form can be
+                // absolute), and a terminal event must carry a resolvable
+                // repository-relative reference.
+                Some(refs.dir.clone()),
+            )
+            .context("failed to persist PreflightBlocked (disk) transition")?;
+            heartbeat.shutdown("").await?;
+            release_reservation(&repo, &identity_key, &fence)?;
+            return Ok(bundle);
+        }
         bundle.failure_classification = Some("preflight_blocked".to_string());
         bundle.final_state = EvaluationState::PreflightBlocked
             .outcome_label()
@@ -417,7 +468,7 @@ pub async fn evaluate_with_cancellation(
 
     let gen_result = match gen_result {
         Ok(r) => {
-            // Check heartbeat — ownership must still be held after generation.
+            // Check heartbeat Ã¢â‚¬â€ ownership must still be held after generation.
             heartbeat.check("")?;
             r
         }
@@ -482,7 +533,7 @@ pub async fn evaluate_with_cancellation(
     .context("failed to transition registry to ProposalGenerated")?;
 
     // Safe point: the proposal is durable and published. Cancellation here is
-    // clean — a later run resumes from the durable proposal (ResumeFromProposal)
+    // clean Ã¢â‚¬â€ a later run resumes from the durable proposal (ResumeFromProposal)
     // and never re-invokes generation.
     if token.is_cancelled() {
         record_cancellation(
@@ -524,7 +575,7 @@ pub async fn evaluate_with_cancellation(
     };
 
     // ---- Stage: Governance verification ----
-    // Governance is already enforced by `generate_proposal` → `propose_with_meta`.
+    // Governance is already enforced by `generate_proposal` Ã¢â€ â€™ `propose_with_meta`.
     // Record that it passed.
     durable_transition(
         &repo,
@@ -598,7 +649,7 @@ pub async fn evaluate_with_cancellation(
     )
     .await;
 
-    // Check heartbeat after validation — must still own the entry.
+    // Check heartbeat after validation Ã¢â‚¬â€ must still own the entry.
     heartbeat.check("")?;
 
     // Safe point: cancellation after validation finished. The run records a
@@ -641,7 +692,21 @@ pub async fn evaluate_with_cancellation(
             // errors must never write a raw secret into the evidence bundle.
             let redactor = Redactor::new().with_known_secrets(&known_secrets);
             let msg = redactor.redact(&e.to_string());
-            let classification = classify_dry_run_error(&msg);
+            // A typed disk breach carries its own classification and evidence;
+            // everything else falls back to free-text classification with no
+            // typed resource fields.
+            let (classification, kind, configured, observed, stage) =
+                if let Some(breach) = e.downcast_ref::<super::preflight::DiskPreflightBreach>() {
+                    (
+                        CLASSIFICATION_DISK.to_string(),
+                        Some("disk"),
+                        Some(breach.required_bytes.to_string()),
+                        breach.observed_free_bytes.map(|v| v.to_string()),
+                        Some("preflight_disk"),
+                    )
+                } else {
+                    (classify_dry_run_error(&msg), None, None, None, None)
+                };
             // Durably record the failure BEFORE the ValidationComplete journal
             // event references it, so a resource/integrity rejection is never
             // lost and recovery maps it correctly.
@@ -656,10 +721,10 @@ pub async fn evaluate_with_cancellation(
                 &msg,
                 now_iso(),
                 now_iso(),
-                None,
-                None,
-                None,
-                None,
+                kind,
+                configured.as_deref(),
+                observed.as_deref(),
+                stage,
             );
             write_validation_artifact(&evidence_dir, &rec)?;
             bundle.validation = Some(rec);
@@ -783,7 +848,7 @@ pub async fn evaluate_with_cancellation(
         bundle.repo_pin_after = head;
     }
 
-    // Fenced finalization: evidence → terminal event → identity → checkpoint →
+    // Fenced finalization: evidence Ã¢â€ â€™ terminal event Ã¢â€ â€™ identity Ã¢â€ â€™ checkpoint Ã¢â€ â€™
     // registry, all under the registry lock. The terminal event references the
     // final evidence that was just written durably.
     fenced_finalize(
@@ -810,7 +875,7 @@ pub async fn evaluate_with_cancellation(
     // and evidence directory, and the run we just produced. Protection is built
     // fail-closed: if it cannot be computed, reclamation is SKIPPED entirely
     // rather than risk deleting authoritative state.
-    match build_retention_protection(&repo, &identity_key, &refs.dir, None) {
+    match build_retention_protection(&repo, &identity_key, &refs.dir) {
         Ok(protection) => {
             let _ = reclaim_orphan_artifacts(
                 &repo,
@@ -846,7 +911,6 @@ fn build_retention_protection(
     repo: &Path,
     identity_key: &str,
     current_run_dir: &str,
-    pws: Option<&PortableWorkState>,
 ) -> Result<ProtectedReferences> {
     let mut protection = ProtectedReferences::new();
     let wf = repo.join(".prometheos").join("workflow");
@@ -854,11 +918,15 @@ fn build_retention_protection(
     protection.insert(&wf.join("proposal_registry.json"))?;
     protection.insert_dir(&wf.join("journal"))?;
     protection.insert_dir(&wf.join("checkpoint"))?;
-    // Referenced proposal + evidence directories from the registry.
+    // Referenced proposal + evidence directories from the registry. A missing
+    // registry yields an empty entry set; a lagging one simply references dirs
+    // that may not exist (insert_dir skips missing paths).
     let reg = read_registry(repo)?;
     for entry in reg.entries.values() {
         if let Some(pid) = &entry.proposal_id {
-            protection.insert_dir(&wf.join(pid))?;
+            // Fail closed: a hostile id must never escape the workflow dir.
+            let p = super::durable::confined_workflow_dir(repo, pid)?;
+            protection.insert_dir(&p)?;
         }
         if let Some(ed) = &entry.evidence_dir {
             // Fail closed: a referenced evidence dir MUST stay inside the repo.
@@ -867,10 +935,12 @@ fn build_retention_protection(
         }
     }
     // Authoritative proposal directories recorded by durable journal events and
-    // the checkpoint snapshot (the journal is the source of truth for what ran).
+    // the checkpoint snapshot (the journal is the source of truth for what ran),
+    // each confined to the workflow directory.
     for ev in super::journal::read_journal(repo, identity_key)? {
         if let Some(pr) = ev.proposal_ref.as_deref() {
-            protection.insert_dir(&wf.join(pr))?;
+            let p = super::durable::confined_workflow_dir(repo, pr)?;
+            protection.insert_dir(&p)?;
         }
         if let Some(er) = ev.evidence_ref.as_deref() {
             protect_evidence_ref(&mut protection, repo, er)?;
@@ -878,16 +948,24 @@ fn build_retention_protection(
     }
     if let Some(cp) = super::checkpoint::read_checkpoint(repo, identity_key)? {
         if let Some(pr) = cp.proposal_ref.as_deref() {
-            protection.insert_dir(&wf.join(pr))?;
+            let p = super::durable::confined_workflow_dir(repo, pr)?;
+            protection.insert_dir(&p)?;
         }
         if let Some(er) = cp.evidence_ref.as_deref() {
             protect_evidence_ref(&mut protection, repo, er)?;
         }
     }
-    // Every repo-local artifact referenced by the portable work state, so an
-    // exported PWS boundary never loses referenced evidence to reclamation.
-    if let Some(pws) = pws {
-        protection.extend_from_portable_work_state(repo, pws);
+    // The real portable work state (when one has been exported into the
+    // workflow tree): every repo-local artifact it references is protected, and
+    // any reference escaping the repository fails closed so reclamation is
+    // SKIPPED rather than risk deleting referenced evidence.
+    let pws_path = wf.join(crate::workflow::portable_state::PORTABLE_STATE_FILENAME);
+    if pws_path.exists() {
+        let text = std::fs::read_to_string(&pws_path)
+            .with_context(|| format!("failed to read {}", pws_path.display()))?;
+        let pws = crate::workflow::portable_state::from_json(&text)
+            .with_context(|| format!("corrupt portable work state {}", pws_path.display()))?;
+        protection.extend_from_portable_work_state(repo, &pws)?;
     }
     // The run we just produced.
     protection.insert_dir(&repo.join(current_run_dir))?;
@@ -922,12 +1000,12 @@ fn protect_evidence_ref(
 /// The durable journal is authoritative; the registry is only a derived
 /// coordination snapshot and must never override it. Recovery derives the
 /// single allowed disposition (see [`RecoveryDisposition`]) and this function
-/// reconciles the registry to it — never above it:
-/// - terminal → return preserved evidence;
-/// - ProposalGenerated/GovernancePassed/Validating (claimable) → resume validation;
-/// - no journal + stale Reserved → clear and let the caller retry fresh;
-/// - a live owner (fresh heartbeat) is never reclaimed — wait;
-/// - Generating interrupted → fail closed (GenerationOutcomeUnknown).
+/// reconciles the registry to it Ã¢â‚¬â€ never above it:
+/// - terminal Ã¢â€ â€™ return preserved evidence;
+/// - ProposalGenerated/GovernancePassed/Validating (claimable) Ã¢â€ â€™ resume validation;
+/// - no journal + stale Reserved Ã¢â€ â€™ clear and let the caller retry fresh;
+/// - a live owner (fresh heartbeat) is never reclaimed Ã¢â‚¬â€ wait;
+/// - Generating interrupted Ã¢â€ â€™ fail closed (GenerationOutcomeUnknown).
 async fn wait_and_reuse(
     repo: &Path,
     commit_at_start: &str,
@@ -941,7 +1019,32 @@ async fn wait_and_reuse(
     token: &CancellationToken,
 ) -> Result<EvidenceBundle> {
     // Run validation-specific preflight first.
-    run_validation_preflight(repo, commit_at_start, manifest, evidence_dir)?;
+    if let Err(pre) = run_validation_preflight(repo, commit_at_start, manifest, evidence_dir) {
+        // A typed disk breach persists its typed durable record into the
+        // evidence directory before failing. This wait/reuse path holds no
+        // fence, so fabricating a terminal journal transition here would be
+        // unsafe; a subsequent owned run re-validates normally and journals it.
+        if let Some(breach) = pre.downcast_ref::<super::preflight::DiskPreflightBreach>() {
+            let redactor = Redactor::new().with_known_secrets(&collect_known_secrets(repo));
+            let msg = redactor.redact(&pre.to_string());
+            let rec = ValidationRecord::resource_failure(
+                manifest
+                    .validation_command
+                    .as_deref()
+                    .map(|c| redactor.redact(c)),
+                CLASSIFICATION_DISK,
+                &msg,
+                now_iso(),
+                now_iso(),
+                Some("disk"),
+                Some(&breach.required_bytes.to_string()),
+                breach.observed_free_bytes.map(|v| v.to_string()).as_deref(),
+                Some("preflight_disk"),
+            );
+            write_validation_artifact(evidence_dir, &rec)?;
+        }
+        return Err(pre);
+    }
 
     if token.is_cancelled() {
         bail!("cancelled by caller before waiting for live owner on identity {identity_key}");
@@ -952,7 +1055,7 @@ async fn wait_and_reuse(
     let mut elapsed = std::time::Duration::ZERO;
 
     loop {
-        let recovered = super::recovery::recover_evaluation(repo, identity_key, None, None)
+        let recovered = recover_evaluation(repo, identity_key, None, None)
             .context("durable state recovery failed; refusing to continue")?;
         let entry = lookup_entry(repo, identity_key);
 
@@ -1036,7 +1139,7 @@ async fn wait_and_reuse(
                     RecoveryDisposition::ResumeFromProposal
                     | RecoveryDisposition::ResumeValidation
                     | RecoveryDisposition::ReconcileSnapshots => {
-                        // Resume validation on the ORIGINAL proposal — never re-invoke
+                        // Resume validation on the ORIGINAL proposal Ã¢â‚¬â€ never re-invoke
                         // generation. Take ownership only when the entry is claimable
                         // (stale or absent); a live owner is never reclaimed.
                         let fence = match &entry {
@@ -1196,7 +1299,7 @@ async fn wait_and_reuse(
 ///
 /// A proposal reference is required only when the durable journal recorded one.
 /// Proposal-less terminal outcomes (`PreflightBlocked`, some `GenerationFailed`)
-/// return their evidence directly — no proposal is loaded and no validation is
+/// return their evidence directly Ã¢â‚¬â€ no proposal is loaded and no validation is
 /// re-run. The bundle is returned byte-for-byte as written.
 fn load_preserved_evidence(
     evidence_dir: &Path,
@@ -1319,9 +1422,8 @@ async fn resume_validation(
     let refs = EvidenceRefs::of(repo, evidence_dir);
 
     // Recover with the newly acquired fence, against the current revision.
-    let recovered =
-        super::recovery::recover_evaluation(repo, identity_key, Some(commit_at_start), Some(fence))
-            .context("durable state recovery after takeover failed; refusing to resume")?;
+    let recovered = recover_evaluation(repo, identity_key, Some(commit_at_start), Some(fence))
+        .context("durable state recovery after takeover failed; refusing to resume")?;
 
     if let Some(recovered) = &recovered {
         super::recovery::ensure_resumable(
@@ -1495,7 +1597,20 @@ async fn resume_validation(
             // errors must never write a raw secret into the evidence bundle.
             let redactor = Redactor::new().with_known_secrets(&known_secrets);
             let msg = redactor.redact(&e.to_string());
-            let classification = classify_dry_run_error(&msg);
+            // A typed disk breach carries its own classification and evidence
+            // (same as the fresh path).
+            let (classification, kind, configured, observed, stage) =
+                if let Some(breach) = e.downcast_ref::<super::preflight::DiskPreflightBreach>() {
+                    (
+                        CLASSIFICATION_DISK.to_string(),
+                        Some("disk"),
+                        Some(breach.required_bytes.to_string()),
+                        breach.observed_free_bytes.map(|v| v.to_string()),
+                        Some("preflight_disk"),
+                    )
+                } else {
+                    (classify_dry_run_error(&msg), None, None, None, None)
+                };
             // Durably record the failure BEFORE the ValidationComplete journal
             // event (same as the fresh path) so a resumed resource/integrity
             // rejection is never lost and recovery maps it correctly.
@@ -1509,10 +1624,10 @@ async fn resume_validation(
                 &msg,
                 now_iso(),
                 now_iso(),
-                None,
-                None,
-                None,
-                None,
+                kind,
+                configured.as_deref(),
+                observed.as_deref(),
+                stage,
             );
             write_validation_artifact(evidence_dir, &rec)?;
             bundle.validation = Some(rec);
@@ -1580,8 +1695,8 @@ async fn resume_validation(
         bundle.repo_pin_after = head;
     }
 
-    // Fenced finalization under the registry lock: final evidence → terminal
-    // event → identity → checkpoint → registry.
+    // Fenced finalization under the registry lock: final evidence Ã¢â€ â€™ terminal
+    // event Ã¢â€ â€™ identity Ã¢â€ â€™ checkpoint Ã¢â€ â€™ registry.
     fenced_finalize(
         repo,
         identity_key,
@@ -1625,9 +1740,8 @@ async fn resume_late_finalization(
     integrity_already_done: bool,
 ) -> Result<EvidenceBundle> {
     // Recover with the newly acquired fence against the current revision.
-    let recovered =
-        super::recovery::recover_evaluation(repo, identity_key, Some(commit_at_start), Some(fence))
-            .context("durable state recovery after takeover failed; refusing to finalize")?;
+    let recovered = recover_evaluation(repo, identity_key, Some(commit_at_start), Some(fence))
+        .context("durable state recovery after takeover failed; refusing to finalize")?;
     if let Some(recovered) = &recovered {
         super::recovery::ensure_resumable(
             EvaluationState::ValidationComplete,
@@ -1821,8 +1935,8 @@ async fn resume_late_finalization(
     // production (no barrier installed).
     token.park_at_safe_point().await;
 
-    // Fenced finalization under the registry lock: final evidence → terminal
-    // event → identity → checkpoint → registry. No validation re-run.
+    // Fenced finalization under the registry lock: final evidence Ã¢â€ â€™ terminal
+    // event Ã¢â€ â€™ identity Ã¢â€ â€™ checkpoint Ã¢â€ â€™ registry. No validation re-run.
     fenced_finalize(
         repo,
         identity_key,
@@ -1904,5 +2018,760 @@ mod tests {
                 provider_notes: None,
             })
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Orchestrator-level exact-once / typed-evidence harness
+    // ------------------------------------------------------------------
+
+    use crate::harness::edit_protocol::{CreateFileEdit, EditOperation};
+    use crate::harness::patch_provider::{
+        GenerateRequest, GenerateResponse, ProviderCandidate, RiskEstimate,
+    };
+    use crate::workflow::evaluate::integrity::git_rev_parse_head;
+    use crate::workflow::evaluate::preflight::run_preflight;
+    use crate::workflow::evaluate::recovery::recover_evaluation;
+    use crate::workflow::evaluate::resource::{CLASSIFICATION_CPU, CLASSIFICATION_TIMEOUT};
+    use std::process::Command as TestCommand;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
+
+    /// Serializes tests that mutate process-global environment variables.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_env(key: &str, value: &str) {
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    fn del_env(key: &str) {
+        unsafe { std::env::remove_var(key) };
+    }
+
+    struct HarnessProvider {
+        calls: std::sync::Arc<AtomicUsize>,
+        error: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl PatchProvider for HarnessProvider {
+        fn name(&self) -> &str {
+            "harness-mock"
+        }
+
+        async fn generate(&self, _request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            self.calls.fetch_add(1, AtomicOrd::SeqCst);
+            if let Some(err) = &self.error {
+                return Err(anyhow::anyhow!("{err}"));
+            }
+            Ok(GenerateResponse {
+                candidates: vec![ProviderCandidate {
+                    edits: vec![EditOperation::CreateFile(CreateFileEdit {
+                        file: std::path::PathBuf::from("docs/note.txt"),
+                        content: "hello\n".to_string(),
+                        executable: None,
+                    })],
+                    source: "mock".to_string(),
+                    strategy: "whole_file".to_string(),
+                    confidence: 99,
+                    reasoning: "test candidate".to_string(),
+                    estimated_risk: RiskEstimate::Low,
+                }],
+                generation_time_ms: 0,
+                provider_notes: None,
+            })
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let out = TestCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git must be runnable");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_orch_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "base\n").expect("write base file");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        dir
+    }
+
+    fn orch_manifest(
+        repo: &Path,
+        task_id: &str,
+        validation_command: Option<String>,
+        evidence_dir: Option<std::path::PathBuf>,
+    ) -> TaskManifest {
+        TaskManifest {
+            task_id: task_id.to_string(),
+            goal: "add a note file".to_string(),
+            repo: repo.to_path_buf(),
+            allowed_paths: vec!["docs/**".to_string()],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: Some(5),
+            max_lines_changed: None,
+            validation_command,
+            provider: "mock".to_string(),
+            authority: "propose".to_string(),
+            min_disk_bytes: 1024 * 1024,
+            evidence_dir,
+        }
+    }
+
+    fn marker_command(path: &Path) -> String {
+        #[cfg(windows)]
+        {
+            // Wrapped so the preflight availability probe (`where`) resolves
+            // the first token to a real executable, not a cmd builtin.
+            format!("cmd /C echo run>>{}", path.display())
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sh -c 'echo run >> {}'", path.display())
+        }
+    }
+
+    fn marker_count(path: &Path) -> usize {
+        std::fs::read_to_string(path)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    }
+
+    fn runaway_command() -> &'static str {
+        #[cfg(windows)]
+        {
+            "ping -n 30 127.0.0.1 >nul"
+        }
+        #[cfg(not(windows))]
+        {
+            "sleep 30"
+        }
+    }
+
+    fn cpu_burn_command() -> &'static str {
+        #[cfg(windows)]
+        {
+            // Infinite cmd loop; wrapped so the preflight availability probe
+            // (`where`) resolves the first token to a real executable.
+            "cmd /C for /l %i in (0,0,1) do @rem"
+        }
+        #[cfg(not(windows))]
+        {
+            "while true; do :; done"
+        }
+    }
+
+    #[test]
+    fn orch_harness_repo_passes_fresh_preflight() {
+        let dir = init_orch_repo();
+        let repo = dir.path().join("repo");
+        let ev = repo.join(".prometheos").join("workflow").join("ev-pf");
+        std::fs::create_dir_all(&ev).unwrap();
+        let manifest = orch_manifest(&repo, "pf", None, None);
+        match run_preflight(&repo, "head", &manifest, &ev) {
+            Ok(p) => {
+                assert!(p.working_tree_clean, "{p:?}");
+                assert!(p.disk_space_sufficient, "{p:?}");
+                assert!(p.validation_command_available, "{p:?}");
+                assert!(p.evidence_dir_writable, "{p:?}");
+                assert!(p.credential_available, "{p:?}");
+                assert!(p.governance_scope_valid, "{p:?}");
+            }
+            Err(e) => panic!("fresh harness repo must pass preflight: {e:#}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_run_is_reused_exactly_once_without_reexecution() {
+        let dir = init_orch_repo();
+        let repo = dir.path().join("repo");
+        let marker = dir.path().join("marker.txt");
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // Run 1: completes the full pipeline (provider + validation).
+        let cfg1 = EvaluationConfig::new(
+            orch_manifest(&repo, "oo-once", Some(marker_command(&marker)), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle1 = evaluate(cfg1)
+            .await
+            .expect("first run must complete successfully");
+        if bundle1.validation.is_none() {
+            panic!(
+                "run1 produced no validation record; class={:?} state={:?}",
+                bundle1.failure_classification, bundle1.final_state
+            );
+        }
+        assert!(bundle1.validation.as_ref().unwrap().validation_passed);
+        assert_eq!(calls.load(AtomicOrd::SeqCst), 1);
+        assert_eq!(marker_count(&marker), 1);
+
+        // Run 2: same identity (task/repo/commit/command/scope). The durable
+        // journal is terminal, so this run must reuse the preserved evidence
+        // WITHOUT calling the provider again and WITHOUT re-running
+        // validation.
+        let cfg2 = EvaluationConfig::new(
+            orch_manifest(&repo, "oo-once", Some(marker_command(&marker)), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle2 = match evaluate(cfg2).await {
+            Ok(b) => b,
+            Err(e) => {
+                let jroot = repo.join(".prometheos").join("workflow").join("journal");
+                for f in walk_files(&jroot) {
+                    if let Ok(t) = std::fs::read_to_string(&f) {
+                        eprintln!("JRN {} => {t}", f.display());
+                    }
+                }
+                panic!("reuse failed: {e:#}")
+            }
+        };
+        assert_eq!(
+            calls.load(AtomicOrd::SeqCst),
+            1,
+            "provider must not be re-invoked on reuse"
+        );
+        assert_eq!(
+            marker_count(&marker),
+            1,
+            "validation command must not re-execute on reuse"
+        );
+        assert_eq!(
+            bundle2.validation.as_ref().unwrap().validation_passed,
+            bundle1.validation.as_ref().unwrap().validation_passed
+        );
+        assert_eq!(bundle2.run_id, bundle1.run_id, "preserved run identity");
+    }
+
+    #[tokio::test]
+    async fn crash_after_validation_journal_fails_closed_without_rerun() {
+        let dir = init_orch_repo();
+        let repo = dir.path().join("repo");
+        let marker = dir.path().join("marker2.txt");
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // Run 1 parks deterministically at the post-IntegrityVerified safe
+        // point (validation and integrity durable, terminal publication
+        // pending), then is cancelled â€” a crash right before publication.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+        let cfg1 = EvaluationConfig::new(
+            orch_manifest(&repo, "crash-once", Some(marker_command(&marker)), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let j = tokio::spawn(evaluate_with_cancellation(cfg1, token.clone()));
+        // The run parks twice (post-ValidationComplete, post-IntegrityVerified);
+        // each 2-party generation pairs one park with one test wait.
+        barrier.wait().await;
+        barrier.wait().await;
+        token.cancel();
+        let r1 = j.await.expect("task joins");
+        assert!(
+            r1.is_err(),
+            "cancelled mid-flight run must surface cancellation"
+        );
+        assert_eq!(
+            calls.load(AtomicOrd::SeqCst),
+            1,
+            "provider executed exactly once"
+        );
+        assert_eq!(marker_count(&marker), 1, "validation executed exactly once");
+
+        // Crash durability invariants: the journal tail records a cooperative
+        // cancellation at ValidationComplete/IntegrityVerified with a
+        // resolvable evidence reference, and the terminal evidence bundle was
+        // NOT published. A later run can therefore resume publication without
+        // any second execution (proven by completed_run_is_reused_*).
+        let jroot = repo.join(".prometheos").join("workflow").join("journal");
+        let mut tail_state = String::new();
+        let mut tail_class = String::new();
+        let mut tail_evidence = String::new();
+        let mut files: Vec<_> = walk_files(&jroot);
+        files.sort();
+        if let Some(last) = files.last() {
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(last).unwrap()).unwrap();
+            tail_state = v["to_state"].as_str().unwrap().to_string();
+            tail_class = v["failure_classification"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            tail_evidence = v["evidence_ref"].as_str().unwrap_or("").to_string();
+        }
+        assert_eq!(tail_state, "integrity_verified", "journal tail state");
+        assert_eq!(tail_class, "cancelled", "journal tail classification");
+        assert!(
+            !tail_evidence.is_empty(),
+            "tail event keeps its evidence reference"
+        );
+        let ev_json = repo.join(&tail_evidence).join("evidence.json");
+        assert!(
+            !ev_json.exists(),
+            "terminal evidence must not be published after the crash"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes process-global env across the awaited run
+    async fn cpu_breach_via_orchestrator_carries_typed_durable_evidence() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_env("PROMETHEOS_MAX_CPU_SECS", "1");
+        set_env("PROMETHEOS_VALIDATION_TIMEOUT_SECS", "60");
+        let dir = init_orch_repo();
+        let repo = dir.path().join("repo");
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let cfg1 = EvaluationConfig::new(
+            orch_manifest(
+                &repo,
+                "cpu-orch",
+                Some(cpu_burn_command().to_string()),
+                None,
+            ),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle1 = evaluate(cfg1)
+            .await
+            .expect("resource breach returns a completed, classified bundle");
+        if bundle1.validation.is_none() {
+            panic!(
+                "cpu run produced no record; class={:?} state={:?}",
+                bundle1.failure_classification, bundle1.final_state
+            );
+        }
+        del_env("PROMETHEOS_MAX_CPU_SECS");
+        del_env("PROMETHEOS_VALIDATION_TIMEOUT_SECS");
+
+        let rec = bundle1.validation.as_ref().expect("durable record");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "cpu record: {rec:?}"
+        );
+        assert_eq!(rec.resource_kind.as_deref(), Some("cpu"));
+        assert_eq!(rec.configured_limit.as_deref(), Some("1s"));
+        assert_eq!(
+            bundle1.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU)
+        );
+
+        // Reuse: second run returns the preserved typed evidence without any
+        // new provider call.
+        let cfg2 = EvaluationConfig::new(
+            orch_manifest(
+                &repo,
+                "cpu-orch",
+                Some(cpu_burn_command().to_string()),
+                None,
+            ),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle2 = evaluate(cfg2).await.expect("reuse must succeed");
+        assert_eq!(calls.load(AtomicOrd::SeqCst), 1);
+        assert_eq!(
+            bundle2.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes process-global env across the awaited run
+    async fn timeout_breach_via_orchestrator_carries_typed_durable_evidence() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_env("PROMETHEOS_VALIDATION_TIMEOUT_SECS", "1");
+        let dir = init_orch_repo();
+        let repo = dir.path().join("repo");
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let cfg1 = EvaluationConfig::new(
+            orch_manifest(&repo, "tmo-orch", Some(runaway_command().to_string()), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle1 = evaluate(cfg1)
+            .await
+            .expect("timeout yields classified bundle");
+        del_env("PROMETHEOS_VALIDATION_TIMEOUT_SECS");
+
+        let rec = bundle1.validation.as_ref().expect("durable record");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_TIMEOUT)
+        );
+        assert_eq!(rec.resource_kind.as_deref(), Some("timeout"));
+        assert_eq!(rec.configured_limit.as_deref(), Some("1s"));
+
+        let cfg2 = EvaluationConfig::new(
+            orch_manifest(&repo, "tmo-orch", Some(runaway_command().to_string()), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle2 = evaluate(cfg2).await.expect("reuse must succeed");
+        assert_eq!(calls.load(AtomicOrd::SeqCst), 1);
+        assert_eq!(
+            bundle2.failure_classification.as_deref(),
+            Some(CLASSIFICATION_TIMEOUT)
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_breach_persists_typed_evidence_and_recovers_infra_blocked() {
+        let dir = init_orch_repo();
+        let repo = dir.path().join("repo");
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let marker3 = dir.path().join("m3.txt");
+        let mut manifest = orch_manifest(&repo, "disk-orch", Some(marker_command(&marker3)), None);
+        manifest.min_disk_bytes = u64::MAX / 2; // absurd reserve Ã¢â€ â€™ typed breach
+        let validation_cmd = manifest.validation_command.clone();
+
+        let cfg1 = EvaluationConfig::new(
+            manifest,
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let bundle1 = evaluate(cfg1)
+            .await
+            .expect("typed disk breach returns a completed, classified bundle");
+
+        let rec = bundle1.validation.as_ref().expect("typed disk record");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_DISK),
+            "{rec:?}"
+        );
+        assert_eq!(rec.resource_kind.as_deref(), Some("disk"));
+        assert_eq!(rec.stage.as_deref(), Some("preflight_disk"));
+        assert_eq!(
+            rec.configured_limit.as_deref(),
+            Some((u64::MAX / 2).to_string()).as_deref()
+        );
+        assert!(
+            rec.observed_value
+                .as_ref()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+                > 0,
+            "observed free bytes must be present: {rec:?}"
+        );
+        // The provider was never invoked: preflight failed first.
+        assert_eq!(calls.load(AtomicOrd::SeqCst), 0);
+
+        // Recovery maps the journaled classification to InfraBlocked.
+        let commit_at_start = git_rev_parse_head(&repo).unwrap();
+        let governance_scope = GovernanceScopeSnapshot {
+            allowed_paths: vec!["docs/**".to_string()],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: Some(5),
+            max_lines_changed: None,
+            authority: "propose".to_string(),
+            validation_command: validation_cmd.clone(),
+        };
+        let identity_key = compute_identity_key(
+            "disk-orch",
+            &repo,
+            &commit_at_start,
+            "harness-mock",
+            "mock",
+            &governance_scope,
+            &validation_cmd,
+        );
+        let recovered = recover_evaluation(&repo, &identity_key, None, None)
+            .expect("recovery reads")
+            .expect("journal exists");
+        // Journal edge legality: preflight-stage disk breach journals as
+        // PreflightBlocked carrying the typed resource classification;
+        // recovery consumers map that classification to InfraBlocked.
+        assert_eq!(recovered.state, EvaluationState::PreflightBlocked);
+        assert_eq!(
+            recovered.last_failure_classification.as_deref(),
+            Some(CLASSIFICATION_DISK)
+        );
+        assert_eq!(
+            failure_to_terminal_state(CLASSIFICATION_DISK),
+            EvaluationState::InfraBlocked
+        );
+
+        // The preserved evidence bundle carries the same typed record, loaded
+        // through the integrity-checked path.
+        {
+            let ev_dir = repo.join(
+                recovered
+                    .evidence_ref
+                    .as_deref()
+                    .expect("terminal event keeps its evidence reference"),
+            );
+            let bytes = crate::workflow::artifact_integrity::read_verified(
+                &ev_dir,
+                &ev_dir.join("evidence.json"),
+                crate::workflow::artifact_integrity::ArtifactKind::Evidence,
+            )
+            .expect("preserved bundle verifies");
+            let preserved: crate::workflow::evaluate::evidence::EvidenceBundle =
+                serde_json::from_slice(&bytes).expect("preserved bundle parses");
+            let rec2 = preserved.validation.as_ref().expect("preserved record");
+            assert_eq!(rec2.resource_kind.as_deref(), Some("disk"));
+            assert_eq!(rec2.stage.as_deref(), Some("preflight_disk"));
+        }
+
+        // A retry of the same identity after the terminal failure is refused
+        // by append-only journal continuity â€” it can never silently re-execute
+        // (the provider counter stays at zero).
+        let cfg2 = EvaluationConfig::new(
+            orch_manifest(&repo, "disk-orch", validation_cmd.clone(), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        let err = evaluate(cfg2)
+            .await
+            .expect_err("retry after terminal journal must fail closed");
+        assert!(
+            format!("{err:#}").contains("continuity"),
+            "unexpected retry failure: {err:#}"
+        );
+        assert_eq!(
+            calls.load(AtomicOrd::SeqCst),
+            0,
+            "provider must never be invoked across the terminal boundary"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes process-global env across the awaited run
+    async fn provider_error_and_stderr_secrets_are_never_persisted() {
+        const CANARY: &str = crate::workflow::redaction::SECRET_CANARY;
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_env("PROMETHEOS_KNOWN_SECRETS", CANARY);
+
+        // Surface A: provider error text embedding the canary in plain,
+        // URL-userinfo and query forms. The pipeline must persist surfaces
+        // (identity, journal, registry, evidence bundle/markdown) with zero
+        // canary occurrences.
+        {
+            let dir = init_orch_repo();
+            let repo = dir.path().join("repo");
+            let calls = std::sync::Arc::new(AtomicUsize::new(0));
+            let cfg = EvaluationConfig::new(
+                orch_manifest(&repo, "canary-gen", None, None),
+                Box::new(HarnessProvider {
+                    calls: calls.clone(),
+                    error: Some(format!(
+                        "upstream exploded key={CANARY} at https://u:{CANARY}@host/x?token={CANARY}"
+                    )),
+                }),
+            );
+            let bundle = evaluate(cfg)
+                .await
+                .expect("generation failure returns a classified bundle");
+            assert_ne!(
+                bundle.failure_classification.as_deref(),
+                None,
+                "generation failure must be classified"
+            );
+            let mut found = 0usize;
+            let mut leaked_in: Vec<String> = Vec::new();
+            let prom = repo.join(".prometheos");
+            for entry in walk_files(&prom) {
+                if let Ok(text) = std::fs::read_to_string(&entry) {
+                    let n = text.matches(CANARY).count();
+                    if n > 0 {
+                        leaked_in.push(format!("{entry:?} x{n}"));
+                    }
+                    found += n;
+                }
+            }
+            assert_eq!(
+                found, 0,
+                "canary leaked into persisted surfaces: {leaked_in:?}"
+            );
+        }
+
+        // Surface B: validation STDERR echoing the canary at RUNTIME (the
+        // command text itself stays clean â€” it is user input persisted in
+        // proposal/identity artifacts). Raw logs, previews, markdown and
+        // journal must all be redacted.
+        {
+            set_env("PROMETHEOS_TEST_CANARY", CANARY);
+            let dir = init_orch_repo();
+            let repo = dir.path().join("repo");
+            #[cfg(windows)]
+            let stderr_cmd: String =
+                "cmd /C echo key=%PROMETHEOS_TEST_CANARY% 1>&2 & exit /b 3".to_string();
+            #[cfg(not(windows))]
+            let stderr_cmd: String =
+                "sh -c 'echo key=$PROMETHEOS_TEST_CANARY >&2; exit 3'".to_string();
+            let cfg = EvaluationConfig::new(
+                orch_manifest(&repo, "canary-val", Some(stderr_cmd), None),
+                Box::new(HarnessProvider {
+                    calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                    error: None,
+                }),
+            );
+            let bundle = evaluate(cfg)
+                .await
+                .expect("failed validation returns a classified bundle");
+            let rec = bundle.validation.as_ref().expect("record");
+            assert!(
+                !rec.stderr_preview.contains(CANARY),
+                "stderr preview leaked the canary"
+            );
+            let mut found = 0usize;
+            let mut leaked_in: Vec<String> = Vec::new();
+            let prom = repo.join(".prometheos");
+            for entry in walk_files(&prom) {
+                if let Ok(text) = std::fs::read_to_string(&entry) {
+                    let n = text.matches(CANARY).count();
+                    if n > 0 {
+                        leaked_in.push(format!("{entry:?} x{n}"));
+                    }
+                    found += n;
+                }
+            }
+            assert_eq!(
+                found, 0,
+                "canary leaked into persisted surfaces: {leaked_in:?}"
+            );
+            del_env("PROMETHEOS_TEST_CANARY");
+        }
+
+        del_env("PROMETHEOS_KNOWN_SECRETS");
+    }
+
+    fn walk_files(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            if let Ok(entries) = std::fs::read_dir(&d) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.is_file() {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // ------------------------------------------------------------------
+    // Retention protection wiring (real PWS source, confinement)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn retention_protection_tolerates_missing_registry_and_confines_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+
+        // Missing registry / journal / checkpoint entirely.
+        build_retention_protection(repo, "key-x", "cur-run")
+            .expect("missing control documents are tolerated");
+
+        // A hostile proposal reference in the durable journal must fail closed.
+        let jdir = repo
+            .join(".prometheos")
+            .join("workflow")
+            .join("journal")
+            .join("key-y");
+        std::fs::create_dir_all(&jdir).unwrap();
+        std::fs::write(
+            jdir.join(format!("{:020}.json", 0)),
+            serde_json::json!({
+                "schema_version": "1.0.0", "event_id": "e0", "sequence": 0,
+                "run_id": "r1", "identity_key": "key-y", "timestamp": "2026-01-01T00:00:00Z",
+                "from_state": "created", "to_state": "generating",
+                "proposal_ref": "../evil", "failure_classification": null,
+                "owner_run_id": "r1", "lease_epoch": 1,
+                "repository_revision": "abc", "evidence_ref": null, "checkpoint_ref": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = build_retention_protection(repo, "key-y", "cur-run")
+            .expect_err("hostile proposal ref must fail closed");
+        assert!(
+            err.to_string().contains("escapes repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn retention_wires_the_real_portable_work_state_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let wf = repo.join(".prometheos").join("workflow");
+        std::fs::create_dir_all(&wf).unwrap();
+        let pws_path = wf.join(crate::workflow::portable_state::PORTABLE_STATE_FILENAME);
+
+        // Corrupt PWS document: fail closed (reclamation skipped).
+        std::fs::write(&pws_path, "{ definitely not json").unwrap();
+        let err =
+            build_retention_protection(repo, "k", "cur").expect_err("corrupt PWS must fail closed");
+        assert!(err.to_string().contains("portable work state"), "{err}");
+
+        // Valid PWS referencing an existing in-repo artifact: protected.
+        let target = repo.join("artifacts").join("keep.bin");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "x").unwrap();
+        std::fs::write(
+            &pws_path,
+            serde_json::json!({
+                "schema_version": crate::workflow::schema::CURRENT_SCHEMA_VERSION.to_string_owned(),
+                "work": {"work_id":"w","task_id":"t","objective":"o",
+                         "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+                "repository": {"identity":"origin","branch":"main","revision":"abc"},
+                "artifact_refs":[{"kind":"artifact","uri":"artifacts/keep.bin"}],
+                "authority": {"authority":"propose","allow_dependency_changes":false},
+                "compatibility": {"state_schema_version":
+                    crate::workflow::schema::PORTABLE_WORK_STATE_SCHEMA_VERSION.to_string_owned()},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let prot =
+            build_retention_protection(repo, "k", "cur").expect("valid PWS must wire through");
+        assert!(
+            prot.contains(&target),
+            "PWS-referenced artifact must be protected by the wired source"
+        );
     }
 }

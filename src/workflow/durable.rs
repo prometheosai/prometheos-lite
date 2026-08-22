@@ -138,3 +138,25 @@ pub fn resolve_repo_relative(repo: &Path, reference: &str) -> Result<std::path::
     }
     Ok(resolved)
 }
+
+/// Resolve a workflow-scoped reference (a proposal id or similar) to
+/// `<repo>/.prometheos/workflow/<id>`, rejecting empty, absolute,
+/// current-dir and parent-traversing references so a hostile id can never
+/// escape the workflow directory.
+pub fn confined_workflow_dir(repo: &Path, id: &str) -> Result<std::path::PathBuf> {
+    if id.is_empty() {
+        anyhow::bail!("empty workflow reference");
+    }
+    let p = Path::new(id);
+    if p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        anyhow::bail!("workflow reference escapes repository: {id}");
+    }
+    Ok(repo.join(".prometheos").join("workflow").join(p))
+}
