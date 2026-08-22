@@ -5,6 +5,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as AsyncCommand;
@@ -518,21 +520,23 @@ async fn bounded_run(
     // Race the process exit against cancellation and the wall-clock timeout.
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
     #[cfg(unix)]
-    let killed_by_sigxcpu = Arc::new(AtomicBool::new(false));
+    let killed_by_cpu_signal = Arc::new(AtomicI32::new(0));
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
 
     let status_result: Result<Option<i32>, Box<BoundedRunError>> = tokio::select! {
         status = child.wait() => {
             let status = status.context("failed to wait on validation command")?;
-            // A death by SIGXCPU is the kernel's deterministic verdict that the
-            // OS-enforced RLIMIT_CPU cap fired; record it for typed
-            // classification below (the monitor may not have polled in time).
+            // A death by signal while a CPU cap is configured is the kernel's
+            // deterministic RLIMIT_CPU verdict: Linux delivers SIGXCPU at the
+            // soft limit and SIGKILL once the (equal) hard limit is hit, so
+            // accept both. Other kill paths (cancel/timeout/output-cap)
+            // return through their own arms before this point.
             #[cfg(unix)]
-            if limits.max_cpu_time.is_some()
-                && status.signal() == Some(libc::SIGXCPU)
-            {
-                killed_by_sigxcpu.store(true, Ordering::SeqCst);
+            if limits.max_cpu_time.is_some() {
+                if let Some(sig) = status.signal() {
+                    killed_by_cpu_signal.store(sig, Ordering::SeqCst);
+                }
             }
             Ok(status.code())
         }
@@ -620,26 +624,32 @@ async fn bounded_run(
         )));
     }
 
-    // Kernel-enforced CPU verdict: the child died by SIGXCPU under an
-    // OS-enforced RLIMIT_CPU cap. This is deterministic kernel evidence, not a
-    // sampling result.
+    // Kernel-enforced CPU verdict: the child died by signal under an
+    // OS-enforced RLIMIT_CPU cap (SIGXCPU at the soft limit; SIGKILL once the
+    // equal hard limit is hit on Linux). This is deterministic kernel
+    // evidence, not a sampling result. Documented caveat: an external OOM
+    // kill would surface here as SIGKILL and classify as CPU exhaustion;
+    // every in-process kill path returns through its own arm first.
     #[cfg(unix)]
-    if limits.max_cpu_time.is_some() && killed_by_sigxcpu.load(Ordering::SeqCst) {
-        return Err(Box::new(BoundedRunError::ResourceExceeded(
-            ResourceExceeded {
-                classification: CLASSIFICATION_CPU,
-                kind: Some("cpu"),
-                configured_limit: Some(format!(
-                    "{}s",
-                    limits.max_cpu_time.unwrap_or_default().as_secs()
-                )),
-                observed_value: Some("SIGXCPU (RLIMIT_CPU)".to_string()),
-                stage: "rlimit_cpu",
-                code: None,
-                stdout: out,
-                stderr: err,
-            },
-        )));
+    {
+        let sig = killed_by_cpu_signal.load(Ordering::SeqCst);
+        if limits.max_cpu_time.is_some() && (sig == libc::SIGXCPU || sig == libc::SIGKILL) {
+            return Err(Box::new(BoundedRunError::ResourceExceeded(
+                ResourceExceeded {
+                    classification: CLASSIFICATION_CPU,
+                    kind: Some("cpu"),
+                    configured_limit: Some(format!(
+                        "{}s",
+                        limits.max_cpu_time.unwrap_or_default().as_secs()
+                    )),
+                    observed_value: Some(format!("signal {sig} after RLIMIT_CPU")),
+                    stage: "rlimit_cpu",
+                    code: None,
+                    stdout: out,
+                    stderr: err,
+                },
+            )));
+        }
     }
 
     match status_result {
