@@ -519,6 +519,8 @@ async fn bounded_run(
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
     #[cfg(unix)]
     let killed_by_sigxcpu = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
 
     let status_result: Result<Option<i32>, Box<BoundedRunError>> = tokio::select! {
         status = child.wait() => {
