@@ -551,5 +551,23 @@ addressed as follows:
   crash durability, cpu/timeout/disk typed-evidence pipelines, provider-error
   + stderr canary scans.
 
+### CI follow-ups on the round-6 series (final head `a3f51d5`)
+
+Four CI-driven refinements after `e66fe24`, each verified by the full 13-check
+matrix turning green:
+
+1. `ExitStatusExt` import for the unix SIGXCPU/signal read (`fda5d3c`).
+2. Linux RLIMIT_CPU verdict widened: with soft==hard the kernel (or the shell
+   relaying its forked child's death) surfaces SIGKILL / exit code 137 rather
+   than SIGXCPU — both are accepted as the deterministic kernel verdict and
+   the actual signal/exit is recorded in `observed_value` (`ef0ed14`,
+   `55d97ce`). OOM-kill caveat documented at the classification site.
+3. Windows cpu unit test timeout raised 30 s → 90 s after one contended-runner
+   flake (`55d97ce`); passed on the next two windows runs.
+4. Integration expectations updated to the new typed terminal: disk-preflight
+   breaches now end `INFRA_BLOCKED` / `resource_disk_exhausted` with a typed
+   validation record instead of generic `PREFLIGHT_BLOCKED`
+   (`workflow_evaluate_tests`, `a3f51d5`).
+
 
 
