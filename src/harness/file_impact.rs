@@ -394,9 +394,7 @@ impl FileImpactScore {
 
         let mut public_api_changes = 0;
         let mut breaking_changes = 0;
-        let semver_impact;
         let mut api_stability = ApiStability::Stable;
-        let consumer_impact;
 
         // Count public API items
         use regex::Regex;
@@ -434,16 +432,13 @@ impl FileImpactScore {
         }
 
         // Determine semver impact
-        if breaking_changes > 0 {
-            semver_impact = SemverImpact::Major;
-            consumer_impact = ConsumerImpact::High;
+        let (semver_impact, consumer_impact) = if breaking_changes > 0 {
+            (SemverImpact::Major, ConsumerImpact::High)
         } else if public_api_changes > 0 {
-            semver_impact = SemverImpact::Minor;
-            consumer_impact = ConsumerImpact::Medium;
+            (SemverImpact::Minor, ConsumerImpact::Medium)
         } else {
-            semver_impact = SemverImpact::Patch;
-            consumer_impact = ConsumerImpact::Low;
-        }
+            (SemverImpact::Patch, ConsumerImpact::Low)
+        };
 
         // Calculate impact score
         let mut score = 0.0;

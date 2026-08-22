@@ -170,58 +170,60 @@ pub(super) async fn run_isolated_validation(
                 let err = redactor.redact(&raw_err);
                 (code, out, err)
             }
-            Err(BoundedRunError::ResourceExceeded(re)) => {
+            Err(e) => match *e {
                 // Build a durable, classified record with the captured (redacted)
                 // diagnostics and typed resource evidence, then return it as a
                 // completed failure so recovery never re-derives the classification.
-                let out = redactor.redact(&re.stdout);
-                let err = redactor.redact(&re.stderr);
-                let completion_time = now_iso();
-                let base = ValidationRecord::resource_failure(
-                    validation_command.map(|s| redactor.redact(s)),
-                    re.classification,
-                    &format!(
-                        "{}: validation breached {} budget",
+                BoundedRunError::ResourceExceeded(re) => {
+                    let out = redactor.redact(&re.stdout);
+                    let err = redactor.redact(&re.stderr);
+                    let completion_time = now_iso();
+                    let base = ValidationRecord::resource_failure(
+                        validation_command.map(|s| redactor.redact(s)),
                         re.classification,
-                        re.kind.unwrap_or("resource")
-                    ),
-                    start_time.clone(),
-                    completion_time.clone(),
-                    re.kind,
-                    re.configured_limit.as_deref(),
-                    re.observed_value.as_deref(),
-                    Some(re.stage),
-                );
-                let rec = ValidationRecord {
-                    stdout_preview: truncate(&out, 4096),
-                    stderr_preview: truncate(&err, 4096),
-                    failure_classification: Some(re.classification.to_string()),
-                    exit_code: re.code,
-                    ..base
-                };
-                // Persist the redacted raw logs so recovery/audit can inspect them.
-                let _ = crate::workflow::artifact_integrity::publish_with_integrity(
-                    repo,
-                    &evidence_dir.join("validation_stdout.log"),
-                    out.as_bytes(),
-                    crate::workflow::artifact_integrity::ArtifactKind::RawLog,
-                );
-                let _ = crate::workflow::artifact_integrity::publish_with_integrity(
-                    repo,
-                    &evidence_dir.join("validation_stderr.log"),
-                    err.as_bytes(),
-                    crate::workflow::artifact_integrity::ArtifactKind::RawLog,
-                );
-                // Clean up the validation worktree before returning.
-                let _ = run_git_cmd(
-                    repo,
-                    &["worktree", "remove", "--force", wt_root.to_str().unwrap()],
-                );
-                let _ = std::fs::remove_dir_all(&wt_root);
-                let _ = std::fs::remove_file(&patch_file);
-                return Ok(rec);
-            }
-            Err(BoundedRunError::Fatal(e)) => return Err(e),
+                        &format!(
+                            "{}: validation breached {} budget",
+                            re.classification,
+                            re.kind.unwrap_or("resource")
+                        ),
+                        start_time.clone(),
+                        completion_time.clone(),
+                        re.kind,
+                        re.configured_limit.as_deref(),
+                        re.observed_value.as_deref(),
+                        Some(re.stage),
+                    );
+                    let rec = ValidationRecord {
+                        stdout_preview: truncate(&out, 4096),
+                        stderr_preview: truncate(&err, 4096),
+                        failure_classification: Some(re.classification.to_string()),
+                        exit_code: re.code,
+                        ..base
+                    };
+                    // Persist the redacted raw logs so recovery/audit can inspect them.
+                    let _ = crate::workflow::artifact_integrity::publish_with_integrity(
+                        repo,
+                        &evidence_dir.join("validation_stdout.log"),
+                        out.as_bytes(),
+                        crate::workflow::artifact_integrity::ArtifactKind::RawLog,
+                    );
+                    let _ = crate::workflow::artifact_integrity::publish_with_integrity(
+                        repo,
+                        &evidence_dir.join("validation_stderr.log"),
+                        err.as_bytes(),
+                        crate::workflow::artifact_integrity::ArtifactKind::RawLog,
+                    );
+                    // Clean up the validation worktree before returning.
+                    let _ = run_git_cmd(
+                        repo,
+                        &["worktree", "remove", "--force", wt_root.to_str().unwrap()],
+                    );
+                    let _ = std::fs::remove_dir_all(&wt_root);
+                    let _ = std::fs::remove_file(&patch_file);
+                    return Ok(rec);
+                }
+                BoundedRunError::Fatal(e) => return Err(e),
+            },
         },
         None => (None, String::new(), String::new()),
     };
@@ -314,9 +316,14 @@ pub(super) enum BoundedRunError {
     Fatal(anyhow::Error),
 }
 
-impl From<anyhow::Error> for BoundedRunError {
+/// `bounded_run`'s result type: the error is boxed because the resource variant
+/// carries captured diagnostics and would otherwise make every result frame
+/// carry a very large `Err` payload (clippy::result_large_err).
+pub(super) type BoundedRunResult = Result<(Option<i32>, String, String), Box<BoundedRunError>>;
+
+impl From<anyhow::Error> for Box<BoundedRunError> {
     fn from(e: anyhow::Error) -> Self {
-        BoundedRunError::Fatal(e)
+        Box::new(BoundedRunError::Fatal(e))
     }
 }
 
@@ -325,46 +332,20 @@ async fn bounded_run(
     cwd: &Path,
     limits: &ResourceLimits,
     token: &CancellationToken,
-) -> Result<(Option<i32>, String, String), BoundedRunError> {
+) -> BoundedRunResult {
     let mut cmd = validation_shell_async(command);
     cmd.current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // OS-enforced memory/CPU caps (POSIX setrlimit in the child's pre-exec;
-    // the limit applies to the shell and its descendants).
-    #[cfg(unix)]
-    {
-        let mem = limits.max_memory_bytes;
-        let cpu = limits.max_cpu_time.map(|d| d.as_secs());
-        // SAFETY: `pre_exec` runs in the child process immediately after fork
-        // and before exec. We only invoke async-signal-safe libc setters, and if
-        // a configured limit cannot be applied the spawn fails (fail closed: a
-        // resource cap we cannot enforce must not silently pass).
-        unsafe {
-            cmd.pre_exec(move || {
-                if let Some(bytes) = mem {
-                    let rlim = libc::rlimit {
-                        rlim_cur: bytes,
-                        rlim_max: bytes,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_AS, &rlim) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                if let Some(secs) = cpu {
-                    let rlim = libc::rlimit {
-                        rlim_cur: secs,
-                        rlim_max: secs,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_CPU, &rlim) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
-    }
+    // NOTE: per-child `setrlimit(RLIMIT_CPU/RLIMIT_AS)` is deliberately NOT
+    // applied here. The kernel enforces those limits *before* the aggregate
+    // monitor can observe the breach (RLIMIT_CPU SIGKILLs at exactly the soft
+    // limit; RLIMIT_AS makes large allocations fail with a plain non-zero
+    // exit), so a resource breach would surface as an ordinary exit and lose
+    // its typed classification. The aggregate process-tree monitor below is
+    // the single authoritative detector: it observes, classifies (kind 1/2/3),
+    // kills the whole tree, and the caller persists typed durable evidence.
     let mut child = cmd
         .spawn()
         .context("failed to execute validation command")?;
@@ -400,11 +381,11 @@ async fn bounded_run(
     }
 
     // Aggregate, process-tree resource enforcement on Unix: a monitor thread walks
-    // the validation process group and kills the entire tree the moment the
+    // the validation process subtree and kills the entire tree the moment the
     // aggregate CPU time, aggregate RSS, or free disk space crosses a budget. This
-    // is true process-tree accounting, not per-process `setrlimit` (which each
-    // descendant could otherwise consume independently). The per-process
-    // `setrlimit` above remains as defense in depth.
+    // is true process-tree accounting AND the authoritative breach classifier: it
+    // sets `monitor_kind` precisely (cpu/memory/disk) so the caller can persist
+    // typed durable evidence instead of inferring a breach from an exit code.
     #[cfg(unix)]
     {
         if (limits.max_cpu_time.is_some()
@@ -485,7 +466,7 @@ async fn bounded_run(
     // Race the process exit against cancellation and the wall-clock timeout.
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
 
-    let status_result: Result<Option<i32>, BoundedRunError> = tokio::select! {
+    let status_result: Result<Option<i32>, Box<BoundedRunError>> = tokio::select! {
         status = child.wait() => {
             let status = status.context("failed to wait on validation command")?;
             Ok(status.code())
@@ -494,16 +475,16 @@ async fn bounded_run(
             if let Some(pid) = pid {
                 kill_child_tree(pid).await;
             }
-            Err(BoundedRunError::Fatal(anyhow!(
+            Err(Box::new(BoundedRunError::Fatal(anyhow!(
                 "validation cancelled by user request"
-            )))
+            ))))
         }
         _ = maybe_timeout(timeout_arm), if timeout_arm.is_some() => {
             if let Some(pid) = pid {
                 kill_child_tree(pid).await;
             }
             let secs = limits.validation_timeout.map(|d| d.as_secs()).unwrap_or(0);
-            Err(BoundedRunError::ResourceExceeded(ResourceExceeded {
+            Err(Box::new(BoundedRunError::ResourceExceeded(ResourceExceeded {
                 classification: CLASSIFICATION_TIMEOUT,
                 kind: Some("timeout"),
                 configured_limit: Some(format!("{}s", secs)),
@@ -512,7 +493,7 @@ async fn bounded_run(
                 code: None,
                 stdout: String::new(),
                 stderr: String::new(),
-            }))
+            })))
         }
     };
 
@@ -560,44 +541,48 @@ async fn bounded_run(
             ),
             _ => (CLASSIFICATION_OUTPUT, Some("resource"), None, None),
         };
-        return Err(BoundedRunError::ResourceExceeded(ResourceExceeded {
-            classification: cls,
-            kind,
-            configured_limit: configured,
-            observed_value: observed,
-            stage: "aggregate_monitor",
-            code: None,
-            stdout: out,
-            stderr: err,
-        }));
+        return Err(Box::new(BoundedRunError::ResourceExceeded(
+            ResourceExceeded {
+                classification: cls,
+                kind,
+                configured_limit: configured,
+                observed_value: observed,
+                stage: "aggregate_monitor",
+                code: None,
+                stdout: out,
+                stderr: err,
+            },
+        )));
     }
 
     match status_result {
         Ok(code) => {
             if exceeded.load(Ordering::SeqCst) {
                 let cap = limits.max_output_bytes.unwrap_or(0);
-                return Err(BoundedRunError::ResourceExceeded(ResourceExceeded {
-                    classification: CLASSIFICATION_OUTPUT,
-                    kind: Some("output"),
-                    configured_limit: Some(cap.to_string()),
-                    observed_value: Some(format!(">{}b", cap)),
-                    stage: "output_cap",
-                    code,
-                    stdout: out,
-                    stderr: err,
-                }));
+                return Err(Box::new(BoundedRunError::ResourceExceeded(
+                    ResourceExceeded {
+                        classification: CLASSIFICATION_OUTPUT,
+                        kind: Some("output"),
+                        configured_limit: Some(cap.to_string()),
+                        observed_value: Some(format!(">{}b", cap)),
+                        stage: "output_cap",
+                        code,
+                        stdout: out,
+                        stderr: err,
+                    },
+                )));
             }
             Ok((code, out, err))
         }
-        Err(e) => match e {
+        Err(e) => match *e {
             // The wall-clock timeout arm is raised before the readers are drained;
             // attach the captured diagnostics so the durable record carries them.
             BoundedRunError::ResourceExceeded(mut re) => {
                 re.stdout = out;
                 re.stderr = err;
-                Err(BoundedRunError::ResourceExceeded(re))
+                Err(Box::new(BoundedRunError::ResourceExceeded(re)))
             }
-            other => Err(other),
+            other => Err(Box::new(other)),
         },
     }
 }
@@ -1057,41 +1042,39 @@ fn spawn_resource_monitor_linux(
             let mut rss_bytes: u64 = 0;
             for &p in &tree {
                 let proc_path = std::path::Path::new("/proc").join(p.to_string());
-                if let Ok(stat) = std::fs::read_to_string(proc_path.join("stat")) {
-                    if let Some((ut, st)) = proc_cpu_ticks(&stat) {
-                        cpu_ticks += ut + st;
-                    }
+                if let Ok(stat) = std::fs::read_to_string(proc_path.join("stat"))
+                    && let Some((ut, st)) = proc_cpu_ticks(&stat)
+                {
+                    cpu_ticks += ut + st;
                 }
                 if let Some(rss) = proc_rss(&proc_path) {
                     rss_bytes += rss;
                 }
             }
-            if let Some(secs) = limits.max_cpu_time {
-                if cpu_ticks / tick >= secs.as_secs() {
-                    kind.store(1, Ordering::SeqCst);
-                    kill_process_tree(root);
-                    return;
-                }
+            if let Some(secs) = limits.max_cpu_time
+                && cpu_ticks / tick >= secs.as_secs()
+            {
+                kind.store(1, Ordering::SeqCst);
+                kill_process_tree(root);
+                return;
             }
-            if let Some(mem) = limits.max_memory_bytes {
-                if rss_bytes >= mem {
-                    kind.store(2, Ordering::SeqCst);
-                    kill_process_tree(root);
-                    return;
-                }
+            if let Some(mem) = limits.max_memory_bytes
+                && rss_bytes >= mem
+            {
+                kind.store(2, Ordering::SeqCst);
+                kill_process_tree(root);
+                return;
             }
-            if let Some(min_free) = limits.min_free_disk_bytes {
-                if let super::preflight::DiskSpaceStatus::Available(free) =
+            if let Some(min_free) = limits.min_free_disk_bytes
+                && let super::preflight::DiskSpaceStatus::Available(free) =
                     super::preflight::available_disk_bytes(&cwd)
-                {
-                    if free < min_free {
-                        kind.store(3, Ordering::SeqCst);
-                        kill_process_tree(root);
-                        return;
-                    }
-                }
+                && free < min_free
+            {
+                kind.store(3, Ordering::SeqCst);
+                kill_process_tree(root);
+                return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     })
 }
@@ -1127,32 +1110,30 @@ fn spawn_resource_monitor_macos(
                     rss_bytes += task.pti_resident_size;
                 }
             }
-            if let Some(secs) = limits.max_cpu_time {
-                if cpu_us / 1_000_000 >= secs.as_secs() {
-                    kind.store(1, Ordering::SeqCst);
-                    kill_process_tree(root);
-                    return;
-                }
+            if let Some(secs) = limits.max_cpu_time
+                && cpu_us / 1_000_000 >= secs.as_secs()
+            {
+                kind.store(1, Ordering::SeqCst);
+                kill_process_tree(root);
+                return;
             }
-            if let Some(mem) = limits.max_memory_bytes {
-                if rss_bytes >= mem {
-                    kind.store(2, Ordering::SeqCst);
-                    kill_process_tree(root);
-                    return;
-                }
+            if let Some(mem) = limits.max_memory_bytes
+                && rss_bytes >= mem
+            {
+                kind.store(2, Ordering::SeqCst);
+                kill_process_tree(root);
+                return;
             }
-            if let Some(min_free) = limits.min_free_disk_bytes {
-                if let super::preflight::DiskSpaceStatus::Available(free) =
+            if let Some(min_free) = limits.min_free_disk_bytes
+                && let super::preflight::DiskSpaceStatus::Available(free) =
                     super::preflight::available_disk_bytes(&cwd)
-                {
-                    if free < min_free {
-                        kind.store(3, Ordering::SeqCst);
-                        kill_process_tree(root);
-                        return;
-                    }
-                }
+                && free < min_free
+            {
+                kind.store(3, Ordering::SeqCst);
+                kill_process_tree(root);
+                return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     })
 }
@@ -1206,13 +1187,11 @@ fn spawn_resource_monitor_win(
                     );
                     if ok != 0
                         && let Some(cpu) = limits.max_cpu_time
+                        && (*acct.TotalUserTime.QuadPart() as u64) >= cpu.as_secs() * 10_000_000
                     {
-                        let limit_100ns = cpu.as_secs() * 10_000_000;
-                        if (*acct.TotalUserTime.QuadPart() as u64) >= limit_100ns {
-                            kind.store(1, Ordering::SeqCst);
-                            TerminateJobObject(job_handle, 0xC000_0142u32);
-                            return;
-                        }
+                        kind.store(1, Ordering::SeqCst);
+                        TerminateJobObject(job_handle, 0xC000_0142u32);
+                        return;
                     }
                 }
             }
@@ -1226,7 +1205,6 @@ fn spawn_resource_monitor_win(
     })
 }
 
-#[cfg(unix)]
 /// Enumerate the validation process subtree rooted at `root` by walking the OS
 /// parent->child map. PID-based enumeration is robust to how the shell assigns
 /// process groups, which is fragile inside containers/CI, and therefore reliably
@@ -1340,9 +1318,7 @@ fn kill_process_tree(root: i32) {
 /// Parse the (utime, stime) pair (in clock ticks) from `/proc/<pid>/stat`.
 #[cfg(target_os = "linux")]
 fn proc_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
-    let Some(idx) = stat.rfind(')') else {
-        return None;
-    };
+    let idx = stat.rfind(')')?;
     let rest = &stat[idx + 1..];
     let fields: Vec<&str> = rest.split_whitespace().collect();
     // state(0) ppid(1) pgrp(2) session(3) tty(4) tpgid(5) flags(6) minflt(7)
@@ -1358,7 +1334,7 @@ fn proc_rss(proc_path: &Path) -> Option<u64> {
     let status = std::fs::read_to_string(proc_path.join("status")).ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb = rest.trim().split_whitespace().next()?.parse::<u64>().ok()?;
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
             return Some(kb * 1024);
         }
     }
@@ -2022,9 +1998,10 @@ mod tests {
         );
     }
 
-    // CPU/memory enforcement via OS setrlimit / Job Objects. These are
-    // exercised on platforms that support them; the wall-clock timeout must not
-    // mask the resource kill, so it is set generously here.
+    // CPU/memory enforcement via the aggregate process-tree monitor (Unix) /
+    // Job Objects (Windows). These are exercised on platforms that support
+    // them; the wall-clock timeout must not mask the resource kill, so it is
+    // set generously here.
     #[cfg(unix)]
     #[tokio::test]
     async fn cpu_limit_kills_runaway_process() {

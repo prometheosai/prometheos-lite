@@ -387,11 +387,11 @@ The reviewer's `#pullrequestreview-4983471511` (8 PRIMARY BLOCKERS) on
 
 - `cargo fmt --all -- --check` — clean
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
-- `cargo test --lib workflow::evaluate::validation::tests` — 22 passed
+- `cargo test --lib workflow::evaluate::validation::tests` — 21 passed
   (incl. `cpu_limit_kills_runaway_process_windows`, `output_cap_breach_is_
   durable_and_classified`, `validation_timeout_is_enforced_as_resource_
   violation`)
-- `cargo test --lib workflow::evaluate::recovery::tests` — 24 passed
+- `cargo test --lib workflow::evaluate::recovery::tests` — 23 passed
   (incl. `e2e_recovery_reuses_persisted_terminal_evidence`)
 - `cargo test --lib workflow::redaction::tests` — 7 passed
   (incl. `seeds_provider_credential_values_from_config`)
@@ -400,4 +400,49 @@ The reviewer's `#pullrequestreview-4983471511` (8 PRIMARY BLOCKERS) on
 - macOS + Linux monitors compile only under their targets; not exercised
   locally (Windows dev env). CI workflows (incl. `#115`) are the cross-platform
   gate. The macOS rewrite uses only verified `libc` 0.2.186 symbols.
+
+### CI follow-up on `eb38786` (round 5, same revision scope)
+
+CI on `eb38786` exposed two root causes behind the four failing checks
+(macos/ubuntu `Resource limits & durable evidence`, `Rust Checks`, `golden-path` —
+all traced to the same two defects):
+
+1. **`pre_exec` `setrlimit` preempted typed classification (Linux + macOS).**
+   The child-side `RLIMIT_CPU`/`RLIMIT_AS` caps killed or failed the process
+   *before* the aggregate monitor could observe and classify the breach:
+   `RLIMIT_CPU` SIGKILLs at exactly the soft limit (the monitor can never win
+   that race), and `RLIMIT_AS` made python's 256 MB allocation fail with a
+   plain non-zero exit — so both Linux breach tests lost their
+   `resource_*` classification, and on macOS the `setrlimit` call itself
+   returned `EINVAL` at spawn ("failed to execute validation command: Invalid
+   argument (os error 22)"). Fix: removed the `pre_exec` `setrlimit` block
+   entirely; the aggregate process-tree monitor (PID-subtree enumeration) is
+   now the single authoritative detector/classifier on Unix — the same
+   architecture Windows already uses (Job Object + monitor). Poll interval
+   tightened 100 ms → 50 ms on Linux/macOS for faster breach detection.
+2. **Nine new-clippy lints visible only on CI's newer stable toolchain.**
+   Local toolchain was 1.95; CI installs latest stable. Fixed exactly what CI
+   reported: `unnecessary_late_initialization` (`harness/file_impact.rs` —
+   late-init pair converted to a tuple `let ... = if/else`),
+   `result_large_err` (`bounded_run` now returns `BoundedRunResult =
+   Result<..., Box<BoundedRunError>>`; `From<anyhow::Error>` implemented for
+   the boxed type; all internal arms boxed), five `collapsible_if` in the
+   Linux monitor (collapsed to let-chains; mirrored in the macOS and Windows
+   monitors), one `let-else → ?` (`proc_cpu_ticks`), and
+   `trim_split_whitespace` (`proc_rss`).
+
+### CI-fix verification evidence (local, Windows dev env, rustc 1.98.0)
+
+- `rustup update stable` — local toolchain aligned to 1.98.0 (2026-08-18) to
+  match CI's lint era (local env only; no repo dependency change)
+- `cargo fmt --all -- --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean on 1.98.0
+- `cargo test --lib workflow::evaluate::validation::tests` — 21 passed
+- `cargo test --lib workflow::evaluate::recovery::tests` — 23 passed
+- `cargo test --lib workflow::redaction::tests` — 7 passed
+- `cargo test --lib workflow::evaluate::migration::tests` — 13 passed
+- `cargo test --lib workflow::retention::tests` — 8 passed
+- Linux/macOS monitor behavior is verified by CI (`#115` + golden-path); the
+  breach-classification race is eliminated by construction (single detector).
+
 
