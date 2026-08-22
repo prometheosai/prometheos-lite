@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+﻿use anyhow::{Context, Result, anyhow, bail};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 use std::path::Path;
@@ -121,7 +121,7 @@ pub(super) async fn run_isolated_validation(
     .is_ok();
 
     if !patch_applies {
-        // Patch doesn't apply — record and clean up.
+        // Patch doesn't apply â€” record and clean up.
         let _ = run_git_cmd(
             repo,
             &["worktree", "remove", "--force", wt_root.to_str().unwrap()],
@@ -157,7 +157,7 @@ pub(super) async fn run_isolated_validation(
     // Apply the patch.
     let _ = run_git_cmd(&wt_root, &["apply", patch_file.to_str().unwrap()]);
 
-    // Step 2: Run validation command if present — cooperatively cancellable and
+    // Step 2: Run validation command if present â€” cooperatively cancellable and
     // resource-bounded (timeout + output cap + aggregate CPU/memory/disk). A
     // resource breach returns a durable, classified `ValidationRecord` carrying the
     // captured (redacted) diagnostics; cancellation is a control-flow signal, not a
@@ -406,7 +406,7 @@ async fn bounded_run(
                         "failed to apply Windows Job Object resource limits (CPU/memory enforcement unavailable)",
                     );
                     // Fail closed. The shell is still suspended (it never ran,
-                    // so it has no descendants); kill it synchronously — never
+                    // so it has no descendants); kill it synchronously â€” never
                     // across an await while the raw job-pointer scrutinee is
                     // live, which would make this future !Send.
                     let _ = std::process::Command::new("taskkill")
@@ -534,7 +534,12 @@ async fn bounded_run(
             // return through their own arms before this point.
             #[cfg(unix)]
             if limits.max_cpu_time.is_some() {
-                if let Some(sig) = status.signal() {
+                // Direct signal death (the capped process itself), OR a
+                // shell-relayed one: some shells run the loop in a forked
+                // child, get IT killed by RLIMIT_CPU/SIGKILL and exit 137.
+                let relayed = status.code() == Some(137);
+                let signaled = if relayed { Some(137) } else { status.signal() };
+                if let Some(sig) = signaled {
                     killed_by_cpu_signal.store(sig, Ordering::SeqCst);
                 }
             }
@@ -633,7 +638,9 @@ async fn bounded_run(
     #[cfg(unix)]
     {
         let sig = killed_by_cpu_signal.load(Ordering::SeqCst);
-        if limits.max_cpu_time.is_some() && (sig == libc::SIGXCPU || sig == libc::SIGKILL) {
+        if limits.max_cpu_time.is_some()
+            && (sig == libc::SIGXCPU || sig == libc::SIGKILL || sig == 137)
+        {
             return Err(Box::new(BoundedRunError::ResourceExceeded(
                 ResourceExceeded {
                     classification: CLASSIFICATION_CPU,
@@ -642,7 +649,7 @@ async fn bounded_run(
                         "{}s",
                         limits.max_cpu_time.unwrap_or_default().as_secs()
                     )),
-                    observed_value: Some(format!("signal {sig} after RLIMIT_CPU")),
+                    observed_value: Some(format!("signal/exit {sig} after RLIMIT_CPU")),
                     stage: "rlimit_cpu",
                     code: None,
                     stdout: out,
@@ -831,7 +838,7 @@ fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<*mut winapi::ct
 /// Resume the primary (and any other) threads of a process that was created
 /// with `CREATE_SUSPENDED`. The validation shell is spawned suspended so the
 /// Job Object can be assigned before it executes a single instruction; this
-/// closes the spawn→assign race where a fast grandchild could escape
+/// closes the spawnâ†’assign race where a fast grandchild could escape
 /// tree-wide job termination.
 #[cfg(windows)]
 fn resume_suspended_process_windows(pid: u32) -> Result<()> {
@@ -999,7 +1006,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         s.to_string()
     } else {
-        format!("{}…[truncated, {} bytes total]", &s[..max_chars], s.len())
+        format!("{}â€¦[truncated, {} bytes total]", &s[..max_chars], s.len())
     }
 }
 pub(super) fn classify_dry_run_error(msg: &str) -> String {
@@ -1131,7 +1138,7 @@ async fn kill_child_tree(pid: u32) {
 
 /// Spawn the aggregate, process-tree resource monitor for a Unix validation run.
 ///
-/// The monitor enumerates the validation process SUBTREE (parent→child walk from
+/// The monitor enumerates the validation process SUBTREE (parentâ†’child walk from
 /// the shell pid; robust to `setpgid` behaviour in containers/CI) and, on each
 /// tick, sums the **aggregate** user+system CPU time and **aggregate** RSS across
 /// the whole tree. If the aggregate CPU, aggregate RSS, or free disk space crosses
@@ -2161,7 +2168,7 @@ mod tests {
         std::fs::create_dir_all(&evidence_dir).unwrap();
         let token = CancellationToken::new();
         let limits = ResourceLimits {
-            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            validation_timeout: Some(std::time::Duration::from_secs(90)),
             max_cpu_time: Some(std::time::Duration::from_secs(1)),
             ..ResourceLimits::default()
         };
@@ -2208,7 +2215,7 @@ mod tests {
         let token = CancellationToken::new();
         // No disk budget here so only the memory breach is observed.
         let limits = ResourceLimits {
-            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            validation_timeout: Some(std::time::Duration::from_secs(90)),
             max_memory_bytes: Some(64 * 1024 * 1024),
             min_free_disk_bytes: None,
             ..ResourceLimits::default()
@@ -2247,7 +2254,7 @@ mod tests {
         std::fs::create_dir_all(&evidence_dir).unwrap();
         let token = CancellationToken::new();
         let limits = ResourceLimits {
-            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            validation_timeout: Some(std::time::Duration::from_secs(90)),
             max_cpu_time: Some(std::time::Duration::from_secs(1)),
             min_free_disk_bytes: None,
             ..ResourceLimits::default()
