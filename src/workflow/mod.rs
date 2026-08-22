@@ -14,9 +14,12 @@
 //! (or generated upstream by a `PatchProvider`). The safety value is the gating, not the
 //! generation.
 
+pub mod artifact_integrity;
 pub mod durable;
 pub mod evaluate;
 pub mod portable_state;
+pub mod redaction;
+pub mod retention;
 pub mod schema;
 
 pub use portable_state::{
@@ -359,16 +362,31 @@ fn workflow_dir(repo: &Path, id: &str) -> PathBuf {
 
 fn load_proposal(repo: &Path, id: &str) -> Result<ProposalArtifact> {
     let path = workflow_dir(repo, id).join("proposal.json");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read proposal {id} at {}", path.display()))?;
-    serde_json::from_str(&text).context("failed to parse proposal artifact")
+    // Fail-closed read: require the #115-format checksum sidecar and verify the
+    // artifact before parsing. Critical dry-run/apply loaders must never trust an
+    // artifact whose integrity cannot be confirmed.
+    let bytes = crate::workflow::artifact_integrity::read_verified(
+        repo,
+        &path,
+        crate::workflow::artifact_integrity::ArtifactKind::Proposal,
+    )
+    .with_context(|| format!("cannot read proposal {id} at {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("failed to parse proposal artifact")
 }
 
 fn save_proposal(repo: &Path, proposal: &ProposalArtifact) -> Result<()> {
     let dir = workflow_dir(repo, &proposal.id);
     std::fs::create_dir_all(&dir).context("failed to create workflow dir")?;
     let text = serde_json::to_string_pretty(proposal).context("failed to serialize proposal")?;
-    std::fs::write(dir.join("proposal.json"), text).context("failed to write proposal")?;
+    // Publish the proposal bytes first, then its checksum sidecar, so the
+    // artifact is durable before its integrity metadata is visible.
+    crate::workflow::artifact_integrity::publish_with_integrity(
+        repo,
+        &dir.join("proposal.json"),
+        text.as_bytes(),
+        crate::workflow::artifact_integrity::ArtifactKind::Proposal,
+    )
+    .context("failed to write proposal")?;
     Ok(())
 }
 
@@ -436,6 +454,17 @@ fn propose_with_meta(
     }
     reject_unsupported_patch(patch)?;
     require_unified_diff(patch)?;
+    // Fail closed on a secret-bearing patch BEFORE it is persisted as a proposal
+    // artifact. This prevents operator/model secrets from ever being written to
+    // `proposal.json`; the evaluate-time check is retained as defense in depth.
+    let known_secrets = crate::workflow::redaction::collect_known_secrets(repo);
+    for secret in &known_secrets {
+        if !secret.is_empty() && patch.contains(secret) {
+            bail!(
+                "proposal rejected: patch embeds a known secret; secrets must not be persisted in a proposal"
+            );
+        }
+    }
     let base_sha = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
     let patch_hash = hash_str(patch);
     let (changed_files, added, removed) = analyze_diff(patch);

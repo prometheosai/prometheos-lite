@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::identity::{ExecutionIdentity, GovernanceScopeSnapshot};
 use super::integrity::git_rev_parse_head;
+use crate::workflow::artifact_integrity::{ArtifactKind, publish_with_integrity, read_verified};
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -75,6 +76,71 @@ pub struct ValidationRecord {
     pub failures: Vec<String>,
     pub patch_applies_cleanly: bool,
     pub validation_passed: bool,
+    /// Authoritative failure classification for this record, when known. Set by
+    /// `resource_failure` so recovery/replay reconstruct the correct terminal
+    /// state without re-deriving from free-text diagnostics. `None` means the
+    /// classification must be derived (e.g. from `failures`/`exit_code`).
+    pub failure_classification: Option<String>,
+    /// Typed resource-breach evidence, populated only when the record is produced
+    /// by a resource violation. `resource_kind` is one of
+    /// `cpu|memory|disk|timeout|output`; the remaining fields capture the
+    /// configured budget, the observed value at breach, the pipeline stage that
+    /// detected it, and a meaningful event timestamp so recovery never has to
+    /// re-derive a classification from free text.
+    #[serde(default)]
+    pub resource_kind: Option<String>,
+    #[serde(default)]
+    pub configured_limit: Option<String>,
+    #[serde(default)]
+    pub observed_value: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub event_timestamp: Option<String>,
+}
+
+impl ValidationRecord {
+    /// Build a durable record for a validation that failed before or during
+    /// execution for a non-candidate reason (e.g., a resource violation or a
+    /// rejected patch). `classification` is the authoritative terminal
+    /// classification (e.g. `resource_cpu_exhausted` or `infra_blocked`) so
+    /// recovery/replay reconstructs the correct terminal state. The caller
+    /// writes this durably BEFORE the `ValidationComplete` journal event so the
+    /// failure is never lost.
+    pub(super) fn resource_failure(
+        validation_command: Option<String>,
+        classification: &str,
+        message: &str,
+        start_time: String,
+        completion_time: String,
+        resource_kind: Option<&str>,
+        configured_limit: Option<&str>,
+        observed_value: Option<&str>,
+        stage: Option<&str>,
+    ) -> Self {
+        ValidationRecord {
+            validation_command,
+            exit_code: None,
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+            start_time,
+            completion_time: completion_time.clone(),
+            event_timestamp: Some(completion_time),
+            test_discovered: false,
+            test_executed: false,
+            test_names_found: Vec::new(),
+            test_count: 0,
+            warnings: Vec::new(),
+            failures: vec![message.to_string()],
+            patch_applies_cleanly: false,
+            validation_passed: false,
+            failure_classification: Some(classification.to_string()),
+            resource_kind: resource_kind.map(|s| s.to_string()),
+            configured_limit: configured_limit.map(|s| s.to_string()),
+            observed_value: observed_value.map(|s| s.to_string()),
+            stage: stage.map(|s| s.to_string()),
+        }
+    }
 }
 
 /// Repository integrity verification record.
@@ -114,8 +180,10 @@ pub(super) fn find_existing_evidence(
     // Look for evidence.json in the evidence directory.
     let evidence_path = evidence_dir.join("evidence.json");
     if evidence_path.exists() {
-        let text = std::fs::read_to_string(&evidence_path).ok()?;
-        let bundle: EvidenceBundle = serde_json::from_str(&text).ok()?;
+        // Verify the #115-format checksum sidecar. A missing or corrupt sidecar
+        // fails closed: we do not silently trust a legacy/unverified artifact.
+        let bytes = read_verified(evidence_dir, &evidence_path, ArtifactKind::Evidence).ok()?;
+        let bundle: EvidenceBundle = serde_json::from_slice(&bytes).ok()?;
         if bundle.proposal.as_ref().map(|p| p.id.as_str()) == Some(proposal_id) {
             return Some(bundle);
         }
@@ -206,8 +274,17 @@ pub(super) fn write_bundle(evidence_dir: &Path, bundle: &EvidenceBundle) -> Resu
     }
 
     let json_path = evidence_dir.join("evidence.json");
-    super::durable::atomic_write_json(&json_path, &bundle)
-        .context("failed to write evidence.json")?;
+    let json =
+        serde_json::to_string_pretty(&bundle).context("failed to serialize evidence.json")?;
+    // Artifact before visibility: publish the evidence bytes, then its checksum
+    // sidecar, before any journal event references it.
+    publish_with_integrity(
+        evidence_dir,
+        &json_path,
+        json.as_bytes(),
+        ArtifactKind::Evidence,
+    )
+    .context("failed to write evidence.json")?;
 
     // Write Markdown report.
     let md_path = evidence_dir.join("evidence.md");
@@ -218,33 +295,52 @@ pub(super) fn write_bundle(evidence_dir: &Path, bundle: &EvidenceBundle) -> Resu
 }
 
 /// Persist the validation record durably, BEFORE the `ValidationComplete`
-/// journal event that references it.
+/// journal event that references it. A checksum sidecar is published alongside.
 pub(super) fn write_validation_artifact(
     evidence_dir: &Path,
     validation: &ValidationRecord,
 ) -> Result<()> {
     let path = evidence_dir.join("validation.json");
-    super::durable::atomic_write_json(&path, validation).context("failed to write validation.json")
+    let json =
+        serde_json::to_string_pretty(validation).context("failed to serialize validation.json")?;
+    publish_with_integrity(
+        evidence_dir,
+        &path,
+        json.as_bytes(),
+        ArtifactKind::Validation,
+    )
+    .context("failed to write validation.json")?;
+    Ok(())
 }
 
 /// Persist the integrity record durably, BEFORE the `IntegrityVerified`
-/// journal event that references it.
+/// journal event that references it. A checksum sidecar is published alongside.
 pub(super) fn write_integrity_artifact(
     evidence_dir: &Path,
     integrity: &IntegrityRecord,
 ) -> Result<()> {
     let path = evidence_dir.join("integrity.json");
-    super::durable::atomic_write_json(&path, integrity).context("failed to write integrity.json")
+    let json =
+        serde_json::to_string_pretty(integrity).context("failed to serialize integrity.json")?;
+    publish_with_integrity(
+        evidence_dir,
+        &path,
+        json.as_bytes(),
+        ArtifactKind::Integrity,
+    )
+    .context("failed to write integrity.json")?;
+    Ok(())
 }
 
 /// Read a previously persisted validation record (written by
 /// [`write_validation_artifact`]). Used when resuming finalization after a
-/// late cancellation: validation is durable and must NOT be re-run.
+/// late cancellation: validation is durable and must NOT be re-run. Verifies the
+/// #115-format checksum sidecar before trusting the bytes.
 pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<ValidationRecord> {
     let path = evidence_dir.join("validation.json");
-    let text = std::fs::read_to_string(&path)
+    let bytes = read_verified(evidence_dir, &path, ArtifactKind::Validation)
         .with_context(|| format!("failed to read validation artifact {}", path.display()))?;
-    serde_json::from_str(&text)
+    serde_json::from_slice(&bytes)
         .with_context(|| format!("corrupt validation artifact {}", path.display()))
 }
 
@@ -255,9 +351,9 @@ pub(super) fn read_validation_artifact(evidence_dir: &Path) -> Result<Validation
 /// artifact fails closed rather than healing itself by re-running integrity.
 pub(super) fn read_integrity_artifact(evidence_dir: &Path) -> Result<IntegrityRecord> {
     let path = evidence_dir.join("integrity.json");
-    let text = std::fs::read_to_string(&path)
+    let bytes = read_verified(evidence_dir, &path, ArtifactKind::Integrity)
         .with_context(|| format!("failed to read integrity artifact {}", path.display()))?;
-    serde_json::from_str(&text)
+    serde_json::from_slice(&bytes)
         .with_context(|| format!("corrupt integrity artifact {}", path.display()))
 }
 // ---------------------------------------------------------------------------
@@ -511,5 +607,36 @@ mod tests {
         assert!(md.contains("**Schema:** `1.0.0`"));
         assert!(md.contains("## Outcome"));
         assert!(md.contains("## Governance"));
+    }
+
+    #[test]
+    fn resource_failure_record_is_a_terminal_failure() {
+        let rec = ValidationRecord::resource_failure(
+            Some("validate --fail".to_string()),
+            "resource_cpu_exhausted",
+            "resource_cpu: validation exceeded CPU budget",
+            "2026-08-18T00:00:00Z".to_string(),
+            "2026-08-18T00:00:01Z".to_string(),
+            Some("cpu"),
+            Some("30s"),
+            Some(">=30s aggregate"),
+            Some("aggregate_monitor"),
+        );
+        assert!(!rec.validation_passed);
+        assert!(!rec.patch_applies_cleanly);
+        assert_eq!(rec.failures.len(), 1);
+        assert_eq!(
+            rec.failures[0],
+            "resource_cpu: validation exceeded CPU budget"
+        );
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some("resource_cpu_exhausted")
+        );
+        assert_eq!(rec.resource_kind.as_deref(), Some("cpu"));
+        assert_eq!(rec.configured_limit.as_deref(), Some("30s"));
+        assert_eq!(rec.observed_value.as_deref(), Some(">=30s aggregate"));
+        assert_eq!(rec.stage.as_deref(), Some("aggregate_monitor"));
+        assert_eq!(rec.event_timestamp.as_deref(), Some("2026-08-18T00:00:01Z"));
     }
 }

@@ -5,5 +5,6 @@
 //! evaluation code and tests are unchanged.
 
 pub use crate::workflow::durable::{
-    atomic_write_json, repo_relative_path, resolve_repo_relative, versioned_write_json,
+    atomic_write_json, confined_workflow_dir, repo_relative_path, resolve_repo_relative,
+    versioned_write_json,
 };
