@@ -20,6 +20,7 @@ pub mod evaluate;
 pub mod memory_contracts;
 pub mod portable_state;
 pub mod redaction;
+pub mod repo_index;
 pub mod retention;
 pub mod schema;
 
