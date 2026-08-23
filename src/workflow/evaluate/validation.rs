@@ -2200,7 +2200,9 @@ mod tests {
         let err = run_isolated_validation(
             &dir,
             id,
-            Some("yes > /dev/null") // shell exec-optimizes: the capped process IS the direct child,
+            // The shell exec-optimizes this simple command, so the capped
+            // process IS the direct child and SIGXCPU lands on it.
+            Some("yes > /dev/null"),
             &evidence_dir,
             &token,
             &limits,
