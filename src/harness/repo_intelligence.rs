@@ -1930,7 +1930,7 @@ pub async fn build_repo_context(
     })
 }
 
-fn collect_files(p: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+pub fn collect_files(p: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let walker = ignore::WalkBuilder::new(p)
         .add_custom_ignore_filename(".gitignore")
         .add_custom_ignore_filename(".prometheosignore")
@@ -1961,7 +1961,7 @@ fn is_code_file(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn detect_language(p: &Path) -> String {
+pub fn detect_language(p: &Path) -> String {
     match p.extension().and_then(|e| e.to_str()) {
         Some("rs") => "rust",
         Some("js") => "javascript",
@@ -1983,7 +1983,7 @@ fn detect_language(p: &Path) -> String {
     .to_string()
 }
 
-fn extract_symbols_and_relationships(
+pub fn extract_symbols_and_relationships(
     file: &Path,
     content: &str,
     language: &str,
