@@ -2205,7 +2205,7 @@ mod tests {
             // Explicit `exec`: the burner REPLACES the shell image, so the
             // kernel's SIGXCPU at the soft RLIMIT_CPU limit is delivered to
             // (and attributable to) our direct child.
-            Some("sh -c 'exec yes > /dev/null'"),
+            Some("exec yes > /dev/null"),
             &evidence_dir,
             &token,
             &limits,
@@ -2478,7 +2478,7 @@ mod tests {
             id,
             // Explicit `exec` so the capped process IS our direct child and
             // the kernel's SIGXCPU verdict is attributable to it.
-            Some("sh -c 'exec yes > /dev/null'"),
+            Some("exec yes > /dev/null"),
             &evidence_dir,
             &token,
             &limits,
