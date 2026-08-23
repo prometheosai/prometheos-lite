@@ -571,3 +571,69 @@ matrix turning green:
 
 
 
+## REVIEW_GATE - round 7 (on `ef033de`)
+
+The reviewer's `#pullrequestreview-5000987577` (4 blockers + 1 acceptance
+inconsistency) are addressed as follows:
+
+1. **Deterministic, non-false-positive CPU verdict.** The RLIMIT_CPU cap now
+   uses soft < hard (`rlim_cur = secs`, `rlim_max = secs + 5`): the kernel
+   delivers SIGXCPU at the soft limit with default disposition, and ONLY a
+   direct-child SIGXCPU death is attributed to the cap
+   (`stage = "rlimit_cpu"`, observed `"SIGXCPU at RLIMIT_CPU soft limit"`).
+   SIGKILL and shell-relayed exit 137 are explicitly NOT accepted anymore -
+   ordinary failures, external kills and OOM can never be classified as CPU
+   exhaustion. Burners switched to exec-optimized `yes` so the capped process
+   IS the direct child. Per-process scope documented: descendants each get
+   their own allowance; the aggregate budget is enforced/classified by the
+   monitor. Regressions added: immediate `exit 137` stays an ordinary failure;
+   self-SIGKILL never classifies as cpu; a TWO-process burner (each under its
+   individual allowance) is classified by the AGGREGATE monitor
+   (`stage = "aggregate_monitor"`) - proving both the no-false-positive and
+   the aggregate properties.
+2. **Windows resume fail-closed.** `resume_suspended_process_windows` now
+   counts successful resumptions, errors on `ResumeThread == u32::MAX`
+   (with last-os-error), skips null `OpenThread` handles but requires at
+   least one resumed thread (the freshly spawned suspended shell has exactly
+   one pre-exec thread: its primary). The caller stops the monitor first
+   (closing the Job handle), kills the still-suspended tree synchronously,
+   and returns Fatal - no silent timeout misclassification. Injected-failure
+   regression: a pid with no threads must error.
+3. **Real second orchestrator execution after the crash.** The crash test now
+   performs it deterministically: short lease config plus rolled-back registry
+   lease timestamps make the takeover immediate; the second `evaluate` run
+   resumes final publication from the durable position with provider-call AND
+   validation-marker counters unchanged (both 1) and the preserved
+   classification intact.
+4. **Resume-path disk breach durably attached.** The wait/reuse branch now
+   takes ownership via observed-CAS from the stale owner, then journals the
+   same legal terminal the fresh path uses
+   (`PreflightBlocked` carrying `resource_disk_exhausted`, typed validation
+   record, evidence bundle, identity anchor, reservation release). Live owner
+   => propagate without fabrication; illegal edge => fail closed + release.
+   Test: seeded stale reservation on a fresh identity, breach attaches, the
+   journal tail carries the verdict, restart reads the same disk
+   classification/fields through `read_verified` with zero executions.
+
+**Acceptance inconsistency resolved by redaction (stronger contract).**
+Known secrets are now redacted from EVERY persisted copy of the user-supplied
+validation command - governance snapshot, execution identity, proposal
+artifact, evidence bundle - while execution keeps the original in-memory
+command. New Surface-C canary regression embeds the secret in the command
+text and asserts the stored form carries `<redacted>` plus a recursive scan
+of `.prometheos` at ZERO occurrences. Documented trade-off: a resumed run
+re-executes the redacted stored form when the manifest command contained a
+secret (leak-safety outranks rerun fidelity for that corner).
+
+### Round-7 verification evidence (local, Windows dev env, rustc 1.98.0)
+
+- `cargo fmt --all -- --check` - clean
+- `cargo clippy --all-targets --all-features -- -D warnings` - clean
+- `cargo test --lib` - 804 passed, 0 failed
+- Integration suites green except the pre-existing Windows-local
+  `report_exposes_lifecycle_evidence` (command `true`; verified present on
+  unmodified earlier heads; ubuntu CI gate covers it)
+- New regressions: exit-137 / self-SIGKILL / two-process aggregate burners
+  (unix-gated, exercised by CI), thread-less-pid resume failure (windows),
+  orchestrator restart-after-crash with real second execution, seeded stale
+  owner resume-path attach, command-text canary surface.

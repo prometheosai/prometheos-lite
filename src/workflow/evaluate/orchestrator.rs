@@ -1,4 +1,4 @@
-﻿use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -181,6 +181,19 @@ pub async fn evaluate_with_cancellation(
     prepare_evidence_dir(&evidence_dir)?;
     let refs = EvidenceRefs::of(&repo, &evidence_dir);
 
+    // LEAK-SAFE CONTRACT: known secrets are redacted from EVERY persisted
+    // copy of the user-supplied validation command (governance snapshot,
+    // execution identity, proposal artifact, evidence bundle). Execution
+    // itself keeps the original in-memory command — redaction is a
+    // persistence-boundary concern only.
+    let known_secrets = collect_known_secrets(&repo);
+    let command_redactor = Redactor::new().with_known_secrets(&known_secrets);
+    let persisted_validation_command = config
+        .manifest
+        .validation_command
+        .as_deref()
+        .map(|c| command_redactor.redact(c));
+
     let governance_scope = GovernanceScopeSnapshot {
         allowed_paths: config.manifest.allowed_paths.clone(),
         forbidden_paths: config.manifest.forbidden_paths.clone(),
@@ -188,7 +201,7 @@ pub async fn evaluate_with_cancellation(
         max_files_changed: config.manifest.max_files_changed,
         max_lines_changed: config.manifest.max_lines_changed,
         authority: config.manifest.authority.clone(),
-        validation_command: config.manifest.validation_command.clone(),
+        validation_command: persisted_validation_command.clone(),
     };
 
     let identity = ExecutionIdentity {
@@ -429,7 +442,9 @@ pub async fn evaluate_with_cancellation(
         patch_context,
         &scope,
         config.route_info.clone(),
-        config.manifest.validation_command.clone(),
+        // Persist the REDACTED command in the proposal artifact; execution
+        // later uses the original in-memory manifest command.
+        persisted_validation_command.clone(),
     );
     tokio::pin!(gen_fut);
 
@@ -637,7 +652,7 @@ pub async fn evaluate_with_cancellation(
     let limits = ResourceLimits::from_environment()
         .context("failed to resolve resource limits from environment")?
         .with_manifest_disk(config.manifest.min_disk_bytes);
-    let known_secrets = collect_known_secrets(&repo);
+    // `known_secrets` was collected at the top of the run (leak-safe contract).
     let validation_result = run_isolated_validation(
         &repo,
         &gen_result.id,
@@ -1020,30 +1035,109 @@ async fn wait_and_reuse(
 ) -> Result<EvidenceBundle> {
     // Run validation-specific preflight first.
     if let Err(pre) = run_validation_preflight(repo, commit_at_start, manifest, evidence_dir) {
-        // A typed disk breach persists its typed durable record into the
-        // evidence directory before failing. This wait/reuse path holds no
-        // fence, so fabricating a terminal journal transition here would be
-        // unsafe; a subsequent owned run re-validates normally and journals it.
-        if let Some(breach) = pre.downcast_ref::<super::preflight::DiskPreflightBreach>() {
-            let redactor = Redactor::new().with_known_secrets(&collect_known_secrets(repo));
-            let msg = redactor.redact(&pre.to_string());
-            let rec = ValidationRecord::resource_failure(
-                manifest
-                    .validation_command
-                    .as_deref()
-                    .map(|c| redactor.redact(c)),
-                CLASSIFICATION_DISK,
-                &msg,
-                now_iso(),
-                now_iso(),
-                Some("disk"),
-                Some(&breach.required_bytes.to_string()),
-                breach.observed_free_bytes.map(|v| v.to_string()).as_deref(),
-                Some("preflight_disk"),
-            );
-            write_validation_artifact(evidence_dir, &rec)?;
+        let Some(breach) = pre.downcast_ref::<super::preflight::DiskPreflightBreach>() else {
+            return Err(pre);
+        };
+        // Attach the typed disk result to the durable state machine on a legal
+        // FENCED edge: take ownership from a stale owner via observed-CAS,
+        // then journal the same PreflightBlocked(resource_disk_exhausted)
+        // terminal (with its typed validation record and evidence bundle) the
+        // fresh path uses. If the current owner is still live we do NOT
+        // fabricate anything — the error propagates and the live owner records
+        // the verdict.
+        let Some(entry) = lookup_entry(repo, identity_key) else {
+            return Err(pre);
+        };
+        let obs = OwnershipObservation {
+            owner_run_id: entry.owner_run_id.clone(),
+            lease_epoch: entry.lease_epoch,
+            state: entry.state,
+        };
+        let TakeoverResult::Taken(fence) =
+            try_take_ownership_cas(repo, identity_key, run_id, lease_config, Some(&obs))?
+        else {
+            return Err(pre);
+        };
+
+        // Anchor state for the attach edge comes from authoritative recovery.
+        let anchor_state = match recover_evaluation(repo, identity_key, None, None)
+            .context("recovery before disk-breach attachment failed")?
+        {
+            Some(r) => r.state,
+            None => EvaluationState::Created,
+        };
+        if super::transition::validate_transition(anchor_state, EvaluationState::PreflightBlocked)
+            .is_err()
+        {
+            // No legal edge from the current journal tail to the terminal:
+            // fail closed rather than force an illegal transition.
+            release_reservation(repo, identity_key, &fence)?;
+            return Err(pre);
         }
-        return Err(pre);
+
+        let redactor = Redactor::new().with_known_secrets(&collect_known_secrets(repo));
+        let msg = redactor.redact(&pre.to_string());
+        let rec = ValidationRecord::resource_failure(
+            manifest
+                .validation_command
+                .as_deref()
+                .map(|c| redactor.redact(c)),
+            CLASSIFICATION_DISK,
+            &msg,
+            now_iso(),
+            now_iso(),
+            Some("disk"),
+            Some(&breach.required_bytes.to_string()),
+            breach.observed_free_bytes.map(|v| v.to_string()).as_deref(),
+            Some("preflight_disk"),
+        );
+        write_validation_artifact(evidence_dir, &rec)?;
+
+        let mut bundle = new_bundle_from_identity(
+            run_id,
+            &manifest.task_id,
+            repo,
+            commit_at_start,
+            governance_scope,
+            evidence_dir,
+        );
+        bundle.validation = Some(rec);
+        bundle.failure_classification = Some(CLASSIFICATION_DISK.to_string());
+        bundle.final_state = EvaluationState::InfraBlocked.outcome_label().to_string();
+        bundle.completed_at = now_iso();
+        write_bundle(evidence_dir, &bundle)?;
+
+        // Identity document anchors the journal edge; it is derived, written
+        // fail-closed like every other run's.
+        let identity = ExecutionIdentity {
+            run_id: run_id.to_string(),
+            task_id: manifest.task_id.clone(),
+            repo: repo.display().to_string(),
+            repo_pin: commit_at_start.to_string(),
+            model: "unknown".to_string(),
+            provider: manifest.provider.clone(),
+            governance_scope: governance_scope.clone(),
+            created_at: now_iso(),
+            state: anchor_state,
+        };
+        let identity_path = persist_execution_identity(evidence_dir, &identity)?;
+        let refs = EvidenceRefs::of(repo, evidence_dir);
+        durable_transition(
+            repo,
+            &identity_path,
+            run_id,
+            identity_key,
+            commit_at_start,
+            &fence,
+            EvaluationState::PreflightBlocked,
+            None,
+            Some(CLASSIFICATION_DISK.to_string()),
+            Some(refs.dir.clone()),
+        )
+        .context("failed to persist resumed PreflightBlocked (disk) transition")?;
+        release_reservation(repo, identity_key, &fence)
+            .context("failed to release reservation after resumed disk breach")?;
+        return Ok(bundle);
     }
 
     if token.is_cancelled() {
@@ -2160,6 +2254,25 @@ mod tests {
         }
     }
 
+    /// Roll a registry entry's lease timestamps far into the past so the next
+    /// run observes it as stale immediately (deterministic takeover in tests).
+    fn make_registry_entry_stale(repo: &Path, identity_key: &str) {
+        let path = repo
+            .join(".prometheos")
+            .join("workflow")
+            .join("proposal_registry.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("registry exists"))
+                .expect("registry json");
+        let entry = v["entries"]
+            .get_mut(identity_key)
+            .expect("entry for key exists");
+        entry["heartbeat_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        entry["updated_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        entry["reserved_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
     fn cpu_burn_command() -> &'static str {
         #[cfg(windows)]
         {
@@ -2169,9 +2282,10 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            // Wrapped so the preflight availability probe (`which`) resolves
-            // the first token to a real executable, not a shell keyword.
-            "sh -c 'while true; do :; done'"
+            // `exec` makes the CPU burner the DIRECT child, so the kernel's
+            // SIGXCPU verdict at the soft RLIMIT_CPU limit is attributable to
+            // it (and `which sh` satisfies the availability probe).
+            "sh -c 'exec yes > /dev/null'"
         }
     }
 
@@ -2332,6 +2446,70 @@ mod tests {
             !ev_json.exists(),
             "terminal evidence must not be published after the crash"
         );
+
+        // ---- Second orchestrator execution after the crash ----
+        // A short stale window plus rolled-back lease timestamps make the
+        // takeover deterministic; recovery resumes FINAL PUBLICATION from the
+        // durable position without re-invoking the provider and without
+        // re-running validation.
+        let commit_at_start = git_rev_parse_head(&repo).unwrap();
+        let gov = crate::workflow::evaluate::identity::GovernanceScopeSnapshot {
+            allowed_paths: vec!["docs/**".to_string()],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: Some(5),
+            max_lines_changed: None,
+            authority: "propose".to_string(),
+            validation_command: Some(marker_command(&marker)),
+        };
+        let identity_key = compute_identity_key(
+            "crash-once",
+            &repo,
+            &commit_at_start,
+            "harness-mock",
+            "mock",
+            &gov,
+            &Some(marker_command(&marker)),
+        );
+        make_registry_entry_stale(&repo, &identity_key);
+
+        let mut cfg2 = EvaluationConfig::new(
+            orch_manifest(&repo, "crash-once", Some(marker_command(&marker)), None),
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        cfg2.lease_config.stale_reservation_timeout = std::time::Duration::from_secs(2);
+        cfg2.lease_config.heartbeat_interval = std::time::Duration::from_millis(500);
+        let bundle2 = match evaluate(cfg2).await {
+            Ok(b) => b,
+            Err(e) => {
+                let jroot = repo.join(".prometheos").join("workflow").join("journal");
+                for f in walk_files(&jroot) {
+                    if let Ok(t) = std::fs::read_to_string(&f) {
+                        eprintln!("JRN {f:?} => {t}");
+                    }
+                }
+                panic!("restart failed: {e:#}")
+            }
+        };
+        assert_eq!(
+            calls.load(AtomicOrd::SeqCst),
+            1,
+            "provider must not be re-invoked by the restart"
+        );
+        assert_eq!(
+            marker_count(&marker),
+            1,
+            "validation must not re-execute on restart"
+        );
+        assert_eq!(
+            bundle2.failure_classification.as_deref(),
+            Some("validation_passed_review_required"),
+            "preserved classification must survive the crash/restart boundary"
+        );
+        assert!(bundle2.validation.is_some(), "restart returns typed record");
     }
 
     #[tokio::test]
@@ -2572,6 +2750,106 @@ mod tests {
             0,
             "provider must never be invoked across the terminal boundary"
         );
+
+        // ---- Resume-path attach (fresh identity, seeded stale owner) ----
+        // A DIFFERENT identity whose reservation already exists and whose
+        // owner is stale: the disk breach on the wait/reuse path must take
+        // ownership on a legal fenced edge, journal the typed terminal, and
+        // return it — proving durable exact-once recovery of the resource
+        // result without any execution.
+        let task2 = "disk-resume";
+        let marker4 = dir.path().join("m4.txt");
+        let commit_at_start = git_rev_parse_head(&repo).unwrap();
+        let gov2 = crate::workflow::evaluate::identity::GovernanceScopeSnapshot {
+            allowed_paths: vec!["docs/**".to_string()],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: Some(5),
+            max_lines_changed: None,
+            authority: "propose".to_string(),
+            validation_command: Some(marker_command(&marker4)),
+        };
+        let key2 = compute_identity_key(
+            task2,
+            &repo,
+            &commit_at_start,
+            "harness-mock",
+            "mock",
+            &gov2,
+            &Some(marker_command(&marker4)),
+        );
+        // Seed the reservation another (now-stale) run would have left.
+        match try_reserve(&repo, &key2, "seed-run-1").expect("seed reserve") {
+            ReserveResult::Owned(_) => {}
+            other => panic!("seed reservation failed: {other:?}"),
+        }
+        make_registry_entry_stale(&repo, &key2);
+
+        let mut manifest3 = orch_manifest(&repo, task2, Some(marker_command(&marker4)), None);
+        manifest3.min_disk_bytes = u64::MAX / 2;
+        let mut cfg3 = EvaluationConfig::new(
+            manifest3,
+            Box::new(HarnessProvider {
+                calls: calls.clone(),
+                error: None,
+            }),
+        );
+        cfg3.lease_config.stale_reservation_timeout = std::time::Duration::from_secs(2);
+        cfg3.lease_config.heartbeat_interval = std::time::Duration::from_millis(500);
+        let bundle3 = evaluate(cfg3)
+            .await
+            .expect("resume-path disk breach attaches durably and returns the classified bundle");
+        let rec3 = bundle3.validation.as_ref().expect("attached record");
+        assert_eq!(rec3.resource_kind.as_deref(), Some("disk"));
+        assert_eq!(rec3.stage.as_deref(), Some("preflight_disk"));
+        assert_eq!(
+            rec3.failure_classification.as_deref(),
+            Some(CLASSIFICATION_DISK)
+        );
+        assert_eq!(
+            bundle3.final_state,
+            EvaluationState::InfraBlocked.outcome_label()
+        );
+        // Journal tail carries the same classification: restart reads the SAME
+        // verdict without re-execution.
+        let recovered3 = recover_evaluation(&repo, &key2, None, None)
+            .expect("recovery reads")
+            .expect("journal attached");
+        assert_eq!(recovered3.state, EvaluationState::PreflightBlocked);
+        assert_eq!(
+            recovered3.last_failure_classification.as_deref(),
+            Some(CLASSIFICATION_DISK)
+        );
+        let ev3 = repo
+            .join(
+                recovered3
+                    .evidence_ref
+                    .as_deref()
+                    .expect("terminal evidence ref"),
+            )
+            .join("evidence.json");
+        let bytes3 = crate::workflow::artifact_integrity::read_verified(
+            ev3.parent().unwrap(),
+            &ev3,
+            crate::workflow::artifact_integrity::ArtifactKind::Evidence,
+        )
+        .expect("attached bundle verifies");
+        let preserved3: crate::workflow::evaluate::evidence::EvidenceBundle =
+            serde_json::from_slice(&bytes3).expect("attached bundle parses");
+        assert_eq!(
+            preserved3
+                .validation
+                .as_ref()
+                .and_then(|r| r.resource_kind.clone())
+                .as_deref(),
+            Some("disk"),
+            "restart reads the same disk classification"
+        );
+        assert_eq!(
+            calls.load(AtomicOrd::SeqCst),
+            0,
+            "no execution across the resumed breach boundary"
+        );
     }
 
     #[tokio::test]
@@ -2670,6 +2948,52 @@ mod tests {
                 "canary leaked into persisted surfaces: {leaked_in:?}"
             );
             del_env("PROMETHEOS_TEST_CANARY");
+        }
+
+        // Surface C: the canary embedded in the user-supplied validation
+        // COMMAND text itself. Every persisted copy (proposal artifact,
+        // execution identity, governance snapshot in the bundle) must carry
+        // the redacted form; the recursive scan stays at zero.
+        {
+            let dir = init_orch_repo();
+            let repo = dir.path().join("repo");
+            #[cfg(windows)]
+            let cmd_text: String = format!("cmd /C echo {CANARY}>nul & exit /b 0");
+            #[cfg(not(windows))]
+            let cmd_text: String = format!("sh -c 'echo {CANARY} > /dev/null'");
+            let cfg = EvaluationConfig::new(
+                orch_manifest(&repo, "canary-cmd", Some(cmd_text), None),
+                Box::new(HarnessProvider {
+                    calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                    error: None,
+                }),
+            );
+            let bundle = evaluate(cfg)
+                .await
+                .expect("command-text canary run completes");
+            let stored = bundle
+                .effective_governance
+                .validation_command
+                .unwrap_or_default();
+            assert!(
+                !stored.contains(CANARY),
+                "bundle governance command leaked the canary: {stored}"
+            );
+            assert!(
+                stored.contains(crate::workflow::redaction::REDACTED_PLACEHOLDER),
+                "persisted command must be the redacted form: {stored}"
+            );
+            let mut found = 0usize;
+            let prom = repo.join(".prometheos");
+            for entry in walk_files(&prom) {
+                if let Ok(text) = std::fs::read_to_string(&entry) {
+                    found += text.matches(CANARY).count();
+                }
+            }
+            assert_eq!(
+                found, 0,
+                "command-text canary leaked into persisted surfaces"
+            );
         }
 
         del_env("PROMETHEOS_KNOWN_SECRETS");

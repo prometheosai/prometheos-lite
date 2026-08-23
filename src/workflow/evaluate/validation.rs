@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use tokio::io::AsyncReadExt;
@@ -340,15 +338,20 @@ async fn bounded_run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // OS-enforced CPU cap (kernel hard limit): POSIX `RLIMIT_CPU` in the
-    // child's pre-exec. The kernel SIGXCPU/SIGKILLs the tree at the soft limit,
-    // so CPU enforcement never depends on polling. A signal death by SIGXCPU is
-    // classified deterministically below (`rlimit_cpu` stage).
+    // OS-enforced CPU cap (kernel hard limit on the validated command
+    // process): POSIX `RLIMIT_CPU` with soft < hard. The kernel delivers
+    // SIGXCPU at the soft limit and the default disposition terminates the
+    // child — a deterministic, attributable verdict (`stage = "rlimit_cpu"`).
+    // The hard limit sits above the soft one purely as a backstop; SIGKILL
+    // and shell-relayed exit 137 are deliberately NOT attributed to the cap,
+    // because ordinary failures, external kills, and OOM would be
+    // indistinguishable from it.
     //
-    // Memory/disk deliberately have NO child-side rlimit: `RLIMIT_AS` makes
-    // large allocations fail with an ordinary non-zero exit (no classifiable
-    // signal, and on macOS it fails outright), so those budgets are enforced and
-    // classified by the aggregate process-tree monitor below.
+    // `RLIMIT_CPU` is per process (each descendant receives its own
+    // allowance), so the AGGREGATE tree budget is enforced and classified by
+    // the monitor below. Memory/disk deliberately have NO child-side rlimit:
+    // `RLIMIT_AS` makes large allocations fail with an ordinary non-zero exit
+    // (no classifiable signal, and on macOS it fails outright).
     #[cfg(unix)]
     {
         let cpu = limits.max_cpu_time.map(|d| d.as_secs());
@@ -361,7 +364,7 @@ async fn bounded_run(
                 if let Some(secs) = cpu {
                     let rlim = libc::rlimit {
                         rlim_cur: secs,
-                        rlim_max: secs,
+                        rlim_max: secs + 5, // soft fires SIGXCPU first; hard is a backstop
                     };
                     if libc::setrlimit(libc::RLIMIT_CPU, &rlim) != 0 {
                         return Err(std::io::Error::last_os_error());
@@ -428,9 +431,23 @@ async fn bounded_run(
         // The shell was created suspended; every descendant it spawns from now
         // on inherits the already-assigned Job Object, so tree-wide termination
         // cannot be escaped by a pre-assignment grandchild.
-        if let Some(win_pid) = pid {
-            resume_suspended_process_windows(win_pid)
-                .context("failed to resume suspended validation process")?;
+        //
+        // Fail-closed on resume failure: a child left suspended would burn the
+        // whole wall-clock timeout and be misrecorded as a timeout breach.
+        // Stop the monitor first (its thread closes the Job handle), kill the
+        // still-suspended tree, and surface the error.
+        if let Some(win_pid) = pid
+            && let Err(e) = resume_suspended_process_windows(win_pid)
+        {
+            let err = e.context("failed to resume suspended validation process");
+            monitor_done.store(true, Ordering::SeqCst);
+            if let Some(h) = monitor_handle.take() {
+                let _ = h.join();
+            }
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &win_pid.to_string()])
+                .output();
+            return Err(Box::new(BoundedRunError::Fatal(err)));
         }
     }
 
@@ -520,28 +537,23 @@ async fn bounded_run(
     // Race the process exit against cancellation and the wall-clock timeout.
     let timeout_arm = limits.validation_timeout.map(|t| tokio::time::sleep(t));
     #[cfg(unix)]
-    let killed_by_cpu_signal = Arc::new(AtomicI32::new(0));
+    let killed_by_sigxcpu = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
 
     let status_result: Result<Option<i32>, Box<BoundedRunError>> = tokio::select! {
         status = child.wait() => {
             let status = status.context("failed to wait on validation command")?;
-            // A death by signal while a CPU cap is configured is the kernel's
-            // deterministic RLIMIT_CPU verdict: Linux delivers SIGXCPU at the
-            // soft limit and SIGKILL once the (equal) hard limit is hit, so
-            // accept both. Other kill paths (cancel/timeout/output-cap)
-            // return through their own arms before this point.
+            // SIGXCPU at the soft RLIMIT_CPU limit is the ONLY unambiguous,
+            // attributable kernel CPU-cap verdict. Ordinary signals (SIGKILL,
+            // OOM, external kills) and shell-relayed exit codes fall through
+            // untouched so they can never be misclassified as CPU exhaustion.
             #[cfg(unix)]
-            if limits.max_cpu_time.is_some() {
-                // Direct signal death (the capped process itself), OR a
-                // shell-relayed one: some shells run the loop in a forked
-                // child, get IT killed by RLIMIT_CPU/SIGKILL and exit 137.
-                let relayed = status.code() == Some(137);
-                let signaled = if relayed { Some(137) } else { status.signal() };
-                if let Some(sig) = signaled {
-                    killed_by_cpu_signal.store(sig, Ordering::SeqCst);
-                }
+            if limits.max_cpu_time.is_some()
+                && let Some(sig) = status.signal()
+                && sig == libc::SIGXCPU
+            {
+                killed_by_sigxcpu.store(true, Ordering::SeqCst);
             }
             Ok(status.code())
         }
@@ -629,34 +641,27 @@ async fn bounded_run(
         )));
     }
 
-    // Kernel-enforced CPU verdict: the child died by signal under an
-    // OS-enforced RLIMIT_CPU cap (SIGXCPU at the soft limit; SIGKILL once the
-    // equal hard limit is hit on Linux). This is deterministic kernel
-    // evidence, not a sampling result. Documented caveat: an external OOM
-    // kill would surface here as SIGKILL and classify as CPU exhaustion;
-    // every in-process kill path returns through its own arm first.
+    // Kernel-enforced CPU verdict: the DIRECT child died by SIGXCPU at the
+    // soft RLIMIT_CPU limit. Deterministic, attributable kernel evidence —
+    // never inferred from SIGKILL or exit codes (those stay ordinary
+    // failures). Aggregate tree CPU is enforced/classified by the monitor.
     #[cfg(unix)]
-    {
-        let sig = killed_by_cpu_signal.load(Ordering::SeqCst);
-        if limits.max_cpu_time.is_some()
-            && (sig == libc::SIGXCPU || sig == libc::SIGKILL || sig == 137)
-        {
-            return Err(Box::new(BoundedRunError::ResourceExceeded(
-                ResourceExceeded {
-                    classification: CLASSIFICATION_CPU,
-                    kind: Some("cpu"),
-                    configured_limit: Some(format!(
-                        "{}s",
-                        limits.max_cpu_time.unwrap_or_default().as_secs()
-                    )),
-                    observed_value: Some(format!("signal/exit {sig} after RLIMIT_CPU")),
-                    stage: "rlimit_cpu",
-                    code: None,
-                    stdout: out,
-                    stderr: err,
-                },
-            )));
-        }
+    if limits.max_cpu_time.is_some() && killed_by_sigxcpu.load(Ordering::SeqCst) {
+        return Err(Box::new(BoundedRunError::ResourceExceeded(
+            ResourceExceeded {
+                classification: CLASSIFICATION_CPU,
+                kind: Some("cpu"),
+                configured_limit: Some(format!(
+                    "{}s",
+                    limits.max_cpu_time.unwrap_or_default().as_secs()
+                )),
+                observed_value: Some("SIGXCPU at RLIMIT_CPU soft limit".to_string()),
+                stage: "rlimit_cpu",
+                code: None,
+                stdout: out,
+                stderr: err,
+            },
+        )));
     }
 
     match status_result {
@@ -838,10 +843,16 @@ fn apply_job_limits(pid: u32, limits: &ResourceLimits) -> Result<*mut winapi::ct
 /// Resume the primary (and any other) threads of a process that was created
 /// with `CREATE_SUSPENDED`. The validation shell is spawned suspended so the
 /// Job Object can be assigned before it executes a single instruction; this
-/// closes the spawnâ†’assign race where a fast grandchild could escape
+/// closes the spawn→assign race where a fast grandchild could escape
 /// tree-wide job termination.
+///
+/// Fail-closed: returns the number of threads successfully resumed, and an
+/// error when none could be resumed (no matching thread found, OpenThread
+/// failure, or `ResumeThread` returning `(u32::MAX)`). A child left
+/// suspended would otherwise silently burn the whole wall-clock timeout and
+/// be misrecorded as a timeout breach.
 #[cfg(windows)]
-fn resume_suspended_process_windows(pid: u32) -> Result<()> {
+fn resume_suspended_process_windows(pid: u32) -> Result<usize> {
     use std::mem;
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
     use winapi::um::processthreadsapi::{OpenThread, ResumeThread};
@@ -850,6 +861,7 @@ fn resume_suspended_process_windows(pid: u32) -> Result<()> {
     };
     use winapi::um::winnt::THREAD_SUSPEND_RESUME;
 
+    let mut resumed = 0usize;
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if snap == INVALID_HANDLE_VALUE {
@@ -864,10 +876,17 @@ fn resume_suspended_process_windows(pid: u32) -> Result<()> {
         loop {
             if entry.th32OwnerProcessID == pid {
                 let h = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
-                if !h.is_null() {
-                    ResumeThread(h);
-                    CloseHandle(h);
+                if h.is_null() {
+                    continue;
                 }
+                let prev = ResumeThread(h);
+                CloseHandle(h);
+                if prev == u32::MAX {
+                    let err = std::io::Error::last_os_error();
+                    CloseHandle(snap);
+                    bail!("ResumeThread failed for tid {}: {err}", entry.th32ThreadID);
+                }
+                resumed += 1;
             }
             if Thread32Next(snap, &mut entry) == 0 {
                 break;
@@ -875,7 +894,13 @@ fn resume_suspended_process_windows(pid: u32) -> Result<()> {
         }
         CloseHandle(snap);
     }
-    Ok(())
+    // The freshly-spawned suspended shell has exactly one thread (its primary)
+    // before executing anything, so "at least one" is equivalent to "the
+    // primary thread was opened and resumed successfully".
+    if resumed == 0 {
+        bail!("no thread could be resumed for suspended validation process {pid}");
+    }
+    Ok(resumed)
 }
 // ---------------------------------------------------------------------------
 // Test evidence parsing
@@ -2175,7 +2200,7 @@ mod tests {
         let err = run_isolated_validation(
             &dir,
             id,
-            Some("while true; do :; done"),
+            Some("yes > /dev/null") // shell exec-optimizes: the capped process IS the direct child,
             &evidence_dir,
             &token,
             &limits,
@@ -2280,6 +2305,20 @@ mod tests {
         assert_eq!(
             failure_to_terminal_state(CLASSIFICATION_CPU),
             crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resume_fails_closed_for_process_without_threads() {
+        // Injected failure: a pid with no threads in the toolhelp snapshot
+        // (nothing to resume) must be an ERROR, not a silent Ok — a child left
+        // suspended would otherwise be misrecorded as a timeout breach.
+        let err = resume_suspended_process_windows(0x0FFF_FFFF)
+            .expect_err("resuming a thread-less pid must fail closed");
+        assert!(
+            format!("{err:#}").contains("no thread could be resumed"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -2432,7 +2471,9 @@ mod tests {
         let rec = run_isolated_validation(
             &dir,
             id,
-            Some("while true; do :; done"),
+            // The shell exec-optimizes this simple command, so the capped
+            // process IS the direct child and SIGXCPU lands on it.
+            Some("yes > /dev/null"),
             &evidence_dir,
             &token,
             &limits,
@@ -2461,5 +2502,123 @@ mod tests {
             failure_to_terminal_state(CLASSIFICATION_CPU),
             crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn immediate_exit_137_is_not_cpu_exhaustion() {
+        // A validation command that exits 137 on its own must stay an ordinary
+        // failure — never be attributed to the CPU cap (regression for the
+        // shell-relayed SIGKILL heuristic).
+        let (dir, base) = init_test_repo("exit137");
+        let id = "exit137-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            max_cpu_time: Some(std::time::Duration::from_secs(60)),
+            ..ResourceLimits::default()
+        };
+        let rec = run_isolated_validation(
+            &dir,
+            id,
+            Some("sh -c 'exit 137'"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect("ordinary exit must complete");
+        assert_eq!(rec.exit_code, Some(137));
+        assert_ne!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "exit 137 must never classify as cpu exhaustion: {rec:?}"
+        );
+        assert_eq!(rec.resource_kind, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_sigkill_is_not_cpu_exhaustion() {
+        // A command that SIGKILLs itself is an ordinary signal death — with a
+        // CPU limit configured it still must not be classified as CPU
+        // exhaustion (only SIGXCPU is the kernel verdict).
+        let (dir, base) = init_test_repo("sigkill");
+        let id = "sigkill-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(30)),
+            max_cpu_time: Some(std::time::Duration::from_secs(60)),
+            ..ResourceLimits::default()
+        };
+        let rec = run_isolated_validation(
+            &dir,
+            id,
+            Some("sh -c 'kill -9 $$'"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect("signal death must complete");
+        assert_ne!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "self-SIGKILL must never classify as cpu exhaustion: {rec:?}"
+        );
+        assert_eq!(rec.resource_kind, None);
+        assert_ne!(rec.stage.as_deref(), Some("rlimit_cpu"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multi_process_aggregate_cpu_burner_is_monitor_classified() {
+        // RLIMIT_CPU is per process: two concurrent burners each get their own
+        // allowance, so the KERNEL cap alone cannot see the aggregate. The
+        // aggregate budget must be enforced and classified by the monitor.
+        let (dir, base) = init_test_repo("aggcpu");
+        let id = "aggcpu-run";
+        write_proposal(&dir, id, &base, PATCH, &sha256_hex(PATCH.as_bytes()), None);
+        let evidence_dir = dir.join(".prometheos").join("workflow").join(id);
+        std::fs::create_dir_all(&evidence_dir).unwrap();
+        let token = CancellationToken::new();
+        let limits = ResourceLimits {
+            validation_timeout: Some(std::time::Duration::from_secs(60)),
+            max_cpu_time: Some(std::time::Duration::from_secs(2)),
+            ..ResourceLimits::default()
+        };
+        let rec = run_isolated_validation(
+            &dir,
+            id,
+            // Two burners: ~2s CPU per second of wall time in aggregate, while
+            // each stays under its individual 2s allowance when the tree is
+            // killed at the 2s aggregate mark.
+            Some("sh -c 'yes > /dev/null & yes > /dev/null; wait'"),
+            &evidence_dir,
+            &token,
+            &limits,
+            &[],
+        )
+        .await
+        .expect("aggregate cpu limit must be enforced");
+        assert_eq!(
+            rec.failure_classification.as_deref(),
+            Some(CLASSIFICATION_CPU),
+            "{rec:?}"
+        );
+        assert_eq!(
+            rec.stage.as_deref(),
+            Some("aggregate_monitor"),
+            "multi-process burn must be classified by the aggregate monitor: {rec:?}"
+        );
+        assert_eq!(rec.configured_limit.as_deref(), Some("2s"));
     }
 }
