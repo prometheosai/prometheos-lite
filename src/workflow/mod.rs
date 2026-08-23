@@ -17,6 +17,7 @@
 pub mod artifact_integrity;
 pub mod durable;
 pub mod evaluate;
+pub mod memory_contracts;
 pub mod portable_state;
 pub mod redaction;
 pub mod retention;
