@@ -2282,10 +2282,11 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            // `exec` makes the CPU burner the DIRECT child, so the kernel's
-            // SIGXCPU verdict at the soft RLIMIT_CPU limit is attributable to
-            // it (and `which sh` satisfies the availability probe).
-            "sh -c 'exec yes > /dev/null'"
+            // TWO burners: RLIMIT_CPU is per process, so each stays under its
+            // individual allowance while the AGGREGATE tree budget (same
+            // value) is crossed in half the time - the monitor classifies
+            // deterministically before any per-process kernel fire.
+            "sh -c 'yes > /dev/null & yes > /dev/null; wait'"
         }
     }
 
