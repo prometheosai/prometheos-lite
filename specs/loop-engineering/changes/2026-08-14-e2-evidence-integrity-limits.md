@@ -637,3 +637,22 @@ secret (leak-safety outranks rerun fidelity for that corner).
   (unix-gated, exercised by CI), thread-less-pid resume failure (windows),
   orchestrator restart-after-crash with real second execution, seeded stale
   owner resume-path attach, command-text canary surface.
+
+### CI follow-ups on the round-7 series (final content head `99303aa`)
+
+Three CI-driven refinements after `1af69d4`, each verified by the full
+13-job matrix turning green:
+
+1. `128e1a2` repaired a malformed unix burner literal (sed artifact).
+2. `1d06128`: dash does NOT exec-optimize commands carrying redirections -
+   `yes > /dev/null` was relayed by the wrapper shell as exit 152
+   ("CPU time limit exceeded"). Unit burners now lead with explicit `exec`
+   so the burner REPLACES the shell image and SIGXCPU lands on OUR direct
+   child (attributable kernel verdict, no relay layer).
+3. `989681c`/`99303aa`: the ORCHESTRATOR cpu test keeps its availability
+   probe wrapper, so it cannot use bare exec; instead it uses a TWO-process
+   burner (`yes & yes; wait`) with a 3 s budget: each process stays under
+   its individual RLIMIT_CPU allowance while the aggregate tree budget is
+   crossed in half the time - the monitor classifies deterministically
+   before any per-process kernel fire. This also exercises exactly the
+   aggregate-vs-per-process distinction blocker #1 demanded.
