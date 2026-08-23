@@ -2202,7 +2202,10 @@ mod tests {
             id,
             // The shell exec-optimizes this simple command, so the capped
             // process IS the direct child and SIGXCPU lands on it.
-            Some("yes > /dev/null"),
+            // Explicit `exec`: the burner REPLACES the shell image, so the
+            // kernel's SIGXCPU at the soft RLIMIT_CPU limit is delivered to
+            // (and attributable to) our direct child.
+            Some("sh -c 'exec yes > /dev/null'"),
             &evidence_dir,
             &token,
             &limits,
@@ -2473,9 +2476,9 @@ mod tests {
         let rec = run_isolated_validation(
             &dir,
             id,
-            // The shell exec-optimizes this simple command, so the capped
-            // process IS the direct child and SIGXCPU lands on it.
-            Some("yes > /dev/null"),
+            // Explicit `exec` so the capped process IS our direct child and
+            // the kernel's SIGXCPU verdict is attributable to it.
+            Some("sh -c 'exec yes > /dev/null'"),
             &evidence_dir,
             &token,
             &limits,
