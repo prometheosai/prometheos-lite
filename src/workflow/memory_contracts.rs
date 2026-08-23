@@ -120,6 +120,9 @@ impl MemoryWrite {
         if w.write_id.is_empty() || w.content.is_empty() {
             bail!("write_id and content must not be empty");
         }
+        if w.writable_scopes.is_empty() {
+            bail!("memory write carries no writable scopes: nothing is authorized");
+        }
         Ok(w)
     }
 }
@@ -345,7 +348,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// - `query.readable_scopes` MUST be non-empty (empty scope set = nothing
 ///   authorized => hard error, not an empty success);
 /// - candidates whose `source_revision` differs from `current_revision`
-///   (when known) are OMITTED with reason `"stale revision"` â€” stale data is
+///   (when known) are OMITTED with reason `"stale revision"` Ã¢â‚¬â€ stale data is
 ///   never delivered;
 /// - candidates exceeding the query's token budget (greedy by relevance,
 ///   stable order) are omitted with `"token budget exceeded"`;
@@ -377,7 +380,35 @@ pub fn assemble_retrieval(
             .then_with(|| a.memory_id.cmp(&b.memory_id))
     });
 
-    for c in ordered {
+    // Conflict resolution: keep ONE entry per memory_id (highest relevance,
+    // then lexicographically smallest event digest). Every other duplicate is
+    // omitted with an explicit conflicting-duplicate reason.
+    let mut kept: Vec<RawCandidate> = Vec::new();
+    {
+        use std::collections::HashMap;
+        let mut first_idx: HashMap<String, usize> = HashMap::new();
+        for c in ordered.into_iter() {
+            match first_idx.get(&c.memory_id) {
+                None => {
+                    first_idx.insert(c.memory_id.clone(), kept.len());
+                    kept.push(c);
+                }
+                Some(&idx) => {
+                    // `kept` is already relevance-descending, so the stored
+                    // candidate has >= relevance; the newcomer is the loser.
+                    omitted.push(OmittedEntry {
+                        memory_id: c.memory_id.clone(),
+                        reason: format!(
+                            "conflicting duplicate (eventDigest {} superseded by {})",
+                            c.evidence.event_digest, kept[idx].evidence.event_digest
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    for c in kept {
         if let Some(cur) = current_revision
             && c.source_revision != cur
         {
@@ -420,6 +451,89 @@ pub fn assemble_retrieval(
             mutation: mutation.to_string(),
             executed_at,
         },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3: final ordered ContextBundle assembly
+// ---------------------------------------------------------------------------
+
+impl ContextBundle {
+    /// Fail-closed parse with the same major-version gate as every other
+    /// document in this family.
+    pub fn parse_json(json: &str) -> Result<Self> {
+        let b: Self =
+            serde_json::from_str(json).context("failed to parse lite.memory ContextBundle")?;
+        ensure_supported_contract_version(&b.schema_version)?;
+        if b.bundle_id.is_empty() {
+            bail!("bundle_id must not be empty");
+        }
+        Ok(b)
+    }
+}
+
+/// Assemble the final ordered `ContextBundle` from retrieval output:
+///
+/// - deterministic block order (relevance desc, then `memory_id`);
+/// - per-block token estimates via [`estimate_tokens`];
+/// - `digest` computed over the canonical form of the bundle WITHOUT the
+///   digest field itself (so the field is verifiable by re-computation);
+/// - omitted entries pass through unchanged (already reasoned upstream).
+pub fn assemble_context_bundle(
+    bundle_id: &str,
+    query_id: &str,
+    mut candidates: Vec<RetrievalCandidate>,
+    omitted: Vec<OmittedEntry>,
+    policy: OperationPolicy,
+) -> Result<ContextBundle> {
+    if bundle_id.is_empty() {
+        bail!("bundle_id must not be empty");
+    }
+    candidates.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.memory_id.cmp(&b.memory_id))
+    });
+    let blocks: Vec<ContextBlock> = candidates
+        .into_iter()
+        .map(|c| {
+            let tokens = estimate_tokens(&c.content);
+            ContextBlock {
+                memory_id: c.memory_id,
+                content: c.content,
+                tokens,
+                selected_because: format!(
+                    "relevance {:.3}, kind {}",
+                    c.relevance,
+                    serde_json::to_string(&c.kind).unwrap_or_default()
+                ),
+            }
+        })
+        .collect();
+    let token_estimate = blocks.iter().map(|b| b.tokens).sum();
+
+    // Digest covers everything except the digest field itself.
+    let pre = serde_json::json!({
+        "bundleId": bundle_id,
+        "blocks": blocks,
+        "omitted": omitted,
+        "policy": policy,
+        "queryId": query_id,
+        "schemaVersion": MEMORY_CONTRACT_VERSION,
+        "tokenEstimate": token_estimate,
+    });
+    let digest = canonical_digest(&pre)?;
+
+    Ok(ContextBundle {
+        schema_version: MEMORY_CONTRACT_VERSION.to_string(),
+        bundle_id: bundle_id.to_string(),
+        query_id: query_id.to_string(),
+        blocks,
+        omitted,
+        token_estimate,
+        digest,
+        policy,
     })
 }
 
@@ -605,6 +719,87 @@ mod tests {
     fn now() -> String {
         "2026-08-23T00:00:00Z".into()
     }
+
+    // ---- slice 3: bundle assembly ----
+
+    fn cand(id: &str, rel: f32, chars: usize) -> RetrievalCandidate {
+        RetrievalCandidate {
+            memory_id: id.into(),
+            kind: MemoryKind::Preference,
+            source_revision: "r1".into(),
+            evidence: ev(id),
+            content: "y".repeat(chars),
+            relevance: rel,
+        }
+    }
+
+    #[test]
+    fn bundle_order_is_deterministic_and_tokens_estimated() {
+        let cands = vec![cand("b", 0.9, 40), cand("a", 0.9, 80), cand("c", 0.5, 10)];
+        let pol = OperationPolicy {
+            backend: BackendKind::Local,
+            mutation: "none".into(),
+            executed_at: now(),
+        };
+        let b1 = assemble_context_bundle("bd-1", "q", cands.clone(), vec![], pol.clone()).unwrap();
+        let b2 = assemble_context_bundle("bd-1", "q", cands, vec![], pol).unwrap();
+        assert_eq!(b1.digest, b2.digest, "same input must yield same digest");
+        assert_eq!(b1.blocks[0].memory_id, "a"); // rel 0.9 tie-break id asc
+        assert_eq!(
+            b1.blocks.iter().map(|x| x.tokens).sum::<u64>(),
+            b1.token_estimate
+        );
+    }
+
+    #[test]
+    fn bundle_digest_is_content_sensitive() {
+        let pol = OperationPolicy {
+            backend: BackendKind::Local,
+            mutation: "none".into(),
+            executed_at: now(),
+        };
+        let b1 = assemble_context_bundle("d", "q", vec![cand("a", 0.9, 40)], vec![], pol.clone())
+            .unwrap();
+        let b2 = assemble_context_bundle("d", "q", vec![cand("a", 0.9, 41)], vec![], pol).unwrap();
+        assert_ne!(b1.digest, b2.digest);
+    }
+
+    #[test]
+    fn context_bundle_parse_rejects_future_major() {
+        let mut b = assemble_context_bundle(
+            "d",
+            "q",
+            vec![cand("a", 0.5, 8)],
+            vec![],
+            OperationPolicy {
+                backend: BackendKind::Local,
+                mutation: "none".into(),
+                executed_at: now(),
+            },
+        )
+        .unwrap();
+        b.schema_version = "9.0.0".into();
+        let err = ContextBundle::parse_json(&serde_json::to_string(&b).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("fail closed"), "{err}");
+    }
+
+    #[test]
+    fn empty_bundle_id_is_rejected() {
+        let err = assemble_context_bundle(
+            "",
+            "q",
+            vec![],
+            vec![],
+            OperationPolicy {
+                backend: BackendKind::Local,
+                mutation: "none".into(),
+                executed_at: now(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bundle_id"), "{err}");
+    }
+
     fn sample_pws() -> PortableWorkState {
         PortableWorkState {
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -663,5 +858,40 @@ mod tests {
         // Deterministic: same state => same digest.
         let again = ProjectCheckpoint::from_portable_work_state(&pws).unwrap();
         assert_eq!(cp, again);
+    }
+    #[test]
+    fn conflicting_duplicates_keep_best_and_omit_rest() {
+        let mut hi = raw("dup", "r1", 0.6, 40);
+        hi.evidence.event_digest = "e".repeat(64);
+        let mut lo = raw("dup", "r1", 0.9, 40);
+        lo.evidence.event_digest = "f".repeat(64);
+        // Insert order: relevance sort puts `lo` first regardless.
+        let r = assemble_retrieval(
+            &q(None),
+            BackendKind::Local,
+            "none",
+            now(),
+            vec![hi, lo],
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!(r.candidates[0].evidence.event_digest, "f".repeat(64));
+        assert_eq!(r.omitted.len(), 1);
+        assert!(r.omitted[0].reason.starts_with("conflicting duplicate"));
+    }
+
+    #[test]
+    fn write_without_scopes_fails_closed() {
+        let w = MemoryWrite {
+            schema_version: MEMORY_CONTRACT_VERSION.into(),
+            write_id: "w".into(),
+            writable_scopes: vec![],
+            kind: MemoryKind::Fact,
+            content: "c".into(),
+            tags: vec![],
+        };
+        let err = MemoryWrite::parse_json(&serde_json::to_string(&w).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("no writable scopes"), "{err}");
     }
 }

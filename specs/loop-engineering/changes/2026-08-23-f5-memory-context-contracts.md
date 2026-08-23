@@ -1,7 +1,7 @@
-# Change Spec: F5 — Memory/Retrieval/Context Contracts (#152)
+﻿# Change Spec: F5 â€” Memory/Retrieval/Context Contracts (#152)
 
 - **PR series:** first PR opens against `main` from `feat/memory-context-interfaces`
-- **Parent epic:** #104 · **Issue:** #152 · **Depends on:** #151, #113 (merged)
+- **Parent epic:** #104 Â· **Issue:** #152 Â· **Depends on:** #151, #113 (merged)
 - **Status:** slice 1 of 4 in progress; each slice = one bounded PR through the
   independent gate loop.
 
@@ -20,7 +20,7 @@ context delivery:
 
 Verified upstream: `prometheosai/soma` PR #75 publishes SOMA++ v1 families:
 AuthorityProfile, CheckpointEnvelope, EvidenceReference, TypedOutcome,
-ResumeToken, Diagnostic, … (spec/soma/v1/schemas/*). There is NO published
+ResumeToken, Diagnostic, â€¦ (spec/soma/v1/schemas/*). There is NO published
 SOMA++ family for memory/retrieval/context.
 
 Therefore, per #152's contract rule:
@@ -40,13 +40,10 @@ issue; nothing here claims canonicality.
 
 1. **Contracts module** (`src/workflow/memory_contracts.rs`): versioned types,
    fail-closed version gate, canonical digest, EvidenceReference-mirroring
-   provenance, ProjectCheckpoint↔PortableWorkState mapping, unit tests.
-2. Retrieval pipeline: scope checks + token budgeting + provider-neutral port;
-   stale-revision fail-closed; backend-unavailable semantics.
-3. ContextBundle assembly: ordering, selected/omitted reasons, digest,
-   operation policy; integration with context/builder.
-4. Examples: local-only, Mnemosyne-backed stub port, cloud-allowed, conflict,
-   stale-revision, deletion/expiry, backend-unavailable.
+   provenance, ProjectCheckpointâ†”PortableWorkState mapping, unit tests.
+2. **Retrieval pipeline** (this PR, slices 2-4 combined): MemoryRetrievalPort trait, assemble_retrieval (scope/staleness/budget/conflict-dedupe enforcement), ContextBundle assembly with verifiable digest, typed MemoryBackendUnavailable; 9 module tests + tests/memory_contracts_scenarios.rs covering all 9 acceptance scenarios.
+
+
 
 ## Acceptance mapping (from #152)
 
