@@ -348,7 +348,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// - `query.readable_scopes` MUST be non-empty (empty scope set = nothing
 ///   authorized => hard error, not an empty success);
 /// - candidates whose `source_revision` differs from `current_revision`
-///   (when known) are OMITTED with reason `"stale revision"` — stale data is
+///   (when known) are OMITTED with reason `"stale revision"` â€” stale data is
 ///   never delivered;
 /// - candidates exceeding the query's token budget (greedy by relevance,
 ///   stable order) are omitted with `"token budget exceeded"`;
@@ -381,8 +381,9 @@ pub fn assemble_retrieval(
     });
 
     // Conflict resolution: keep ONE entry per memory_id (highest relevance,
-    // then lexicographically smallest event digest). Every other duplicate is
-    // omitted with an explicit conflicting-duplicate reason.
+    // then lexicographically smallest memory_id â€” the same deterministic
+    // ordering applied above). Every other duplicate is omitted with an
+    // explicit conflicting-duplicate reason.
     let mut kept: Vec<RawCandidate> = Vec::new();
     {
         use std::collections::HashMap;
@@ -881,6 +882,28 @@ mod tests {
         assert!(r.omitted[0].reason.starts_with("conflicting duplicate"));
     }
 
+    #[test]
+    fn equal_relevance_tie_breaks_on_memory_id() {
+        // Locks the documented determinism rule: identical relevance resolves
+        // ORDER by lexicographically smallest memory_id (both candidates are
+        // delivered; dedupe only collapses identical ids).
+        let zz = raw("zz", "r1", 0.7, 40);
+        let mut aa = raw("aa", "r1", 0.7, 40);
+        aa.evidence.event_digest = "3".repeat(64);
+        let r = assemble_retrieval(
+            &q(None),
+            BackendKind::Local,
+            "none",
+            now(),
+            vec![zz, aa],
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.candidates.len(), 2);
+        assert_eq!(r.candidates[0].memory_id, "aa");
+        assert_eq!(r.candidates[1].memory_id, "zz");
+        assert!(r.omitted.is_empty());
+    }
     #[test]
     fn write_without_scopes_fails_closed() {
         let w = MemoryWrite {
