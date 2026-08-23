@@ -1,4 +1,4 @@
-﻿//! Stable, revision-qualified local repository index (#167 slice 1).
+//! Stable, revision-qualified local repository index (#167 slice 1).
 //!
 //! OWNERSHIP: Lite owns scanning, revision detection, digests, indexing and
 //! local retrieval. This module wraps the existing extraction engine
@@ -385,6 +385,132 @@ fn collect_files_public(p: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 fn detect_language_public(p: &Path) -> String {
     crate::harness::repo_intelligence::detect_language(p)
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3: local RetrievalPort integration (#153 contract family)
+// ---------------------------------------------------------------------------
+
+/// Read-only [`crate::workflow::memory_contracts::MemoryRetrievalPort`]
+/// backed by an [`IndexedRepository`]. Query text is matched deterministically:
+/// exact symbol name first, then case-insensitive lexical search.
+///
+/// Staleness is fail-closed: when a `current_revision` is supplied and it
+/// differs from the indexed revision, retrieval errors with
+/// [`IndexStale`] in the chain (never silently serves stale context).
+///
+/// The repository index is a read-only evidence surface: `write` is always a
+/// typed unavailable error.
+pub struct RepoEvidencePort {
+    pub index: IndexedRepository,
+    pub current_revision: Option<String>,
+}
+
+impl crate::workflow::memory_contracts::MemoryRetrievalPort for RepoEvidencePort {
+    fn name(&self) -> &'static str {
+        "repo-evidence"
+    }
+    fn backend(&self) -> crate::workflow::memory_contracts::BackendKind {
+        crate::workflow::memory_contracts::BackendKind::Local
+    }
+
+    fn retrieve(
+        &self,
+        query: &crate::workflow::memory_contracts::MemoryQuery,
+    ) -> Result<Vec<crate::workflow::memory_contracts::RawCandidate>> {
+        use crate::workflow::memory_contracts::{EvidenceReferenceV1, RawCandidate};
+        if let Some(cur) = &self.current_revision
+            && cur.as_str() != self.index.identity.revision
+        {
+            return Err(IndexStale {
+                reason: format!(
+                    "query revision {cur} != indexed revision {}",
+                    self.index.identity.revision
+                ),
+            }
+            .into());
+        }
+        let term = query.text.trim();
+        if term.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Deterministic: exact hit(s) preferred; else lexical matches.
+        let mut out: Vec<RawCandidate> = Vec::new();
+        let push = |s: &CodeSymbol, out: &mut Vec<RawCandidate>| {
+            let abs_norm = s.file.to_string_lossy().replace('\\', "/");
+            let root_norm = self
+                .index
+                .identity
+                .root
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_string();
+            let rel = abs_norm
+                .strip_prefix(root_norm.as_str())
+                .map(|r| r.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| abs_norm.clone());
+            let artifact_digest = self
+                .index
+                .files
+                .get(&rel)
+                .map(|e| e.sha256.clone())
+                .unwrap_or_else(|| "0".repeat(64));
+            let memory_id = format!("repo:{rel}#{}", s.name);
+            let event_digest = {
+                let mut h = Sha256::new();
+                h.update(self.index.identity.revision.as_bytes());
+                h.update(b"\n");
+                h.update(rel.as_bytes());
+                format!("{:x}", h.finalize())
+            };
+            out.push(RawCandidate {
+                memory_id,
+                kind: crate::workflow::memory_contracts::MemoryKind::Fact,
+                source_revision: self.index.identity.revision.clone(),
+                evidence: EvidenceReferenceV1 {
+                    id: String::new(), // filled below (id == memory id)
+                    event_digest,
+                    artifact_digest,
+                    artifact_kind: "repository-symbol".into(),
+                    produced_by: self.index.parser_version.clone(),
+                    produced_at: Some(self.index.built_at.clone()),
+                },
+                content: match &s.signature {
+                    Some(sig) => format!("{sig}\n// {}:{}..{}", rel, s.line_start, s.line_end),
+                    None => format!("{}\n// {}:{}..{}", s.name, rel, s.line_start, s.line_end),
+                },
+                relevance: 1.0,
+            });
+            let last = out.last_mut().expect("just pushed");
+            last.evidence.id = last.memory_id.clone();
+        };
+        match self.index.exact_symbol(term) {
+            SymbolLookup::Hit { .. } => {
+                if let Some(s) = self.index.symbols.iter().find(|s| s.name == term) {
+                    push(s, &mut out);
+                }
+            }
+            SymbolLookup::NotFound { .. } => {
+                for s in self.index.symbols.iter().filter(|s| {
+                    s.name
+                        .to_ascii_lowercase()
+                        .contains(&term.to_ascii_lowercase())
+                }) {
+                    push(s, &mut out);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn write(&self, _write: &crate::workflow::memory_contracts::MemoryWrite) -> Result<String> {
+        Err(anyhow::Error::new(
+            crate::workflow::memory_contracts::MemoryBackendUnavailable {
+                backend: crate::workflow::memory_contracts::BackendKind::Local,
+                message: "repository evidence index is read-only".into(),
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
