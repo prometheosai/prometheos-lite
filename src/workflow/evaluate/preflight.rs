@@ -35,6 +35,59 @@ pub struct PreflightResult {
     pub governance_scope_valid: bool,
     pub evidence_dir_writable: bool,
 }
+
+/// Typed disk-space preflight breach.
+///
+/// Carries the configured reserve and the observed free bytes (when they could
+/// be measured) so the orchestrator can persist typed durable evidence
+/// (`resource_kind = "disk"`, configured limit, observed value, stage) instead
+/// of a free-text failure.
+#[derive(Debug)]
+pub(super) struct DiskPreflightBreach {
+    pub required_bytes: u64,
+    pub observed_free_bytes: Option<u64>,
+}
+
+impl std::fmt::Display for DiskPreflightBreach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.observed_free_bytes {
+            Some(free) => write!(
+                f,
+                "insufficient free disk space: {} bytes available, {} required",
+                free, self.required_bytes
+            ),
+            None => write!(
+                f,
+                "free disk space could not be measured; {} bytes required",
+                self.required_bytes
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiskPreflightBreach {}
+
+fn disk_breach_if_insufficient(
+    manifest_min_disk_bytes: u64,
+    disk_space: &DiskSpaceStatus,
+) -> Option<DiskPreflightBreach> {
+    let sufficient = match disk_space {
+        DiskSpaceStatus::Available(bytes) => *bytes >= manifest_min_disk_bytes,
+        // Fail closed: unknown disk space is treated as insufficient.
+        DiskSpaceStatus::Unsupported | DiskSpaceStatus::Failed(_) => false,
+    };
+    if sufficient {
+        return None;
+    }
+    Some(DiskPreflightBreach {
+        required_bytes: manifest_min_disk_bytes,
+        observed_free_bytes: match disk_space {
+            DiskSpaceStatus::Available(bytes) => Some(*bytes),
+            _ => None,
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Preflight
 // ---------------------------------------------------------------------------
@@ -48,11 +101,12 @@ pub(super) fn run_preflight(
     let is_git = is_git_repo(repo);
     let working_tree_clean = is_repo_clean(repo);
     let disk_space = available_disk_bytes(repo);
-    let disk_sufficient = match &disk_space {
-        DiskSpaceStatus::Available(bytes) => *bytes >= manifest.min_disk_bytes,
-        // Fail closed: unknown disk space is treated as insufficient.
-        DiskSpaceStatus::Unsupported | DiskSpaceStatus::Failed(_) => false,
-    };
+    // A typed disk breach fails fast so the orchestrator can persist typed
+    // durable evidence rather than a free-text preflight failure.
+    if let Some(breach) = disk_breach_if_insufficient(manifest.min_disk_bytes, &disk_space) {
+        return Err(anyhow::Error::new(breach));
+    }
+    let disk_sufficient = true;
     let credential_available = check_credential_available(&manifest.provider);
     let validation_available = manifest
         .validation_command
@@ -139,10 +193,12 @@ pub(super) fn run_validation_preflight(
     let is_git = is_git_repo(repo);
     let working_tree_clean = is_repo_clean(repo);
     let disk_space = available_disk_bytes(repo);
-    let disk_sufficient = match &disk_space {
-        DiskSpaceStatus::Available(bytes) => *bytes >= manifest.min_disk_bytes,
-        DiskSpaceStatus::Unsupported | DiskSpaceStatus::Failed(_) => false,
-    };
+    // A typed disk breach fails fast so the orchestrator can persist typed
+    // durable evidence rather than a free-text preflight failure.
+    if let Some(breach) = disk_breach_if_insufficient(manifest.min_disk_bytes, &disk_space) {
+        return Err(anyhow::Error::new(breach));
+    }
+    let disk_sufficient = true;
     // Validation does NOT require credentials — generation already happened.
     let credential_available = true;
     let validation_available = manifest
@@ -381,5 +437,60 @@ mod tests {
                 .map(|cmd| check_command_available(cmd))
                 .unwrap_or(true)
         );
+    }
+
+    fn disk_manifest(repo: std::path::PathBuf, min_disk: u64) -> TaskManifest {
+        TaskManifest {
+            task_id: "disk-t".to_string(),
+            goal: "g".to_string(),
+            repo,
+            allowed_paths: vec![],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: None,
+            max_lines_changed: None,
+            validation_command: None,
+            provider: "mock".to_string(),
+            authority: "propose".to_string(),
+            min_disk_bytes: min_disk,
+            evidence_dir: None,
+        }
+    }
+
+    #[test]
+    fn insufficient_disk_preflight_is_a_typed_breach() {
+        let dir = tempfile::tempdir().unwrap();
+        let evidence = dir.path().join("ev");
+        std::fs::create_dir_all(&evidence).unwrap();
+        let err = run_validation_preflight(
+            dir.path(),
+            "abc",
+            &disk_manifest(dir.path().to_path_buf(), u64::MAX / 2),
+            &evidence,
+        )
+        .expect_err("absurd reserve must fail");
+        let breach = err
+            .downcast_ref::<DiskPreflightBreach>()
+            .expect("error must be a typed DiskPreflightBreach");
+        assert_eq!(breach.required_bytes, u64::MAX / 2);
+        assert!(breach.observed_free_bytes.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn unmeasurable_disk_fails_closed_with_typed_breach() {
+        // Unmeasurable disk space (unsupported platform or measurement
+        // failure) must fail closed with a typed breach carrying no observed
+        // bytes.
+        let unsupported = DiskSpaceStatus::Unsupported;
+        let breach = disk_breach_if_insufficient(1, &unsupported)
+            .expect("unsupported measurement must fail closed");
+        assert_eq!(breach.observed_free_bytes, None);
+        assert_eq!(breach.required_bytes, 1);
+
+        let failed = DiskSpaceStatus::Failed("GetDiskFreeSpaceExW failed".to_string());
+        let breach =
+            disk_breach_if_insufficient(1, &failed).expect("failed measurement must fail closed");
+        assert_eq!(breach.observed_free_bytes, None);
+        assert_eq!(breach.required_bytes, 1);
     }
 }

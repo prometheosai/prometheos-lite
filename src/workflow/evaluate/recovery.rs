@@ -613,6 +613,79 @@ mod tests {
     }
 
     #[test]
+    fn e2e_recovery_reuses_persisted_terminal_evidence() {
+        let repo = repo_dir();
+        // Persist a real evidence bundle through the integrity-checked durable
+        // path, exactly as a completed run would before a late crash/handshake
+        // failure.
+        let evidence_ref = "prometheos/workflow/evidence/run-1".to_string();
+        let ed = repo
+            .join("prometheos")
+            .join("workflow")
+            .join("evidence")
+            .join("run-1");
+        crate::workflow::evaluate::evidence::prepare_evidence_dir(&ed).unwrap();
+        let gov = crate::workflow::evaluate::identity::GovernanceScopeSnapshot {
+            allowed_paths: vec![],
+            forbidden_paths: vec![],
+            allow_dependency_changes: false,
+            max_files_changed: None,
+            max_lines_changed: None,
+            authority: "test".to_string(),
+            validation_command: None,
+        };
+        let bundle = crate::workflow::evaluate::evidence::new_bundle_from_identity(
+            "run-1", "task-1", &repo, "abc123", &gov, &ed,
+        );
+        crate::workflow::evaluate::evidence::write_bundle(&ed, &bundle).unwrap();
+        // The durable journal records a terminal ValidationComplete transition
+        // referencing the evidence (simulating the prior run completing, then
+        // crashing before its final handshake).
+        append_event_unlocked(
+            &repo,
+            "ric-1",
+            "key-1",
+            EvaluationState::Validating,
+            EvaluationState::ValidationComplete,
+            Some("proposal-9".to_string()),
+            None,
+            "run-1",
+            1,
+            "abc123",
+            Some(evidence_ref.clone()),
+        )
+        .unwrap();
+        let recovered = recover_evaluation(&repo, "key-1", None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, EvaluationState::ValidationComplete);
+        assert_eq!(recovered.proposal_ref.as_deref(), Some("proposal-9"));
+        assert_eq!(
+            recovered.evidence_ref.as_deref(),
+            Some(evidence_ref.as_str())
+        );
+        // The durable evidence is locatable and loads through the
+        // integrity-checked, migration-aware path: proof of exact-once reuse
+        // rather than silent re-derivation.
+        let edir = resolve_evidence_dir(&repo, &evidence_ref).unwrap();
+        let bytes = crate::workflow::artifact_integrity::read_verified(
+            &edir,
+            &edir.join("evidence.json"),
+            crate::workflow::artifact_integrity::ArtifactKind::Evidence,
+        )
+        .expect("durable evidence must verify via its checksum sidecar");
+        crate::workflow::evaluate::migration::migrate_document_bytes(
+            &edir.join("evidence.json"),
+            crate::workflow::evaluate::schema::DocumentType::EvidenceBundle,
+            &bytes,
+        )
+        .expect("durable evidence must migrate");
+        let loaded: crate::workflow::evaluate::evidence::EvidenceBundle =
+            serde_json::from_slice(&bytes).expect("durable evidence must parse");
+        assert_eq!(loaded.run_id, "run-1");
+    }
+
+    #[test]
     fn from_state_mismatch_fails_closed() {
         let repo = repo_dir();
         let dir = journal_dir_for(&repo, "key-1");

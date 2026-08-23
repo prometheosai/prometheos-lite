@@ -17,19 +17,11 @@ use super::schema::{
     validate_version, version_diagnostic,
 };
 
-/// Read the schema version declared by a JSON document.
+/// Read the schema version declared by an already-parsed JSON document value.
 ///
 /// Legacy documents without a `schema_version` field are reported as the
 /// explicit legacy version ([`LEGACY_UNVERSIONED_VERSION`]), which is distinct
 /// from the current version so unversioned data is always migrated.
-pub fn read_declared_version(path: &Path, doc_type: DocumentType) -> Result<SchemaVersion> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let value: Value = serde_json::from_str(&text)
-        .with_context(|| format!("corrupt {} document {}", doc_type.as_str(), path.display()))?;
-    read_declared_version_from_value(&value)
-}
-
 fn read_declared_version_from_value(value: &Value) -> Result<SchemaVersion> {
     match value.get("schema_version") {
         Some(v) => SchemaVersion::parse(v.as_str().context("schema_version must be a string")?),
@@ -82,7 +74,18 @@ pub fn migrate_document(
 ) -> Result<super::schema::VersionStatus> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let mut value: Value = serde_json::from_str(&text)
+    migrate_document_bytes(path, doc_type, text.as_bytes())
+}
+
+/// Validate/migrate a document from already-authenticated bytes (e.g. read via
+/// `artifact_integrity::read_verified`). Used for evidence bundles so migration
+/// never re-reads untrusted file bytes after the integrity sidecar check.
+pub fn migrate_document_bytes(
+    path: &Path,
+    doc_type: DocumentType,
+    content: &[u8],
+) -> Result<super::schema::VersionStatus> {
+    let mut value: Value = serde_json::from_slice(content)
         .with_context(|| format!("corrupt {} document {}", doc_type.as_str(), path.display()))?;
     if !value.is_object() {
         bail!(
@@ -91,7 +94,7 @@ pub fn migrate_document(
             path.display()
         );
     }
-    let declared = read_declared_version(path, doc_type)?;
+    let declared = read_declared_version_from_value(&value)?;
     let status = validate_version(doc_type, declared)?;
     match status {
         super::schema::VersionStatus::Current => {
@@ -154,7 +157,8 @@ mod tests {
         let dir = sample_dir();
         let path = dir.path().join("doc.json");
         std::fs::write(&path, "{\"state\":\"created\"}").unwrap();
-        let version = read_declared_version(&path, DocumentType::ExecutionIdentity).unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let version = read_declared_version_from_value(&value).unwrap();
         assert_eq!(version, LEGACY_UNVERSIONED_VERSION);
         assert_eq!(version, SchemaVersion::new(0, 0, 0));
         assert!(!version.is_current());
@@ -165,7 +169,8 @@ mod tests {
         let dir = sample_dir();
         let path = dir.path().join("doc.json");
         std::fs::write(&path, "{\"schema_version\":\"1.0.0\"}").unwrap();
-        let version = read_declared_version(&path, DocumentType::EvidenceBundle).unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let version = read_declared_version_from_value(&value).unwrap();
         assert_eq!(version, SchemaVersion::new(1, 0, 0));
     }
 
