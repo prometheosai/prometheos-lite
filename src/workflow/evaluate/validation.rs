@@ -1,4 +1,4 @@
-﻿use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 use std::path::Path;
@@ -119,7 +119,7 @@ pub(super) async fn run_isolated_validation(
     .is_ok();
 
     if !patch_applies {
-        // Patch doesn't apply â€” record and clean up.
+        // Patch doesn't apply — record and clean up.
         let _ = run_git_cmd(
             repo,
             &["worktree", "remove", "--force", wt_root.to_str().unwrap()],
@@ -155,7 +155,7 @@ pub(super) async fn run_isolated_validation(
     // Apply the patch.
     let _ = run_git_cmd(&wt_root, &["apply", patch_file.to_str().unwrap()]);
 
-    // Step 2: Run validation command if present â€” cooperatively cancellable and
+    // Step 2: Run validation command if present — cooperatively cancellable and
     // resource-bounded (timeout + output cap + aggregate CPU/memory/disk). A
     // resource breach returns a durable, classified `ValidationRecord` carrying the
     // captured (redacted) diagnostics; cancellation is a control-flow signal, not a
@@ -409,7 +409,7 @@ async fn bounded_run(
                         "failed to apply Windows Job Object resource limits (CPU/memory enforcement unavailable)",
                     );
                     // Fail closed. The shell is still suspended (it never ran,
-                    // so it has no descendants); kill it synchronously â€” never
+                    // so it has no descendants); kill it synchronously — never
                     // across an await while the raw job-pointer scrutinee is
                     // live, which would make this future !Send.
                     let _ = std::process::Command::new("taskkill")
@@ -1031,7 +1031,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         s.to_string()
     } else {
-        format!("{}â€¦[truncated, {} bytes total]", &s[..max_chars], s.len())
+        format!("{}…[truncated, {} bytes total]", &s[..max_chars], s.len())
     }
 }
 pub(super) fn classify_dry_run_error(msg: &str) -> String {
@@ -1163,7 +1163,7 @@ async fn kill_child_tree(pid: u32) {
 
 /// Spawn the aggregate, process-tree resource monitor for a Unix validation run.
 ///
-/// The monitor enumerates the validation process SUBTREE (parentâ†’child walk from
+/// The monitor enumerates the validation process SUBTREE (parent→child walk from
 /// the shell pid; robust to `setpgid` behaviour in containers/CI) and, on each
 /// tick, sums the **aggregate** user+system CPU time and **aggregate** RSS across
 /// the whole tree. If the aggregate CPU, aggregate RSS, or free disk space crosses

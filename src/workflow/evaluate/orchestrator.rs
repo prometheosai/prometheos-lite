@@ -1,4 +1,4 @@
-﻿use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -184,7 +184,7 @@ pub async fn evaluate_with_cancellation(
     // LEAK-SAFE CONTRACT: known secrets are redacted from EVERY persisted
     // copy of the user-supplied validation command (governance snapshot,
     // execution identity, proposal artifact, evidence bundle). Execution
-    // itself keeps the original in-memory command â€” redaction is a
+    // itself keeps the original in-memory command — redaction is a
     // persistence-boundary concern only.
     let known_secrets = collect_known_secrets(&repo);
     let command_redactor = Redactor::new().with_known_secrets(&known_secrets);
@@ -288,7 +288,7 @@ pub async fn evaluate_with_cancellation(
     if let Err(e) = &preflight {
         // A typed disk breach persists typed durable evidence (resource_kind,
         // configured reserve, observed free bytes, stage) and terminates as an
-        // InfraBlocked resource outcome ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not a generic preflight failure.
+        // InfraBlocked resource outcome — not a generic preflight failure.
         if let Some(breach) = e.downcast_ref::<super::preflight::DiskPreflightBreach>() {
             let redactor = Redactor::new().with_known_secrets(&collect_known_secrets(&repo));
             let msg = redactor.redact(&e.to_string());
@@ -483,7 +483,7 @@ pub async fn evaluate_with_cancellation(
 
     let gen_result = match gen_result {
         Ok(r) => {
-            // Check heartbeat ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ownership must still be held after generation.
+            // Check heartbeat — ownership must still be held after generation.
             heartbeat.check("")?;
             r
         }
@@ -548,7 +548,7 @@ pub async fn evaluate_with_cancellation(
     .context("failed to transition registry to ProposalGenerated")?;
 
     // Safe point: the proposal is durable and published. Cancellation here is
-    // clean ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a later run resumes from the durable proposal (ResumeFromProposal)
+    // clean — a later run resumes from the durable proposal (ResumeFromProposal)
     // and never re-invokes generation.
     if token.is_cancelled() {
         record_cancellation(
@@ -590,7 +590,7 @@ pub async fn evaluate_with_cancellation(
     };
 
     // ---- Stage: Governance verification ----
-    // Governance is already enforced by `generate_proposal` ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ `propose_with_meta`.
+    // Governance is already enforced by `generate_proposal` → `propose_with_meta`.
     // Record that it passed.
     durable_transition(
         &repo,
@@ -664,7 +664,7 @@ pub async fn evaluate_with_cancellation(
     )
     .await;
 
-    // Check heartbeat after validation ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â must still own the entry.
+    // Check heartbeat after validation — must still own the entry.
     heartbeat.check("")?;
 
     // Safe point: cancellation after validation finished. The run records a
@@ -863,7 +863,7 @@ pub async fn evaluate_with_cancellation(
         bundle.repo_pin_after = head;
     }
 
-    // Fenced finalization: evidence ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ terminal event ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ identity ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ checkpoint ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢
+    // Fenced finalization: evidence → terminal event → identity → checkpoint →
     // registry, all under the registry lock. The terminal event references the
     // final evidence that was just written durably.
     fenced_finalize(
@@ -1015,12 +1015,12 @@ fn protect_evidence_ref(
 /// The durable journal is authoritative; the registry is only a derived
 /// coordination snapshot and must never override it. Recovery derives the
 /// single allowed disposition (see [`RecoveryDisposition`]) and this function
-/// reconciles the registry to it ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never above it:
-/// - terminal ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ return preserved evidence;
-/// - ProposalGenerated/GovernancePassed/Validating (claimable) ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ resume validation;
-/// - no journal + stale Reserved ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ clear and let the caller retry fresh;
-/// - a live owner (fresh heartbeat) is never reclaimed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â wait;
-/// - Generating interrupted ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ fail closed (GenerationOutcomeUnknown).
+/// reconciles the registry to it — never above it:
+/// - terminal → return preserved evidence;
+/// - ProposalGenerated/GovernancePassed/Validating (claimable) → resume validation;
+/// - no journal + stale Reserved → clear and let the caller retry fresh;
+/// - a live owner (fresh heartbeat) is never reclaimed — wait;
+/// - Generating interrupted → fail closed (GenerationOutcomeUnknown).
 async fn wait_and_reuse(
     repo: &Path,
     commit_at_start: &str,
@@ -1043,7 +1043,7 @@ async fn wait_and_reuse(
         // then journal the same PreflightBlocked(resource_disk_exhausted)
         // terminal (with its typed validation record and evidence bundle) the
         // fresh path uses. If the current owner is still live we do NOT
-        // fabricate anything â€” the error propagates and the live owner records
+        // fabricate anything — the error propagates and the live owner records
         // the verdict.
         let Some(entry) = lookup_entry(repo, identity_key) else {
             return Err(pre);
@@ -1233,7 +1233,7 @@ async fn wait_and_reuse(
                     RecoveryDisposition::ResumeFromProposal
                     | RecoveryDisposition::ResumeValidation
                     | RecoveryDisposition::ReconcileSnapshots => {
-                        // Resume validation on the ORIGINAL proposal ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never re-invoke
+                        // Resume validation on the ORIGINAL proposal — never re-invoke
                         // generation. Take ownership only when the entry is claimable
                         // (stale or absent); a live owner is never reclaimed.
                         let fence = match &entry {
@@ -1393,7 +1393,7 @@ async fn wait_and_reuse(
 ///
 /// A proposal reference is required only when the durable journal recorded one.
 /// Proposal-less terminal outcomes (`PreflightBlocked`, some `GenerationFailed`)
-/// return their evidence directly ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no proposal is loaded and no validation is
+/// return their evidence directly — no proposal is loaded and no validation is
 /// re-run. The bundle is returned byte-for-byte as written.
 fn load_preserved_evidence(
     evidence_dir: &Path,
@@ -1789,8 +1789,8 @@ async fn resume_validation(
         bundle.repo_pin_after = head;
     }
 
-    // Fenced finalization under the registry lock: final evidence ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ terminal
-    // event ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ identity ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ checkpoint ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ registry.
+    // Fenced finalization under the registry lock: final evidence → terminal
+    // event → identity → checkpoint → registry.
     fenced_finalize(
         repo,
         identity_key,
@@ -2029,8 +2029,8 @@ async fn resume_late_finalization(
     // production (no barrier installed).
     token.park_at_safe_point().await;
 
-    // Fenced finalization under the registry lock: final evidence ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ terminal
-    // event ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ identity ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ checkpoint ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ registry. No validation re-run.
+    // Fenced finalization under the registry lock: final evidence → terminal
+    // event → identity → checkpoint → registry. No validation re-run.
     fenced_finalize(
         repo,
         identity_key,
@@ -2387,7 +2387,7 @@ mod tests {
 
         // Run 1 parks deterministically at the post-IntegrityVerified safe
         // point (validation and integrity durable, terminal publication
-        // pending), then is cancelled Ã¢â‚¬â€ a crash right before publication.
+        // pending), then is cancelled — a crash right before publication.
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let token = CancellationToken::with_park_barrier(barrier.clone());
         let cfg1 = EvaluationConfig::new(
@@ -2638,7 +2638,7 @@ mod tests {
 
         let marker3 = dir.path().join("m3.txt");
         let mut manifest = orch_manifest(&repo, "disk-orch", Some(marker_command(&marker3)), None);
-        manifest.min_disk_bytes = u64::MAX / 2; // absurd reserve ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ typed breach
+        manifest.min_disk_bytes = u64::MAX / 2; // absurd reserve → typed breach
         let validation_cmd = manifest.validation_command.clone();
 
         let cfg1 = EvaluationConfig::new(
@@ -2734,7 +2734,7 @@ mod tests {
         }
 
         // A retry of the same identity after the terminal failure is refused
-        // by append-only journal continuity Ã¢â‚¬â€ it can never silently re-execute
+        // by append-only journal continuity — it can never silently re-execute
         // (the provider counter stays at zero).
         let cfg2 = EvaluationConfig::new(
             orch_manifest(&repo, "disk-orch", validation_cmd.clone(), None),
@@ -2760,7 +2760,7 @@ mod tests {
         // A DIFFERENT identity whose reservation already exists and whose
         // owner is stale: the disk breach on the wait/reuse path must take
         // ownership on a legal fenced edge, journal the typed terminal, and
-        // return it â€” proving durable exact-once recovery of the resource
+        // return it — proving durable exact-once recovery of the resource
         // result without any execution.
         let task2 = "disk-resume";
         let marker4 = dir.path().join("m4.txt");
@@ -2908,7 +2908,7 @@ mod tests {
         }
 
         // Surface B: validation STDERR echoing the canary at RUNTIME (the
-        // command text itself stays clean Ã¢â‚¬â€ it is user input persisted in
+        // command text itself stays clean — it is user input persisted in
         // proposal/identity artifacts). Raw logs, previews, markdown and
         // journal must all be redacted.
         {

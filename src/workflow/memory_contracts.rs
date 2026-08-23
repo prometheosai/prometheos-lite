@@ -120,6 +120,9 @@ impl MemoryWrite {
         if w.write_id.is_empty() || w.content.is_empty() {
             bail!("write_id and content must not be empty");
         }
+        if w.writable_scopes.is_empty() {
+            bail!("memory write carries no writable scopes: nothing is authorized");
+        }
         Ok(w)
     }
 }
@@ -283,6 +286,258 @@ impl ProjectCheckpoint {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Slice 2: provider-neutral retrieval pipeline (scopes, staleness, budget)
+// ---------------------------------------------------------------------------
+
+/// A candidate as returned by a raw backend before Lite enforcement.
+#[derive(Debug, Clone)]
+pub struct RawCandidate {
+    pub memory_id: String,
+    pub kind: MemoryKind,
+    pub source_revision: String,
+    pub evidence: EvidenceReferenceV1,
+    pub content: String,
+    /// Backend relevance in `[0,1]`.
+    pub relevance: f32,
+}
+
+/// Typed backend failure so "backend unavailable" is never conflated with an
+/// ordinary retrieval error (acceptance: backend-unavailable case).
+#[derive(Debug)]
+pub struct MemoryBackendUnavailable {
+    pub backend: BackendKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for MemoryBackendUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "memory backend '{}' unavailable: {}",
+            match self.backend {
+                BackendKind::Local => "local",
+                BackendKind::Mnemosyne => "mnemosyne",
+                BackendKind::CloudAllowed => "cloud-allowed",
+            },
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for MemoryBackendUnavailable {}
+
+/// Provider-neutral port. Implementations: local store, optional Mnemosyne
+/// adapter, cloud-allowed adapter. Ports MUST enforce scope authorization
+/// server-side of this trait; Lite re-verifies non-emptiness here.
+pub trait MemoryRetrievalPort: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn backend(&self) -> BackendKind;
+    fn retrieve(&self, query: &MemoryQuery) -> Result<Vec<RawCandidate>>;
+    fn write(&self, write: &MemoryWrite) -> Result<String>;
+}
+
+/// Cheap deterministic token estimate (~4 chars/token); budgets must never
+/// depend on a tokenizer being installed.
+pub fn estimate_tokens(text: &str) -> u64 {
+    (text.chars().count() as u64).div_ceil(4)
+}
+
+/// Enforce Lite-side invariants and assemble the provenance-rich result:
+///
+/// - `query.readable_scopes` MUST be non-empty (empty scope set = nothing
+///   authorized => hard error, not an empty success);
+/// - candidates whose `source_revision` differs from `current_revision`
+///   (when known) are OMITTED with reason `"stale revision"` â€” stale data is
+///   never delivered;
+/// - candidates exceeding the query's token budget (greedy by relevance,
+///   stable order) are omitted with `"token budget exceeded"`;
+/// - every delivered candidate carries full SOMA EvidenceReference fields.
+pub fn assemble_retrieval(
+    query: &MemoryQuery,
+    backend: BackendKind,
+    mutation: &str,
+    executed_at: String,
+    raw: Vec<RawCandidate>,
+    current_revision: Option<&str>,
+) -> Result<RetrievalResult> {
+    ensure_supported_contract_version(&query.schema_version)?;
+    if query.readable_scopes.is_empty() {
+        bail!("memory query carries no readable scopes: nothing is authorized");
+    }
+
+    let mut selected: Vec<RetrievalCandidate> = Vec::new();
+    let mut omitted: Vec<OmittedEntry> = Vec::new();
+    let mut used_tokens: u64 = 0;
+    let budget = query.token_budget.unwrap_or(u64::MAX);
+
+    // Stable greedy order: relevance desc, then memory_id for determinism.
+    let mut ordered = raw;
+    ordered.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.memory_id.cmp(&b.memory_id))
+    });
+
+    // Conflict resolution: keep ONE entry per memory_id (highest relevance,
+    // then lexicographically smallest memory_id â€” the same deterministic
+    // ordering applied above). Every other duplicate is omitted with an
+    // explicit conflicting-duplicate reason.
+    let mut kept: Vec<RawCandidate> = Vec::new();
+    {
+        use std::collections::HashMap;
+        let mut first_idx: HashMap<String, usize> = HashMap::new();
+        for c in ordered.into_iter() {
+            match first_idx.get(&c.memory_id) {
+                None => {
+                    first_idx.insert(c.memory_id.clone(), kept.len());
+                    kept.push(c);
+                }
+                Some(&idx) => {
+                    // `kept` is already relevance-descending, so the stored
+                    // candidate has >= relevance; the newcomer is the loser.
+                    omitted.push(OmittedEntry {
+                        memory_id: c.memory_id.clone(),
+                        reason: format!(
+                            "conflicting duplicate (eventDigest {} superseded by {})",
+                            c.evidence.event_digest, kept[idx].evidence.event_digest
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    for c in kept {
+        if let Some(cur) = current_revision
+            && c.source_revision != cur
+        {
+            omitted.push(OmittedEntry {
+                memory_id: c.memory_id.clone(),
+                reason: format!(
+                    "stale revision: produced against {}, current {}",
+                    c.source_revision, cur
+                ),
+            });
+            continue;
+        }
+        let tokens = estimate_tokens(&c.content);
+        if used_tokens.saturating_add(tokens) > budget {
+            omitted.push(OmittedEntry {
+                memory_id: c.memory_id.clone(),
+                reason: "token budget exceeded".to_string(),
+            });
+            continue;
+        }
+        used_tokens = used_tokens.saturating_add(tokens);
+        selected.push(RetrievalCandidate {
+            memory_id: c.memory_id,
+            kind: c.kind,
+            source_revision: c.source_revision,
+            evidence: c.evidence,
+            content: c.content,
+            relevance: c.relevance,
+        });
+    }
+
+    Ok(RetrievalResult {
+        schema_version: MEMORY_CONTRACT_VERSION.to_string(),
+        query_id: query.query_id.clone(),
+        token_estimate: used_tokens,
+        candidates: selected,
+        omitted,
+        policy: OperationPolicy {
+            backend,
+            mutation: mutation.to_string(),
+            executed_at,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3: final ordered ContextBundle assembly
+// ---------------------------------------------------------------------------
+
+impl ContextBundle {
+    /// Fail-closed parse with the same major-version gate as every other
+    /// document in this family.
+    pub fn parse_json(json: &str) -> Result<Self> {
+        let b: Self =
+            serde_json::from_str(json).context("failed to parse lite.memory ContextBundle")?;
+        ensure_supported_contract_version(&b.schema_version)?;
+        if b.bundle_id.is_empty() {
+            bail!("bundle_id must not be empty");
+        }
+        Ok(b)
+    }
+}
+
+/// Assemble the final ordered `ContextBundle` from retrieval output:
+///
+/// - deterministic block order (relevance desc, then `memory_id`);
+/// - per-block token estimates via [`estimate_tokens`];
+/// - `digest` computed over the canonical form of the bundle WITHOUT the
+///   digest field itself (so the field is verifiable by re-computation);
+/// - omitted entries pass through unchanged (already reasoned upstream).
+pub fn assemble_context_bundle(
+    bundle_id: &str,
+    query_id: &str,
+    mut candidates: Vec<RetrievalCandidate>,
+    omitted: Vec<OmittedEntry>,
+    policy: OperationPolicy,
+) -> Result<ContextBundle> {
+    if bundle_id.is_empty() {
+        bail!("bundle_id must not be empty");
+    }
+    candidates.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.memory_id.cmp(&b.memory_id))
+    });
+    let blocks: Vec<ContextBlock> = candidates
+        .into_iter()
+        .map(|c| {
+            let tokens = estimate_tokens(&c.content);
+            ContextBlock {
+                memory_id: c.memory_id,
+                content: c.content,
+                tokens,
+                selected_because: format!(
+                    "relevance {:.3}, kind {}",
+                    c.relevance,
+                    serde_json::to_string(&c.kind).unwrap_or_default()
+                ),
+            }
+        })
+        .collect();
+    let token_estimate = blocks.iter().map(|b| b.tokens).sum();
+
+    // Digest covers everything except the digest field itself.
+    let pre = serde_json::json!({
+        "bundleId": bundle_id,
+        "blocks": blocks,
+        "omitted": omitted,
+        "policy": policy,
+        "queryId": query_id,
+        "schemaVersion": MEMORY_CONTRACT_VERSION,
+        "tokenEstimate": token_estimate,
+    });
+    let digest = canonical_digest(&pre)?;
+
+    Ok(ContextBundle {
+        schema_version: MEMORY_CONTRACT_VERSION.to_string(),
+        bundle_id: bundle_id.to_string(),
+        query_id: query_id.to_string(),
+        blocks,
+        omitted,
+        token_estimate,
+        digest,
+        policy,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +588,217 @@ mod tests {
         );
         let c = serde_json::json!({"b":2,"a":[2,1]});
         assert_ne!(canonical_digest(&c).unwrap(), d1);
+    }
+
+    // ---- slice 2: pipeline enforcement ----
+
+    fn ev(id: &str) -> EvidenceReferenceV1 {
+        EvidenceReferenceV1 {
+            id: id.to_string(),
+            event_digest: "a".repeat(64),
+            artifact_digest: "b".repeat(64),
+            artifact_kind: "memory".into(),
+            produced_by: "test".into(),
+            produced_at: None,
+        }
+    }
+
+    fn raw(id: &str, rev: &str, rel: f32, chars: usize) -> RawCandidate {
+        RawCandidate {
+            memory_id: id.into(),
+            kind: MemoryKind::Fact,
+            source_revision: rev.into(),
+            evidence: ev(id),
+            content: "x".repeat(chars),
+            relevance: rel,
+        }
+    }
+
+    fn q(budget: Option<u64>) -> MemoryQuery {
+        MemoryQuery {
+            schema_version: MEMORY_CONTRACT_VERSION.into(),
+            query_id: "q".into(),
+            readable_scopes: vec!["p".into()],
+            text: "t".into(),
+            kinds: vec![],
+            token_budget: budget,
+        }
+    }
+
+    #[test]
+    fn empty_scopes_are_rejected() {
+        let mut query = q(None);
+        query.readable_scopes.clear();
+        let err = assemble_retrieval(&query, BackendKind::Local, "none", now(), vec![], None)
+            .unwrap_err();
+        assert!(err.to_string().contains("no readable scopes"), "{err}");
+    }
+
+    #[test]
+    fn stale_revision_is_omitted_never_delivered() {
+        let r = assemble_retrieval(
+            &q(None),
+            BackendKind::Local,
+            "none",
+            now(),
+            vec![raw("fresh", "rev1", 0.9, 40), raw("old", "rev0", 0.8, 40)],
+            Some("rev1"),
+        )
+        .unwrap();
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!(r.candidates[0].memory_id, "fresh");
+        assert_eq!(r.omitted.len(), 1);
+        assert!(r.omitted[0].reason.starts_with("stale revision"));
+    }
+
+    #[test]
+    fn token_budget_trims_by_relevance_with_reason() {
+        let mut query = q(Some(20)); // ~80 chars total
+        query.readable_scopes = vec!["p".into()];
+        let r = assemble_retrieval(
+            &query,
+            BackendKind::Local,
+            "none",
+            now(),
+            vec![raw("hi", "r", 0.9, 160), raw("lo", "r", 0.5, 40)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!(r.candidates[0].memory_id, "lo");
+        assert_eq!(r.omitted.len(), 1);
+        assert_eq!(r.omitted[0].reason, "token budget exceeded");
+        assert_eq!(r.token_estimate, estimate_tokens(&"x".repeat(40)));
+    }
+
+    #[test]
+    fn backend_unavailable_is_a_distinct_typed_error() {
+        let e = MemoryBackendUnavailable {
+            backend: BackendKind::Mnemosyne,
+            message: "connection refused".into(),
+        };
+        assert!(e.to_string().contains("mnemosyne"));
+        assert!(e.to_string().contains("unavailable"));
+    }
+
+    struct UnavailablePort;
+    impl MemoryRetrievalPort for UnavailablePort {
+        fn name(&self) -> &'static str {
+            "unavailable"
+        }
+        fn backend(&self) -> BackendKind {
+            BackendKind::Local
+        }
+        fn retrieve(&self, _q: &MemoryQuery) -> Result<Vec<RawCandidate>> {
+            Err(anyhow::Error::new(MemoryBackendUnavailable {
+                backend: BackendKind::Local,
+                message: "db locked".into(),
+            }))
+        }
+        fn write(&self, _w: &MemoryWrite) -> Result<String> {
+            Err(anyhow::Error::new(MemoryBackendUnavailable {
+                backend: BackendKind::Local,
+                message: "db locked".into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn port_unavailable_surfaces_typed_error() {
+        use anyhow::Context as _;
+        let port = UnavailablePort;
+        let err = port.retrieve(&q(None)).context("retrieve");
+        let err = err.expect_err("must fail");
+        let typed = err
+            .chain()
+            .filter_map(|c| c.downcast_ref::<MemoryBackendUnavailable>())
+            .next()
+            .expect("typed backend-unavailable must be in the chain");
+        assert!(matches!(typed.backend, BackendKind::Local));
+    }
+
+    fn now() -> String {
+        "2026-08-23T00:00:00Z".into()
+    }
+
+    // ---- slice 3: bundle assembly ----
+
+    fn cand(id: &str, rel: f32, chars: usize) -> RetrievalCandidate {
+        RetrievalCandidate {
+            memory_id: id.into(),
+            kind: MemoryKind::Preference,
+            source_revision: "r1".into(),
+            evidence: ev(id),
+            content: "y".repeat(chars),
+            relevance: rel,
+        }
+    }
+
+    #[test]
+    fn bundle_order_is_deterministic_and_tokens_estimated() {
+        let cands = vec![cand("b", 0.9, 40), cand("a", 0.9, 80), cand("c", 0.5, 10)];
+        let pol = OperationPolicy {
+            backend: BackendKind::Local,
+            mutation: "none".into(),
+            executed_at: now(),
+        };
+        let b1 = assemble_context_bundle("bd-1", "q", cands.clone(), vec![], pol.clone()).unwrap();
+        let b2 = assemble_context_bundle("bd-1", "q", cands, vec![], pol).unwrap();
+        assert_eq!(b1.digest, b2.digest, "same input must yield same digest");
+        assert_eq!(b1.blocks[0].memory_id, "a"); // rel 0.9 tie-break id asc
+        assert_eq!(
+            b1.blocks.iter().map(|x| x.tokens).sum::<u64>(),
+            b1.token_estimate
+        );
+    }
+
+    #[test]
+    fn bundle_digest_is_content_sensitive() {
+        let pol = OperationPolicy {
+            backend: BackendKind::Local,
+            mutation: "none".into(),
+            executed_at: now(),
+        };
+        let b1 = assemble_context_bundle("d", "q", vec![cand("a", 0.9, 40)], vec![], pol.clone())
+            .unwrap();
+        let b2 = assemble_context_bundle("d", "q", vec![cand("a", 0.9, 41)], vec![], pol).unwrap();
+        assert_ne!(b1.digest, b2.digest);
+    }
+
+    #[test]
+    fn context_bundle_parse_rejects_future_major() {
+        let mut b = assemble_context_bundle(
+            "d",
+            "q",
+            vec![cand("a", 0.5, 8)],
+            vec![],
+            OperationPolicy {
+                backend: BackendKind::Local,
+                mutation: "none".into(),
+                executed_at: now(),
+            },
+        )
+        .unwrap();
+        b.schema_version = "9.0.0".into();
+        let err = ContextBundle::parse_json(&serde_json::to_string(&b).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("fail closed"), "{err}");
+    }
+
+    #[test]
+    fn empty_bundle_id_is_rejected() {
+        let err = assemble_context_bundle(
+            "",
+            "q",
+            vec![],
+            vec![],
+            OperationPolicy {
+                backend: BackendKind::Local,
+                mutation: "none".into(),
+                executed_at: now(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bundle_id"), "{err}");
     }
 
     fn sample_pws() -> PortableWorkState {
@@ -393,5 +859,62 @@ mod tests {
         // Deterministic: same state => same digest.
         let again = ProjectCheckpoint::from_portable_work_state(&pws).unwrap();
         assert_eq!(cp, again);
+    }
+    #[test]
+    fn conflicting_duplicates_keep_best_and_omit_rest() {
+        let mut hi = raw("dup", "r1", 0.6, 40);
+        hi.evidence.event_digest = "e".repeat(64);
+        let mut lo = raw("dup", "r1", 0.9, 40);
+        lo.evidence.event_digest = "f".repeat(64);
+        // Insert order: relevance sort puts `lo` first regardless.
+        let r = assemble_retrieval(
+            &q(None),
+            BackendKind::Local,
+            "none",
+            now(),
+            vec![hi, lo],
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!(r.candidates[0].evidence.event_digest, "f".repeat(64));
+        assert_eq!(r.omitted.len(), 1);
+        assert!(r.omitted[0].reason.starts_with("conflicting duplicate"));
+    }
+
+    #[test]
+    fn equal_relevance_tie_breaks_on_memory_id() {
+        // Locks the documented determinism rule: identical relevance resolves
+        // ORDER by lexicographically smallest memory_id (both candidates are
+        // delivered; dedupe only collapses identical ids).
+        let zz = raw("zz", "r1", 0.7, 40);
+        let mut aa = raw("aa", "r1", 0.7, 40);
+        aa.evidence.event_digest = "3".repeat(64);
+        let r = assemble_retrieval(
+            &q(None),
+            BackendKind::Local,
+            "none",
+            now(),
+            vec![zz, aa],
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.candidates.len(), 2);
+        assert_eq!(r.candidates[0].memory_id, "aa");
+        assert_eq!(r.candidates[1].memory_id, "zz");
+        assert!(r.omitted.is_empty());
+    }
+    #[test]
+    fn write_without_scopes_fails_closed() {
+        let w = MemoryWrite {
+            schema_version: MEMORY_CONTRACT_VERSION.into(),
+            write_id: "w".into(),
+            writable_scopes: vec![],
+            kind: MemoryKind::Fact,
+            content: "c".into(),
+            tags: vec![],
+        };
+        let err = MemoryWrite::parse_json(&serde_json::to_string(&w).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("no writable scopes"), "{err}");
     }
 }
