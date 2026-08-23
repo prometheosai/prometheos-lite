@@ -348,7 +348,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// - `query.readable_scopes` MUST be non-empty (empty scope set = nothing
 ///   authorized => hard error, not an empty success);
 /// - candidates whose `source_revision` differs from `current_revision`
-///   (when known) are OMITTED with reason `"stale revision"` Ã¢â‚¬â€ stale data is
+///   (when known) are OMITTED with reason `"stale revision"` — stale data is
 ///   never delivered;
 /// - candidates exceeding the query's token budget (greedy by relevance,
 ///   stable order) are omitted with `"token budget exceeded"`;

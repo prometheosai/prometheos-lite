@@ -2,14 +2,14 @@
 //!
 //! Evidence directories accumulate durable artifacts (proposal, validation,
 //! integrity, raw logs, terminal evidence). Retention must never delete a
-//! referenced artifact â€” terminal, nonterminal/recoverable, journal-referenced,
-//! checkpoint-referenced, or `PortableWorkState`-referenced â€” and must never
+//! referenced artifact — terminal, nonterminal/recoverable, journal-referenced,
+//! checkpoint-referenced, or `PortableWorkState`-referenced — and must never
 //! follow a reference outside the repository.
 //!
 //! This module provides the deterministic building blocks:
-//! - [`ProtectedReferences`] â€” the set of artifact paths that must survive.
-//! - [`plan_retention`] â€” classify every candidate under a root.
-//! - [`apply_retention`] â€” remove only planned, unprotected, in-repo candidates
+//! - [`ProtectedReferences`] — the set of artifact paths that must survive.
+//! - [`plan_retention`] — classify every candidate under a root.
+//! - [`apply_retention`] — remove only planned, unprotected, in-repo candidates
 //!   (revalidating safety immediately before each removal).
 //!
 //! Corrupted-but-referenced evidence is still protected: fail closed and
