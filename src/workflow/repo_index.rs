@@ -1,4 +1,4 @@
-//! Stable, revision-qualified local repository index (#167 slice 1).
+﻿//! Stable, revision-qualified local repository index (#167 slice 1).
 //!
 //! OWNERSHIP: Lite owns scanning, revision detection, digests, indexing and
 //! local retrieval. This module wraps the existing extraction engine
@@ -185,7 +185,7 @@ impl IndexedRepository {
 
     /// Fail-closed freshness check: current HEAD must equal the captured
     /// revision and every indexed file's digest must still match. Any drift
-    /// returns [`IndexStale`] ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â callers must rebuild, never read stale.
+    /// returns [`IndexStale`] - callers must rebuild, never read stale.
     pub fn verify_fresh(&self, root: &Path) -> Result<()> {
         let current = git(root, &["rev-parse", "HEAD"])?;
         if current != self.identity.revision {
@@ -303,8 +303,8 @@ impl IndexedRepository {
             .collect()
     }
 
-    /// Outgoing relations of a bounded kind from symbols named `from`.
-    /// Only relation kinds the extractor marks reliable are surfaced here.
+    /// Outgoing edges whose `from` equals this value. Extractor convention:
+    /// for Import/Call kinds `from` is the SOURCE FILE NAME, not a symbol.
     pub fn relations_from<'a>(
         &'a self,
         from: &str,
@@ -316,7 +316,8 @@ impl IndexedRepository {
             .collect()
     }
 
-    /// Incoming relations of a bounded kind into symbols named `to`.
+    /// Incoming edges whose `to` equals this value (for Import/Call kinds
+    /// `to` is the referenced target name).
     pub fn relations_to<'a>(
         &'a self,
         to: &str,
