@@ -185,7 +185,7 @@ impl IndexedRepository {
 
     /// Fail-closed freshness check: current HEAD must equal the captured
     /// revision and every indexed file's digest must still match. Any drift
-    /// returns [`IndexStale`] â€” callers must rebuild, never read stale.
+    /// returns [`IndexStale`] ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â callers must rebuild, never read stale.
     pub fn verify_fresh(&self, root: &Path) -> Result<()> {
         let current = git(root, &["rev-parse", "HEAD"])?;
         if current != self.identity.revision {
@@ -258,6 +258,112 @@ impl IndexedRepository {
     pub fn symbol_occurrences(&self, name: &str) -> usize {
         self.symbols.iter().filter(|s| s.name == name).count()
     }
+
+    // -----------------------------------------------------------------
+    // Slice 2: lexical + bounded relations lookup
+    // -----------------------------------------------------------------
+
+    /// Case-insensitive substring search over symbol names. Deterministic
+    /// (index order). Empty `needle` yields no results (avoid full-table scan).
+    pub fn lexical_symbol_search<'a>(&'a self, needle: &str) -> Vec<SymbolLookup<'a>> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let n = needle.to_ascii_lowercase();
+        self.symbols
+            .iter()
+            .filter(|s| s.name.to_ascii_lowercase().contains(&n))
+            .map(move |s| {
+                let rel_key = {
+                    let p = s.file.to_string_lossy().replace('\\', "/");
+                    let root_norm = self
+                        .identity
+                        .root
+                        .replace('\\', "/")
+                        .trim_end_matches('/')
+                        .to_string();
+                    match p.strip_prefix(root_norm.as_str()) {
+                        Some(r) => r.trim_start_matches('/').to_string(),
+                        None => p.clone(),
+                    }
+                };
+                let file_sha256 = self.files.get(&rel_key).map(|e| e.sha256.as_str());
+                SymbolLookup::Hit {
+                    name: &s.name,
+                    file: &s.file,
+                    line_start: s.line_start,
+                    line_end: s.line_end,
+                    kind: s.kind,
+                    signature: s.signature.as_deref(),
+                    visibility: &s.visibility,
+                    revision: &self.identity.revision,
+                    file_sha256,
+                }
+            })
+            .collect()
+    }
+
+    /// Outgoing relations of a bounded kind from symbols named `from`.
+    /// Only relation kinds the extractor marks reliable are surfaced here.
+    pub fn relations_from<'a>(
+        &'a self,
+        from: &str,
+        kinds: &'a [crate::harness::repo_intelligence::EdgeKind],
+    ) -> Vec<&'a SymbolEdge> {
+        self.relations
+            .iter()
+            .filter(|e| e.from == from && kinds.contains(&e.kind))
+            .collect()
+    }
+
+    /// Incoming relations of a bounded kind into symbols named `to`.
+    pub fn relations_to<'a>(
+        &'a self,
+        to: &str,
+        kinds: &'a [crate::harness::repo_intelligence::EdgeKind],
+    ) -> Vec<&'a SymbolEdge> {
+        self.relations
+            .iter()
+            .filter(|e| e.to == to && kinds.contains(&e.kind))
+            .collect()
+    }
+
+    /// Heuristic symbol-linked test association. A symbol links to
+    /// `symbol_name` when ANY of:
+    /// - its own name contains "test" and the target name, or
+    /// - it lives in a test/spec file whose path references the target name,
+    /// - it is a Test-kind symbol whose path references the FILE STEM of a
+    ///   definition site of the target (module-under-test convention,
+    ///   e.g. `util.rs` <-> `tests/util_test.rs`).
+    pub fn linked_tests<'a>(&'a self, symbol_name: &str) -> Vec<&'a CodeSymbol> {
+        let lower = symbol_name.to_ascii_lowercase();
+        // File stems of the target's definition sites.
+        let mut stems: Vec<String> = Vec::new();
+        for s in self.symbols.iter().filter(|s| s.name == symbol_name) {
+            if let Some(stem) = s.file.file_stem() {
+                let st = stem.to_string_lossy().to_ascii_lowercase().to_string();
+                if !st.is_empty() && !stems.contains(&st) {
+                    stems.push(st);
+                }
+            }
+        }
+        self.symbols
+            .iter()
+            .filter(|s| {
+                let n = s.name.to_ascii_lowercase();
+                let path = s.file.to_string_lossy().to_ascii_lowercase();
+                let name_links = n.contains("test") && n.contains(&lower);
+                let path_links =
+                    (path.contains("test") || path.contains("spec")) && path.contains(&lower);
+                let module_links = stems.iter().any(|st| {
+                    path.contains(&format!("{st}_test"))
+                        || path.contains(&format!("{st}_spec"))
+                        || path.ends_with(&format!("test_{st}.rs"))
+                });
+                name_links || path_links || module_links
+            })
+            .collect()
+    }
 }
 
 /// Fail-closed staleness error (revision or file digest drift).
@@ -305,7 +411,7 @@ mod tests {
         g(&["config", "user.name", "T"]);
         std::fs::write(
             repo.join("src/lib.rs"),
-            "pub mod util;\npub fn top() -> u32 { util::helper() }\n",
+            "pub mod util;\nuse crate::util::helper;\npub fn top() -> u32 { helper() }\n",
         )
         .unwrap();
         std::fs::write(repo.join("src/util.rs"), "pub fn helper() -> u32 { 1 }\n").unwrap();
@@ -405,5 +511,83 @@ mod tests {
         .unwrap();
         let idx = IndexedRepository::build(&repo).unwrap();
         assert!(idx.identity.dirty, "uncommitted change must set dirty flag");
+    }
+    // ---- slice 2: lexical + relations ----
+
+    #[test]
+    fn lexical_search_is_case_insensitive_and_deterministic() {
+        let dir = init_repo("idx-lex");
+        let repo = dir.path().join("idx-lex");
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let hits = idx.lexical_symbol_search("HELP");
+        assert!(
+            hits.iter()
+                .any(|h| matches!(h, SymbolLookup::Hit { name, .. } if *name == "helper"))
+        );
+        assert!(
+            idx.lexical_symbol_search("").is_empty(),
+            "empty needle = no scan"
+        );
+    }
+
+    #[test]
+    fn bounded_relations_query_is_typed_and_directional() {
+        use crate::harness::repo_intelligence::EdgeKind;
+        let dir = init_repo("idx-rel");
+        let repo = dir.path().join("idx-rel");
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let kinds = [EdgeKind::Import, EdgeKind::Call, EdgeKind::Reference];
+        // Engine convention: Import/Call edges carry the SOURCE FILE NAME in
+        // `from` and the referenced target name in `to`.
+        let out_to = idx.relations_to("helper", &kinds);
+        assert!(
+            !out_to.is_empty(),
+            "fixture must produce import/call edges into helper"
+        );
+        let dbg: Vec<String> = out_to
+            .iter()
+            .map(|e| format!("{}->{} {:?}", e.from, e.to, e.kind))
+            .collect();
+        assert!(!dbg.is_empty(), "fixture must produce edges");
+        for e in &out_to {
+            assert!(kinds.contains(&e.kind));
+        }
+        let helper_edge = out_to
+            .iter()
+            .find(|e| e.to.trim_end_matches(';') == "helper")
+            .expect("no edge targeting helper");
+        let src_file = helper_edge.from.as_str();
+        let out_from = idx.relations_from(src_file, &[EdgeKind::Import]);
+        assert!(
+            !out_from.is_empty(),
+            "directional from-query must find edges; src_file={src_file:?} all={dbg:?}"
+        );
+    }
+
+    #[test]
+    fn linked_tests_uses_name_and_path_heuristic() {
+        let dir = init_repo("idx-tests");
+        let repo = dir.path().join("idx-tests");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(
+            repo.join("tests").join("util_test.rs"),
+            "#[test]\nfn helper_works() { assert_eq!(1,1); }\n",
+        )
+        .unwrap();
+        let g = |a: &[&str]| {
+            std::process::Command::new("git")
+                .args(a)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "tests"]);
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let linked = idx.linked_tests("helper");
+        assert!(
+            linked.iter().any(|s| s.name.contains("helper")),
+            "test symbol linking failed"
+        );
     }
 }
