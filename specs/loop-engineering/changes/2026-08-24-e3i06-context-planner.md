@@ -59,6 +59,7 @@ provider invocation itself.
 
 ## Verification plan
 
-fmt/clippy/-D warnings; cargo test --lib workflow::context_planner;
-tests/context_planner_scenarios.rs (determinism, two-profile projection,
-multi-port partial failure, budget capping).
+fmt/clippy/-D warnings; cargo test --lib workflow::context_planner
+(determinism, two-profile projection, multi-port partial failure, budget
+capping incl. override clamping); tests/context_planner_scenarios.rs
+(RepoEvidencePort end-to-end through retrieval + assembly).

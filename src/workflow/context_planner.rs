@@ -440,4 +440,26 @@ mod tests {
                 .any(|o| o.reason.starts_with("stale revision"))
         );
     }
+    #[test]
+    fn override_clamped_to_window_minus_reserved() {
+        let rows = vec![row("big", 0.9, 3600, "r1"), row("small", 0.5, 100, "r1")];
+        let p = StubPort {
+            backend: BackendKind::Local,
+            rows,
+            unavailable: false,
+        };
+        let mut inp = inputs("clamp", 1000, Some(5000));
+        inp.token_budget_override = Some(5000);
+        let outcome = plan(&inp, &[&p]).unwrap();
+        // Override 5000 clamped to window(1000)-reserved(100) = 900.
+        assert_eq!(outcome.audit.effective_budget_tokens, 900);
+        assert!(outcome.bundle.blocks.len() < 3, "budget must cap selection");
+        assert!(
+            outcome
+                .bundle
+                .omitted
+                .iter()
+                .any(|o| o.reason == "token budget exceeded")
+        );
+    }
 }
