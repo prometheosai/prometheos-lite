@@ -23,7 +23,7 @@ Development sequencing is tracked in the [governed execution roadmap](https://gi
 ## Stable alpha surface
 
 - `prometheos work` — Repo Workbench CRUD, artifacts, memory, continue, approve
-- Repo Workbench deterministic static analysis (tree-sitter, no model required)
+- Repo Workbench deterministic static analysis (tree-sitter, no model required), sourced from a revision-qualified repository index (HEAD + per-file digests; no first-N truncation)
 - WorkContext creation, run, and continuation
 - Risk report and suggested patch plan artifacts
 - Approval recording

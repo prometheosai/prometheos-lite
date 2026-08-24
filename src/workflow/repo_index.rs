@@ -1,4 +1,4 @@
-﻿//! Stable, revision-qualified local repository index (#167 slice 1).
+//! Stable, revision-qualified local repository index (#167 slice 1).
 //!
 //! OWNERSHIP: Lite owns scanning, revision detection, digests, indexing and
 //! local retrieval. This module wraps the existing extraction engine
@@ -387,6 +387,232 @@ fn detect_language_public(p: &Path) -> String {
     crate::harness::repo_intelligence::detect_language(p)
 }
 
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Slice 4: versioned normalized fact-batch emission (lite.repofact.v1)
+// ---------------------------------------------------------------------------
+
+/// One normalized repository fact. Lite-owned `lite.repofact.v1`
+/// (no published SOMA++ family exists; upstream publication is future work).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryFactV1 {
+    /// Stable id: `<revision>:<rel_path>#<name>` (matches retrieval ids).
+    pub fact_id: String,
+    pub kind: String,
+    pub name: String,
+    pub rel_path: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub visibility: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    pub file_sha256: String,
+}
+
+/// Versioned batch envelope binding facts to a repository revision with a
+/// canonical digest. Fail-closed on unknown major versions when parsed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepoFactBatchV1 {
+    pub schema_version: String,
+    pub parser_version: String,
+    pub identity: RepositoryIdentity,
+    pub facts: Vec<RepositoryFactV1>,
+    /// Canonical digest over every other field (recomputable).
+    pub batch_digest: String,
+}
+
+impl RepoFactBatchV1 {
+    /// Build from an index. Facts mirror indexed symbols with full
+    /// provenance (file digest + revision via the envelope).
+    pub fn from_index(index: &IndexedRepository) -> Result<Self> {
+        let root_norm = index
+            .identity
+            .root
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        let mut facts = Vec::new();
+        for s in &index.symbols {
+            let abs_norm = s.file.to_string_lossy().replace('\\', "/");
+            let rel = abs_norm
+                .strip_prefix(root_norm.as_str())
+                .map(|r| r.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| abs_norm.clone());
+            let file_sha256 = index
+                .files
+                .get(&rel)
+                .map(|e| e.sha256.clone())
+                .unwrap_or_else(|| "0".repeat(64));
+            facts.push(RepositoryFactV1 {
+                fact_id: format!("{}:{}#{}", index.identity.revision, rel, s.name),
+                kind: format!("{:?}", s.kind),
+                name: s.name.clone(),
+                rel_path: rel,
+                line_start: s.line_start as u32,
+                line_end: s.line_end as u32,
+                visibility: format!("{:?}", s.visibility),
+                signature: s.signature.clone(),
+                file_sha256,
+            });
+        }
+        let pre = serde_json::json!({
+            "facts": facts,
+            "identity": index.identity,
+            "parserVersion": index.parser_version,
+            "schemaVersion": "1.0.0",
+        });
+        Ok(Self {
+            schema_version: "1.0.0".to_string(),
+            parser_version: index.parser_version.clone(),
+            identity: index.identity.clone(),
+            batch_digest: crate::workflow::memory_contracts::canonical_digest(&pre)?,
+            facts,
+        })
+    }
+
+    /// Fail-closed parse: rejects major versions above 1.
+    pub fn parse_json(json: &str) -> Result<Self> {
+        let b: Self = serde_json::from_str(json).context("failed to parse lite.repofact batch")?;
+        let ceiling = crate::workflow::schema::SchemaVersion::new(1, u32::MAX, u32::MAX);
+        let sv = crate::workflow::schema::SchemaVersion::parse(&b.schema_version)
+            .context("invalid lite.repofact schema_version")?;
+        if sv > ceiling {
+            bail!(
+                "unsupported lite.repofact version {} (fail closed)",
+                b.schema_version
+            );
+        }
+        Ok(b)
+    }
+}
+
+// Slice 3: local RetrievalPort integration (#153 contract family)
+// ---------------------------------------------------------------------------
+
+/// Read-only [`crate::workflow::memory_contracts::MemoryRetrievalPort`]
+/// backed by an [`IndexedRepository`]. Query text is matched deterministically:
+/// exact symbol name first, then case-insensitive lexical search.
+///
+/// Staleness is fail-closed: when a `current_revision` is supplied and it
+/// differs from the indexed revision, retrieval errors with
+/// [`IndexStale`] in the chain (never silently serves stale context).
+///
+/// The repository index is a read-only evidence surface: `write` is always a
+/// typed unavailable error.
+pub struct RepoEvidencePort {
+    pub index: IndexedRepository,
+    pub current_revision: Option<String>,
+}
+
+impl crate::workflow::memory_contracts::MemoryRetrievalPort for RepoEvidencePort {
+    fn name(&self) -> &'static str {
+        "repo-evidence"
+    }
+    fn backend(&self) -> crate::workflow::memory_contracts::BackendKind {
+        crate::workflow::memory_contracts::BackendKind::Local
+    }
+
+    fn retrieve(
+        &self,
+        query: &crate::workflow::memory_contracts::MemoryQuery,
+    ) -> Result<Vec<crate::workflow::memory_contracts::RawCandidate>> {
+        use crate::workflow::memory_contracts::{EvidenceReferenceV1, RawCandidate};
+        if let Some(cur) = &self.current_revision
+            && cur.as_str() != self.index.identity.revision
+        {
+            return Err(IndexStale {
+                reason: format!(
+                    "query revision {cur} != indexed revision {}",
+                    self.index.identity.revision
+                ),
+            }
+            .into());
+        }
+        let term = query.text.trim();
+        if term.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Deterministic: exact hit(s) preferred; else lexical matches.
+        let mut out: Vec<RawCandidate> = Vec::new();
+        let push = |s: &CodeSymbol, out: &mut Vec<RawCandidate>| {
+            let abs_norm = s.file.to_string_lossy().replace('\\', "/");
+            let root_norm = self
+                .index
+                .identity
+                .root
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_string();
+            let rel = abs_norm
+                .strip_prefix(root_norm.as_str())
+                .map(|r| r.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| abs_norm.clone());
+            let artifact_digest = self
+                .index
+                .files
+                .get(&rel)
+                .map(|e| e.sha256.clone())
+                .unwrap_or_else(|| "0".repeat(64));
+            let memory_id = format!("repo:{rel}#{}", s.name);
+            let event_digest = {
+                let mut h = Sha256::new();
+                h.update(self.index.identity.revision.as_bytes());
+                h.update(b"\n");
+                h.update(rel.as_bytes());
+                format!("{:x}", h.finalize())
+            };
+            out.push(RawCandidate {
+                memory_id,
+                kind: crate::workflow::memory_contracts::MemoryKind::Fact,
+                source_revision: self.index.identity.revision.clone(),
+                evidence: EvidenceReferenceV1 {
+                    id: String::new(), // filled below (id == memory id)
+                    event_digest,
+                    artifact_digest,
+                    artifact_kind: "repository-symbol".into(),
+                    produced_by: self.index.parser_version.clone(),
+                    produced_at: Some(self.index.built_at.clone()),
+                },
+                content: match &s.signature {
+                    Some(sig) => format!("{sig}\n// {}:{}..{}", rel, s.line_start, s.line_end),
+                    None => format!("{}\n// {}:{}..{}", s.name, rel, s.line_start, s.line_end),
+                },
+                relevance: 1.0,
+            });
+            let last = out.last_mut().expect("just pushed");
+            last.evidence.id = last.memory_id.clone();
+        };
+        match self.index.exact_symbol(term) {
+            SymbolLookup::Hit { .. } => {
+                if let Some(s) = self.index.symbols.iter().find(|s| s.name == term) {
+                    push(s, &mut out);
+                }
+            }
+            SymbolLookup::NotFound { .. } => {
+                for s in self.index.symbols.iter().filter(|s| {
+                    s.name
+                        .to_ascii_lowercase()
+                        .contains(&term.to_ascii_lowercase())
+                }) {
+                    push(s, &mut out);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn write(&self, _write: &crate::workflow::memory_contracts::MemoryWrite) -> Result<String> {
+        Err(anyhow::Error::new(
+            crate::workflow::memory_contracts::MemoryBackendUnavailable {
+                backend: crate::workflow::memory_contracts::BackendKind::Local,
+                message: "repository evidence index is read-only".into(),
+            },
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,5 +816,33 @@ mod tests {
             linked.iter().any(|s| s.name.contains("helper")),
             "test symbol linking failed"
         );
+    }
+    // ---- slice 4: repofact batch ----
+
+    #[test]
+    fn repofact_batch_is_deterministic_and_roundtrips() {
+        let dir = init_repo("rf1");
+        let repo = dir.path().join("rf1");
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let b1 = RepoFactBatchV1::from_index(&idx).unwrap();
+        let b2 = RepoFactBatchV1::from_index(&idx).unwrap();
+        assert_eq!(b1.batch_digest, b2.batch_digest);
+        assert_eq!(b1.batch_digest.len(), 64);
+        assert!(b1.facts.iter().any(|f| f.name == "top"));
+        assert!(b1.facts.iter().all(|f| f.file_sha256.len() == 64));
+        let json = serde_json::to_string(&b1).unwrap();
+        let parsed = RepoFactBatchV1::parse_json(&json).unwrap();
+        assert_eq!(parsed, b1);
+    }
+
+    #[test]
+    fn repofact_batch_rejects_future_major() {
+        let dir = init_repo("rf2");
+        let repo = dir.path().join("rf2");
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let mut b = RepoFactBatchV1::from_index(&idx).unwrap();
+        b.schema_version = "7.0.0".into();
+        let err = RepoFactBatchV1::parse_json(&serde_json::to_string(&b).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("fail closed"), "{err}");
     }
 }

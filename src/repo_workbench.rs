@@ -462,59 +462,61 @@ fn save_context(context: &WorkbenchContext) -> Result<()> {
 }
 
 fn scan_repo(repo_path: &Path) -> Result<RepoSummary> {
-    let mut files = Vec::new();
-    let mut ignored_dirs = vec![
-        ".git".to_string(),
-        "target".to_string(),
-        "node_modules".to_string(),
-        "dist".to_string(),
-        "build".to_string(),
-        ".prometheos-lite".to_string(),
+    let ignored_dirs: Vec<String> = vec![
+        ".git".into(),
+        "target".into(),
+        "node_modules".into(),
+        "dist".into(),
+        "build".into(),
+        ".prometheos-lite".into(),
     ];
+    let is_ignored_rel = |rel: &str| {
+        let norm = rel.replace('\\', "/");
+        ignored_dirs.iter().any(|d| {
+            norm == *d || norm.starts_with(&format!("{d}/")) || norm.contains(&format!("/{d}/"))
+        })
+    };
 
-    for entry in WalkDir::new(repo_path)
-        .into_iter()
-        .filter_entry(|entry| !is_ignored(entry))
-        .filter_map(|entry| entry.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
+    // Revision-qualified source (#167): candidate files come from the stable
+    // repository index (HEAD + per-file digests, no first-N truncation).
+    // Workbench contexts are always git repositories.
+    match crate::workflow::repo_index::IndexedRepository::build(repo_path) {
+        Ok(index) => {
+            let mut files = Vec::new();
+            for rel in index.files.keys() {
+                if is_ignored_rel(rel) {
+                    continue;
+                }
+                let path = repo_path.join(rel);
+                let metadata = fs::metadata(&path).with_context(|| format!("stat {rel}"))?;
+                let content = fs::read_to_string(&path).unwrap_or_default();
+                files.push(FileSummary {
+                    path: rel.clone(),
+                    bytes: metadata.len(),
+                    lines: content.lines().count(),
+                });
+            }
+            let mut ignored = ignored_dirs.clone();
+            ignored.sort();
+            ignored.dedup();
+            Ok(RepoSummary {
+                project_type: detect_project_type(repo_path),
+                files_scanned: files.len(),
+                candidate_files: files,
+                ignored_dirs: ignored,
+            })
         }
-        let path = entry.path();
-        if !is_candidate_file(path) {
-            continue;
-        }
-        let metadata = fs::metadata(path)?;
-        if metadata.len() > 200_000 {
-            continue;
-        }
-        let content = fs::read_to_string(path).unwrap_or_default();
-        let relative = path
-            .strip_prefix(repo_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.push(FileSummary {
-            path: relative,
-            bytes: metadata.len(),
-            lines: content.lines().count(),
-        });
-        if files.len() >= 80 {
-            break;
+        Err(index_err) => {
+            // Non-git directory: fall back to the bounded legacy walk so
+            // tooling still functions outside repositories (fail-soft here;
+            // the index itself remains fail-closed for evaluation runs).
+            eprintln!("repo index unavailable ({index_err:#}); using bounded legacy walk");
+            scan_repo_legacy(repo_path, &ignored_dirs)
         }
     }
-
-    ignored_dirs.sort();
-    ignored_dirs.dedup();
-
-    Ok(RepoSummary {
-        project_type: detect_project_type(repo_path),
-        files_scanned: files.len(),
-        candidate_files: files,
-        ignored_dirs,
-    })
 }
 
+/// Legacy bounded first-80-files walk. Only used OUTSIDE git repositories.
 fn is_ignored(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     matches!(
@@ -552,6 +554,50 @@ fn is_candidate_file(path: &Path) -> bool {
                 | "yml"
         )
     )
+}
+
+fn scan_repo_legacy(repo_path: &Path, ignored_dirs: &[String]) -> Result<RepoSummary> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(repo_path)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored(entry))
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !is_candidate_file(path) {
+            continue;
+        }
+        let metadata = fs::metadata(path)?;
+        if metadata.len() > 200_000 {
+            continue;
+        }
+        let content = fs::read_to_string(path).unwrap_or_default();
+        let relative = path
+            .strip_prefix(repo_path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push(FileSummary {
+            path: relative,
+            bytes: metadata.len(),
+            lines: content.lines().count(),
+        });
+        if files.len() >= 80 {
+            break;
+        }
+    }
+    let mut ignored = ignored_dirs.to_vec();
+    ignored.sort();
+    ignored.dedup();
+    Ok(RepoSummary {
+        project_type: detect_project_type(repo_path),
+        files_scanned: files.len(),
+        candidate_files: files,
+        ignored_dirs: ignored,
+    })
 }
 
 fn detect_project_type(repo_path: &Path) -> String {
