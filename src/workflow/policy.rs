@@ -256,8 +256,7 @@ impl PolicyDecisionRecordV1 {
 
 // Helper so the snapshot can expose identity parts without widening the
 // public struct (kept private to this module's digest computation).
-impl EffectiveExecutionSnapshotV1 {
-}
+impl EffectiveExecutionSnapshotV1 {}
 
 #[cfg(test)]
 mod tests {
