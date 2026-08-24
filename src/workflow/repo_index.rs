@@ -388,6 +388,106 @@ fn detect_language_public(p: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Slice 4: versioned normalized fact-batch emission (lite.repofact.v1)
+// ---------------------------------------------------------------------------
+
+/// One normalized repository fact. Lite-owned `lite.repofact.v1`
+/// (no published SOMA++ family exists; upstream publication is future work).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryFactV1 {
+    /// Stable id: `<revision>:<rel_path>#<name>` (matches retrieval ids).
+    pub fact_id: String,
+    pub kind: String,
+    pub name: String,
+    pub rel_path: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub visibility: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    pub file_sha256: String,
+}
+
+/// Versioned batch envelope binding facts to a repository revision with a
+/// canonical digest. Fail-closed on unknown major versions when parsed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepoFactBatchV1 {
+    pub schema_version: String,
+    pub parser_version: String,
+    pub identity: RepositoryIdentity,
+    pub facts: Vec<RepositoryFactV1>,
+    /// Canonical digest over every other field (recomputable).
+    pub batch_digest: String,
+}
+
+impl RepoFactBatchV1 {
+    /// Build from an index. Facts mirror indexed symbols with full
+    /// provenance (file digest + revision via the envelope).
+    pub fn from_index(index: &IndexedRepository) -> Result<Self> {
+        let root_norm = index
+            .identity
+            .root
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        let mut facts = Vec::new();
+        for s in &index.symbols {
+            let abs_norm = s.file.to_string_lossy().replace('\\', "/");
+            let rel = abs_norm
+                .strip_prefix(root_norm.as_str())
+                .map(|r| r.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| abs_norm.clone());
+            let file_sha256 = index
+                .files
+                .get(&rel)
+                .map(|e| e.sha256.clone())
+                .unwrap_or_else(|| "0".repeat(64));
+            facts.push(RepositoryFactV1 {
+                fact_id: format!("{}:{}#{}", index.identity.revision, rel, s.name),
+                kind: format!("{:?}", s.kind),
+                name: s.name.clone(),
+                rel_path: rel,
+                line_start: s.line_start as u32,
+                line_end: s.line_end as u32,
+                visibility: format!("{:?}", s.visibility),
+                signature: s.signature.clone(),
+                file_sha256,
+            });
+        }
+        let pre = serde_json::json!({
+            "facts": facts,
+            "identity": index.identity,
+            "parserVersion": index.parser_version,
+            "schemaVersion": "1.0.0",
+        });
+        Ok(Self {
+            schema_version: "1.0.0".to_string(),
+            parser_version: index.parser_version.clone(),
+            identity: index.identity.clone(),
+            batch_digest: crate::workflow::memory_contracts::canonical_digest(&pre)?,
+            facts,
+        })
+    }
+
+    /// Fail-closed parse: rejects major versions above 1.
+    pub fn parse_json(json: &str) -> Result<Self> {
+        let b: Self = serde_json::from_str(json).context("failed to parse lite.repofact batch")?;
+        let ceiling = crate::workflow::schema::SchemaVersion::new(1, u32::MAX, u32::MAX);
+        let sv = crate::workflow::schema::SchemaVersion::parse(&b.schema_version)
+            .context("invalid lite.repofact schema_version")?;
+        if sv > ceiling {
+            bail!(
+                "unsupported lite.repofact version {} (fail closed)",
+                b.schema_version
+            );
+        }
+        Ok(b)
+    }
+}
+
 // Slice 3: local RetrievalPort integration (#153 contract family)
 // ---------------------------------------------------------------------------
 
@@ -716,5 +816,33 @@ mod tests {
             linked.iter().any(|s| s.name.contains("helper")),
             "test symbol linking failed"
         );
+    }
+    // ---- slice 4: repofact batch ----
+
+    #[test]
+    fn repofact_batch_is_deterministic_and_roundtrips() {
+        let dir = init_repo("rf1");
+        let repo = dir.path().join("rf1");
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let b1 = RepoFactBatchV1::from_index(&idx).unwrap();
+        let b2 = RepoFactBatchV1::from_index(&idx).unwrap();
+        assert_eq!(b1.batch_digest, b2.batch_digest);
+        assert_eq!(b1.batch_digest.len(), 64);
+        assert!(b1.facts.iter().any(|f| f.name == "top"));
+        assert!(b1.facts.iter().all(|f| f.file_sha256.len() == 64));
+        let json = serde_json::to_string(&b1).unwrap();
+        let parsed = RepoFactBatchV1::parse_json(&json).unwrap();
+        assert_eq!(parsed, b1);
+    }
+
+    #[test]
+    fn repofact_batch_rejects_future_major() {
+        let dir = init_repo("rf2");
+        let repo = dir.path().join("rf2");
+        let idx = IndexedRepository::build(&repo).unwrap();
+        let mut b = RepoFactBatchV1::from_index(&idx).unwrap();
+        b.schema_version = "7.0.0".into();
+        let err = RepoFactBatchV1::parse_json(&serde_json::to_string(&b).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("fail closed"), "{err}");
     }
 }
