@@ -53,7 +53,7 @@ pub enum MemoryKind {
     Decision,
 }
 
-fn ensure_supported_contract_version(v: &str) -> Result<()> {
+pub fn ensure_supported_contract_version(v: &str) -> Result<()> {
     let sv = crate::workflow::schema::SchemaVersion::parse(v)
         .with_context(|| format!("invalid lite.memory schema_version {v:?}"))?;
     let ceiling = crate::workflow::schema::SchemaVersion::new(
