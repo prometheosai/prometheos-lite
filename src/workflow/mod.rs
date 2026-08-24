@@ -19,6 +19,7 @@ pub mod durable;
 pub mod evaluate;
 pub mod memory_contracts;
 pub mod node_contracts;
+pub mod policy;
 pub mod portable_state;
 pub mod redaction;
 pub mod repo_index;
