@@ -30,17 +30,19 @@ memory operations (#152 types), and portable work-state references.
 
 `src/workflow/node_contracts.rs`:
 
-- `NodeManifestV1`: schema_version, node_id, purpose, inputs (typed kv),
-  outputs (declared), authority_ref (scopes+budget), evidence_refs:
+- `NodeManifestV1`: schema_version, node_id, purpose, inputs (typed kv via
+  `NodeIo`), outputs (declared), authority alignment via
+  `readable_scopes`/`writable_scopes`/`token_budget`, evidence_refs:
   Vec<EvidenceReferenceV1>, memory_reads: Vec<MemoryQuery>,
   memory_writes: Vec<MemoryWrite>, work_state_ref: Option<String>
-  (versioned PortableWorkState pointer), retry: {max_attempts,
+  (versioned PortableWorkState pointer), retry: RetryPolicy{max_attempts,
   retryable_classes}, next_route_hints: Vec<String>.
-- `NodeOutcome` enum: Completed/Failed/Blocked/ReviewRequired/Cancelled
-  (+ reason string).
-- `NodeResultV1`: schema_version, manifest ref (node_id), outcome,
-  outputs, evidence_refs, memory_ops_executed counts, work_state_ref,
-  started_at/completed_at, failure_classification Option.
+- `OutcomeKind` enum: Completed/Failed/Blocked/ReviewRequired/Cancelled;
+  reason string required for every non-Completed outcome.
+- `NodeResultV1`: schema_version, node_id ref, outcome: OutcomeKind,
+  reason, outputs, evidence_refs, memory_reads/writes_executed counts,
+  work_state_ref, started_at/completed_at, failure_classification Option,
+  result_digest (canonical, excluding itself).
 - parse_json fail-closed major gate on BOTH; deny_unknown_fields;
   non-empty id validation; outcome-reason required for Failed/Blocked/
   Cancelled/ReviewRequired.
