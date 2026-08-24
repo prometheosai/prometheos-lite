@@ -1,0 +1,105 @@
+{
+  "canonicalization": {
+    "sha256": "5c78a38a4fb69ab8c567d5dd6b258fd84116eb96597fd3b1f6d32664ac824da0",
+    "version": "1.0.0"
+  },
+  "diagnostics": {
+    "sha256": "89134b13998c3a17f482c036f0305c5e3ea60ebc7fac4529e22884461f6f1857",
+    "version": "1.1.0"
+  },
+  "fixtures": {
+    "sha256": "abb48fefb7575dba4c2693780125573badf390fed456bfdedf816f2da586ca8f",
+    "version": "1.1.0"
+  },
+  "manifest_sha256": "328bff3d8f988cbd26984b91aae6843b945e05dd536437def5329f88fb4ab134",
+  "schema_version": "1.1.0",
+  "schemas": {
+    "AdapterConformance": {
+      "sha256": "7bf691a6d61849a84f24b3472de478cbfd64404966b62f66b3eb41a5daa895b8",
+      "version": "1.1.0"
+    },
+    "AuthorityProfile": {
+      "sha256": "135dc601e760d04e7738fbfc4253837137152e8c1bc0cfba863591953f6842f2",
+      "version": "1.1.0"
+    },
+    "CheckpointEnvelope": {
+      "sha256": "dd2ea480e69ecec403b20dce99c295b4dfa5904b37449180447f13365d80fb97",
+      "version": "1.1.0"
+    },
+    "CompositeDefinition": {
+      "sha256": "c971b0f0fbc0e25177f8e82ad62893136132d10caa1c27697d650728282cf678",
+      "version": "1.1.0"
+    },
+    "Diagnostic": {
+      "sha256": "5bbcfed47ce5c9dcc57eb1392c5159607acd710023f4dcdcdf1c6ffb489ea06e",
+      "version": "1.1.0"
+    },
+    "EvidenceReference": {
+      "sha256": "c532188551dc3f0d2dadbf27968e27649a1db812ca5e2016cd08e29c538924a5",
+      "version": "1.1.0"
+    },
+    "ExecutionPlan": {
+      "sha256": "b5ee0ce1c24c1d47eba24947f5059978a8f9942b0c4c6d56f88c2c1f95391f8b",
+      "version": "1.1.0"
+    },
+    "ExecutionProfile": {
+      "sha256": "49e79ded15a2d87e194261e0dc1fe5eff742cc513fd1ce73d64928d35220e7cc",
+      "version": "1.1.0"
+    },
+    "GovernanceConstraint": {
+      "sha256": "26e4f9fffea285efca2d0311555243c617ed235413723c41732ba412302170c9",
+      "version": "1.1.0"
+    },
+    "HarnessAdapter": {
+      "sha256": "6e46f80d0a50817359ca254ca0b0b05317211d10483866bec36dac6313ed69fd",
+      "version": "1.1.0"
+    },
+    "OperationDefinition": {
+      "sha256": "caa475583fbee0fd3da9a724dff40d886b8077cf272cc0158aa86d9c1f4b44f0",
+      "version": "1.1.0"
+    },
+    "OperationState": {
+      "sha256": "e4763ffd122ee6f0d5a681d852ff93e10318e17d927d6be6f4ef9735f8d541b8",
+      "version": "1.1.0"
+    },
+    "PortDefinition": {
+      "sha256": "0a12349b5ab2a915be37e968b67e6890c2e8428e511917df6b3b24ab34a8ac0e",
+      "version": "1.1.0"
+    },
+    "ResumeToken": {
+      "sha256": "1f863c87bc65c39f7ce9eed62172ccc422300db9fb22f4b3472979b79cab6bc7",
+      "version": "1.1.0"
+    },
+    "ReviewDecision": {
+      "sha256": "17fe2c9b57b8a80d529004b5ac0570ede193f28db07367a5b40641998244a084",
+      "version": "1.1.0"
+    },
+    "ReviewRequest": {
+      "sha256": "f95a09fe912a3bdf2343300c44ac92fd54e7f902a6bbe343f5c118791e935c82",
+      "version": "1.1.0"
+    },
+    "SuspensionPoint": {
+      "sha256": "3fa46a1627f9728f5b963699c2fb6308934212bc969a7094b04e1a94eb9a38f4",
+      "version": "1.1.0"
+    },
+    "TypedOutcome": {
+      "sha256": "8fc21a62c4156c40b995988c60b7d4eaea1381840b1c1d7f6f7bff5c777b9e29",
+      "version": "1.1.0"
+    },
+    "WorkEvent": {
+      "sha256": "fb4d40cefca4a62aee7ad8d549bb422e17829ce4b810dc603a9661156c101d13",
+      "version": "1.1.0"
+    },
+    "WorkEventBatch": {
+      "sha256": "0003b1962e2847e5a3917c5fd308495f1843c5c67338a49fe5584b3f9ba7800f",
+      "version": "1.1.0"
+    },
+    "WorkflowDefinition": {
+      "sha256": "97313b0bfab2912321d18774016df06e4d9d48e503e0f1cc7c91a6849a34cae0",
+      "version": "1.1.0"
+    }
+  },
+  "spec_source_commit": "04858275ac61e4c8cd61b2a826242297f0915ff6",
+  "spec_source_repository": "https://github.com/prometheosai/soma",
+  "spec_version": "1.1.0"
+}

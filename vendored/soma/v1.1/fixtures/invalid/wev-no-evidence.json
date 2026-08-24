@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "ev-ne",
+  "eventType": "result",
+  "actor": {
+    "kind": "agent",
+    "identity": "agent-a",
+    "implementation": {
+      "name": "soma",
+      "revision": "r1"
+    }
+  },
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none"
+  },
+  "effectiveAuthority": {
+    "executionClass": "deterministic",
+    "mutation": "none"
+  },
+  "sequence": 0,
+  "timestamp": "2026-01-01T00:00:00Z",
+  "idempotencyKey": "idem-1",
+  "correlationId": "corr-1",
+  "repoRevision": "abc123",
+  "compatibility": {
+    "schemaVersion": "1.1.0",
+    "minReaderVersion": "1.0.0"
+  },
+  "parents": [],
+  "payload": {
+    "result": {
+      "kind": "ok",
+      "bindings": {}
+    }
+  },
+  "semanticDigest": "5559fd07092ecd2f15712d8a3c2a50906a9fe50467f13a08a07256fafec271e4",
+  "evidence": [
+    {
+      "id": "ev-unbound",
+      "eventDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "artifactDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "artifactKind": "checkpoint",
+      "producedBy": "harness"
+    }
+  ]
+}

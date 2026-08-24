@@ -1,0 +1,67 @@
+{
+  "id": "adapter-1",
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "identity": {
+    "name": "adapter-x",
+    "revision": "v2"
+  },
+  "declaredCapabilities": [
+    "translate",
+    "summarize"
+  ],
+  "capabilities": [
+    "translate",
+    "summarize"
+  ],
+  "limitations": [],
+  "inputMapping": {
+    "strategy": "canonical",
+    "fields": [
+      {
+        "source": "prompt",
+        "target": "translatedPrompt",
+        "transform": "translate",
+        "semanticKey": "prompt.sem",
+        "required": true,
+        "dropOnLoss": false
+      }
+    ]
+  },
+  "outputMapping": {
+    "strategy": "identity",
+    "fields": [
+      {
+        "source": "answer",
+        "target": "answer",
+        "semanticKey": "answer.sem",
+        "required": true,
+        "dropOnLoss": true
+      }
+    ]
+  },
+  "eventCorrelation": {
+    "scheme": "correlationId",
+    "requiredFields": [
+      "correlationId"
+    ]
+  },
+  "checkpointImport": true,
+  "checkpointExport": true,
+  "cancellation": {
+    "propagatesTo": true,
+    "preservesState": true
+  },
+  "failureClassification": [
+    "transient",
+    "permanent"
+  ],
+  "evidenceAttachment": {
+    "required": true,
+    "maxBytes": 1048576
+  },
+  "handoffBehavior": {
+    "preservesSemanticIdentity": true,
+    "requiresCheckpoint": true
+  }
+}

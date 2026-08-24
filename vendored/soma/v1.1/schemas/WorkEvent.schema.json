@@ -1,0 +1,252 @@
+{
+  "$id": "/schemas/WorkEvent.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkEvent",
+  "description": "Singular normative envelope for one governed work event. A batch/stream of events is a separate container (see WorkEventBatch) that references individual WorkEvent envelopes by id. Every event carries stable identity, implementation provenance, repository revision, causation, correlation, compatibility, and a canonical semantic digest so that the same logical work reproduces an identical digest across native and adapter boundaries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "version",
+    "id",
+    "eventType",
+    "actor",
+    "authority",
+    "effectiveAuthority",
+    "sequence",
+    "timestamp",
+    "idempotencyKey",
+    "correlationId",
+    "repoRevision",
+    "compatibility",
+    "semanticDigest",
+    "parents"
+  ],
+  "properties": {
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 0},
+    "eventType": {
+      "type": "string",
+      "enum": ["lifecycle", "context", "decision", "capability", "evidence", "approval", "checkpoint", "suspension", "resume", "outcome", "result", "handoff"]
+    },
+    "parents": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "actor": {"$ref": "#/$defs/Actor"},
+    "authority": {"$ref": "AuthorityProfile.schema.json"},
+    "effectiveAuthority": {"$ref": "AuthorityProfile.schema.json"},
+    "evidence": {"type": "array", "items": {"$ref": "EvidenceReference.schema.json"}},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "idempotencyKey": {"type": "string", "minLength": 1},
+    "correlationId": {"type": "string", "minLength": 1},
+    "repoRevision": {"type": "string", "minLength": 1},
+    "implementation": {"$ref": "#/$defs/Implementation"},
+    "compatibility": {"$ref": "#/$defs/Compatibility"},
+    "semanticDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payload": {"$ref": "#/$defs/EventPayload"},
+    "replay": {"type": "boolean"},
+    "conflict": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"eventType": {"const": "result"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["evidence", "payload"],
+        "properties": {
+          "evidence": {"minItems": 1},
+          "payload": {"required": ["result"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "outcome"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["evidence", "payload"],
+        "properties": {
+          "evidence": {"minItems": 1},
+          "payload": {"required": ["outcome"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "approval"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"required": ["approval"]}}
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "checkpoint"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"required": ["checkpointEnvelope"]}}
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "resume"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload", "parents"],
+        "properties": {
+          "payload": {"required": ["resumeToken"]},
+          "parents": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "suspension"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"required": ["resumeToken"]}}
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "decision"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"required": ["decision"]}}
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "capability"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"required": ["capability"]}}
+      }
+    },
+    {
+      "if": {"properties": {"eventType": {"const": "handoff"}}, "required": ["eventType"]},
+      "then": {
+        "required": ["payload", "parents"],
+        "properties": {
+          "payload": {"required": ["handoff"]},
+          "parents": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "Implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "revision"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "build": {"type": "string"}
+      }
+    },
+    "Actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identity"],
+      "properties": {
+        "kind": {"enum": ["agent", "model", "provider", "harness", "human", "tool", "memory"]},
+        "identity": {"type": "string", "minLength": 1},
+        "revision": {"type": "string"},
+        "implementation": {"$ref": "#/$defs/Implementation"}
+      }
+    },
+    "Compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion"],
+      "properties": {
+        "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+        "minReaderVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"}
+      }
+    },
+    "CheckpointEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stateDigest", "sequence", "repoRevision"],
+      "properties": {
+        "stateDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sequence": {"type": "integer", "minimum": 0},
+        "repoRevision": {"type": "string", "minLength": 1},
+        "boundEvidence": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+      }
+    },
+    "ResumeToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "checkpointDigest", "issuedAt", "expiresAt"],
+      "properties": {
+        "token": {"type": "string", "minLength": 1},
+        "checkpointDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "issuedAt": {"type": "string", "format": "date-time"},
+        "expiresAt": {"type": "string", "format": "date-time"},
+        "decision": {"type": "string"}
+      }
+    },
+    "EventPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "result": {"$ref": "#/$defs/ResultPayload"},
+        "outcome": {"$ref": "#/$defs/OutcomePayload"},
+        "approval": {"$ref": "#/$defs/ApprovalPayload"},
+        "checkpointEnvelope": {"$ref": "#/$defs/CheckpointEnvelope"},
+        "resumeToken": {"$ref": "#/$defs/ResumeToken"},
+        "decision": {"$ref": "#/$defs/DecisionPayload"},
+        "capability": {"$ref": "#/$defs/CapabilityPayload"},
+        "handoff": {"$ref": "#/$defs/HandoffPayload"}
+      }
+    },
+    "ResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "bindings": {"type": "object"}
+      }
+    },
+    "OutcomePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "acceptedBy": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "ApprovalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "approver"],
+      "properties": {
+        "decision": {"enum": ["approved", "rejected", "abstained"]},
+        "approver": {"type": "string", "minLength": 1},
+        "reApprovalPath": {"type": "string"}
+      }
+    },
+    "DecisionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision"],
+      "properties": {
+        "decision": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string"}
+      }
+    },
+    "CapabilityPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "granted"],
+      "properties": {
+        "capability": {"type": "string", "minLength": 1},
+        "granted": {"type": "boolean"}
+      }
+    },
+    "HandoffPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "semanticIdentity"],
+      "properties": {
+        "target": {"$ref": "#/$defs/Actor"},
+        "semanticIdentity": {"type": "string", "minLength": 1},
+        "preservesCheckpoint": {"type": "boolean"}
+      }
+    }
+  }
+}

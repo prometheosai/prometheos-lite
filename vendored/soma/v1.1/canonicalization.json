@@ -1,0 +1,1 @@
+{"rules":{"arrays":"declared-order","digest":"sha256-of-canonical-bytes","duplicateKeys":"invalid","encoding":"utf-8","keyOrder":"lexicographic-bytes","null":"only-where-nullable","numbers":"canonical-decimal","whitespace":"none"},"version":"1.0.0"}

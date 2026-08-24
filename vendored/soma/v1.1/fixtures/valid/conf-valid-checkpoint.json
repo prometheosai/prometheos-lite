@@ -1,0 +1,95 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "conf-1",
+  "adapter": {
+    "id": "adapt-1",
+    "schemaVersion": "1.1.0",
+    "version": "1.1.0",
+    "identity": {
+      "name": "external-harness",
+      "revision": "1"
+    },
+    "declaredCapabilities": [
+      "map.v1"
+    ],
+    "capabilities": [
+      "map.v1"
+    ],
+    "inputMapping": {
+      "strategy": "canonical",
+      "fields": [
+        {
+          "source": "ext_a",
+          "target": "order"
+        },
+        {
+          "source": "ext_b",
+          "target": "meta"
+        }
+      ]
+    },
+    "outputMapping": {
+      "strategy": "canonical",
+      "fields": [
+        {
+          "source": "order",
+          "target": "ext_a",
+          "required": true
+        },
+        {
+          "source": "meta",
+          "target": "ext_b"
+        }
+      ]
+    },
+    "checkpointImport": true,
+    "checkpointExport": true,
+    "handoffBehavior": {
+      "preservesSemanticIdentity": true
+    }
+  },
+  "scenarios": [
+    {
+      "kind": "checkpoint-resume",
+      "adapterId": "adapt-1",
+      "checkpointEnvelope": {
+        "id": "cp-1",
+        "suspensionPointId": "sp-1",
+        "planDigest": "64879f7d6b960a01909762d911a32d4582c20010c5641ee90278b644a9e3b525",
+        "authoritySnapshotDigest": "d7304d17bf10fb7c9353427372d3e482af8f410ad8c7b09646ea01603b2105d4",
+        "checkpointDigest": "2483569f723588464b5fc78d60478c2b4f6ee917a5018cb6fe7cb5677112a9bb",
+        "eventsDigest": "862417b9e7c3720bcb3263cd873b09892d787823b6f9a0f453e42824c5a4d4b6",
+        "schemaVersion": "1.1.0",
+        "revision": "r-1"
+      },
+      "resumeToken": {
+        "id": "tok-1",
+        "suspensionPointId": "sp-1",
+        "suspensionDigest": "2483569f723588464b5fc78d60478c2b4f6ee917a5018cb6fe7cb5677112a9bb",
+        "workflowVersion": "1.1.0",
+        "schemaVersion": "1.1.0",
+        "authoritySnapshotDigest": "d7304d17bf10fb7c9353427372d3e482af8f410ad8c7b09646ea01603b2105d4",
+        "planDigest": "64879f7d6b960a01909762d911a32d4582c20010c5641ee90278b644a9e3b525",
+        "revision": "r-1",
+        "expiration": "2030-01-01T00:00:00Z",
+        "bindingDigest": "3c949e2eed74b14bcf5a1b005ee21356b2a09f4a70a2cf3e5397753e877673e7"
+      },
+      "evidence": [
+        {
+          "id": "ev-1",
+          "eventDigest": "b8e1f80bd70ae0784c7855a451731b745fddb67749d23f637be9082b75e9575b",
+          "artifactDigest": "2483569f723588464b5fc78d60478c2b4f6ee917a5018cb6fe7cb5677112a9bb",
+          "artifactKind": "checkpoint",
+          "producedBy": "harness",
+          "producedAt": "2026-01-01T00:00:00Z"
+        }
+      ],
+      "repoRevision": "r-1",
+      "compatibility": {
+        "version": "1.1.0"
+      },
+      "resumeRequested": true
+    }
+  ]
+}

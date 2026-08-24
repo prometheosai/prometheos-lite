@@ -1,0 +1,20 @@
+{
+  "id": "prof-cap-widen",
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "harness": "harness://gvisor@1.0",
+  "declared": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "capabilities": ["cap.x"]
+  },
+  "effective": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "capabilities": ["cap.x", "cap.y"]
+  }
+}
