@@ -89,7 +89,11 @@ pub struct PlanOutcome {
 
 fn effective_budget(inputs: &PlannerInputsV1) -> Result<u64> {
     if let Some(b) = inputs.token_budget_override {
-        return Ok(b);
+        let window = inputs
+            .profile
+            .context_window_tokens
+            .saturating_sub(inputs.profile.reserved_output_tokens);
+        return Ok(b.min(window));
     }
     let eff = inputs
         .profile
