@@ -21,9 +21,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::workflow::memory_contracts::{
-    EvidenceReferenceV1, MemoryQuery, MemoryWrite,
-};
+use crate::workflow::memory_contracts::{EvidenceReferenceV1, MemoryQuery, MemoryWrite};
 
 /// Version of the lite.node contract family.
 pub const NODE_CONTRACT_VERSION: &str = "1.0.0";
