@@ -3,7 +3,7 @@
 - **Issue:** #167 (parents #104/#107; depends on #151 #152 - both MERGED)
 - **Unblocks:** #153, #155, #142
 - **Branch:** feat/repo-index-repofact
-- **Status:** slicing; slice 1 in progress
+- **Status:** slices 1-2 MERGED via #177; slices 3-4 under review in #178
 
 ## Objective
 
@@ -62,3 +62,22 @@ no model calls for indexing.
 
 No new dependencies (tree-sitter family already present). One bounded PR per
 slice through the independent-gate loop; minimality budget respected.
+
+## Slices 3-4 completion notes (PR #178)
+
+- RepoEvidencePort: local MemoryRetrievalPort over the index; exact-then-
+  lexical policy; SOMA EvidenceReference provenance per hit (artifact digest
+  = file sha256, event digest = sha256(revision+rel)); fail-closed staleness
+  via typed IndexStale through the error chain.
+- lite.repofact.v1: RepositoryFactV1/RepoFactBatchV1 with canonical batch
+  digest excluding itself; parse_json rejects major>1. Lite-owned family;
+  upstream SOMA publication remains future work.
+- Workbench source swap: scan_repo sources candidate files from the index
+  (HEAD + per-file digests) for git contexts - the first-80-files cap is
+  gone. Bounded legacy walk retained ONLY for non-git directories (the
+  index itself stays fail-closed for evaluation runs). README updated.
+- Known follow-ups: from_index currently falls back to a zero digest when a
+  rel-path mapping misses (should hard-error); reason-taxonomy refinement
+  for stale-vs-conflict from #152 applies here too once shared.
+- Hygiene: repo_workbench.rs encoding fully repaired this PR (BOM + mojibake
+  removed); recommend adding a byte-hygiene guard to reviewonly CI.
