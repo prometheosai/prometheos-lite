@@ -15,6 +15,7 @@
 //! generation.
 
 pub mod artifact_integrity;
+pub mod context_planner;
 pub mod durable;
 pub mod evaluate;
 pub mod memory_contracts;
@@ -975,7 +976,7 @@ fn apply_search_replace(old: &str, sr: &SearchReplaceEdit) -> Result<String> {
 fn ellipsize(s: &str) -> String {
     let t = s.trim();
     if t.len() > 40 {
-        format!("{}…", &t[..40])
+        format!("{}â€¦", &t[..40])
     } else {
         t.to_string()
     }
@@ -1469,7 +1470,7 @@ mod tests {
 
     // Platform-aware validation commands used by the workflow gating tests. The
     // workflow runs the user-supplied command through a platform shell (`sh -c`
-    // on Unix, `cmd /C` on Windows — see #98), so the command itself must be
+    // on Unix, `cmd /C` on Windows â€” see #98), so the command itself must be
     // expressed in a way the target shell understands. Paths use the platform
     // separator (findstr on Windows does not accept a forward-slash file path),
     // and the search tokens are space-free to avoid nested-quote parsing.
