@@ -234,19 +234,6 @@ impl PolicyDecisionRecordV1 {
         reason: &str,
         recorded_at: String,
     ) -> Result<Self> {
-        let pre = serde_json::json!({
-            "identity": {
-                "refName": snap.identity_fields().0,
-                "revision": snap.identity_fields().1,
-                "nodeId": snap.node_id,
-                "readableScopes": snap.readable_scopes,
-                "tokenBudget": snap.token_budget,
-            },
-            "parserVersion": crate::workflow::repo_index::INDEX_PARSER_VERSION,
-            "schemaVersion": POLICY_CONTRACT_VERSION,
-        });
-        // Digest binds decision to the immutable snapshot content.
-        let _ = pre;
         let digest_value = serde_json::to_value(snap).context("serialize snapshot")?;
         let digest = crate::workflow::memory_contracts::canonical_digest(&digest_value)?;
         Ok(Self {
@@ -270,9 +257,6 @@ impl PolicyDecisionRecordV1 {
 // Helper so the snapshot can expose identity parts without widening the
 // public struct (kept private to this module's digest computation).
 impl EffectiveExecutionSnapshotV1 {
-    fn identity_fields(&self) -> (String, String) {
-        (self.snapshot_id.clone(), self.node_id.clone())
-    }
 }
 
 #[cfg(test)]
