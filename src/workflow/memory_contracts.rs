@@ -53,7 +53,7 @@ pub enum MemoryKind {
     Decision,
 }
 
-fn ensure_supported_contract_version(v: &str) -> Result<()> {
+pub fn ensure_supported_contract_version(v: &str) -> Result<()> {
     let sv = crate::workflow::schema::SchemaVersion::parse(v)
         .with_context(|| format!("invalid lite.memory schema_version {v:?}"))?;
     let ceiling = crate::workflow::schema::SchemaVersion::new(
@@ -348,7 +348,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// - `query.readable_scopes` MUST be non-empty (empty scope set = nothing
 ///   authorized => hard error, not an empty success);
 /// - candidates whose `source_revision` differs from `current_revision`
-///   (when known) are OMITTED with reason `"stale revision"` â€” stale data is
+///   (when known) are OMITTED with reason `"stale revision"` Ã¢â‚¬â€ stale data is
 ///   never delivered;
 /// - candidates exceeding the query's token budget (greedy by relevance,
 ///   stable order) are omitted with `"token budget exceeded"`;
@@ -381,7 +381,7 @@ pub fn assemble_retrieval(
     });
 
     // Conflict resolution: keep ONE entry per memory_id (highest relevance,
-    // then lexicographically smallest memory_id â€” the same deterministic
+    // then lexicographically smallest memory_id Ã¢â‚¬â€ the same deterministic
     // ordering applied above). Every other duplicate is omitted with an
     // explicit conflicting-duplicate reason.
     let mut kept: Vec<RawCandidate> = Vec::new();
