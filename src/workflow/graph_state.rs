@@ -440,13 +440,12 @@ impl GraphRunStateV1 {
         if !journaled {
             return Err(GraphRunError::UnjournaledDecisionBasis.into());
         }
-        if !manifest.nodes.iter().any(|n| n.node_id == decision.to_node) {
-            // Terminal exit: nothing enters the frontier.
-            self.decisions.push(decision);
-            self.content_digest = Some(self.compute_digest());
-            return Ok(());
+        let is_terminal = manifest.terminal_exits.contains(&decision.to_node);
+        if !is_terminal {
+            // Only non-terminal targets enter the frontier; reaching a
+            // terminal exit completes the run path instead.
+            self.frontier.push(decision.to_node.clone());
         }
-        self.frontier.push(decision.to_node.clone());
         self.decisions.push(decision);
         self.content_digest = Some(self.compute_digest());
         Ok(())
