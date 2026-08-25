@@ -21,6 +21,7 @@ pub mod evaluate;
 pub mod governance;
 pub mod memory_contracts;
 pub mod node_contracts;
+pub mod node_runner;
 pub mod policy;
 pub mod portable_state;
 pub mod redaction;
