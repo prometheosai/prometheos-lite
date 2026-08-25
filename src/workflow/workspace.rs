@@ -715,6 +715,37 @@ mod tests {
     }
 
     #[test]
+    fn manifest_parse_rejects_bad_version_identity_and_unscoped_writable() {
+        let m = writable_manifest("guards", &"a".repeat(40));
+        let mut v = serde_json::to_value(&m).unwrap();
+        v["schemaVersion"] = serde_json::json!("9.9.9");
+        let err = WorkspaceManifestV1::parse_json(&v.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unsupported workspace schema version"),
+            "{err}"
+        );
+
+        let mut v2 = serde_json::to_value(&m).unwrap();
+        v2["workspaceId"] = serde_json::json!("");
+        let t2 = serde_json::to_string(&v2).unwrap();
+        assert!(WorkspaceManifestV1::parse_json(&t2).is_err());
+
+        let mut v3 = serde_json::to_value(&m).unwrap();
+        v3["writableScopes"] = serde_json::json!([]);
+        v3["contentDigest"] = serde_json::Value::Null;
+        let t3 = serde_json::to_string(&v3).unwrap();
+        let err3 = WorkspaceManifestV1::parse_json(&t3)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err3.contains("contentDigest") || err3.contains("writable scope"),
+            "{err3}"
+        );
+    }
+
+    #[test]
     fn worktree_create_teardown_deterministic_pinned() {
         let repo = TempRepo::new("ct");
         let parent = repo.0.join("_ws");
