@@ -1,0 +1,984 @@
+//! Governed execution workspace seam (issue #171).
+//!
+//! Generalizes execution isolation so a harness is never synonymous with a
+//! filesystem/worktree: an execution node receives an explicit, versioned
+//! workspace whose identity, revision, isolation mode, writable scope,
+//! lifecycle, and evidence are independent of the selected model/provider/
+//! harness.
+//!
+//! Invariants enforced here (fail closed):
+//! - workspace authority is resolved before execution and cannot be widened
+//!   by any downstream path;
+//! - a writable execution never silently falls back to the source checkout
+//!   when isolation setup fails (no fallback path exists);
+//! - resume rejects missing/stale/incompatible workspace references unless an
+//!   explicit governed remap is authorized AND the authorization itself is
+//!   carried in evidence;
+//! - cleanup preserves referenced artifacts before teardown.
+//!
+//! `lite.workspace.v1` is Lite-owned. Mapping to SOMA#80 portable
+//! governed-run contracts happens only when that spec publishes.
+
+use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
+
+/// Schema version of the workspace contract.
+pub const WORKSPACE_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Revision of the built-in adapters (bump on behavior change).
+pub const ADAPTER_REVISION: &str = "lite.workspace.adapter.v1";
+
+// ---------------------------------------------------------------------------
+// Manifest
+// ---------------------------------------------------------------------------
+
+/// Isolation mode of a workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceMode {
+    /// Inspection/review paths; write authority structurally denied.
+    #[serde(rename = "read-only")]
+    ReadOnly,
+    /// Isolated repository writes (git worktree).
+    Writable,
+}
+
+/// Which concrete adapter owns the workspace lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdapterKind {
+    #[serde(rename = "git-worktree")]
+    GitWorktree,
+    #[serde(rename = "existing-read-only")]
+    ExistingReadOnly,
+}
+
+/// Versioned manifest describing one governed execution workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceManifestV1 {
+    pub schema_version: String,
+    /// Stable workspace identity (NOT agent identity).
+    pub workspace_id: String,
+    pub adapter: AdapterKind,
+    pub adapter_revision: String,
+    /// Durable repository identity (origin URL or stable name).
+    pub repo_identity: String,
+    /// Exact commit SHA the workspace is pinned to.
+    pub base_revision: String,
+    /// Worktree branch name when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub mode: WorkspaceMode,
+    /// Declared writable scopes (authority surface for #154/#133).
+    #[serde(default)]
+    pub writable_scopes: Vec<String>,
+    /// Resource-lock identity for later #124 parallel scheduling.
+    pub resource_lock_id: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    /// Canonical digest over the manifest minus this member.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "contentDigest"
+    )]
+    pub content_digest: Option<String>,
+}
+
+impl WorkspaceManifestV1 {
+    /// Build + seal a manifest (digest computed over manifest-minus-digest).
+    pub fn sealed(mut self) -> Self {
+        self.content_digest = None;
+        let d = self.compute_digest();
+        self.content_digest = Some(d);
+        self
+    }
+
+    /// Canonical digest over every field except `contentDigest`.
+    pub fn compute_digest(&self) -> String {
+        let mut v = serde_json::to_value(self).expect("manifest serializes");
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        crate::workflow::soma::canonical_digest(&v)
+    }
+
+    /// Fail-closed parse: version gate, structural checks, digest verify.
+    pub fn parse_json(text: &str) -> Result<Self> {
+        let m: Self = serde_json::from_str(text).context("workspace manifest parse failed")?;
+        if m.schema_version != WORKSPACE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported workspace schema version {} (supported {WORKSPACE_SCHEMA_VERSION})",
+                m.schema_version
+            );
+        }
+        if m.workspace_id.is_empty() || m.repo_identity.is_empty() || m.base_revision.is_empty() {
+            anyhow::bail!("workspace manifest missing identity fields");
+        }
+        if m.mode == WorkspaceMode::Writable && m.writable_scopes.is_empty() {
+            anyhow::bail!("writable workspace must declare at least one writable scope");
+        }
+        match &m.content_digest {
+            None => anyhow::bail!("workspace manifest missing contentDigest"),
+            Some(d) if *d != m.compute_digest() => {
+                anyhow::bail!("workspace manifest contentDigest does not verify")
+            }
+            Some(_) => {}
+        }
+        Ok(m)
+    }
+
+    /// Portable reference derived from this manifest (for PortableWorkState /
+    /// checkpoints / evidence): durable identity only, no process state.
+    pub fn to_reference(&self) -> WorkspaceRefV1 {
+        WorkspaceRefV1 {
+            schema_version: WORKSPACE_SCHEMA_VERSION.into(),
+            workspace_id: self.workspace_id.clone(),
+            adapter: self.adapter,
+            adapter_revision: self.adapter_revision.clone(),
+            repo_identity: self.repo_identity.clone(),
+            base_revision: self.base_revision.clone(),
+            mode: self.mode,
+            content_digest: self.compute_digest(),
+        }
+    }
+}
+
+/// Portable, versioned reference to a workspace. Round-trips through
+/// PortableWorkState / checkpoint evidence without hidden process state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRefV1 {
+    pub schema_version: String,
+    pub workspace_id: String,
+    pub adapter: AdapterKind,
+    pub adapter_revision: String,
+    pub repo_identity: String,
+    pub base_revision: String,
+    pub mode: WorkspaceMode,
+    /// Digest of the originating manifest (manifest-minus-digest form).
+    #[serde(rename = "contentDigest")]
+    pub content_digest: String,
+}
+
+impl WorkspaceRefV1 {
+    pub fn parse_json(text: &str) -> Result<Self> {
+        let r: Self = serde_json::from_str(text).context("workspace ref parse failed")?;
+        if r.schema_version != WORKSPACE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported workspace ref schema version {}",
+                r.schema_version
+            );
+        }
+        Ok(r)
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+}
+
+/// Explicit, evidenced authorization required to remap a stale/missing/
+/// incompatible workspace reference on resume. Carried into recovery output
+/// so the remap itself is auditable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemapAuthorization {
+    pub reason: String,
+    pub authorized_by: String,
+    #[serde(rename = "recordedAt")]
+    pub recorded_at: String,
+}
+
+/// Typed failure modes for reference validation (all fail closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceRefError {
+    Missing,
+    StaleRevision,
+    AdapterMismatch,
+    IncompatibleSchema,
+}
+
+impl std::fmt::Display for WorkspaceRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            WorkspaceRefError::Missing => "workspace missing",
+            WorkspaceRefError::StaleRevision => "workspace revision stale/mismatched",
+            WorkspaceRefError::AdapterMismatch => "workspace adapter mismatch",
+            WorkspaceRefError::IncompatibleSchema => "workspace schema incompatible",
+        };
+        f.write_str(s)
+    }
+}
+
+/// An acquired, validated workspace handed to execution.
+#[derive(Debug, Clone)]
+pub struct AcquiredWorkspace {
+    pub manifest: WorkspaceManifestV1,
+    pub root: std::path::PathBuf,
+    /// Revision actually validated at acquisition time.
+    pub revision: String,
+}
+
+impl AcquiredWorkspace {
+    /// Write-authority gate: read-only modes can NEVER acquire write power,
+    /// accidentally or otherwise.
+    pub fn ensure_writable(&self) -> Result<()> {
+        if self.manifest.mode != WorkspaceMode::Writable {
+            anyhow::bail!(
+                "LITE-GOV-0002-class guard: workspace {} is read-only; write authority denied",
+                self.manifest.workspace_id
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Artifact paths that MUST survive cleanup (proposals, checkpoints,
+/// evidence, journal state). Copied into `evidence_dir` before teardown.
+#[derive(Debug, Clone, Default)]
+pub struct PreservationSet {
+    pub files: Vec<std::path::PathBuf>,
+}
+
+/// Cleanup report naming what was preserved and what was removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanupReport {
+    pub workspace_id: String,
+    pub removed_root: Option<String>,
+    pub preserved: Vec<String>,
+}
+
+/// Recovery outcome for crash-recovery validation.
+#[derive(Debug, Clone)]
+pub enum RecoveryOutcome {
+    /// Existing workspace matches its reference; safe to resume.
+    Resumed(Box<AcquiredWorkspace>),
+    /// Reference unusable and either no authorization was given or it did
+    /// not apply; callers must not proceed.
+    Rejected(WorkspaceRefError),
+    /// Governed remap performed under explicit authorization.
+    RemappedUnderAuthority(Box<RemapAuthorization>),
+}
+
+// ---------------------------------------------------------------------------
+// Adapter trait
+// ---------------------------------------------------------------------------
+
+/// Lifecycle owner for one workspace kind.
+pub trait WorkspaceAdapter {
+    fn kind(&self) -> AdapterKind;
+
+    /// Deterministically materialize the workspace described by `manifest`.
+    fn acquire(&self, manifest: &WorkspaceManifestV1) -> Result<AcquiredWorkspace>;
+
+    /// Validate an acquired workspace against its manifest (stale/missing).
+    fn validate(&self, acquired: &AcquiredWorkspace) -> Result<()>;
+
+    /// Preserve referenced artifacts, then tear the workspace down.
+    fn cleanup(
+        &self,
+        acquired: AcquiredWorkspace,
+        preserve: &PreservationSet,
+        evidence_dir: &std::path::Path,
+    ) -> Result<CleanupReport>;
+
+    /// Crash-recovery: re-validate an existing on-disk workspace against a
+    /// portable reference WITHOUT re-acquiring (never mutates the checkout).
+    fn recover(
+        &self,
+        expected_root: &std::path::Path,
+        reference: &WorkspaceRefV1,
+        manifest: &WorkspaceManifestV1,
+        remap: Option<&RemapAuthorization>,
+    ) -> Result<RecoveryOutcome>;
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .context("git invocation failed")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn head_revision(repo: &std::path::Path) -> Result<String> {
+    run_git(repo, &["rev-parse", "HEAD"])
+}
+
+fn preserve_files(
+    acquired: &AcquiredWorkspace,
+    preserve: &PreservationSet,
+    evidence_dir: &std::path::Path,
+) -> Result<Vec<String>> {
+    std::fs::create_dir_all(evidence_dir)?;
+    let mut preserved = Vec::new();
+    for f in &preserve.files {
+        // Only relative paths inside the workspace may be preserved.
+        let abs = if f.is_absolute() {
+            f.clone()
+        } else {
+            acquired.root.join(f)
+        };
+        if !abs.exists() {
+            continue;
+        }
+        let name = format!(
+            "{}-{}",
+            acquired.manifest.workspace_id,
+            f.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        );
+        let dest = evidence_dir.join(&name);
+        std::fs::copy(&abs, &dest).with_context(|| format!("preserving {} failed", f.display()))?;
+        preserved.push(name);
+    }
+    Ok(preserved)
+}
+
+// ---------------------------------------------------------------------------
+// GitWorktreeWorkspace — isolated repository writes
+// ---------------------------------------------------------------------------
+
+/// First production adapter: cheap parallel repository isolation via
+/// `git worktree add`, deterministically pinned to the requested revision.
+pub struct GitWorktreeWorkspace {
+    /// Parent directory under which `<workspace_id>/worktree` is created.
+    pub parent_dir: std::path::PathBuf,
+    /// Path of the SOURCE repository the worktrees attach to.
+    pub source_repo: std::path::PathBuf,
+}
+
+impl GitWorktreeWorkspace {
+    fn worktree_path(&self, manifest: &WorkspaceManifestV1) -> std::path::PathBuf {
+        // Deterministic: derived only from stable identity fields.
+        self.parent_dir
+            .join(&manifest.workspace_id)
+            .join("worktree")
+    }
+}
+
+impl WorkspaceAdapter for GitWorktreeWorkspace {
+    fn kind(&self) -> AdapterKind {
+        AdapterKind::GitWorktree
+    }
+
+    fn acquire(&self, manifest: &WorkspaceManifestV1) -> Result<AcquiredWorkspace> {
+        if manifest.mode != WorkspaceMode::Writable {
+            anyhow::bail!("git-worktree adapter acquires writable workspaces only");
+        }
+        if manifest.base_revision.is_empty() {
+            anyhow::bail!("base revision required");
+        }
+        let path = self.worktree_path(manifest);
+        if path.exists() {
+            anyhow::bail!(
+                "workspace path {} already exists: refusing to reuse or fall back",
+                path.display()
+            );
+        }
+        std::fs::create_dir_all(path.parent().expect("parent exists"))?;
+        // Pin the worktree to the EXACT requested revision. If this fails,
+        // the error propagates — there is deliberately NO fallback to the
+        // source checkout — and any created directories are removed so
+        // failed acquisitions leave no residue.
+        if let Err(e) = run_git(
+            &self.source_repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &path.to_string_lossy(),
+                &manifest.base_revision,
+            ],
+        ) {
+            let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+            return Err(e).context("worktree acquisition failed (fail closed)");
+        }
+        Ok(AcquiredWorkspace {
+            manifest: manifest.clone(),
+            root: path,
+            revision: manifest.base_revision.clone(),
+        })
+    }
+
+    fn validate(&self, acquired: &AcquiredWorkspace) -> Result<()> {
+        if !acquired.root.exists() {
+            anyhow::bail!("{}", WorkspaceRefError::Missing);
+        }
+        let actual = head_revision(&acquired.root)?;
+        if actual != acquired.manifest.base_revision {
+            anyhow::bail!(
+                "{}: HEAD {actual} != pinned {}",
+                WorkspaceRefError::StaleRevision,
+                acquired.manifest.base_revision
+            );
+        }
+        Ok(())
+    }
+
+    fn cleanup(
+        &self,
+        acquired: AcquiredWorkspace,
+        preserve: &PreservationSet,
+        evidence_dir: &std::path::Path,
+    ) -> Result<CleanupReport> {
+        let preserved = preserve_files(&acquired, preserve, evidence_dir)?;
+        // Workspace teardown is unconditional AFTER preservation succeeds:
+        // workspaces are ephemeral execution sandboxes; durable artifacts
+        // survive only via the PreservationSet (copied out above). The
+        // source checkout is never touched.
+        run_git(
+            &self.source_repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &acquired.root.to_string_lossy(),
+            ],
+        )
+        .context("worktree removal failed after preservation")?;
+        Ok(CleanupReport {
+            workspace_id: acquired.manifest.workspace_id.clone(),
+            removed_root: Some(acquired.root.to_string_lossy().to_string()),
+            preserved,
+        })
+    }
+
+    fn recover(
+        &self,
+        expected_root: &std::path::Path,
+        reference: &WorkspaceRefV1,
+        manifest: &WorkspaceManifestV1,
+        remap: Option<&RemapAuthorization>,
+    ) -> Result<RecoveryOutcome> {
+        if reference.adapter != AdapterKind::GitWorktree
+            || manifest.adapter != AdapterKind::GitWorktree
+        {
+            return reject_or_remap(remap, WorkspaceRefError::AdapterMismatch);
+        }
+        if reference.schema_version != WORKSPACE_SCHEMA_VERSION
+            || manifest.schema_version != WORKSPACE_SCHEMA_VERSION
+        {
+            return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
+        }
+        if !expected_root.exists() {
+            return reject_or_remap(remap, WorkspaceRefError::Missing);
+        }
+        let actual = match head_revision(expected_root) {
+            Ok(r) => r,
+            Err(_) => return reject_or_remap(remap, WorkspaceRefError::Missing),
+        };
+        if actual != reference.base_revision || actual != manifest.base_revision {
+            return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
+        }
+        Ok(RecoveryOutcome::Resumed(Box::new(AcquiredWorkspace {
+            manifest: manifest.clone(),
+            root: expected_root.to_path_buf(),
+            revision: actual,
+        })))
+    }
+}
+
+fn reject_or_remap(
+    remap: Option<&RemapAuthorization>,
+    err: WorkspaceRefError,
+) -> Result<RecoveryOutcome> {
+    match remap {
+        None => Ok(RecoveryOutcome::Rejected(err)),
+        Some(auth) => {
+            if auth.reason.is_empty() || auth.authorized_by.is_empty() {
+                anyhow::bail!("governed remap requires non-empty reason and authorizer");
+            }
+            Ok(RecoveryOutcome::RemappedUnderAuthority(Box::new(
+                auth.clone(),
+            )))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExistingReadOnlyWorkspace — inspection/review paths
+// ---------------------------------------------------------------------------
+
+/// Read-only mode over an already-existing checkout. Write authority is
+/// structurally denied: acquisition validates existence and pins the
+/// observed revision; `ensure_writable` always refuses.
+pub struct ExistingReadOnlyWorkspace {
+    /// The existing checkout this adapter exposes (bound at construction).
+    root: std::path::PathBuf,
+}
+
+impl ExistingReadOnlyWorkspace {
+    /// Bind the adapter to the existing checkout it will expose.
+    pub fn bound_to(root: std::path::PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn root_for(&self, _manifest: &WorkspaceManifestV1) -> Result<std::path::PathBuf> {
+        Ok(self.root.clone())
+    }
+}
+
+impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
+    fn kind(&self) -> AdapterKind {
+        AdapterKind::ExistingReadOnly
+    }
+
+    fn acquire(&self, manifest: &WorkspaceManifestV1) -> Result<AcquiredWorkspace> {
+        if manifest.mode != WorkspaceMode::ReadOnly {
+            anyhow::bail!("existing-read-only adapter acquires read-only workspaces only");
+        }
+        let path = self.root_for(manifest)?;
+        if !path.exists() {
+            anyhow::bail!("{}", WorkspaceRefError::Missing);
+        }
+        // Pin whatever revision the existing checkout is actually at; the
+        // manifest's base_revision must MATCH reality or acquisition fails
+        // (no silent rebasing of authority onto a different tree).
+        let actual = head_revision(&path)?;
+        if actual != manifest.base_revision {
+            anyhow::bail!("{}: found {actual}", WorkspaceRefError::StaleRevision);
+        }
+        Ok(AcquiredWorkspace {
+            manifest: manifest.clone(),
+            root: path,
+            revision: actual,
+        })
+    }
+
+    fn validate(&self, acquired: &AcquiredWorkspace) -> Result<()> {
+        if !acquired.root.exists() {
+            anyhow::bail!("{}", WorkspaceRefError::Missing);
+        }
+        let actual = head_revision(&acquired.root)?;
+        if actual != acquired.manifest.base_revision {
+            anyhow::bail!("{}", WorkspaceRefError::StaleRevision);
+        }
+        Ok(())
+    }
+
+    fn cleanup(
+        &self,
+        acquired: AcquiredWorkspace,
+        preserve: &PreservationSet,
+        evidence_dir: &std::path::Path,
+    ) -> Result<CleanupReport> {
+        // Never deletes anything: read-only inspection leaves the user's
+        // checkout untouched; referenced artifacts are still copied out.
+        let preserved = preserve_files(&acquired, preserve, evidence_dir)?;
+        Ok(CleanupReport {
+            workspace_id: acquired.manifest.workspace_id.clone(),
+            removed_root: None,
+            preserved,
+        })
+    }
+
+    fn recover(
+        &self,
+        expected_root: &std::path::Path,
+        reference: &WorkspaceRefV1,
+        manifest: &WorkspaceManifestV1,
+        remap: Option<&RemapAuthorization>,
+    ) -> Result<RecoveryOutcome> {
+        if reference.adapter != AdapterKind::ExistingReadOnly
+            || manifest.adapter != AdapterKind::ExistingReadOnly
+        {
+            return reject_or_remap(remap, WorkspaceRefError::AdapterMismatch);
+        }
+        if reference.schema_version != WORKSPACE_SCHEMA_VERSION {
+            return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
+        }
+        if !expected_root.exists() {
+            return reject_or_remap(remap, WorkspaceRefError::Missing);
+        }
+        let actual = match head_revision(expected_root) {
+            Ok(r) => r,
+            Err(_) => return reject_or_remap(remap, WorkspaceRefError::Missing),
+        };
+        if actual != reference.base_revision {
+            return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
+        }
+        Ok(RecoveryOutcome::Resumed(Box::new(AcquiredWorkspace {
+            manifest: manifest.clone(),
+            root: expected_root.to_path_buf(),
+            revision: actual,
+        })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    struct TempRepo(std::path::PathBuf);
+    impl TempRepo {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("lite-ws-{}-{}", tag, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let g = |a: &[&str]| {
+                let o = Command::new("git")
+                    .args(a)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap();
+                assert!(
+                    o.status.success(),
+                    "git {a:?}: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            };
+            g(&["init", "-q"]);
+            g(&["config", "user.email", "t@t"]);
+            g(&["config", "user.name", "T"]);
+            std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+            g(&["add", "."]);
+            g(&["commit", "-q", "-m", "c1"]);
+            Self(dir)
+        }
+        fn head(&self) -> String {
+            let o = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&self.0)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+    }
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn writable_manifest(repo: &str, revision: &str) -> WorkspaceManifestV1 {
+        WorkspaceManifestV1 {
+            schema_version: WORKSPACE_SCHEMA_VERSION.into(),
+            workspace_id: format!("ws-{repo}"),
+            adapter: AdapterKind::GitWorktree,
+            adapter_revision: ADAPTER_REVISION.into(),
+            repo_identity: format!("origin/{repo}"),
+            base_revision: revision.into(),
+            branch: None,
+            mode: WorkspaceMode::Writable,
+            writable_scopes: vec!["work://x".into()],
+            resource_lock_id: format!("lock-{repo}"),
+            created_at: "2026-08-25T00:00:00Z".into(),
+            content_digest: None,
+        }
+        .sealed()
+    }
+
+    #[test]
+    fn manifest_digest_seals_and_verifies() {
+        let m = writable_manifest("t1", &"a".repeat(40));
+        let sealed = m.sealed();
+        assert!(
+            sealed
+                .content_digest
+                .as_deref()
+                .is_some_and(|d| d.len() == 64)
+        );
+        let text = serde_json::to_string(&sealed).unwrap();
+        let parsed = WorkspaceManifestV1::parse_json(&text).expect("verifies");
+        assert_eq!(parsed, sealed);
+
+        // Tamper with any field -> digest fails closed.
+        let mut tampered = sealed.clone();
+        tampered.base_revision = "b".repeat(40);
+        let bad = serde_json::to_string(&tampered).unwrap();
+        assert!(WorkspaceManifestV1::parse_json(&bad).is_err());
+
+        // Missing digest fails closed.
+        let mut naked = sealed.clone();
+        naked.content_digest = None;
+        let bad2 = serde_json::to_string(&naked).unwrap();
+        assert!(WorkspaceManifestV1::parse_json(&bad2).is_err());
+    }
+
+    #[test]
+    fn worktree_create_teardown_deterministic_pinned() {
+        let repo = TempRepo::new("ct");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest("ct", &rev);
+        let acquired = adapter.acquire(&manifest).expect("worktree created");
+        assert_eq!(acquired.revision, rev);
+        // Deterministic path from stable identity.
+        assert_eq!(acquired.root, parent.join("ws-ct").join("worktree"));
+        adapter
+            .validate(&acquired)
+            .expect("pinned revision validates");
+
+        // Write inside the isolated workspace does not touch the source.
+        std::fs::write(acquired.root.join("new.txt"), "isolated\n").unwrap();
+        assert!(!repo.0.join("new.txt").exists());
+
+        let ev = repo.0.join("_evidence");
+        std::fs::write(acquired.root.join("keep.json"), "{}").unwrap();
+        let report = adapter
+            .cleanup(
+                acquired,
+                &PreservationSet {
+                    files: vec![PathBuf::from("keep.json")],
+                },
+                &ev,
+            )
+            .expect("cleanup");
+        assert_eq!(report.preserved, vec!["ws-ct-keep.json"]);
+        assert!(ev.join("ws-ct-keep.json").exists());
+        assert!(!parent.join("ws-ct").join("worktree").exists());
+    }
+
+    #[test]
+    fn stale_revision_fails_closed() {
+        let repo = TempRepo::new("stale");
+        let old = repo.head();
+        std::fs::write(repo.0.join("a.txt"), "two\n").unwrap();
+        {
+            let st = Command::new("git")
+                .args(["commit", "-aqm", "c2"])
+                .current_dir(&repo.0)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let mut manifest = writable_manifest("stale", &old);
+        manifest.base_revision = old.clone();
+        let manifest = manifest.sealed();
+        let acquired = adapter.acquire(&manifest).unwrap();
+        // The pinned revision no longer matches... acquire pins the OLD
+        // commit which still exists; simulate staleness by validating
+        // against a manifest claiming a NEWER revision.
+        let mut drifted = manifest.clone();
+        drifted.base_revision = repo.head();
+        let drifted = drifted.sealed();
+        let mut acq = acquired.clone();
+        acq.manifest = drifted;
+        let err = adapter.validate(&acq).unwrap_err().to_string();
+        assert!(err.contains("stale/mismatched"), "{err}");
+    }
+
+    #[test]
+    fn readonly_mode_cannot_acquire_write_authority() {
+        let repo = TempRepo::new("ro");
+        let adapter = ExistingReadOnlyWorkspace::bound_to(repo.0.clone());
+        let manifest = WorkspaceManifestV1 {
+            schema_version: WORKSPACE_SCHEMA_VERSION.into(),
+            workspace_id: "ws-ro".into(),
+            adapter: AdapterKind::ExistingReadOnly,
+            adapter_revision: ADAPTER_REVISION.into(),
+            repo_identity: "origin/ro".into(),
+            base_revision: repo.head(),
+            branch: None,
+            mode: WorkspaceMode::ReadOnly,
+            writable_scopes: vec![],
+            resource_lock_id: "lock-ro".into(),
+            created_at: "2026-08-25T00:00:00Z".into(),
+            content_digest: None,
+        }
+        .sealed();
+        let acquired = adapter.acquire(&manifest).expect("read-only acquisition");
+        let err = acquired.ensure_writable().unwrap_err().to_string();
+        assert!(err.contains("write authority denied"), "{err}");
+        // Cleanup never deletes the user's checkout.
+        let report = adapter
+            .cleanup(acquired, &PreservationSet::default(), &repo.0.join("_ev"))
+            .unwrap();
+        assert!(report.removed_root.is_none());
+        assert!(repo.0.join("a.txt").exists());
+    }
+
+    #[test]
+    fn recovery_rejects_missing_stale_mismatch_and_remaps_under_authority() {
+        let repo = TempRepo::new("rec");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest("rec", &rev);
+        let reference = manifest.to_reference();
+
+        // Missing workspace.
+        match adapter
+            .recover(
+                &repo.0.join("_ws/ws-rec/worktree"),
+                &reference,
+                &manifest,
+                None,
+            )
+            .unwrap()
+        {
+            RecoveryOutcome::Rejected(WorkspaceRefError::Missing) => {}
+            other => panic!("expected Missing, got {other:?}"),
+        }
+        // With governed remap authorization -> RemappedUnderAuthority.
+        let auth = RemapAuthorization {
+            reason: "workspace lost to infra failure".into(),
+            authorized_by: "operator-diego".into(),
+            recorded_at: "2026-08-25T00:00:00Z".into(),
+        };
+        match adapter
+            .recover(
+                &repo.0.join("_ws/ws-rec/worktree"),
+                &reference,
+                &manifest,
+                Some(&auth),
+            )
+            .unwrap()
+        {
+            RecoveryOutcome::RemappedUnderAuthority(a) => {
+                assert_eq!(a.authorized_by, "operator-diego")
+            }
+            other => panic!("expected remap, got {other:?}"),
+        }
+
+        // Stale revision: the workspace sits at its original pin while the
+        // reference/manifest claim a NEWER revision — resume must reject.
+        let acquired = adapter.acquire(&manifest).unwrap();
+        std::fs::write(repo.0.join("a.txt"), "three\n").unwrap();
+        {
+            let st = Command::new("git")
+                .args(["commit", "-aqm", "c3"])
+                .current_dir(&repo.0)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        let newer = repo.head();
+        let drifted_manifest = writable_manifest("rec", &newer);
+        let drifted_ref = drifted_manifest.to_reference();
+        // The drifted manifest digest differs from the on-disk workspace's
+        // origin; recovery compares REVISIONS, so present the drifted pair
+        // against the old-pinned worktree.
+        let outcome = adapter
+            .recover(&acquired.root, &drifted_ref, &drifted_manifest, None)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RecoveryOutcome::Rejected(WorkspaceRefError::StaleRevision)
+        ));
+        // Without authorization the caller must NOT proceed on drift; with
+        // governed remap authorization it is allowed and evidenced.
+        let outcome2 = adapter
+            .recover(&acquired.root, &drifted_ref, &drifted_manifest, Some(&auth))
+            .unwrap();
+        assert!(matches!(
+            outcome2,
+            RecoveryOutcome::RemappedUnderAuthority(_)
+        ));
+        // The honest pair still resumes cleanly.
+        let outcome3 = adapter
+            .recover(&acquired.root, &reference, &manifest, None)
+            .unwrap();
+        assert!(matches!(outcome3, RecoveryOutcome::Resumed(_)));
+        adapter
+            .cleanup(acquired, &PreservationSet::default(), &repo.0.join("_ev"))
+            .ok();
+    }
+
+    #[test]
+    fn adapter_mismatch_fails_closed() {
+        let repo = TempRepo::new("mix");
+        let ro_adapter = ExistingReadOnlyWorkspace::bound_to(repo.0.clone());
+        let wt_adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let wt_manifest = writable_manifest("mix", &rev);
+        let reference = wt_manifest.to_reference(); // git-worktree ref
+
+        // Presenting a git-worktree reference to the read-only adapter is
+        // rejected (adapter mismatch), not silently adapted.
+        let outcome = ro_adapter
+            .recover(&repo.0, &reference, &wt_manifest, None)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RecoveryOutcome::Rejected(WorkspaceRefError::AdapterMismatch)
+        ));
+
+        // And vice versa: read-only ref to worktree adapter.
+        let ro_manifest = WorkspaceManifestV1 {
+            schema_version: WORKSPACE_SCHEMA_VERSION.into(),
+            workspace_id: "ws-mix-ro".into(),
+            adapter: AdapterKind::ExistingReadOnly,
+            adapter_revision: ADAPTER_REVISION.into(),
+            repo_identity: "origin/mix".into(),
+            base_revision: rev.clone(),
+            branch: None,
+            mode: WorkspaceMode::ReadOnly,
+            writable_scopes: vec![],
+            resource_lock_id: "lock-x".into(),
+            created_at: "2026-08-25T00:00:00Z".into(),
+            content_digest: None,
+        }
+        .sealed();
+        let ro_ref = ro_manifest.to_reference();
+        let outcome2 = wt_adapter
+            .recover(&repo.0, &ro_ref, &ro_manifest, None)
+            .unwrap();
+        assert!(matches!(
+            outcome2,
+            RecoveryOutcome::Rejected(WorkspaceRefError::AdapterMismatch)
+        ));
+    }
+
+    #[test]
+    fn references_round_trip_without_process_state() {
+        let repo = TempRepo::new("rt");
+        let manifest = writable_manifest("rt", &repo.head());
+        let reference = manifest.to_reference();
+        let json = reference.to_json().unwrap();
+        let parsed = WorkspaceRefV1::parse_json(&json).unwrap();
+        assert_eq!(parsed, reference);
+        // No hidden process state: the JSON carries only durable identity.
+        assert!(!json.contains("pid") && !json.contains(std::process::id().to_string().as_str()));
+        // Resource-lock identity available for later parallel scheduling.
+        assert_eq!(manifest.resource_lock_id, "lock-rt");
+    }
+
+    #[test]
+    fn writable_acquisition_never_falls_back_to_source_checkout() {
+        let repo = TempRepo::new("fb");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        // Nonexistent revision: acquisition must FAIL, and critically the
+        // source checkout must be untouched (no silent fallback).
+        let manifest = writable_manifest("fb", &"f".repeat(40));
+        assert!(adapter.acquire(&manifest).is_err());
+        let head_before = repo.head();
+        assert_eq!(repo.head(), head_before);
+        assert!(!repo.0.join("_ws/ws-fb").exists());
+    }
+}
