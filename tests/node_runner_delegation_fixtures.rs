@@ -5,8 +5,9 @@
 //! code mode, tool bridges, and external adapter boundaries — must reach its
 //! effect ONLY through the nine-gate pipeline. These fixtures prove:
 //!
-//! 1. nested runners: a parent capability invoking a child NodeRunner yields
-//!    TWO journaled, digest-chained outcomes (both sides gated);
+//! 1. nested runners: a parent capability invoking a child NodeRunner gates
+//!    BOTH sides; the child's journal length and terminal entry digest are
+//!    surfaced through the parent output and asserted;
 //! 2. code mode / tool bridge / external adapter capabilities execute only
 //!    via runner-resolved one-shot handlers;
 //! 3. bypass attempts fail closed: re-resolving a consumed capability,
@@ -90,7 +91,14 @@ fn delegation_registry(child_calls: Arc<AtomicUsize>) -> CapabilityRegistry {
                         "inner.effect",
                         serde_json::json!({"body": "nested"}),
                     ))?;
-                    Ok(format!("nested:{}", outcome.output))
+                    // Surface CHILD-side durability so the fixture can assert
+                    // both sides of the delegation are journaled.
+                    Ok(format!(
+                        "nested:{}|child_entry={}|child_journal={}",
+                        outcome.output,
+                        outcome.evidence_entry.entry_digest,
+                        child.journal().len()
+                    ))
                 })
             }
         }),
@@ -170,6 +178,27 @@ async fn nested_node_execution_is_fully_gated_on_both_sides() {
         .await
         .expect("nested delegation passes gates on both sides");
     assert!(outcome.output.starts_with("nested:inner:nested"));
+    // Child-side durability is surfaced and asserted: the child runner
+    // journaled its own digest-chained terminal entry, bound into the
+    // parent output.
+    assert!(
+        outcome.output.contains("child_journal=1"),
+        "child runner must journal its run: {}",
+        outcome.output
+    );
+    let child_digest = outcome
+        .output
+        .split("child_entry=")
+        .nth(1)
+        .and_then(|s| s.split('|').next())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        child_digest.len(),
+        64,
+        "child terminal entry digest must bind: {child_digest}"
+    );
+    assert!(outcome.output.contains(&child_digest));
     // The child effect ran exactly once, through the child's own gates.
     assert_eq!(child_calls.load(Ordering::SeqCst), 1);
     // Parent journaled its terminal entry; evidence binds.
