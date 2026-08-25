@@ -24,6 +24,26 @@ Plus:
 - **Idempotency**: same identity key ⇒ cached outcome, handler runs exactly once.
 - **Terminal ⇒ durable evidence**: result's `evidence_refs[0].event_digest == journal entry digest`; result sealed with `result_digest`.
 
+## Slice 2 (this PR): Fast Governed Loop V1 wiring
+
+- `Capability::asynchronous` — one-shot boxed-future handlers; a capability
+  instance IS one authorized effect (`FnOnce`, extracted fail-closed at
+  preflight; double-resolution impossible by construction).
+- `NodeRunner::preflight_gates` (gates 1-4) + `ResolvedAsyncCapability::
+  into_effect` (the ONLY sanctioned gate-5 future) + `seal_effect` (gates
+  6-9) — split API so the provider future stays raceable against heartbeat/
+  cancellation exactly as before. `NodeRunner::execute_async` is the full
+  nine-gate path for directly-awaited effects.
+- Orchestrator: BOTH fast-loop effects now run through the pipeline:
+  - `provider.generate` — authorized preflight, sanctioned future raced
+    against heartbeat/cancellation, sealed on success; generation failures
+    keep their full durable bookkeeping BEFORE sealing (classify/evidence/
+    GenerationFailed transition/reservation release).
+  - `validation.run` — full execute_async path; typed failures (disk breach
+    etc.) propagate with their downcast identity intact.
+- `GenerateResult` gains Serialize/Deserialize for the runner boundary;
+  `NodeRunOutcome.output` carries the redacted effect content.
+
 ## Out of scope (follow-ups)
 
 - Nested-node/code-mode/tool-bridge/external-adapter bypass-proof fixtures (#154 ExecutionHarness adapters; slice 2).
