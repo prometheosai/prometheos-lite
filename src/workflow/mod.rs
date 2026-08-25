@@ -19,6 +19,7 @@ pub mod context_planner;
 pub mod durable;
 pub mod evaluate;
 pub mod governance;
+pub mod graph_state;
 pub mod memory_contracts;
 pub mod node_contracts;
 pub mod node_runner;
