@@ -1,0 +1,95 @@
+{
+  "$id": "/schemas/HarnessAdapter.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HarnessAdapter",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schemaVersion", "version", "identity", "declaredCapabilities"],
+  "properties": {
+    "id": {"type": "string"},
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "identity": {"$ref": "#/$defs/Identity"},
+    "declaredCapabilities": {"type": "array", "items": {"type": "string"}},
+    "capabilities": {"type": "array", "items": {"type": "string"}},
+    "limitations": {"type": "array", "items": {"type": "string"}},
+    "inputMapping": {"$ref": "#/$defs/Mapping"},
+    "outputMapping": {"$ref": "#/$defs/Mapping"},
+    "eventCorrelation": {"$ref": "#/$defs/EventCorrelation"},
+    "checkpointImport": {"type": "boolean"},
+    "checkpointExport": {"type": "boolean"},
+    "cancellation": {"$ref": "#/$defs/Cancellation"},
+    "failureClassification": {"type": "array", "items": {"type": "string"}},
+    "evidenceAttachment": {"$ref": "#/$defs/EvidenceAttachment"},
+    "handoffBehavior": {"$ref": "#/$defs/HandoffBehavior"}
+  },
+  "$defs": {
+    "Identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "revision"],
+      "properties": {
+        "name": {"type": "string"},
+        "revision": {"type": "string"}
+      }
+    },
+    "Mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "fields"],
+      "properties": {
+        "strategy": {"enum": ["identity", "canonical", "adapter"]},
+        "fields": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/FieldMapping"}
+        }
+      }
+    },
+    "FieldMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "transform": {"type": "string"},
+        "semanticKey": {"type": "string", "minLength": 1},
+        "required": {"type": "boolean"},
+        "dropOnLoss": {"type": "boolean"}
+      }
+    },
+    "EventCorrelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme"],
+      "properties": {
+        "scheme": {"type": "string"},
+        "requiredFields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "Cancellation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "propagatesTo": {"type": "boolean"},
+        "preservesState": {"type": "boolean"}
+      }
+    },
+    "EvidenceAttachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required": {"type": "boolean"},
+        "maxBytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "HandoffBehavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preservesSemanticIdentity": {"type": "boolean", "const": true},
+        "requiresCheckpoint": {"type": "boolean"}
+      }
+    }
+  }
+}

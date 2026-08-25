@@ -26,6 +26,7 @@ pub mod redaction;
 pub mod repo_index;
 pub mod retention;
 pub mod schema;
+pub mod soma;
 
 pub use portable_state::{
     CompatibilityMetadata, DecisionRecord, DecisionStatus, ExecutionProvenance, PortableRef,

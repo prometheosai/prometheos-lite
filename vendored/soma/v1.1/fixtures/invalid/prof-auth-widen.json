@@ -1,0 +1,24 @@
+{
+  "declared": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "budgets": {
+      "tokens": 100
+    }
+  },
+  "effective": {
+    "authority": {
+      "executionClass": "open-ended",
+      "mutation": "none"
+    },
+    "budgets": {
+      "tokens": 100
+    }
+  },
+  "harness": "harness://gvisor@1.0",
+  "id": "prof-widen",
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0"
+}

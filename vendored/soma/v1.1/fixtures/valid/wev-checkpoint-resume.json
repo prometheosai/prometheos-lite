@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "runId": "run-2",
+  "compatibility": {
+    "schemaVersion": "1.1.0"
+  },
+  "events": [
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "ev-cp",
+      "eventType": "checkpoint",
+      "actor": {
+        "kind": "agent",
+        "identity": "agent-a",
+        "implementation": {
+          "name": "soma",
+          "revision": "r1"
+        }
+      },
+      "authority": {
+        "executionClass": "deterministic",
+        "mutation": "none"
+      },
+      "effectiveAuthority": {
+        "executionClass": "deterministic",
+        "mutation": "none"
+      },
+      "sequence": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "idempotencyKey": "idem-1",
+      "correlationId": "corr-1",
+      "repoRevision": "abc123",
+      "compatibility": {
+        "schemaVersion": "1.1.0",
+        "minReaderVersion": "1.0.0"
+      },
+      "parents": [],
+      "payload": {
+        "checkpointEnvelope": {
+          "stateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sequence": 1,
+          "repoRevision": "abc123",
+          "boundEvidence": [
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ]
+        }
+      },
+      "semanticDigest": "91c6d1fe1104eded632b1fad8df4cd4ca40ca17f0da43b650c5d75e369c4140e"
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "ev-res",
+      "eventType": "resume",
+      "actor": {
+        "kind": "agent",
+        "identity": "agent-a",
+        "implementation": {
+          "name": "soma",
+          "revision": "r1"
+        }
+      },
+      "authority": {
+        "executionClass": "deterministic",
+        "mutation": "none"
+      },
+      "effectiveAuthority": {
+        "executionClass": "deterministic",
+        "mutation": "none"
+      },
+      "sequence": 0,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "idempotencyKey": "idem-1",
+      "correlationId": "corr-1",
+      "repoRevision": "abc123",
+      "compatibility": {
+        "schemaVersion": "1.1.0",
+        "minReaderVersion": "1.0.0"
+      },
+      "parents": [
+        "ev-cp"
+      ],
+      "payload": {
+        "resumeToken": {
+          "token": "tok-1",
+          "checkpointDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issuedAt": "2026-01-01T00:00:00Z",
+          "expiresAt": "2026-12-31T23:59:59Z",
+          "decision": "approved"
+        }
+      },
+      "semanticDigest": "24b2ecc607d0f1ee7d1a15c733cf9efdc6dadf6c571db0432ed89c4df5d2a74d"
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "wf-out-0001",
+  "name": "Base",
+  "kind": "atomic",
+  "inputPorts": [
+    {
+      "name": "order",
+      "direction": "input",
+      "type": "Order",
+      "cardinality": "single",
+      "requiredness": "required"
+    }
+  ],
+  "outputPorts": [
+    {
+      "name": "shipment",
+      "direction": "output",
+      "type": "Shipment",
+      "cardinality": "single",
+      "requiredness": "required"
+    }
+  ],
+  "body": [
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "p",
+      "executionClass": "deterministic",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "verdict",
+          "type": "Status",
+          "emits": [
+            "Failed"
+          ]
+        }
+      ],
+      "authority": [],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "c",
+      "executionClass": "deterministic",
+      "inputs": [
+        {
+          "name": "verdict",
+          "type": "Status",
+          "acceptedOutcomes": [
+            "Produced"
+          ]
+        }
+      ],
+      "outputs": [],
+      "authority": [],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    }
+  ],
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "tools": {
+      "ship": [
+        "ship.v1"
+      ]
+    },
+    "readableScopes": [
+      "orders"
+    ],
+    "writableScopes": [
+      "shipping"
+    ],
+    "networkPolicy": {
+      "default": "deny"
+    },
+    "providerPolicy": {
+      "allowlist": [
+        "provider-1"
+      ]
+    },
+    "secrets": [
+      {
+        "name": "cred",
+        "scopes": [
+          "shipping"
+        ]
+      }
+    ]
+  }
+}

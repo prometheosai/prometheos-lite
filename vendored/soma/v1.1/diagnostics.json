@@ -1,0 +1,251 @@
+{
+  "codes": [
+    {
+      "category": "authority_expansion",
+      "code": "SOMA-AUTH-0001",
+      "message": "capability used but not granted",
+      "severity": "error"
+    },
+    {
+      "category": "authority_exceeded_composite",
+      "code": "SOMA-AUTH-0002",
+      "message": "composite exceeding imported authority",
+      "severity": "error"
+    },
+    {
+      "category": "scope_violation",
+      "code": "SOMA-AUTH-0003",
+      "message": "read/write outside declared scopes",
+      "severity": "error"
+    },
+    {
+      "category": "provider_boundary_violation",
+      "code": "SOMA-AUTH-0004",
+      "message": "restricted content routed to a prohibited provider",
+      "severity": "error"
+    },
+    {
+      "category": "capability_violation",
+      "code": "SOMA-AUTH-0005",
+      "message": "capability/operation outside allowed set",
+      "severity": "error"
+    },
+    {
+      "category": "secret_violation",
+      "code": "SOMA-AUTH-0006",
+      "message": "secret read or disclosure outside policy",
+      "severity": "error"
+    },
+    {
+      "category": "unreviewed_effect",
+      "code": "SOMA-AUTH-0007",
+      "message": "review-gated effect without approved decision",
+      "severity": "error"
+    },
+    {
+      "category": "irreversible_without_recovery",
+      "code": "SOMA-AUTH-0008",
+      "message": "irreversible effect without authority/recovery",
+      "severity": "error"
+    },
+    {
+      "category": "budget_exceeded",
+      "code": "SOMA-AUTH-0009",
+      "message": "token/cost/duration/retry/concurrency budget exceeded",
+      "severity": "error"
+    },
+    {
+      "category": "abstention_unhandled",
+      "code": "SOMA-AUTH-0010",
+      "message": "abstained review with no re-approval path",
+      "severity": "error"
+    },
+    {
+      "category": "constraint_violation",
+      "code": "SOMA-GOV-0001",
+      "message": "governance constraint unsatisfied",
+      "severity": "error"
+    },
+    {
+      "category": "constraint_inconsistent",
+      "code": "SOMA-GOV-0002",
+      "message": "declared constraint set unsatisfiable",
+      "severity": "error"
+    },
+    {
+      "category": "constraint_undecidable",
+      "code": "SOMA-GOV-0003",
+      "message": "constraint satisfiability not decidable (fail closed, never fail open)",
+      "severity": "error"
+    },
+    {
+      "category": "unsupported_version",
+      "code": "SOMA-CMP-0001",
+      "message": "artifact version unsupported",
+      "severity": "error"
+    },
+    {
+      "category": "invalid_reference",
+      "code": "SOMA-CMP-0002",
+      "message": "unknown/invalid/circular reference",
+      "severity": "error"
+    },
+    {
+      "category": "schema_violation",
+      "code": "SOMA-CMP-0003",
+      "message": "contract violates its declared schema",
+      "severity": "error"
+    },
+    {
+      "category": "canonicalization_mismatch",
+      "code": "SOMA-CMP-0004",
+      "message": "canonical digest does not verify",
+      "severity": "error"
+    },
+    {
+      "category": "type_mismatch",
+      "code": "SOMA-CMP-0005",
+      "message": "port/edge type or cardinality mismatch",
+      "severity": "error"
+    },
+    {
+      "category": "unsupported_type",
+      "code": "SOMA-CMP-0006",
+      "message": "type not in the SOMA type vocabulary",
+      "severity": "error"
+    },
+    {
+      "category": "duplicate_key",
+      "code": "SOMA-CMP-0007",
+      "message": "duplicate canonical JSON key",
+      "severity": "error"
+    },
+    {
+      "category": "cyclic_composition",
+      "code": "SOMA-EXP-0001",
+      "message": "transitive self-containment",
+      "severity": "error"
+    },
+    {
+      "category": "cyclic_edges",
+      "code": "SOMA-EXP-0002",
+      "message": "operation-edge cycle (no topological sort)",
+      "severity": "error"
+    },
+    {
+      "category": "nondeterministic_expansion",
+      "code": "SOMA-EXP-0003",
+      "message": "two expansions differ",
+      "severity": "error"
+    },
+    {
+      "category": "unreachable_required",
+      "code": "SOMA-EXP-0004",
+      "message": "required internal operation unreachable",
+      "severity": "error"
+    },
+    {
+      "category": "unsatisfied_required_input",
+      "code": "SOMA-EXP-0005",
+      "message": "required input not fed/defaulted",
+      "severity": "error"
+    },
+    {
+      "category": "optional_to_required",
+      "code": "SOMA-EXP-0006",
+      "message": "required input fed only by optional output",
+      "severity": "error"
+    },
+    {
+      "category": "leakage",
+      "code": "SOMA-EXP-0007",
+      "message": "undeclared data/authority/effect/context crossing",
+      "severity": "error"
+    },
+    {
+      "category": "outcome_coercion",
+      "code": "SOMA-OUT-0001",
+      "message": "failure-like outcome coerced to success",
+      "severity": "error"
+    },
+    {
+      "category": "outcome_not_accepted",
+      "code": "SOMA-OUT-0002",
+      "message": "upstream outcome not in accept set",
+      "severity": "error"
+    },
+    {
+      "category": "resume_stale",
+      "code": "SOMA-RES-0001",
+      "message": "resume token stale",
+      "severity": "error"
+    },
+    {
+      "category": "resume_expired",
+      "code": "SOMA-RES-0002",
+      "message": "resume token/decision expired",
+      "severity": "error"
+    },
+    {
+      "category": "resume_tampered",
+      "code": "SOMA-RES-0003",
+      "message": "resume token digest mismatch",
+      "severity": "error"
+    },
+    {
+      "category": "resume_unsupported",
+      "code": "SOMA-RES-0004",
+      "message": "resume token version unsupported",
+      "severity": "error"
+    },
+    {
+      "category": "event_unsupported_version",
+      "code": "SOMA-EVT-0001",
+      "message": "WorkEvent schema or workflow version unsupported",
+      "severity": "error"
+    },
+    {
+      "category": "event_broken_causality",
+      "code": "SOMA-EVT-0002",
+      "message": "WorkEvent references a missing or cyclic causal parent",
+      "severity": "error"
+    },
+    {
+      "category": "event_authority_expansion",
+      "code": "SOMA-EVT-0003",
+      "message": "effective authority exceeds declared authority across handoff/retry/projection",
+      "severity": "error"
+    },
+    {
+      "category": "event_missing_evidence",
+      "code": "SOMA-EVT-0004",
+      "message": "attributable result/outcome event missing required evidence",
+      "severity": "error"
+    },
+    {
+      "category": "event_replay_conflict",
+      "code": "SOMA-EVT-0005",
+      "message": "replay conflicts with existing causal history and is not idempotent",
+      "severity": "error"
+    },
+    {
+      "category": "profile_authority_expansion",
+      "code": "SOMA-PROF-0001",
+      "message": "ExecutionProfile effective authority widens declared authority",
+      "severity": "error"
+    },
+    {
+      "category": "profile_budget_exceeded",
+      "code": "SOMA-PROF-0002",
+      "message": "ExecutionProfile budgets exceed declared limits",
+      "severity": "error"
+    },
+    {
+      "category": "adapter_incompatible",
+      "code": "SOMA-ADAPT-0001",
+      "message": "HarnessAdapter claims a capability outside its declared capabilities",
+      "severity": "error"
+    }
+  ],
+  "version": "1.1.0"
+}

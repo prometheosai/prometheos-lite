@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "conf-1",
+  "adapter": {
+    "id": "adapt-1",
+    "schemaVersion": "1.1.0",
+    "version": "1.1.0",
+    "identity": {
+      "name": "external-harness",
+      "revision": "1"
+    },
+    "declaredCapabilities": [
+      "map.v1"
+    ],
+    "capabilities": [
+      "map.v1"
+    ],
+    "inputMapping": {
+      "strategy": "canonical",
+      "fields": [
+        {
+          "source": "ext_a",
+          "target": "order"
+        },
+        {
+          "source": "ext_b",
+          "target": "meta"
+        }
+      ]
+    },
+    "outputMapping": {
+      "strategy": "canonical",
+      "fields": [
+        {
+          "source": "order",
+          "target": "ext_a",
+          "required": true
+        },
+        {
+          "source": "meta",
+          "target": "ext_b"
+        }
+      ]
+    },
+    "checkpointImport": true,
+    "checkpointExport": true,
+    "handoffBehavior": {
+      "preservesSemanticIdentity": true
+    }
+  },
+  "scenarios": [
+    {
+      "kind": "handoff-roundtrip",
+      "canonicalInput": {
+        "order": "o-1",
+        "meta": "m-1"
+      },
+      "appliedMapping": [
+        {
+          "source": "order",
+          "target": "ext_a",
+          "required": true
+        },
+        {
+          "source": "meta",
+          "target": "ext_b"
+        }
+      ],
+      "mappedOutput": {
+        "ext_a": "o-1"
+      },
+      "restoredCanonical": {
+        "order": "o-1",
+        "meta": "m-1"
+      },
+      "semanticDigest": "c8349c740f3b73f2a3381aa2f38341a8322eac02eeff1d405b69ea296167da2f"
+    }
+  ]
+}

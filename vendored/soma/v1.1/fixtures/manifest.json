@@ -1,0 +1,550 @@
+{
+  "fixtures": [
+    {
+      "path": "fixtures/valid/adapter-valid.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "HarnessAdapter",
+      "sha256": "c3be7bd5dfeb83ff5006a374e10cf76f9a371d540a30b47e6877b544ee314643"
+    },
+    {
+      "path": "fixtures/valid/conf-valid-checkpoint.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "AdapterConformance",
+      "sha256": "70a51ee5a60c61f74dc8d4ddfeb2986e9f22826200119d4b3ba75ca7e88fb5a7"
+    },
+    {
+      "path": "fixtures/valid/conf-valid-roundtrip.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "AdapterConformance",
+      "sha256": "8c10c14dd18b55ad8dee05318d1fe8cf13a27668dc7408aa52691de90ad94bc8"
+    },
+    {
+      "path": "fixtures/valid/prof-valid.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "ExecutionProfile",
+      "sha256": "52607a45bd9defcb4ef6eea08fcec4979634a7bd4358ca5fed797f92ff30df0e"
+    },
+    {
+      "path": "fixtures/valid/wev-checkpoint-resume.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkEventBatch",
+      "sha256": "f97cd1a342837830f932cdcffb4a056ef28624cedc7f64b61df4035da7b7b789"
+    },
+    {
+      "path": "fixtures/valid/wev-handoff-native.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkEvent",
+      "sha256": "11ecdddcac2065e402d435fd9df910de2c4799c2c03cab68b967a1ac35f6f348"
+    },
+    {
+      "path": "fixtures/valid/wev-valid-chain.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkEventBatch",
+      "sha256": "6d4fd5997a05d7d8e8af316eaf8b465682524a13d1a31d0c583fb50fd71ae26a"
+    },
+    {
+      "path": "fixtures/valid/wev-valid-idempotent.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkEvent",
+      "sha256": "8991acfd393f80916db06a2b71f812bfe0ea80a7db705012db010332d0659b6d"
+    },
+    {
+      "path": "fixtures/valid/wf-valid-base.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkflowDefinition",
+      "sha256": "512c74f7e0a254de06b597f6efec785c4f0ff21fa5d380cfcf2377895cf8c9cf"
+    },
+    {
+      "path": "fixtures/valid/wf-valid-composite.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkflowDefinition",
+      "sha256": "41d47567f87b83cff537fea21ae62f6184b69195fbe1c708a363df8099eb63aa"
+    },
+    {
+      "path": "fixtures/valid/wf-valid-gov.json",
+      "kind": "valid",
+      "expected_codes": [],
+      "artifact": "WorkflowDefinition",
+      "sha256": "1ad6bad9c780eaf9ab3f55b5ba6cd821bd00c3012aeb61d32f8d556ad871a8e5"
+    },
+    {
+      "path": "fixtures/invalid/adapter-cap.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-ADAPT-0001"
+      ],
+      "artifact": "HarnessAdapter",
+      "sha256": "1b53e541819268099d70fb28eb112804457318976cdc51d914a04c60c71a13d6"
+    },
+    {
+      "path": "fixtures/invalid/conf-checkpoint-capability.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-ADAPT-0001"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "09720b508dcff3b3034961b382cd10655221d0c37cda6493b03201987a4bc2c0"
+    },
+    {
+      "path": "fixtures/invalid/conf-compat-version.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0001"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "56ebb2713498a9868b5c47214dd37f204666c530595966b78d1301cfc471a113"
+    },
+    {
+      "path": "fixtures/invalid/conf-mapping-loss.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0004"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "6d795dfc8ef79820d277e7a59b66bb7f2c228b4ba3b49e45d2dd6f70d922e9f7"
+    },
+    {
+      "path": "fixtures/invalid/conf-token-digest.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-RES-0003"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "e3a8bcb12376a98d5a61e47e5e5b28e22ed3e0aebe1ba9b7a96f6811cf6eded8"
+    },
+    {
+      "path": "fixtures/invalid/conf-token-expired.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-RES-0002"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "11c1f2957664b9a3faf52ecc5c0d1bf4fdacb618c0a184b34e23175e62578b81"
+    },
+    {
+      "path": "fixtures/invalid/conf-token-stale.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-RES-0001"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "d18f7ff4757d1232ae5724791156dfcfe1a9b74a07bb8ed0f461fc694e661c07"
+    },
+    {
+      "path": "fixtures/invalid/conf-token-version.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-RES-0004"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "4f8494c1e3c6a6b4417a4caeefab19d6e29d29022c4c7058adc6b812cb9fbf68"
+    },
+    {
+      "path": "fixtures/invalid/conf-unapplied-mapping.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-ADAPT-0001"
+      ],
+      "artifact": "AdapterConformance",
+      "sha256": "fef7aeed2281465424ce18f41d28aac4cf4b38d18fd32e99227182436f423ab1"
+    },
+    {
+      "path": "fixtures/invalid/prof-auth-widen.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-PROF-0001"
+      ],
+      "artifact": "ExecutionProfile",
+      "sha256": "a3e33a7e99813bc3611e6441e61b75b02be27aa18d3ef2d8c53a81e338efe8e6"
+    },
+    {
+      "path": "fixtures/invalid/prof-budget-siblings.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0009"
+      ],
+      "artifact": "ExecutionProfile",
+      "sha256": "b4d27a0b911e8db1ff591b568b1671a4014b0d9068ead5825ba5c9bc8c76ae1d"
+    },
+    {
+      "path": "fixtures/invalid/prof-budget.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-PROF-0002"
+      ],
+      "artifact": "ExecutionProfile",
+      "sha256": "25a6c75746c1c6c2ecc60ea20da0193e53be94e0242b8ff6fb33e731f5b63205"
+    },
+    {
+      "path": "fixtures/invalid/prof-cap-widen.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-PROF-0001"
+      ],
+      "artifact": "ExecutionProfile",
+      "sha256": "495a124927dcfdf323632a5c9918de3da8c46ba5e05927f13a7ba1d0bf44a789"
+    },
+    {
+      "path": "fixtures/invalid/prof-unbounded-budget.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-PROF-0002"
+      ],
+      "artifact": "ExecutionProfile",
+      "sha256": "c32f5df8849e5489d4706feb2bc321c946d9a3042c6e2384401055523aed7e11"
+    },
+    {
+      "path": "fixtures/invalid/wev-auth-cap.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0003"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "bbeea55ec8a13771fdce5385dd0f87ca88ba2f439ec549769410b671ca9ff737"
+    },
+    {
+      "path": "fixtures/invalid/wev-auth-level.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0003"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "662a00455ddaa27d1f18704db8e8d94407dc99daf79d1f9464ac8c1c78fbe7f4"
+    },
+    {
+      "path": "fixtures/invalid/wev-auth-mutation.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0003"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "51e151be41e566bb443d802091ddb255d6770653ec843517ee0a39a494945539"
+    },
+    {
+      "path": "fixtures/invalid/wev-auth-network.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0003"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "42a23ca3a77081ffa3acbd96fa8d92b0a6c718d43bf974e0d478127f4ea3cfaf"
+    },
+    {
+      "path": "fixtures/invalid/wev-auth-scope.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0003"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "7358dbb7918867a96247059627fc3505f134b38aa71ce8e376fbd783f80e1711"
+    },
+    {
+      "path": "fixtures/invalid/wev-cyclic.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0002"
+      ],
+      "artifact": "WorkEventBatch",
+      "sha256": "b00c7ec24cbbaa9ef4b0ed3475c1c31fbbab708dd5ab5ec9a675b8aa52510b66"
+    },
+    {
+      "path": "fixtures/invalid/wev-missing-parent.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0002"
+      ],
+      "artifact": "WorkEventBatch",
+      "sha256": "1c03c9287bafc41d001b7271a6ddf15199c1e255fea7465c2b2ab53e34097755"
+    },
+    {
+      "path": "fixtures/invalid/wev-no-evidence.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0004"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "6974bff3283d50462eeaab523b8cdb627fb129447e31bae6938f159fa165f156"
+    },
+    {
+      "path": "fixtures/invalid/wev-replay-conflict.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0005"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "5a3c91db8ff774aee7617cfddd64889c70b944cdcc8fdb403fa557be113d2e60"
+    },
+    {
+      "path": "fixtures/invalid/wev-semantic-loss.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0004"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "7e2ffeb797424334f916ba133848b208c50ec304bfbe2de1ec9d57a3cec5917d"
+    },
+    {
+      "path": "fixtures/invalid/wev-unsupported-version.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EVT-0001",
+        "SOMA-CMP-0001"
+      ],
+      "artifact": "WorkEvent",
+      "sha256": "3d3c76baa2c064976245f335aaca82ce5129756b40555b1a1dbf3f74a95b4976"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0001.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0001"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "7aa4e18e82554d2d5fbb1e32a1baa4c5f3bfc58e20f1a5a70abf7dce748fffd3"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0002.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0002"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "73e815c8381d71b1321292efa9b7166ae275ca1ef3f25b9edf79f41f066eb5c1"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0003.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0003"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "bd8eeb4e8b69cd2690372abad7d988b6b9468404a526c9c982a562e9fcc8e803"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0004.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0004"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "91392991ad5309a795baac5e1dd7082b3d9a10d65560dc5da1104144beadb623"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0005.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0005"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "b63244f07af9aba638c750244392c23dd36939cf5fceb670c3f5f4fbb0a2f8c2"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0006.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0006"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "4e1614aac148319a754e1bc0e6a4f069a512e9df3c28198baf71a1f4fddc52a6"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0007.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0007"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "bbb8fdee9adf1b5835fb4f768b39265b5d41a081a657e2b03e582266eff5c331"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0008.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0008"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "cfb66aa64a6385bf70509212f1b86f5e5fb8291787741dbf7f3c9e0ebdf3c7d0"
+    },
+    {
+      "path": "fixtures/invalid/wf-auth-0010.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-AUTH-0010"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "3a5f0ffd83309caade331dcacf971a78bba0cfbc4f815b81c84465c6958afe8d"
+    },
+    {
+      "path": "fixtures/invalid/wf-cmp-0002.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0002"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "f044c6289706daf59761d1564b0ce9f55df6245de5c49710aea10b1f6a6fe579"
+    },
+    {
+      "path": "fixtures/invalid/wf-cmp-0003.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0003"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "8f54390c3a62e9da67a521ecebe268ec91427b4dd10d824de5c6ab30ac789e62"
+    },
+    {
+      "path": "fixtures/invalid/wf-cmp-0004.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0004"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "fe93b93216db1a67173224b117cd69dec54177bf1f25367d1d895fe83948f93b"
+    },
+    {
+      "path": "fixtures/invalid/wf-cmp-0005.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0005"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "bba2bb2aa11d114342a10491d1ed5ddc957ed96035f8cb95230d38d6bd05e77c"
+    },
+    {
+      "path": "fixtures/invalid/wf-cmp-0006.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0006"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "9ec2c2bcc65a76cbedee0bc50c5f5293c3ccb2b06e1a68c8cc032e2a68528c96"
+    },
+    {
+      "path": "fixtures/invalid/wf-cmp-0007.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-CMP-0007"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0001.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0001"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "97a44906e9122edcf357ec580f183d1b3b247d7ac9f43944221538f2cf42fac4"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0002.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0002"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "a70b2bb3ce34016661e011d0d4fb33c3fb21a989d255f390fbd903911c3aa5eb"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0003.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0003"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "8e43058eaf5ec432ec91afcbdbfb6419ccfa6a0f41313753dede7a40eb109a4a"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0004.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0004"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "f2555c7aa02ed4d49e1e77a4712273f8be836ee20333c96a52e3c1bd746083e9"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0005.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0005"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "2a43d23bd2b9edfe8b1620158286a7e3abf163a9b7191cfa492cbdd1db9484ab"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0006.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0006"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "c5443a1f9973eeea647aa3b7a22490ba59e9066092460b7668144e8e01df5c5f"
+    },
+    {
+      "path": "fixtures/invalid/wf-exp-0007.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-EXP-0007"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "908b82262df95dff41770dd7974ad384cd48e3380255be835cbb4ad1d985e8fc"
+    },
+    {
+      "path": "fixtures/invalid/wf-gov-0001.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-GOV-0001"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "651eefcb7a6ac9b167339f44da225dc2a32fa20fe1a11592c051bf7803ae6b75"
+    },
+    {
+      "path": "fixtures/invalid/wf-gov-0002.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-GOV-0002"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "6f8670995b1eafc91d5e69f88bd79bbd6beef81d388fb74ab243be34a5b923f8"
+    },
+    {
+      "path": "fixtures/invalid/wf-gov-0003.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-GOV-0003"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "e56c0e7a2ee984192987921b42e644911a3123c050ae7c12e84fc004ca377835"
+    },
+    {
+      "path": "fixtures/invalid/wf-out-0001.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-OUT-0001"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "71706250bb09e5bec982fa31d06df501b7a0cd7d5ddf3166c23c370efde6b9e6"
+    },
+    {
+      "path": "fixtures/invalid/wf-out-0002.json",
+      "kind": "invalid",
+      "expected_codes": [
+        "SOMA-OUT-0002"
+      ],
+      "artifact": "WorkflowDefinition",
+      "sha256": "297b00569fd60f16175b6f4181a121dc12c2616bd433adc30172c471a88fef1f"
+    }
+  ]
+}
