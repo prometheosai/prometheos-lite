@@ -558,7 +558,7 @@ pub struct GenerateScope {
 }
 
 /// Result of a provider-backed generation request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateResult {
     pub id: String,
     pub patch: String,

@@ -74,12 +74,23 @@ pub fn validate_gate_transition(from: GateStage, to: GateStage) -> Result<()> {
 // Capability registry
 // ---------------------------------------------------------------------------
 
+/// A boxed one-shot async capability handler. A capability instance IS one
+/// authorized effect: governed execution never re-invokes it (idempotency
+/// returns the cached outcome instead).
+pub type AsyncHandler = Box<
+    dyn FnOnce(serde_json::Value) -> futures::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send,
+>;
+
 /// A declared capability: typed handler plus its declared argument keys.
+/// Exactly one of `handler` (sync) / `async_handler` is set.
 pub struct Capability {
     /// Required top-level argument names (gate 2 validation).
     pub required_args: &'static [&'static str],
     #[allow(clippy::type_complexity)]
-    pub handler: Box<dyn Fn(&serde_json::Value) -> Result<String> + Send + Sync>,
+    pub handler: Option<Box<dyn Fn(&serde_json::Value) -> Result<String> + Send + Sync>>,
+    #[allow(clippy::type_complexity)]
+    pub async_handler: Option<AsyncHandler>,
 }
 
 impl Capability {
@@ -89,7 +100,26 @@ impl Capability {
     ) -> Self {
         Self {
             required_args,
-            handler: Box::new(handler),
+            handler: Some(Box::new(handler)),
+            async_handler: None,
+        }
+    }
+
+    /// Async capability for effectful paths that await (provider calls,
+    /// sandboxed validation). Invoked at gate 5 by
+    /// [`NodeRunner::execute_async`] / [`NodeRunner::seal_effect`].
+    pub fn asynchronous(
+        required_args: &'static [&'static str],
+        handler: impl FnOnce(
+            serde_json::Value,
+        ) -> futures::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + 'static,
+    ) -> Self {
+        Self {
+            required_args,
+            handler: None,
+            async_handler: Some(Box::new(handler)),
         }
     }
 }
@@ -133,6 +163,26 @@ pub struct JournalEntryV1 {
     pub entry_digest: String,
 }
 
+/// A capability resolved through gates 1-4 whose async effect the caller
+/// drives directly (heartbeat races, cancellation scopes).
+pub struct ResolvedAsyncCapability {
+    /// The extracted one-shot handler; `None` after extraction.
+    handler: Option<AsyncHandler>,
+    args: serde_json::Value,
+}
+
+impl ResolvedAsyncCapability {
+    /// The authorized gate-5 future. This is the ONLY sanctioned effect;
+    /// calling twice is impossible by construction (the handler is taken).
+    pub fn into_effect(mut self) -> futures::future::BoxFuture<'static, anyhow::Result<String>> {
+        let handler = self
+            .handler
+            .take()
+            .expect("resolved capability effect already consumed");
+        handler(self.args)
+    }
+}
+
 /// Terminal outcome of a governed node run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeRunOutcome {
@@ -140,6 +190,8 @@ pub struct NodeRunOutcome {
     /// Digest-bound evidence reference: the journaled terminal entry whose
     /// chain root is this run's identity key.
     pub evidence_entry: JournalEntryV1,
+    /// The gate-7-redacted effect output retained as evidence content.
+    pub output: String,
 }
 
 /// Request to execute one governed node.
@@ -174,6 +226,172 @@ impl NodeRunner {
 
     pub fn journal(&self) -> &[JournalEntryV1] {
         &self.journal
+    }
+
+    /// Mutable registry access for declaring capabilities before runs.
+    pub fn registry_mut(&mut self) -> &mut CapabilityRegistry {
+        &mut self.registry
+    }
+
+    /// Gates 1-4 for an async effect whose future the CALLER drives (e.g. a
+    /// provider call raced against a heartbeat). Returns the resolved
+    /// capability; pair with [`NodeRunner::seal_effect`], which enforces
+    /// gates 6-9 on the effect's result. The effect MUST come from
+    /// `resolved`; no other execution path is authorized.
+    pub fn preflight_gates<'a>(
+        &'a mut self,
+        req: &'a NodeRunRequest<'_>,
+    ) -> Result<ResolvedAsyncCapability> {
+        if self.completed.contains_key(&req.idempotency_key) {
+            anyhow::bail!("idempotency conflict: key already completed");
+        }
+        let mut stage = GateStage::CapabilityResolved;
+        // Extract the ONE-SHOT handler (fail closed if missing or already
+        // consumed): a resolved capability authorizes exactly one effect.
+        let capability = self
+            .registry
+            .entries
+            .get_mut(&req.capability)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SOMA-AUTH-0005: capability {:?} not declared",
+                    req.capability
+                )
+            })?;
+        let async_handler = match capability.async_handler.take() {
+            Some(h) => h,
+            None => anyhow::bail!(
+                "capability {:?} has no unconsumed async handler",
+                req.capability
+            ),
+        };
+        let required_args = capability.required_args;
+        advance(&mut stage, GateStage::ArgsValidated)?;
+        if let Some(obj) = req.args.as_object() {
+            for key in required_args {
+                if !obj.contains_key(*key) {
+                    bail!("SOMA-CMP-0003: missing required argument {key:?}");
+                }
+            }
+        } else if !required_args.is_empty() {
+            bail!("SOMA-CMP-0003: arguments must be an object");
+        }
+        // Gate 3: authorize.
+        let snapshot: EffectiveExecutionSnapshotV1 = resolve_effective(
+            req.manifest,
+            req.local_restrictions,
+            crate::workflow::evaluate::now_iso(),
+        )?;
+        let writable_scope = req.manifest.writable_scopes.first().cloned();
+        if let Err(violation) = crate::workflow::policy::enforce_before_effects(
+            &snapshot,
+            1,
+            writable_scope.as_deref(),
+            None,
+        ) {
+            bail!("SOMA-AUTH-0003/0009: policy rejected before effects: {violation}");
+        }
+        advance(&mut stage, GateStage::Authorized)?;
+        // Gate 4: bounded by declaration.
+        if req.manifest.retry.max_attempts == 0 {
+            bail!("SOMA-AUTH-0009: unbounded retry budget refused");
+        }
+        advance(&mut stage, GateStage::Constrained)?;
+        Ok(ResolvedAsyncCapability {
+            handler: Some(async_handler),
+            args: req.args.clone(),
+        })
+    }
+
+    /// Gates 6-9 after a preflighted async effect resolves. `effect` is the
+    /// gate-5 output; handler errors propagate unchanged so typed failures
+    /// (e.g. resource breaches) keep their downcast identity upstream.
+    pub async fn seal_effect(
+        &mut self,
+        req: &NodeRunRequest<'_>,
+        effect: Result<String>,
+    ) -> Result<NodeRunOutcome> {
+        let mut stage = GateStage::Executed;
+        let redacted_output = match effect {
+            Ok(text) => {
+                if text.trim().is_empty() {
+                    bail!("SOMA-CMP-0003: empty node output failed verification");
+                }
+                text
+            }
+            Err(e) => return Err(e),
+        };
+        advance(&mut stage, GateStage::Verified)?;
+        let redactor = Redactor::with_known_secrets(Redactor::new(), &req.known_secrets);
+        let redacted_output = redactor.redact(&redacted_output);
+        advance(&mut stage, GateStage::Redacted)?;
+        let artifact_digest =
+            crate::workflow::artifact_integrity::sha256_hex(redacted_output.as_bytes());
+        if artifact_digest.len() != 64 {
+            bail!("evidence digest malformed");
+        }
+        advance(&mut stage, GateStage::EvidenceRetained)?;
+        let now = crate::workflow::evaluate::now_iso();
+        let result = NodeResultV1 {
+            schema_version: crate::workflow::node_contracts::NODE_CONTRACT_VERSION.into(),
+            node_id: req.manifest.node_id.clone(),
+            outcome: crate::workflow::node_contracts::OutcomeKind::Completed,
+            reason: String::new(),
+            outputs: req.manifest.outputs.clone(),
+            evidence_refs: vec![crate::workflow::memory_contracts::EvidenceReferenceV1 {
+                id: format!("ev-{}", req.idempotency_key),
+                event_digest: String::new(),
+                artifact_digest: artifact_digest.clone(),
+                artifact_kind: "node-output".into(),
+                produced_by: "lite.node-runner".into(),
+                produced_at: Some(now.clone()),
+            }],
+            memory_reads_executed: 0,
+            memory_writes_executed: 0,
+            work_state_ref: req.manifest.work_state_ref.clone(),
+            failure_classification: None,
+            started_at: now.clone(),
+            completed_at: now,
+            result_digest: String::new(),
+        };
+        advance(&mut stage, GateStage::Journaled)?;
+        let prev = self.journal.last().map(|e| e.entry_digest.clone());
+        let detail_digest = result.compute_digest()?;
+        let mut entry = JournalEntryV1 {
+            sequence: self.journal.len() as u64,
+            identity_key: req.idempotency_key.clone(),
+            stage: format!("{stage:?}"),
+            detail_digest,
+            prev_entry_digest: prev,
+            entry_digest: String::new(),
+        };
+        entry.entry_digest = journal_entry_digest(&entry);
+        self.journal.push(entry.clone());
+        let mut final_result = result;
+        if let Some(ev) = final_result.evidence_refs.first_mut() {
+            ev.event_digest = entry.entry_digest.clone();
+        }
+        final_result.result_digest = final_result.compute_digest()?;
+        let outcome = NodeRunOutcome {
+            result: final_result,
+            evidence_entry: entry,
+            output: redacted_output,
+        };
+        self.completed
+            .insert(req.idempotency_key.clone(), outcome.clone());
+        Ok(outcome)
+    }
+
+    /// Full async path: gates 1-4, await gate 5 via the declared async
+    /// handler, then gates 6-9. For effects the caller must race/select,
+    /// use [`NodeRunner::preflight_gates`] + [`NodeRunner::seal_effect`].
+    pub async fn execute_async(&mut self, req: NodeRunRequest<'_>) -> Result<NodeRunOutcome> {
+        if self.completed.contains_key(&req.idempotency_key) {
+            return Ok(self.completed[&req.idempotency_key].clone());
+        }
+        let resolved = self.preflight_gates(&req)?;
+        let fut = resolved.into_effect();
+        self.seal_effect(&req, fut.await).await
     }
 
     /// Execute through all nine gates. Idempotent on `idempotency_key`.
@@ -227,7 +445,13 @@ impl NodeRunner {
         advance(&mut stage, GateStage::Constrained)?;
 
         // Gate 5: execute (the ONLY delegation point).
-        let raw_output = (capability.handler)(&req.args)?;
+        let raw_output = match capability.handler.as_ref() {
+            Some(h) => h(&req.args)?,
+            None => bail!(
+                "capability {:?} is async-only; use execute_async",
+                req.capability
+            ),
+        };
         advance(&mut stage, GateStage::Executed)?;
 
         // Gate 6: verify result/state — non-empty output.
@@ -300,6 +524,7 @@ impl NodeRunner {
         let outcome = NodeRunOutcome {
             result: final_result,
             evidence_entry: entry,
+            output: redacted_output.clone(),
         };
         self.completed
             .insert(req.idempotency_key.clone(), outcome.clone());

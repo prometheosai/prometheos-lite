@@ -1,4 +1,4 @@
-# Change: E3/I02 — generic governed NodeRunner (slice 1)
+# Change: E3/I02 — generic governed NodeRunner (slices 1-2)
 
 **Issue:** #117
 **Depends on:** #116 ✅ (merged #179); builds on #118 ✅, #152 ✅, #159/#161 ✅.
