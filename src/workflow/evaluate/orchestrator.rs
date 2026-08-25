@@ -5,7 +5,7 @@ use std::str::FromStr;
 use crate::harness::patch_provider::{PatchProvider, PatchProviderContext};
 use crate::workflow::{
     AuthorityLevel, GenerateScope, ProposalArtifact, ProviderRouteInfo, is_git_repo,
-    sanitize_provider_route,
+    node_contracts::NodeManifestV1, sanitize_provider_route,
 };
 
 use super::cancellation::CancellationToken;
@@ -61,6 +61,41 @@ impl EvaluationConfig {
         }
     }
 }
+/// Build the NodeRunner manifest for one governed fast-loop stage (#117).
+/// Scopes are runner-internal bookkeeping labels; the real path authority
+/// remains `TaskManifest.allowed_paths/forbidden_paths`, enforced inside
+/// generation and validation exactly as before.
+fn evaluation_node_manifest(_manifest: &TaskManifest, stage: &str) -> Result<NodeManifestV1> {
+    let json = serde_json::json!({
+        "schemaVersion": "1.0.0",
+        "nodeId": format!("fast-loop.{stage}"),
+        "purpose": format!("governed {} stage of the fast loop", stage),
+        "inputs": [],
+        "outputs": [{"name": "result", "typeRef": "lite.node.v1", "required": true}],
+        "readableScopes": ["repo://evaluation"],
+        "writableScopes": ["work://evaluation"],
+        "retry": {"maxAttempts": 1, "retryableClasses": []}
+    });
+    NodeManifestV1::parse_json(&serde_json::to_string(&json)?)
+}
+
+/// Local restrictions mirroring what the orchestrator already enforces:
+/// forbidden paths carry over verbatim; one attempt per stage; escalation is
+/// the human review gate (the loop never auto-approves).
+fn evaluation_local_restrictions(
+    manifest: &TaskManifest,
+) -> crate::workflow::policy::LocalRestrictions {
+    crate::workflow::policy::LocalRestrictions {
+        readable_scopes: vec!["repo://evaluation".into()],
+        writable_scopes: vec!["work://evaluation".into()],
+        token_budget_ceiling: None,
+        denied_providers: vec![],
+        forbidden_paths: manifest.forbidden_paths.clone(),
+        max_attempts: 1,
+        escalation_target: "human-review".into(),
+    }
+}
+
 /// Repo-relative evidence references used as journal `evidence_ref` values.
 struct EvidenceRefs {
     /// The evidence directory, referenced by in-progress events.
@@ -433,23 +468,61 @@ pub async fn evaluate_with_cancellation(
     };
 
     // Race generation against heartbeat failure so we can abort early if
-    // ownership is lost or the heartbeat I/O fails.
-    let gen_fut = crate::workflow::generate_proposal(
-        &repo,
-        &config.manifest.goal,
-        AuthorityLevel::from_str(&config.manifest.authority)?,
-        config.provider.as_ref(),
-        patch_context,
-        &scope,
-        config.route_info.clone(),
-        // Persist the REDACTED command in the proposal artifact; execution
-        // later uses the original in-memory manifest command.
-        persisted_validation_command.clone(),
+    // ownership is lost or the heartbeat I/O fails. The provider effect is
+    // authorized through the NodeRunner gate pipeline first (#117): capability
+    // resolution, typed args, policy authorization, bounded-by-declaration;
+    // the sanctioned future is raced exactly as before and sealed through
+    // gates 6-9 afterwards. There is no path that bypasses the gates.
+    let provider_name = config.provider.name().to_string();
+    let gen_node_manifest = evaluation_node_manifest(&config.manifest, "generate")?;
+    let eval_restrictions = evaluation_local_restrictions(&config.manifest);
+    let gen_req = crate::workflow::node_runner::NodeRunRequest {
+        manifest: &gen_node_manifest,
+        local_restrictions: &eval_restrictions,
+        capability: "provider.generate".into(),
+        args: serde_json::json!({
+            "goal": config.manifest.goal,
+            "authority": config.manifest.authority,
+        }),
+        idempotency_key: format!("{identity_key}:generate"),
+        known_secrets: known_secrets.clone(),
+    };
+    let mut gen_runner = crate::workflow::node_runner::NodeRunner::default();
+    gen_runner.registry_mut().declare(
+        "provider.generate",
+        crate::workflow::node_runner::Capability::asynchronous(&["goal"], {
+            let repo_c = repo.clone();
+            let goal_c = config.manifest.goal.clone();
+            let authority_c = AuthorityLevel::from_str(&config.manifest.authority)?;
+            let provider_c = config.provider;
+            let ctx_c = patch_context;
+            let scope_c = scope.clone();
+            let route_c = config.route_info.clone();
+            let vc_c = persisted_validation_command.clone();
+            move |_args| {
+                Box::pin(async move {
+                    let r = crate::workflow::generate_proposal(
+                        &repo_c,
+                        &goal_c,
+                        authority_c,
+                        provider_c.as_ref(),
+                        ctx_c,
+                        &scope_c,
+                        route_c,
+                        vc_c,
+                    )
+                    .await?;
+                    Ok(serde_json::to_string(&r)?)
+                })
+            }
+        }),
     );
+    let resolved_generate = gen_runner.preflight_gates(&gen_req)?;
+    let gen_fut = resolved_generate.into_effect();
     tokio::pin!(gen_fut);
 
     let mut hb_rx = heartbeat.status_receiver();
-    let gen_result = loop {
+    let gen_effect = loop {
         tokio::select! {
             result = &mut gen_fut => {
                 break result;
@@ -481,44 +554,48 @@ pub async fn evaluate_with_cancellation(
         }
     };
 
-    let gen_result = match gen_result {
-        Ok(r) => {
-            // Check heartbeat — ownership must still be held after generation.
-            heartbeat.check("")?;
-            r
-        }
-        Err(e) => {
-            // Stop heartbeat and check for heartbeat errors first.
-            heartbeat.shutdown("").await?;
+    // Run the failure path BEFORE sealing: generation failures keep their
+    // full durable bookkeeping (classify, evidence bundle, GenerationFailed
+    // transition, reservation release). gen_effect is already the gate-5
+    // serialized output (Result<String>) from the sanctioned future.
+    if let Err(e) = &gen_effect {
+        // Stop heartbeat and check for heartbeat errors first.
+        heartbeat.shutdown("").await?;
 
-            let msg = e.to_string();
-            let classification = classify_generation_error(&msg);
-            bundle.failure_classification = Some(classification.clone());
-            bundle.final_state = EvaluationState::GenerationFailed
-                .outcome_label()
-                .to_string();
-            bundle.completed_at = now_iso();
-            // Failure evidence durable, then the terminal failure event, then
-            // release the reservation.
-            write_bundle(&evidence_dir, &bundle)?;
-            durable_transition(
-                &repo,
-                &identity_path,
-                &run_id,
-                &identity_key,
-                &commit_at_start,
-                &fence,
-                EvaluationState::GenerationFailed,
-                None,
-                Some(classification),
-                Some(refs.final_json.clone()),
-            )
-            .context("failed to persist GenerationFailed transition")?;
-            release_reservation(&repo, &identity_key, &fence)
-                .context("failed to release reservation after generation failure")?;
-            return Ok(bundle);
-        }
-    };
+        let msg = e.to_string();
+        let classification = classify_generation_error(&msg);
+        bundle.failure_classification = Some(classification.clone());
+        bundle.final_state = EvaluationState::GenerationFailed
+            .outcome_label()
+            .to_string();
+        bundle.completed_at = now_iso();
+        // Failure evidence durable, then the terminal failure event, then
+        // release the reservation.
+        write_bundle(&evidence_dir, &bundle)?;
+        durable_transition(
+            &repo,
+            &identity_path,
+            &run_id,
+            &identity_key,
+            &commit_at_start,
+            &fence,
+            EvaluationState::GenerationFailed,
+            None,
+            Some(classification),
+            Some(refs.final_json.clone()),
+        )
+        .context("failed to persist GenerationFailed transition")?;
+        release_reservation(&repo, &identity_key, &fence)
+            .context("failed to release reservation after generation failure")?;
+        return Ok(bundle);
+    }
+
+    // Gates 6-9: verify, redact, retain, journal (success path only).
+    let gen_outcome = gen_runner.seal_effect(&gen_req, gen_effect).await?;
+    // Check heartbeat — ownership must still be held after generation.
+    heartbeat.check("")?;
+    let gen_result: crate::workflow::GenerateResult = serde_json::from_str(&gen_outcome.output)
+        .context("provider.generate output did not deserialize")?;
 
     // Proposal artifact is published and loadable BEFORE the ProposalGenerated
     // event is recorded (durability before visibility).
@@ -577,7 +654,7 @@ pub async fn evaluate_with_cancellation(
         base_sha: proposal.base_sha.clone(),
     });
     bundle.provider_provenance = ProviderProvenanceRecord {
-        implementation: config.provider.name().to_string(),
+        implementation: provider_name,
         model: config.route_info.as_ref().and_then(|r| r.model.clone()),
         route: config
             .route_info
@@ -653,16 +730,53 @@ pub async fn evaluate_with_cancellation(
         .context("failed to resolve resource limits from environment")?
         .with_manifest_disk(config.manifest.min_disk_bytes);
     // `known_secrets` was collected at the top of the run (leak-safe contract).
-    let validation_result = run_isolated_validation(
-        &repo,
-        &gen_result.id,
-        config.manifest.validation_command.as_deref(),
-        &evidence_dir,
-        &token,
-        &limits,
-        &known_secrets,
-    )
-    .await;
+    // The validation effect runs through the NodeRunner gate pipeline (#117):
+    // gates 1-4 authorize the sandboxed command before it executes, gates 6-9
+    // verify/redact/retain/journal the durable record. Typed failures (e.g.
+    // disk preflight breach) propagate with their downcast identity intact.
+    let val_manifest = evaluation_node_manifest(&config.manifest, "validate")?;
+    let val_req = crate::workflow::node_runner::NodeRunRequest {
+        manifest: &val_manifest,
+        local_restrictions: &eval_restrictions,
+        capability: "validation.run".into(),
+        args: serde_json::json!({ "proposal_id": gen_result.id }),
+        idempotency_key: format!("{identity_key}:validate"),
+        known_secrets: known_secrets.clone(),
+    };
+    let mut val_runner = crate::workflow::node_runner::NodeRunner::default();
+    val_runner.registry_mut().declare(
+        "validation.run",
+        crate::workflow::node_runner::Capability::asynchronous(&["proposal_id"], {
+            let repo_c = repo.clone();
+            let pid_c = gen_result.id.clone();
+            let cmd_c = config.manifest.validation_command.clone();
+            let evd_c = evidence_dir.clone();
+            let tok_c = token.clone();
+            let lim_c = limits;
+            let ks_c = known_secrets.clone();
+            move |_args| {
+                Box::pin(async move {
+                    let r = run_isolated_validation(
+                        &repo_c,
+                        &pid_c,
+                        cmd_c.as_deref(),
+                        &evd_c,
+                        &tok_c,
+                        &lim_c,
+                        &ks_c,
+                    )
+                    .await?;
+                    Ok(serde_json::to_string(&r)?)
+                })
+            }
+        }),
+    );
+    let validation_outcome = val_runner.execute_async(val_req).await;
+    let validation_result: Result<ValidationRecord> = match validation_outcome {
+        Ok(outcome) => Ok(serde_json::from_str(&outcome.output)
+            .context("validation.run output did not deserialize")?),
+        Err(e) => Err(e),
+    };
 
     // Check heartbeat after validation — must still own the entry.
     heartbeat.check("")?;
