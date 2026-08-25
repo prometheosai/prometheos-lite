@@ -7,7 +7,7 @@
 `src/workflow/graph_exec.rs` — pure, durable-state-driven routing on top of the #120 transaction law:
 
 - **Typed outcome→edge mapping**: a completed node's `OutcomeCategory` selects among outgoing edges — `sequence` edges are unconditionally eligible; `conditional` edges are eligible iff their `conditionLabel` equals the outcome label (snake_case). Eligible set sorted by target id.
-- **Fail-closed routing**: zero eligible edges ⇒ `RouteError::MissingRoute`; multiple eligible ⇒ `AmbiguousRoute` (with candidate targets). Routing for a node with no journaled completion refuses (`UnjournaledDecisionBasis` via existing law).
+- **Fail-closed routing**: zero eligible edges ⇒ `RouteError::MissingRoute`; multiple eligible ⇒ `AmbiguousRoute` (with candidate targets). Routing for a node with no journaled completion refuses (`RouteError::UnjournaledSource` via existing law).
 - **Limits**: per-node cycle cap (visits of one node) and global attempt budget — exceeded ⇒ typed `CycleLimitExceeded` / `AttemptBudgetExhausted` BEFORE the decision is applied. Infinite loops terminate.
 - **Determinism**: `route_after(state, from, outcome, recorded_at)` is a pure function of durable state + inputs — same state yields byte-identical decisions (recorded_at is an input).
 - **Completion**: `run_complete(state)` true iff frontier is empty (all paths reached terminal exits).
