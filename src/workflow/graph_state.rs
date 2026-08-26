@@ -306,8 +306,13 @@ pub struct GraphRunStateV1 {
     #[serde(rename = "portableStateDigest")]
     pub portable_state_digest: String,
     /// Durable human gate decisions keyed by gate node id (additive,
-    /// backward-compatible: absent in pre-#122 checkpoints).
-    #[serde(default, rename = "gateDecisions")]
+    /// backward-compatible: an EMPTY map serializes as ABSENT so digests of
+    /// pre-#122 sealed checkpoints remain byte-identical).
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        rename = "gateDecisions"
+    )]
     pub gate_decisions: BTreeMap<String, crate::workflow::graph_gates::HumanDecisionRecordV1>,
     /// Canonical digest over the state minus this member (chain root).
     #[serde(

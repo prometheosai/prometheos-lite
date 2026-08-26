@@ -620,9 +620,9 @@ mod tests {
             )
             .unwrap();
             complete(&mut s, "run");
-            // Model outcome is Failed; the CLASS decides the label via a
-            // conditional edge keyed on the canonical class label.
-            let d = route_after(
+            // Generic `failed` matches NO edge (labels are class-specific):
+            // generic outcome must never cross-route into a class branch.
+            let err = route_after(
                 &s,
                 &m,
                 ExecutionLimits::default(),
@@ -630,9 +630,9 @@ mod tests {
                 OutcomeCategory::Failed,
                 "t",
             )
-            .ok()
-            .filter(|_| false); // Failed label != class labels: expect MissingRoute
-            assert!(d.is_none(), "generic failed must not cross-route");
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("missing route"), "{err}");
             // The class-specific routing uses the class label directly.
             let eligible = m
                 .edges
@@ -706,5 +706,97 @@ mod tests {
             back.gate_decisions["review"].verdict,
             HumanVerdict::Approved
         );
+    }
+
+    #[test]
+    fn human_decision_parse_fails_closed() {
+        let d = human_decision(HumanVerdict::Approved);
+        let good = d.to_json().unwrap();
+        assert!(HumanDecisionRecordV1::parse_json(&good).is_ok());
+
+        // Wrong schema version.
+        let mut v = serde_json::to_value(&d).unwrap();
+        v["schemaVersion"] = serde_json::json!("2.0.0");
+        assert!(HumanDecisionRecordV1::parse_json(&v.to_string()).is_err());
+
+        // Tampered digest.
+        let mut v2 = serde_json::to_value(&d).unwrap();
+        v2["reason"] = serde_json::json!("tampered");
+        assert!(HumanDecisionRecordV1::parse_json(&v2.to_string()).is_err());
+
+        // Missing digest.
+        let mut v3 = serde_json::to_value(&d).unwrap();
+        v3["contentDigest"] = serde_json::Value::Null;
+        assert!(HumanDecisionRecordV1::parse_json(&v3.to_string()).is_err());
+
+        // Machine-actor identity refused on IMPORT too.
+        let mut v4 = serde_json::to_value(&d).unwrap();
+        v4["decidedBy"] = serde_json::json!("model:gpt-x");
+        let err4 = HumanDecisionRecordV1::parse_json(&v4.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(err4.contains("machine actor"), "{err4}");
+    }
+
+    #[test]
+    fn pre_122_checkpoints_still_import() {
+        let m = gate_manifest();
+        // A literal PRE-#122 sealed checkpoint: no gateDecisions key, digest
+        // computed over exactly these bytes by the old law.
+        let legacy = serde_json::json!({
+            "schemaVersion": "1.0.0",
+            "runId": "legacy-run",
+            "graphId": "gated",
+            "graphManifestDigest": m.compute_digest(),
+            "repoRevision": "rev",
+            "nodeAttempts": {
+                "build": [{
+                    "attempt": 1,
+                    "startedAt": "t",
+                    "completedAt": "t",
+                    "outcome": "completed",
+                    "resultDigest": "dg-build"
+                }]
+            },
+            "frontier": ["review"],
+            "decisions": [],
+            "evidenceRefs": [],
+            "portableStateRef": "pws.json",
+            "portableStateDigest": "pd",
+            "contentDigest": "PLACEHOLDER"
+        });
+        // Compute the digest the OLD law would have pinned: state minus
+        // contentDigest, WITHOUT any gateDecisions member. With the empty-map
+        // skip rule, today's compute_digest reproduces those bytes.
+        let probe = HumanDecisionProbe {
+            inner: legacy.clone(),
+        };
+        let computed = probe.digest_without_content_digest();
+        let mut final_legacy = legacy;
+        final_legacy["contentDigest"] = serde_json::json!(computed);
+
+        let imported = crate::workflow::graph_state::GraphRunStateV1::import_checkpoint(
+            &final_legacy.to_string(),
+            &m,
+            "pd",
+        )
+        .expect("pre-#122 checkpoint imports after #122");
+        assert_eq!(imported.frontier, vec!["review".to_string()]);
+        assert!(imported.gate_decisions.is_empty());
+    }
+
+    /// Digest helper mirroring GraphRunStateV1::compute_digest over an
+    /// arbitrary JSON object minus contentDigest (fixture-only).
+    struct HumanDecisionProbe {
+        inner: serde_json::Value,
+    }
+    impl HumanDecisionProbe {
+        fn digest_without_content_digest(&self) -> String {
+            let mut v = self.inner.clone();
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("contentDigest");
+            }
+            crate::workflow::soma::canonical_digest(&v)
+        }
     }
 }
