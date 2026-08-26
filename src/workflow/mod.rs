@@ -20,6 +20,7 @@ pub mod durable;
 pub mod evaluate;
 pub mod governance;
 pub mod graph_exec;
+pub mod graph_gates;
 pub mod graph_state;
 pub mod memory_contracts;
 pub mod node_contracts;
