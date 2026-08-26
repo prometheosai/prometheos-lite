@@ -305,6 +305,10 @@ pub struct GraphRunStateV1 {
     /// Digest of the canonical PortableWorkState document (projection).
     #[serde(rename = "portableStateDigest")]
     pub portable_state_digest: String,
+    /// Durable human gate decisions keyed by gate node id (additive,
+    /// backward-compatible: absent in pre-#122 checkpoints).
+    #[serde(default, rename = "gateDecisions")]
+    pub gate_decisions: BTreeMap<String, crate::workflow::graph_gates::HumanDecisionRecordV1>,
     /// Canonical digest over the state minus this member (chain root).
     #[serde(
         default,
@@ -368,6 +372,7 @@ impl GraphRunStateV1 {
             node_attempts: BTreeMap::new(),
             frontier: manifest.entry_points.clone(),
             decisions: Vec::new(),
+            gate_decisions: BTreeMap::new(),
             evidence_refs: Vec::new(),
             portable_state_ref: portable_state_ref.into(),
             portable_state_digest: portable_state_digest.into(),
@@ -436,7 +441,12 @@ impl GraphRunStateV1 {
                 ats.iter()
                     .any(|a| a.result_digest == decision.basis_result_digest)
             })
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || self
+                .gate_decisions
+                .get(&decision.from_node)
+                .map(|g| g.compute_digest() == decision.basis_result_digest)
+                .unwrap_or(false);
         if !journaled {
             return Err(GraphRunError::UnjournaledDecisionBasis.into());
         }
