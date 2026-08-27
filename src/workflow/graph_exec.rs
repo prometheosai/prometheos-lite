@@ -199,6 +199,8 @@ mod tests {
             node_id: id.into(),
             capability: format!("cap.{id}"),
             purpose: None,
+            resources: Vec::new(),
+            join: None,
         }
     }
 

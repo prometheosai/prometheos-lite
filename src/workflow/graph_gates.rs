@@ -370,6 +370,8 @@ mod tests {
             node_id: id.into(),
             capability: cap.into(),
             purpose: None,
+            resources: Vec::new(),
+            join: None,
         }
     }
 

@@ -21,6 +21,7 @@ pub mod evaluate;
 pub mod governance;
 pub mod graph_exec;
 pub mod graph_gates;
+pub mod graph_parallel;
 pub mod graph_resume;
 pub mod graph_state;
 pub mod memory_contracts;
