@@ -314,6 +314,22 @@ pub struct GraphRunStateV1 {
         rename = "gateDecisions"
     )]
     pub gate_decisions: BTreeMap<String, crate::workflow::graph_gates::HumanDecisionRecordV1>,
+    /// Whole-run terminal outcome recorded by cancellation (additive;
+    /// `None` keeps pre-#123 sealed checkpoints byte-identical).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "termination"
+    )]
+    pub termination: Option<RunTerminationV1>,
+    /// Recorded provider/model/harness swaps with policy evidence (additive;
+    /// an EMPTY list serializes as ABSENT for backward compat).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "implementationChanges"
+    )]
+    pub implementation_changes: Vec<ImplChangeV1>,
     /// Canonical digest over the state minus this member (chain root).
     #[serde(
         default,
@@ -321,6 +337,33 @@ pub struct GraphRunStateV1 {
         rename = "contentDigest"
     )]
     pub content_digest: Option<String>,
+}
+
+/// Terminal whole-run outcome recorded by cancellation (#123).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunTerminationV1 {
+    /// Stable kind, e.g. `"cancelled"`.
+    pub kind: String,
+    pub reason: String,
+    #[serde(rename = "recordedAt")]
+    pub recorded_at: String,
+}
+
+/// A recorded provider/model/harness swap with mandatory policy evidence (#123).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImplChangeV1 {
+    /// `"provider"` | `"model"` | `"harness"`.
+    pub kind: String,
+    #[serde(rename = "fromId")]
+    pub from_id: String,
+    #[serde(rename = "toId")]
+    pub to_id: String,
+    #[serde(rename = "policyEvidenceDigest")]
+    pub policy_evidence_digest: String,
+    #[serde(rename = "recordedAt")]
+    pub recorded_at: String,
 }
 
 /// Typed contradictions between graph state and external durable artifacts.
@@ -379,6 +422,8 @@ impl GraphRunStateV1 {
             decisions: Vec::new(),
             gate_decisions: BTreeMap::new(),
             evidence_refs: Vec::new(),
+            termination: None,
+            implementation_changes: Vec::new(),
             portable_state_ref: portable_state_ref.into(),
             portable_state_digest: portable_state_digest.into(),
             content_digest: None,
