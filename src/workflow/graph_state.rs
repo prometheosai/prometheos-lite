@@ -36,6 +36,15 @@ pub struct GraphNodeV1 {
     pub capability: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    /// Exclusive resources the node must hold while executing (#124). Additive:
+    /// absent/empty serializes as ABSENT so pre-#124 manifests remain
+    /// byte-identical. Two nodes sharing ANY resource must never co-schedule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
+    /// Join policy when this node synchronizes multiple branches (#124).
+    /// Additive; `None` serializes as ABSENT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<crate::workflow::graph_parallel::JoinPolicyV1>,
 }
 
 /// A directed edge. `sequence` edges are unconditional; `conditional` edges
@@ -330,6 +339,14 @@ pub struct GraphRunStateV1 {
         rename = "implementationChanges"
     )]
     pub implementation_changes: Vec<ImplChangeV1>,
+    /// Recorded join evaluations keyed by join node id (#124). Additive,
+    /// backward-compatible: an EMPTY map serializes as ABSENT.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        rename = "joinEvaluations"
+    )]
+    pub join_evaluations: BTreeMap<String, crate::workflow::graph_parallel::JoinEvaluationV1>,
     /// Canonical digest over the state minus this member (chain root).
     #[serde(
         default,
@@ -424,6 +441,7 @@ impl GraphRunStateV1 {
             evidence_refs: Vec::new(),
             termination: None,
             implementation_changes: Vec::new(),
+            join_evaluations: BTreeMap::new(),
             portable_state_ref: portable_state_ref.into(),
             portable_state_digest: portable_state_digest.into(),
             content_digest: None,
@@ -496,6 +514,11 @@ impl GraphRunStateV1 {
                 .gate_decisions
                 .get(&decision.from_node)
                 .map(|g| g.compute_digest() == decision.basis_result_digest)
+                .unwrap_or(false)
+            || self
+                .join_evaluations
+                .get(&decision.from_node)
+                .map(|j| j.compute_digest() == decision.basis_result_digest)
                 .unwrap_or(false);
         if !journaled {
             return Err(GraphRunError::UnjournaledDecisionBasis.into());
@@ -585,16 +608,22 @@ mod tests {
                     node_id: "a".into(),
                     capability: "cap.a".into(),
                     purpose: None,
+                    resources: Vec::new(),
+                    join: None,
                 },
                 GraphNodeV1 {
                     node_id: "b".into(),
                     capability: "cap.b".into(),
                     purpose: None,
+                    resources: Vec::new(),
+                    join: None,
                 },
                 GraphNodeV1 {
                     node_id: "done".into(),
                     capability: "cap.done".into(),
                     purpose: None,
+                    resources: Vec::new(),
+                    join: None,
                 },
             ],
             edges: vec![
@@ -700,6 +729,8 @@ mod tests {
             node_id: "orphan".into(),
             capability: "cap.o".into(),
             purpose: None,
+            resources: Vec::new(),
+            join: None,
         });
         assert!(bad3.validate().is_err());
 

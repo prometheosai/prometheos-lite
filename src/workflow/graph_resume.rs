@@ -236,16 +236,22 @@ mod tests {
                     node_id: "a".into(),
                     capability: "c.a".into(),
                     purpose: None,
+                    resources: Vec::new(),
+                    join: None,
                 },
                 GraphNodeV1 {
                     node_id: "b".into(),
                     capability: "c.b".into(),
                     purpose: None,
+                    resources: Vec::new(),
+                    join: None,
                 },
                 GraphNodeV1 {
                     node_id: "done".into(),
                     capability: "c.done".into(),
                     purpose: None,
+                    resources: Vec::new(),
+                    join: None,
                 },
             ],
             edges: vec![
