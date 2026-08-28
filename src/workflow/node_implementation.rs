@@ -25,7 +25,7 @@ use crate::workflow::node_library::ScopedPlanV1;
 use crate::workflow::node_runner::{Capability, CapabilityRegistry};
 use crate::workflow::workspace::{
     AdapterKind, GitWorktreeWorkspace, WORKSPACE_SCHEMA_VERSION, WorkspaceAdapter,
-    WorkspaceManifestV1, WorkspaceMode,
+    WorkspaceManifestV1, WorkspaceMode, WorkspaceRefV1, validate_workspace_id,
 };
 
 /// Version of the E5/I02 node contracts.
@@ -97,56 +97,11 @@ pub struct RepairResultV1 {
 // Workspace helpers (deterministic git, isolated worktree)
 // ---------------------------------------------------------------------------
 
+/// Re-export the workflow module's RFC3339 timestamp. Hand-rolled proleptic
+/// Gregorian math was incorrect (E5/I02 repair); the canonical helper lives
+/// in `crate::workflow::now_iso` and uses `chrono::DateTime::from_timestamp`.
 fn now_iso() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    chrono_like_iso(secs)
-}
-
-/// Minimal ISO-8601 UTC timestamp without pulling a chrono dependency into the
-/// node surface (the workspace/evaluate helpers already standardize on this).
-#[allow(clippy::manual_is_multiple_of)]
-fn chrono_like_iso(secs: u64) -> String {
-    let days = secs / 86400;
-    // Proleptic Gregorian day math; sufficient for an audit timestamp.
-    let mut y = 1970 + (days / 365);
-    let mut d = days;
-    loop {
-        let leap = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-            366
-        } else {
-            365
-        };
-        if d < leap {
-            break;
-        }
-        d -= leap;
-        y += 1;
-    }
-    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-        1
-    } else {
-        0
-    };
-    let mut m = 0;
-    let mut rem = d;
-    while m < 12 {
-        let md = month_days[m] + if m == 1 { leap } else { 0 };
-        if rem < md {
-            break;
-        }
-        rem -= md;
-        m += 1;
-    }
-    let day = rem + 1;
-    let month = m + 1;
-    let hour = (secs % 86400) / 3600;
-    let min = (secs % 3600) / 60;
-    let sec = secs % 60;
-    format!("{y:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+    crate::workflow::now_iso()
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
@@ -218,6 +173,12 @@ fn run_implement(args: &serde_json::Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("implement requires workspaceParent"))?;
 
+    // E5/I02 repair (P1.1): reject any plan_id that could escape the
+    // workspace_parent when used as a path segment. The adapter also
+    // re-validates inside acquire() for defense in depth.
+    validate_workspace_id(&plan.plan_id)
+        .map_err(|e| anyhow::anyhow!("implement: plan.plan_id unsafe: {e}"))?;
+
     let workspace_id = format!("impl-{}", plan.plan_id);
     let (_adapter, manifest, root) = acquire_writable_worktree(
         repo_root,
@@ -256,7 +217,23 @@ fn run_implement(args: &serde_json::Value) -> Result<String> {
         ],
     )?;
     let revision = git(&root, &["rev-parse", "HEAD"])?;
-    let workspace_ref = manifest.to_reference().to_json()?;
+    // E5/I02 repair (P1.3): the emitted ref must carry the committed HEAD so
+    // downstream recovery can revalidate the workspace against the post-write
+    // state, not the pre-write base. We build a fresh ref (baseRevision =
+    // newHEAD, headRevision = Some(newHEAD)) and recompute its digest.
+    let mut workspace_ref = WorkspaceRefV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: workspace_id.clone(),
+        adapter: manifest.adapter,
+        adapter_revision: manifest.adapter_revision.clone(),
+        repo_identity: manifest.repo_identity.clone(),
+        base_revision: revision.clone(),
+        mode: manifest.mode,
+        content_digest: String::new(),
+        head_revision: Some(revision.clone()),
+    };
+    workspace_ref.content_digest = workspace_ref.compute_digest();
+    let workspace_ref_json = workspace_ref.to_json()?;
     let changed_files: Vec<String> = changes
         .iter()
         .map(|c| format!("prometheos/changes/{}/{}.change.json", plan.plan_id, c.step))
@@ -267,7 +244,7 @@ fn run_implement(args: &serde_json::Value) -> Result<String> {
         plan_id: plan.plan_id.clone(),
         discovery_evidence_id: plan.discovery_evidence_id.clone(),
         revision,
-        workspace_ref,
+        workspace_ref: workspace_ref_json,
         changed_files,
         changes,
     };
@@ -293,6 +270,11 @@ fn run_repair(args: &serde_json::Value) -> Result<String> {
         .get("workspaceParent")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("repair requires workspaceParent"))?;
+
+    // E5/I02 repair (P1.1): reject any diagnosis_id that could escape
+    // workspace_parent when joined into a filesystem path.
+    validate_workspace_id(&diagnosis.diagnosis_id)
+        .map_err(|e| anyhow::anyhow!("repair: diagnosis.diagnosis_id unsafe: {e}"))?;
 
     let repair_id = format!("repair-{}", diagnosis.diagnosis_id);
     let (_adapter, manifest, root) = acquire_writable_worktree(
@@ -331,7 +313,22 @@ fn run_repair(args: &serde_json::Value) -> Result<String> {
         ],
     )?;
     let revision = git(&root, &["rev-parse", "HEAD"])?;
-    let workspace_ref = manifest.to_reference().to_json()?;
+    // E5/I02 repair (P1.3): see run_implement. Build the post-commit ref
+    // (baseRevision = newHEAD, headRevision = Some(newHEAD)) and recompute
+    // its digest so the emitted reference can revalidate the workspace.
+    let mut workspace_ref = WorkspaceRefV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: repair_id.clone(),
+        adapter: manifest.adapter,
+        adapter_revision: manifest.adapter_revision.clone(),
+        repo_identity: manifest.repo_identity.clone(),
+        base_revision: revision.clone(),
+        mode: manifest.mode,
+        content_digest: String::new(),
+        head_revision: Some(revision.clone()),
+    };
+    workspace_ref.content_digest = workspace_ref.compute_digest();
+    let workspace_ref_json = workspace_ref.to_json()?;
     let changed_files = vec![format!(
         "prometheos/repairs/{}.repair.json",
         diagnosis.diagnosis_id
@@ -343,7 +340,7 @@ fn run_repair(args: &serde_json::Value) -> Result<String> {
         diagnosis_ref: diagnosis.diagnosis_id.clone(),
         failing_target: diagnosis.failing_target.clone(),
         revision,
-        workspace_ref,
+        workspace_ref: workspace_ref_json,
         changed_files,
         corrective_summary,
     };

@@ -406,7 +406,7 @@ fn save_proposal(repo: &Path, proposal: &ProposalArtifact) -> Result<()> {
     Ok(())
 }
 
-fn now_iso() -> String {
+pub fn now_iso() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

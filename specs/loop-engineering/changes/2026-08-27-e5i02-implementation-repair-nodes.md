@@ -114,3 +114,101 @@ Drives both nodes through the generic `NodeRunner` (same machinery as
 - Feeds: later E5 executor-side issues (parallel execution, commit
   aggregation) and the E6 cloud path.
 - Issue #126 will be closed on PR merge.
+
+---
+
+## Post-merge repair (2026-08-28)
+
+The original PR #196 was merged before the human gate could review four
+automated review findings (three P1, one P2). This section records the
+focused repair that addresses them without scope creep.
+
+### P1.1 — Path traversal through plan_id / diagnosis_id
+
+- `validate_workspace_id(id: &str) -> anyhow::Result<()>` added to
+  `src/workflow/workspace.rs`. Rejects: empty / > 200 chars, `..`,
+  path separators (`/`, `\`, NUL), and any char outside
+  `[A-Za-z0-9._-]`.
+- Called at the start of `run_implement` and `run_repair` (before any
+  workspace acquisition) AND from `GitWorktreeWorkspace::acquire` for
+  defense in depth on `manifest.workspace_id`.
+- Test: `repair_p1_1_implement_rejects_path_traversal_in_plan_id`,
+  `repair_p1_1_repair_rejects_path_traversal_in_diagnosis_id`.
+
+### P1.2 — Repository authority not bound to `repoRoot`
+
+- `GitWorktreeWorkspace::acquire` now resolves the source repo's toplevel
+  via `git rev-parse --show-toplevel` and requires the canonicalized
+  `manifest.repo_identity` to match. Fails closed on mismatch.
+- Required the existing workspace test helper `writable_manifest` to take
+  a real `&Path` (the old form used a synthetic `origin/<name>` string
+  that now correctly fails the authority check). Updated 7 test sites.
+- Test: `repair_p1_2_authority_mismatch_is_rejected_fail_closed` builds
+  a plan against `dir_a` and points the adapter at `dir_b`, asserting
+  the mismatch is caught at acquire time.
+
+### P1.3 — Emitted workspace reference cannot recover committed HEAD
+
+- `WorkspaceRefV1` extended with optional `headRevision: Option<String>`
+  (default None for forward compat; `deny_unknown_fields` preserved
+  because new optional fields with `#[serde(default)]` are not
+  "unknown"). Added `WorkspaceRefV1::compute_digest` so callers can
+  re-seal after mutating `headRevision`.
+- `WorkspaceAdapter::recover` now pins against `headRevision` when
+  present and falls back to `baseRevision` for older refs.
+- The implement / repair nodes now build a fresh `WorkspaceRefV1` after
+  the commit: `baseRevision = newHEAD`, `headRevision = Some(newHEAD)`,
+  `contentDigest` recomputed via the new helper.
+- `to_reference()` (from a pre-write manifest) still emits
+  `headRevision = None` so older callers and ref-only consumers see
+  identical JSON shape.
+- Test: `repair_p1_3_emitted_ref_carries_committed_head_and_recovers`
+  drives the full implement → ref → recover cycle and asserts the
+  on-disk worktree revalidates against the emitted reference.
+
+### P2 — Generated audit timestamps were incorrect
+
+- The hand-rolled `chrono_like_iso` in `node_implementation.rs` produced
+  wrong dates (the proleptic Gregorian year/day math was off by the
+  number of leap years). Removed.
+- `pub fn now_iso()` in `src/workflow/mod.rs:409` was already the
+  canonical RFC3339 helper (uses `chrono::DateTime::from_timestamp`).
+  The node module now calls `crate::workflow::now_iso()` directly.
+- Test: `repair_p2_emitted_timestamp_round_trips_through_chrono` parses
+  every `appliedAt` via `chrono::DateTime::parse_from_rfc3339` and
+  asserts the year is in a plausible range (2024..=2100).
+
+### Test fragility surfaced + fixed (collateral)
+
+- `references_round_trip_without_process_state` in `workspace.rs` had a
+  pre-existing fragile PID-substring check that became reliably false
+  after `headRevision` was added to the digest. Replaced with a
+  positive assertion: the serialized JSON's top-level key set equals
+  the exact `WorkspaceRefV1` field list. The `deny_unknown_fields`
+  guarantee makes this check both stronger and stable.
+
+### Verification (repair)
+
+- `cargo fmt --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — exit 0
+- `cargo test --lib` — 922 passed, 0 failed
+- `cargo test --test node_library_conformance` — 7 passed
+- `cargo test --test node_implementation_conformance` — **10 passed**
+  (5 original + 5 new repair tests)
+- No `Cargo.toml` / `Cargo.lock` edits
+
+### Files touched (repair)
+
+- `src/workflow/workspace.rs` — `validate_workspace_id`, repo authority
+  check in `acquire`, `WorkspaceRefV1.headRevision` + `compute_digest`,
+  `recover` update, test helper + test-site updates, fragile-test fix.
+- `src/workflow/node_implementation.rs` — `validate_workspace_id` calls,
+  post-commit `WorkspaceRefV1` construction, switch to
+  `crate::workflow::now_iso`, drop broken `chrono_like_iso`.
+- `src/workflow/mod.rs` — `now_iso` is now `pub` (one-character change).
+- `tests/node_implementation_conformance.rs` — 5 new repair tests
+  (P1.1 × 2, P1.2, P1.3, P2).
+- `specs/loop-engineering/changes/2026-08-27-e5i02-implementation-repair-nodes.md`
+  — this section.
+
+Five files; no new dependencies; no Cargo edits.
