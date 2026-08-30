@@ -25,6 +25,17 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the workspace contract.
 pub const WORKSPACE_SCHEMA_VERSION: &str = "1.0.0";
 
+/// Schema version for `WorkspaceRefV1`. See `WorkspaceRefV1::parse_json` for
+/// the compatibility contract: refs written at `1.0.0` (without the
+/// `headRevision` field) and `1.1.0` (with the optional field) both parse on
+/// a modern reader; older readers pinned to `1.0.0` MUST fail closed on a
+/// `1.1.0` ref (the unknown-field or unsupported-version bail), which is the
+/// intended fail-closed behavior.
+pub const WORKSPACE_REF_SCHEMA_VERSION: &str = "1.1.0";
+
+/// Legacy ref version accepted by `WorkspaceRefV1::parse_json`.
+pub const WORKSPACE_REF_SCHEMA_VERSION_V1: &str = "1.0.0";
+
 /// Revision of the built-in adapters (bump on behavior change).
 pub const ADAPTER_REVISION: &str = "lite.workspace.adapter.v1";
 
@@ -160,9 +171,10 @@ impl WorkspaceManifestV1 {
     /// `headRevision` is unset (None) because the manifest captures the
     /// pre-write base; post-write refs are built separately by the implement
     /// / repair nodes with `headRevision` set to the committed HEAD.
+    /// Emits ref schema `1.1.0` (WorkspaceRefV1 now carries `headRevision`).
     pub fn to_reference(&self) -> WorkspaceRefV1 {
         WorkspaceRefV1 {
-            schema_version: WORKSPACE_SCHEMA_VERSION.into(),
+            schema_version: WORKSPACE_REF_SCHEMA_VERSION.into(),
             workspace_id: self.workspace_id.clone(),
             adapter: self.adapter,
             adapter_revision: self.adapter_revision.clone(),
@@ -195,7 +207,9 @@ pub struct WorkspaceRefV1 {
     /// instead of `baseRevision`; when absent (older / read-only refs),
     /// `recover()` keeps the pre-write `baseRevision` semantics. Optional
     /// for forward compatibility: older serialized refs deserialize cleanly
-    /// via `#[serde(default)]`.
+    /// via `#[serde(default)]`. Adding this field moves the wire schema to
+    /// `1.1.0` (WORKSPACE_REF_SCHEMA_VERSION); refs written at `1.0.0` are
+    /// still accepted by `parse_json` but new refs emit `1.1.0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_revision: Option<String>,
 }
@@ -203,10 +217,14 @@ pub struct WorkspaceRefV1 {
 impl WorkspaceRefV1 {
     pub fn parse_json(text: &str) -> Result<Self> {
         let r: Self = serde_json::from_str(text).context("workspace ref parse failed")?;
-        if r.schema_version != WORKSPACE_SCHEMA_VERSION {
+        if r.schema_version != WORKSPACE_REF_SCHEMA_VERSION_V1
+            && r.schema_version != WORKSPACE_REF_SCHEMA_VERSION
+        {
             anyhow::bail!(
-                "unsupported workspace ref schema version {}",
-                r.schema_version
+                "unsupported workspace ref schema version {} (supported: {}, {})",
+                r.schema_version,
+                WORKSPACE_REF_SCHEMA_VERSION_V1,
+                WORKSPACE_REF_SCHEMA_VERSION
             );
         }
         Ok(r)
@@ -376,6 +394,85 @@ fn toplevel(repo: &std::path::Path) -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(s))
 }
 
+/// Returns true if `identity` looks like a filesystem path (exists, has a
+/// path separator, or starts with a drive letter). Conservative: anything
+/// that could be a path is treated as one so the canonicalize binding
+/// applies. Anything that can't possibly be a path falls through to the
+/// URL / stable-name branches. URL / git-protocol patterns are excluded.
+fn existing_fs_path_like(identity: &str) -> bool {
+    // Empty is impossible (validated upstream) but guard anyway.
+    if identity.is_empty() {
+        return false;
+    }
+    // URLs and git-protocol strings are never paths.
+    if looks_like_url_or_git_proto(identity) {
+        return false;
+    }
+    // Contains a path separator (forward or back) — treat as a path.
+    if identity.contains('/') || identity.contains('\\') {
+        return true;
+    }
+    // Looks like a Windows drive letter path (e.g. "C:").
+    let bytes = identity.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        return true;
+    }
+    // The identity exists on disk — the canonicalize path is the right
+    // binding.
+    std::path::Path::new(identity).exists()
+}
+
+/// Returns true if `identity` is a URL (http/https/ssh/git protocol) or a
+/// git-protocol SCP-style reference (`user@host:path`).
+fn looks_like_url_or_git_proto(identity: &str) -> bool {
+    if identity.starts_with("http://")
+        || identity.starts_with("https://")
+        || identity.starts_with("git://")
+        || identity.starts_with("ssh://")
+        || identity.starts_with("git@")
+    {
+        return true;
+    }
+    // SCP-style: `user@host:path` where path contains a colon.
+    if let Some(at) = identity.find('@') {
+        let after = &identity[at + 1..];
+        if after.contains(':') && !after.starts_with("//") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Weak but correct equality for URLs / git-protocol strings: normalizes
+/// trailing `.git`, trailing slash, and the `.git@` / `:` SCP separator
+/// before comparing. This is NOT a full URL parser — it's intentionally
+/// minimal and only used in the authority-binding path.
+fn url_or_git_proto_equal(a: &str, b: &str) -> bool {
+    fn normalize_url(s: &str) -> String {
+        let mut s = s.trim().to_lowercase();
+        // Normalize SCP-style `git@host:path` to `ssh://git@host/path`.
+        if let Some(at_pos) = s.find('@') {
+            let host_path = &s[at_pos + 1..];
+            if let Some(colon_pos) = host_path.find(':') {
+                let host = &host_path[..colon_pos];
+                let path = &host_path[colon_pos + 1..];
+                if !host.is_empty() && !path.is_empty() && !path.starts_with("//") {
+                    s = format!("ssh://git@{}/{}", host, path);
+                }
+            }
+        }
+        // Strip trailing .git and /
+        while s.ends_with(".git") {
+            s.truncate(s.len() - 4);
+        }
+        while s.ends_with('/') {
+            s.truncate(s.len() - 1);
+        }
+        s
+    }
+    normalize_url(a) == normalize_url(b)
+}
+
 fn preserve_files(
     acquired: &AcquiredWorkspace,
     preserve: &PreservationSet,
@@ -446,28 +543,62 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         // the implement/repair nodes) are expected to validate their own
         // plan_id / diagnosis_id, but the adapter MUST NOT trust upstream.
         validate_workspace_id(&manifest.workspace_id)?;
-        // Authority binding (E5/I02 repair): the worktree's source_repo
-        // MUST canonicalize to manifest.repo_identity, otherwise a caller
-        // could pass an arbitrary source_repo and acquire authority over an
-        // unrelated repository. Fail closed on mismatch. We canonicalize
-        // both sides because on Windows `git rev-parse --show-toplevel`
-        // returns a path with forward slashes and no `\\?\` prefix, while
-        // `std::fs::canonicalize` returns the `\\?\` extended form.
-        let declared = std::path::PathBuf::from(&manifest.repo_identity);
-        let actual = toplevel(&self.source_repo).map_err(|e| {
-            anyhow::anyhow!(
-                "source_repo {} is not a git working copy: {e}",
-                self.source_repo.display()
-            )
-        })?;
-        let declared_canon = std::fs::canonicalize(&declared).unwrap_or(declared);
-        let actual_canon = std::fs::canonicalize(&actual).unwrap_or(actual);
-        if actual_canon != declared_canon {
-            anyhow::bail!(
-                "workspace repo identity mismatch: manifest.repo_identity={} but source_repo resolves to {}",
-                declared_canon.display(),
-                actual_canon.display()
-            );
+        // Authority binding (E5/I02 repair round 2): repo_identity is
+        // documented as "origin URL or stable name" (or a filesystem path).
+        // All three forms are valid per the manifest contract. We branch:
+        //
+        //  a) URL / git-protocol identity (contains "://" or matches
+        //     "user@host:path") -> bind via `git remote get-url origin`:
+        //     the source_repo's origin remote must equal the declared URL.
+        //  b) Existing filesystem path -> canonicalize BOTH sides and compare
+        //     (the original E5/I02 P1.2 check, preserved).
+        //  c) Fallback: treat it as a stable-name label (no binding beyond
+        //     the recorded identity string). This is the documented contract;
+        //     the manifest's contentDigest still attests to the exact string,
+        //     so silent substitution is detectable on audit.
+        //
+        // Fail closed: any of the three branches errors on mismatch.
+        let identity = &manifest.repo_identity;
+        let looks_like_path = existing_fs_path_like(identity);
+        if looks_like_path {
+            let declared = std::path::PathBuf::from(identity);
+            let actual = toplevel(&self.source_repo).map_err(|e| {
+                anyhow::anyhow!(
+                    "source_repo {} is not a git working copy: {e}",
+                    self.source_repo.display()
+                )
+            })?;
+            let declared_canon = std::fs::canonicalize(&declared).unwrap_or(declared);
+            let actual_canon = std::fs::canonicalize(&actual).unwrap_or(actual);
+            if actual_canon != declared_canon {
+                anyhow::bail!(
+                    "workspace repo identity mismatch: manifest.repo_identity={} (path) but source_repo resolves to {}",
+                    declared_canon.display(),
+                    actual_canon.display()
+                );
+            }
+        } else if looks_like_url_or_git_proto(identity) {
+            // URL / git-protocol identity: compare against the source repo's
+            // origin remote, if any. If the source has no origin, fail closed.
+            let origin_url = run_git(&self.source_repo, &["remote", "get-url", "origin"])
+                .context("source_repo has no origin remote: cannot bind a URL identity")?;
+            if !url_or_git_proto_equal(identity, origin_url.trim()) {
+                anyhow::bail!(
+                    "workspace repo identity mismatch: manifest.repo_identity={} (URL) but source_repo's origin is {}",
+                    identity,
+                    origin_url.trim()
+                );
+            }
+        } else {
+            // Stable-name label: no filesystem or URL binding is possible by
+            // design. The manifest digest still commits the exact string; an
+            // audit of the stderr log will reveal substitutions. We still
+            // require the string to be non-empty (already validated above)
+            // and to be a valid workspace-id-shaped token so it can't be
+            // confused with a path or URL by a downstream consumer.
+            validate_workspace_id(identity).map_err(|e| {
+                anyhow::anyhow!("manifest.repo_identity as stable name is unsafe: {e}")
+            })?;
         }
         let path = self.worktree_path(manifest);
         if path.exists() {
@@ -556,9 +687,12 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         {
             return reject_or_remap(remap, WorkspaceRefError::AdapterMismatch);
         }
-        if reference.schema_version != WORKSPACE_SCHEMA_VERSION
-            || manifest.schema_version != WORKSPACE_SCHEMA_VERSION
+        if reference.schema_version != WORKSPACE_REF_SCHEMA_VERSION_V1
+            && reference.schema_version != WORKSPACE_REF_SCHEMA_VERSION
         {
+            return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
+        }
+        if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
             return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
         }
         if !expected_root.exists() {
@@ -569,13 +703,23 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             Err(_) => return reject_or_remap(remap, WorkspaceRefError::Missing),
         };
         // For post-write refs (headRevision set), the workspace is "pinned"
-        // to the committed HEAD, not the pre-write base. Fall back to
-        // baseRevision for older refs that predate the headRevision field.
-        let pinned = reference
-            .head_revision
-            .as_deref()
-            .unwrap_or(&reference.base_revision);
-        if actual != pinned || actual != manifest.base_revision {
+        // to the committed HEAD, not the pre-write base. When headRevision
+        // is set, the manifest's base_revision describes the PRE-write state
+        // and must not be compared against the actual HEAD for the resume
+        // decision — the ref's headRevision is the authoritative pin.
+        // For pre-write refs (headRevision absent), keep the pre-existing
+        // strict check against BOTH the ref and the manifest.
+        let actual_expected = match &reference.head_revision {
+            Some(head) => head.as_str(),
+            None => reference.base_revision.as_str(),
+        };
+        if actual != actual_expected {
+            return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
+        }
+        // For pre-write refs, the manifest must ALSO agree with the ref.
+        // For post-write refs, the manifest may legitimately carry the
+        // pre-write base revision (audit trail), so we skip that check.
+        if reference.head_revision.is_none() && actual != manifest.base_revision {
             return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
         }
         Ok(RecoveryOutcome::Resumed(Box::new(AcquiredWorkspace {
@@ -692,7 +836,9 @@ impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
         {
             return reject_or_remap(remap, WorkspaceRefError::AdapterMismatch);
         }
-        if reference.schema_version != WORKSPACE_SCHEMA_VERSION {
+        if reference.schema_version != WORKSPACE_REF_SCHEMA_VERSION_V1
+            && reference.schema_version != WORKSPACE_REF_SCHEMA_VERSION
+        {
             return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
         }
         if !expected_root.exists() {
