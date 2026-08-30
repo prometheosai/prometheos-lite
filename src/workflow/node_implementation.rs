@@ -24,8 +24,8 @@ use crate::workflow::node_contracts::NodeManifestV1;
 use crate::workflow::node_library::ScopedPlanV1;
 use crate::workflow::node_runner::{Capability, CapabilityRegistry};
 use crate::workflow::workspace::{
-    AdapterKind, GitWorktreeWorkspace, WORKSPACE_SCHEMA_VERSION, WorkspaceAdapter,
-    WorkspaceManifestV1, WorkspaceMode, WorkspaceRefV1, validate_workspace_id,
+    AdapterKind, GitWorktreeWorkspace, WORKSPACE_REF_SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION,
+    WorkspaceAdapter, WorkspaceManifestV1, WorkspaceMode, WorkspaceRefV1, validate_workspace_id,
 };
 
 /// Version of the E5/I02 node contracts.
@@ -221,8 +221,10 @@ fn run_implement(args: &serde_json::Value) -> Result<String> {
     // downstream recovery can revalidate the workspace against the post-write
     // state, not the pre-write base. We build a fresh ref (baseRevision =
     // newHEAD, headRevision = Some(newHEAD)) and recompute its digest.
+    // Emits schema 1.1.0 (WORKSPACE_REF_SCHEMA_VERSION) so older readers
+    // fail closed cleanly on the new field.
     let mut workspace_ref = WorkspaceRefV1 {
-        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
         workspace_id: workspace_id.clone(),
         adapter: manifest.adapter,
         adapter_revision: manifest.adapter_revision.clone(),
@@ -316,8 +318,9 @@ fn run_repair(args: &serde_json::Value) -> Result<String> {
     // E5/I02 repair (P1.3): see run_implement. Build the post-commit ref
     // (baseRevision = newHEAD, headRevision = Some(newHEAD)) and recompute
     // its digest so the emitted reference can revalidate the workspace.
+    // Emits schema 1.1.0 (WORKSPACE_REF_SCHEMA_VERSION).
     let mut workspace_ref = WorkspaceRefV1 {
-        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
         workspace_id: repair_id.clone(),
         adapter: manifest.adapter,
         adapter_revision: manifest.adapter_revision.clone(),
