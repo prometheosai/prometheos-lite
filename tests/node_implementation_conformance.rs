@@ -22,8 +22,13 @@ use prometheos_lite::workflow::node_implementation::{
 };
 use prometheos_lite::workflow::node_library::ScopedPlanV1;
 use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
+use prometheos_lite::workflow::now_iso;
 use prometheos_lite::workflow::policy::LocalRestrictions;
-use prometheos_lite::workflow::workspace::WorkspaceAdapter;
+use prometheos_lite::workflow::workspace::{
+    ADAPTER_REVISION, AdapterKind, GitWorktreeWorkspace, RecoveryOutcome,
+    WORKSPACE_REF_SCHEMA_VERSION, WORKSPACE_REF_SCHEMA_VERSION_V1, WORKSPACE_SCHEMA_VERSION,
+    WorkspaceAdapter, WorkspaceManifestV1, WorkspaceMode, WorkspaceRefError, WorkspaceRefV1,
+};
 
 fn restrictions_with_write() -> LocalRestrictions {
     LocalRestrictions {
@@ -83,6 +88,49 @@ fn git(root: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn init_repo(root: &Path) {
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "ci@ci"]);
+    git(root, &["config", "user.name", "ci"]);
+}
+
+fn git_output(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git available in test environment");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn full_manifest(
+    workspace_id: &str,
+    repo: &Path,
+    base_revision: &str,
+    mode: WorkspaceMode,
+) -> WorkspaceManifestV1 {
+    WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: workspace_id.to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: repo.to_string_lossy().to_string(),
+        base_revision: base_revision.to_string(),
+        branch: None,
+        mode,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: format!("lock-{workspace_id}"),
+        created_at: now_iso(),
+        content_digest: None,
+    }
 }
 
 fn fixture_repo() -> tempfile::TempDir {
@@ -670,4 +718,357 @@ fn repair_p2_emitted_timestamp_round_trips_through_chrono() {
             "applied_at year {year} out of plausible range"
         );
     }
+}
+
+// ===========================================================================
+// Repair round 2 regressions (post-#197 findings)
+// ===========================================================================
+
+#[test]
+fn recovery_with_original_manifest_succeeds_when_head_revision_set() {
+    // P1 regression: recover() previously compared committed HEAD against the
+    // manifest's base_revision even when headRevision was set. With the fix,
+    // when headRevision is present, the manifest's base_revision is NOT
+    // compared against the actual HEAD (it may legitimately carry the
+    // pre-write base as an audit trail).
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let pre_commit = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // Acquire with the pre-commit manifest.
+    let manifest = full_manifest(
+        "recovery-original-manifest",
+        &repo,
+        &pre_commit,
+        WorkspaceMode::Writable,
+    );
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+    let acquired = adapter.acquire(&manifest).unwrap();
+
+    // Commit something into the worktree.
+    std::fs::write(acquired.root.join("new.txt"), "written").unwrap();
+    git(&acquired.root, &["add", "."]);
+    git(&acquired.root, &["commit", "-q", "-m", "write in worktree"]);
+    let post_commit = git_output(&acquired.root, &["rev-parse", "HEAD"]);
+    assert_ne!(pre_commit, post_commit, "worktree must have committed");
+
+    // Build a post-write ref at 1.1.0 with headRevision = post-commit.
+    let mut ref_with_head = WorkspaceRefV1 {
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
+        workspace_id: "recovery-original-manifest".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: repo.to_string_lossy().to_string(),
+        base_revision: pre_commit.clone(), // pre-write base (audit trail)
+        mode: WorkspaceMode::Writable,
+        content_digest: String::new(),
+        head_revision: Some(post_commit.clone()),
+    };
+    ref_with_head.content_digest = ref_with_head.compute_digest();
+
+    // Recover with the ORIGINAL manifest (base_revision = pre-commit).
+    // This must succeed because headRevision overrides the manifest check.
+    let outcome = adapter.recover(
+        &acquired.root,
+        &ref_with_head,
+        &manifest, // original: base_revision = pre-commit
+        None,
+    );
+    match outcome.unwrap() {
+        RecoveryOutcome::Resumed(a) => {
+            assert_eq!(a.revision, post_commit);
+        }
+        other => panic!("expected Resumed, got {:?}", other),
+    }
+}
+
+#[test]
+fn recovery_rejects_stale_when_head_revision_absent_and_manifest_disagrees() {
+    // Complementary regression: when headRevision is absent, recovery must
+    // still enforce the manifest.base_revision == actual HEAD check (pre-write
+    // recovery). A ref without headRevision and a manifest whose base is stale
+    // must be rejected.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // Make a second commit to move HEAD.
+    std::fs::write(repo.join("second.txt"), "second").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "second"]);
+    let current = git_output(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(base, current);
+
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+
+    // Acquire a real worktree pinned to current HEAD.
+    let acquire_manifest =
+        full_manifest("stale-manifest", &repo, &current, WorkspaceMode::Writable);
+    let acquired = adapter.acquire(&acquire_manifest).unwrap();
+
+    // Ref without headRevision, base_revision = current.
+    let ref_no_head = WorkspaceRefV1 {
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION_V1.to_string(),
+        workspace_id: "stale-manifest".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: repo.to_string_lossy().to_string(),
+        base_revision: current.clone(),
+        mode: WorkspaceMode::Writable,
+        content_digest: String::new(),
+        head_revision: None, // pre-write ref
+    };
+
+    // Manifest with stale base_revision (the old commit).
+    let stale_manifest = full_manifest(
+        "stale-manifest",
+        &repo,
+        &base, // stale: does not match current HEAD
+        WorkspaceMode::Writable,
+    );
+
+    let outcome = adapter.recover(&acquired.root, &ref_no_head, &stale_manifest, None);
+    match outcome.unwrap() {
+        RecoveryOutcome::Rejected(e) => {
+            assert!(matches!(e, WorkspaceRefError::StaleRevision));
+        }
+        other => panic!("expected Rejected(StaleRevision), got {:?}", other),
+    }
+}
+
+#[test]
+fn authority_binding_accepts_url_identity_matching_origin_remote() {
+    // P1.2 regression: repo_identity documented as "origin URL or stable name".
+    // A URL identity must bind to the source_repo's origin remote.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // Set origin remote to a URL.
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/repo.git",
+        ],
+    );
+
+    let manifest = WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: "url-identity-test".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: "https://github.com/example/repo.git".to_string(),
+        base_revision: base.clone(),
+        branch: None,
+        mode: WorkspaceMode::Writable,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: "lock-url-test".to_string(),
+        created_at: now_iso(),
+        content_digest: None,
+    };
+
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+
+    // Must succeed: URL matches origin remote.
+    let acquired = adapter.acquire(&manifest).unwrap();
+    assert_eq!(acquired.manifest.base_revision, base);
+}
+
+#[test]
+fn authority_binding_rejects_url_identity_mismatch() {
+    // P1.2 regression: URL identity that does NOT match origin remote must
+    // be rejected.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // Set origin remote to a DIFFERENT URL.
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/other/repo.git",
+        ],
+    );
+
+    let manifest = WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: "url-mismatch".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: "https://github.com/example/repo.git".to_string(),
+        base_revision: base.clone(),
+        branch: None,
+        mode: WorkspaceMode::Writable,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: "lock-url-mismatch".to_string(),
+        created_at: now_iso(),
+        content_digest: None,
+    };
+
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+
+    let err = adapter.acquire(&manifest).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("repo identity mismatch"),
+        "expected repo identity mismatch error, got: {msg}"
+    );
+}
+
+#[test]
+fn authority_binding_accepts_stable_name_identity() {
+    // P1.2 regression: stable-name identity (bare label) is accepted per the
+    // documented contract. The manifest's contentDigest commits the exact
+    // string so silent substitution is auditable.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    let manifest = WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: "stable-name-test".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: "my-stable-repo-name".to_string(),
+        base_revision: base.clone(),
+        branch: None,
+        mode: WorkspaceMode::Writable,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: "lock-stable-name".to_string(),
+        created_at: now_iso(),
+        content_digest: None,
+    };
+
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+
+    // Must succeed: stable-name is a label, no binding beyond the digest.
+    let acquired = adapter.acquire(&manifest).unwrap();
+    assert_eq!(acquired.manifest.base_revision, base);
+}
+
+#[test]
+fn workspace_ref_v1_accepts_1_1_0_schema_with_head_revision() {
+    // P2 regression: new ref schema 1.1.0 with headRevision must parse.
+    let ref_json = r#"{
+        "schemaVersion": "1.1.0",
+        "workspaceId": "test-v1.1",
+        "adapter": "git-worktree",
+        "adapterRevision": "lite.workspace.adapter.v1",
+        "repoIdentity": "my-repo",
+        "baseRevision": "abc123",
+        "mode": "writable",
+        "contentDigest": "digest123",
+        "headRevision": "def456"
+    }"#;
+    let parsed = WorkspaceRefV1::parse_json(ref_json).unwrap();
+    assert_eq!(parsed.schema_version, "1.1.0");
+    assert_eq!(parsed.head_revision.as_deref(), Some("def456"));
+}
+
+#[test]
+fn workspace_ref_v1_accepts_1_0_0_schema_without_head_revision() {
+    // P2 regression: old ref schema 1.0.0 (without headRevision) must still
+    // parse for backward compatibility.
+    let ref_json = r#"{
+        "schemaVersion": "1.0.0",
+        "workspaceId": "test-v1.0",
+        "adapter": "git-worktree",
+        "adapterRevision": "lite.workspace.adapter.v1",
+        "repoIdentity": "my-repo",
+        "baseRevision": "abc123",
+        "mode": "writable",
+        "contentDigest": "digest123"
+    }"#;
+    let parsed = WorkspaceRefV1::parse_json(ref_json).unwrap();
+    assert_eq!(parsed.schema_version, "1.0.0");
+    assert!(parsed.head_revision.is_none());
+}
+
+#[test]
+fn workspace_ref_v1_rejects_unknown_schema_version() {
+    // P2 regression: refs at an unsupported version MUST be rejected.
+    let ref_json = r#"{
+        "schemaVersion": "2.0.0",
+        "workspaceId": "test-v2",
+        "adapter": "git-worktree",
+        "adapterRevision": "lite.workspace.adapter.v1",
+        "repoIdentity": "my-repo",
+        "baseRevision": "abc123",
+        "mode": "writable",
+        "contentDigest": "digest123"
+    }"#;
+    let err = WorkspaceRefV1::parse_json(ref_json).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unsupported workspace ref schema version 2.0.0"),
+        "expected unsupported version error, got: {msg}"
+    );
+}
+
+#[test]
+fn workspace_ref_v1_1_1_0_rejects_unknown_fields() {
+    // P2 regression: deny_unknown_fields must still apply at 1.1.0.
+    let ref_json = r#"{
+        "schemaVersion": "1.1.0",
+        "workspaceId": "test-v1.1-unknown",
+        "adapter": "git-worktree",
+        "adapterRevision": "lite.workspace.adapter.v1",
+        "repoIdentity": "my-repo",
+        "baseRevision": "abc123",
+        "mode": "writable",
+        "contentDigest": "digest123",
+        "futureField": "surprise"
+    }"#;
+    let err = WorkspaceRefV1::parse_json(ref_json).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unknown field") || msg.contains("parse failed"),
+        "expected unknown field or parse error, got: {msg}"
+    );
 }
