@@ -212,3 +212,78 @@ focused repair that addresses them without scope creep.
   — this section.
 
 Five files; no new dependencies; no Cargo edits.
+
+## Repair round 2 (post-#197 findings)
+
+Three regressions surfaced during review of #197. All fixed in a follow-up
+PR with seven new regression tests.
+
+### P1 — recover() failed for post-write refs with original manifest
+
+- `recover()` compared `actual` against `manifest.base_revision` even when
+  `headRevision` was present. A post-write recovery using the original
+  (pre-write) manifest would always fail.
+- Fix: when `headRevision` is set, the ref's `headRevision` is the
+  authoritative pin; `manifest.base_revision` is only checked when
+  `headRevision` is absent (pre-write recovery).
+- Regression tests:
+  - `recovery_with_original_manifest_succeeds_when_head_revision_set`
+  - `recovery_rejects_stale_when_head_revision_absent_and_manifest_disagrees`
+
+### P1 — repo_identity canonicalized as path broke URL/stable-name forms
+
+- `acquire()` treated every `repo_identity` as a filesystem path and
+  canonicalized both sides. This broke documented URL and stable-name
+  identity forms (per `WorkspaceManifestV1.repo_identity` docs: "origin URL
+  or stable name").
+- Fix: three-form authority binding:
+  1. Filesystem path → canonicalize + compare (unchanged behavior)
+  2. URL / git-protocol → `git remote get-url origin` + normalize + compare
+  3. Stable-name label → `validate_workspace_id` + no filesystem binding
+     (per documented contract; contentDigest commits the exact string)
+- Helpers added: `existing_fs_path_like`, `looks_like_url_or_git_proto`,
+  `url_or_git_proto_equal`.
+- Regression tests:
+  - `authority_binding_accepts_url_identity_matching_origin_remote`
+  - `authority_binding_rejects_url_identity_mismatch`
+  - `authority_binding_accepts_stable_name_identity`
+
+### P2 — schema version 1.0.0 with headRevision broke older readers
+
+- `WorkspaceRefV1` uses `deny_unknown_fields`. Adding `headRevision` while
+  retaining schema `1.0.0` meant a new-emitter JSON broke old readers
+  (they'd fail on the unknown field).
+- Fix: new constant `WORKSPACE_REF_SCHEMA_VERSION = "1.1.0"` for refs.
+  `parse_json` accepts both `"1.0.0"` and `"1.1.0"`. `to_reference()` and
+  the implement/repair node ref builders now emit `"1.1.0"`. Old readers
+  pinned to `1.0.0` reject `1.1.0` cleanly (correct fail-closed behavior).
+  `recover()` also updated to accept both ref schema versions.
+- Regression tests:
+  - `workspace_ref_v1_accepts_1_1_0_schema_with_head_revision`
+  - `workspace_ref_v1_accepts_1_0_0_schema_without_head_revision`
+  - `workspace_ref_v1_rejects_unknown_schema_version`
+  - `workspace_ref_v1_1_1_0_rejects_unknown_fields`
+
+### Verification (repair round 2)
+
+- `cargo fmt --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — exit 0
+- `cargo test --lib` — 922 passed, 0 failed
+- `cargo test --test node_library_conformance` — 7 passed
+- `cargo test --test node_implementation_conformance` — **19 passed**
+  (12 original + 7 new regressions)
+- No `Cargo.toml` / `Cargo.lock` edits
+
+### Files touched (repair round 2)
+
+- `src/workflow/workspace.rs` — `WORKSPACE_REF_SCHEMA_VERSION` (1.1.0),
+  `WORKSPACE_REF_SCHEMA_VERSION_V1` (1.0.0), `parse_json` accepts both,
+  `existing_fs_path_like` / `looks_like_url_or_git_proto` /
+  `url_or_git_proto_equal` helpers, three-form authority binding in
+  `acquire`, `recover()` schema + headRevision logic.
+- `src/workflow/node_implementation.rs` — imports
+  `WORKSPACE_REF_SCHEMA_VERSION`, both ref builders emit 1.1.0.
+- `tests/node_implementation_conformance.rs` — 7 new regression tests,
+  `git_output` + `full_manifest` helpers, `RecoveryOutcome` import.
+
+Three files; no new dependencies; no Cargo edits.
