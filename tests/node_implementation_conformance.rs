@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
+use chrono::Datelike;
 use serde_json::json;
 
 use prometheos_lite::workflow::node_contracts::{NodeManifestV1, OutcomeKind};
@@ -22,6 +23,7 @@ use prometheos_lite::workflow::node_implementation::{
 use prometheos_lite::workflow::node_library::ScopedPlanV1;
 use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use prometheos_lite::workflow::policy::LocalRestrictions;
+use prometheos_lite::workflow::workspace::WorkspaceAdapter;
 
 fn restrictions_with_write() -> LocalRestrictions {
     LocalRestrictions {
@@ -386,4 +388,286 @@ fn implement_rejects_unparseable_plan() {
         "impl-bad",
     );
     assert!(res.is_err(), "malformed plan input must be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// E5/I02 repair: P1/P2 findings — focused tests covering the four regressions
+// called out in the post-merge review of #126.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repair_p1_1_implement_rejects_path_traversal_in_plan_id() {
+    // P1.1: a plan_id containing path traversal must be rejected before any
+    // workspace acquisition or filesystem write.
+    let dir = fixture_repo();
+    let base_revision = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let mut bad_plan = build_plan("plan-ok", &base_revision, "evidence-x", 1);
+    bad_plan.plan_id = "../../../etc/evil".to_string();
+    let ws_parent = tempfile::tempdir().unwrap();
+
+    let mut runner = runner();
+    let caps = restrictions_with_write();
+    let m = node_manifest("node-impl-p11", CAP_IMPLEMENT);
+    let res = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_IMPLEMENT,
+        json!({
+            "plan": serde_json::to_string(&bad_plan).unwrap(),
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+        }),
+        "p11",
+    );
+    assert!(
+        res.is_err(),
+        "implement must reject path-traversal plan_id (P1.1), got Ok"
+    );
+    let msg = res.err().unwrap().to_string();
+    assert!(
+        msg.contains("unsafe") || msg.contains("..") || msg.contains("path"),
+        "error must cite the unsafe plan_id, got: {msg}"
+    );
+}
+
+#[test]
+fn repair_p1_1_repair_rejects_path_traversal_in_diagnosis_id() {
+    let dir = fixture_repo();
+    let base_revision = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let bad_diagnosis = DiagnosisV1 {
+        diagnosis_id: "../escape".to_string(),
+        failing_target: "src/main.rs".to_string(),
+        message: "msg".to_string(),
+        base_revision,
+    };
+    let ws_parent = tempfile::tempdir().unwrap();
+    let mut runner = runner();
+    let caps = restrictions_with_write();
+    let m = node_manifest("node-repair-p11", CAP_REPAIR);
+    let res = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_REPAIR,
+        json!({
+            "diagnosis": serde_json::to_string(&bad_diagnosis).unwrap(),
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+        }),
+        "p11-repair",
+    );
+    assert!(
+        res.is_err(),
+        "repair must reject path-traversal diagnosis_id (P1.1), got Ok"
+    );
+}
+
+#[test]
+fn repair_p1_2_authority_mismatch_is_rejected_fail_closed() {
+    // P1.2: repo_identity must canonicalize to source_repo's toplevel. The
+    // node builds a manifest whose repo_identity is `dir.path()` (the real
+    // fixture), so this test exercises the positive path; we then build a
+    // SECOND fixture and confirm that attempting to bind the node's
+    // adapter to the wrong source_repo (constructed manually) fails closed.
+    let dir_a = fixture_repo();
+    let dir_b = fixture_repo();
+    let base_a = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir_a.path())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Construct a plan whose plan_id is clean (P1.1 still passes) but where
+    // we will deliberately build a worktree adapter pointed at dir_b while
+    // the manifest claims dir_a. This must fail closed inside acquire().
+    let plan = build_plan("plan-p12", &base_a, "evidence-p12", 1);
+    let ws_parent = tempfile::tempdir().unwrap();
+    let adapter = prometheos_lite::workflow::workspace::GitWorktreeWorkspace {
+        parent_dir: ws_parent.path().to_path_buf(),
+        // BUG injection: source_repo is dir_b, but the node's manifest will
+        // carry dir_a as repo_identity. The new authority check must catch it.
+        source_repo: dir_b.path().to_path_buf(),
+    };
+    let manifest = prometheos_lite::workflow::workspace::WorkspaceManifestV1 {
+        schema_version: "1.0.0".to_string(),
+        workspace_id: "impl-plan-p12".to_string(),
+        adapter: prometheos_lite::workflow::workspace::AdapterKind::GitWorktree,
+        adapter_revision: "lite.workspace.adapter.v1".to_string(),
+        repo_identity: dir_a.path().to_string_lossy().to_string(),
+        base_revision: plan.discovery_revision.clone(),
+        branch: None,
+        mode: prometheos_lite::workflow::workspace::WorkspaceMode::Writable,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: "lock-p12".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        content_digest: None,
+    }
+    .sealed();
+    let err = adapter
+        .acquire(&manifest)
+        .expect_err("acquire must fail closed on repo identity mismatch (P1.2)");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("repo identity mismatch") || msg.contains("mismatch"),
+        "expected identity-mismatch error, got: {msg}"
+    );
+}
+
+#[test]
+fn repair_p1_3_emitted_ref_carries_committed_head_and_recovers() {
+    // P1.3: the emitted workspace_ref must carry the post-write committed
+    // HEAD (headRevision set, baseRevision == newHEAD) and the on-disk
+    // worktree's actual HEAD must equal the ref's pinned value so that
+    // WorkspaceAdapter::recover() accepts the workspace.
+    let dir = fixture_repo();
+    let base_revision = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let plan = build_plan("plan-p13", &base_revision, "evidence-p13", 2);
+    let ws_parent = tempfile::tempdir().unwrap();
+    let mut runner = runner();
+    let caps = restrictions_with_write();
+    let m = node_manifest("node-impl-p13", CAP_IMPLEMENT);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_IMPLEMENT,
+        json!({
+            "plan": serde_json::to_string(&plan).unwrap(),
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+        }),
+        "p13",
+    )
+    .expect("implement completes");
+    let r: ImplementationResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    let parsed: prometheos_lite::workflow::workspace::WorkspaceRefV1 =
+        prometheos_lite::workflow::workspace::WorkspaceRefV1::parse_json(&r.workspace_ref)
+            .expect("workspace_ref round-trips");
+    // P1.3 invariants
+    assert_eq!(
+        parsed.head_revision.as_deref(),
+        Some(r.revision.as_str()),
+        "headRevision must equal the committed HEAD"
+    );
+    assert_eq!(
+        parsed.base_revision, r.revision,
+        "baseRevision must be the post-write HEAD so recover() can pin"
+    );
+    // Digest must verify against the new struct contents.
+    assert_eq!(
+        parsed.content_digest,
+        parsed.compute_digest(),
+        "content_digest must be self-consistent after the new headRevision"
+    );
+    // The worktree sits at the committed HEAD, so recover() must accept it.
+    let adapter = prometheos_lite::workflow::workspace::GitWorktreeWorkspace {
+        parent_dir: ws_parent.path().to_path_buf(),
+        source_repo: dir.path().to_path_buf(),
+    };
+    let acquired_root = ws_parent.path().join("impl-plan-p13").join("worktree");
+    assert!(acquired_root.exists(), "worktree must still be on disk");
+    // We need a manifest whose base_revision matches; the ref's
+    // base_revision is the committed HEAD, so a minimal sealed manifest
+    // that just declares identity + mode + adapter is enough to drive
+    // recover(). The adapter's own recover() check uses ref.headRevision
+    // (or ref.baseRevision as fallback) AND manifest.base_revision.
+    // recover() expects a full WorkspaceManifestV1; build one with
+    // base_revision = committed HEAD so the stale-revision check passes.
+    let full_manifest = prometheos_lite::workflow::workspace::WorkspaceManifestV1 {
+        schema_version: "1.0.0".to_string(),
+        workspace_id: parsed.workspace_id.clone(),
+        adapter: parsed.adapter,
+        adapter_revision: parsed.adapter_revision.clone(),
+        repo_identity: parsed.repo_identity.clone(),
+        base_revision: parsed.base_revision.clone(),
+        branch: None,
+        mode: parsed.mode,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: format!("lock-{}", parsed.workspace_id),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        content_digest: None,
+    }
+    .sealed();
+    let recovered = adapter
+        .recover(&acquired_root, &parsed, &full_manifest, None)
+        .expect("recover should not error");
+    match recovered {
+        prometheos_lite::workflow::workspace::RecoveryOutcome::Resumed(aw) => {
+            assert_eq!(
+                aw.revision, r.revision,
+                "recovered HEAD must equal the committed HEAD"
+            );
+        }
+        other => panic!("expected Resumed, got {other:?}"),
+    }
+}
+
+#[test]
+fn repair_p2_emitted_timestamp_round_trips_through_chrono() {
+    // P2: the audit timestamps embedded in ImplementationResultV1 must be
+    // valid RFC3339 datetimes parseable by chrono (the broken hand-rolled
+    // `chrono_like_iso` produced strings that did not round-trip).
+    let dir = fixture_repo();
+    let base_revision = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let plan = build_plan("plan-p2", &base_revision, "evidence-p2", 1);
+    let ws_parent = tempfile::tempdir().unwrap();
+    let mut runner = runner();
+    let caps = restrictions_with_write();
+    let m = node_manifest("node-impl-p2", CAP_IMPLEMENT);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_IMPLEMENT,
+        json!({
+            "plan": serde_json::to_string(&plan).unwrap(),
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+        }),
+        "p2",
+    )
+    .expect("implement completes");
+    let r: ImplementationResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    // Every change must have an applied_at that parses as a real datetime.
+    for c in &r.changes {
+        let parsed = chrono::DateTime::parse_from_rfc3339(&c.applied_at)
+            .unwrap_or_else(|e| panic!("applied_at not RFC3339 ({}): {}", c.applied_at, e));
+        // Must be within a sane window of "now" (between 2024 and 2100).
+        let year = parsed.year();
+        assert!(
+            (2024..=2100).contains(&year),
+            "applied_at year {year} out of plausible range"
+        );
+    }
 }

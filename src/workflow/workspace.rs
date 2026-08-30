@@ -28,6 +28,32 @@ pub const WORKSPACE_SCHEMA_VERSION: &str = "1.0.0";
 /// Revision of the built-in adapters (bump on behavior change).
 pub const ADAPTER_REVISION: &str = "lite.workspace.adapter.v1";
 
+/// Defense-in-depth ID validator. A workspace_id (and any path-derived segment
+/// from a plan_id / diagnosis_id) MUST be a bare segment: no `..`, no path
+/// separators, no nulls, and only the safe char set `[A-Za-z0-9._-]`. Empty
+/// strings and overly long strings are also rejected. Returns `Ok(())` iff the
+/// id is safe to join into a filesystem path or workspace identifier.
+pub fn validate_workspace_id(id: &str) -> anyhow::Result<()> {
+    if id.is_empty() {
+        anyhow::bail!("workspace id must not be empty");
+    }
+    if id.len() > 200 {
+        anyhow::bail!("workspace id too long ({} > 200)", id.len());
+    }
+    if id.contains("..") {
+        anyhow::bail!("workspace id must not contain '..'");
+    }
+    for c in id.chars() {
+        if matches!(c, '/' | '\\' | '\0') {
+            anyhow::bail!("workspace id must not contain path separators or NUL");
+        }
+        if !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+            anyhow::bail!("workspace id contains unsafe character {c:?}");
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Manifest
 // ---------------------------------------------------------------------------
@@ -131,6 +157,9 @@ impl WorkspaceManifestV1 {
 
     /// Portable reference derived from this manifest (for PortableWorkState /
     /// checkpoints / evidence): durable identity only, no process state.
+    /// `headRevision` is unset (None) because the manifest captures the
+    /// pre-write base; post-write refs are built separately by the implement
+    /// / repair nodes with `headRevision` set to the committed HEAD.
     pub fn to_reference(&self) -> WorkspaceRefV1 {
         WorkspaceRefV1 {
             schema_version: WORKSPACE_SCHEMA_VERSION.into(),
@@ -141,6 +170,7 @@ impl WorkspaceManifestV1 {
             base_revision: self.base_revision.clone(),
             mode: self.mode,
             content_digest: self.compute_digest(),
+            head_revision: None,
         }
     }
 }
@@ -160,6 +190,14 @@ pub struct WorkspaceRefV1 {
     /// Digest of the originating manifest (manifest-minus-digest form).
     #[serde(rename = "contentDigest")]
     pub content_digest: String,
+    /// Optional committed HEAD for post-write refs (implement / repair).
+    /// When set, `recover()` checks `headRevision` against the on-disk HEAD
+    /// instead of `baseRevision`; when absent (older / read-only refs),
+    /// `recover()` keeps the pre-write `baseRevision` semantics. Optional
+    /// for forward compatibility: older serialized refs deserialize cleanly
+    /// via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_revision: Option<String>,
 }
 
 impl WorkspaceRefV1 {
@@ -176,6 +214,18 @@ impl WorkspaceRefV1 {
 
     pub fn to_json(&self) -> Result<String> {
         Ok(serde_json::to_string(self)?)
+    }
+
+    /// Canonical digest over every field including `headRevision`. Must be
+    /// recomputed after mutating `headRevision` post-construction (the
+    /// implement / repair nodes do this so the emitted ref attests to the
+    /// committed HEAD, not the pre-write base).
+    pub fn compute_digest(&self) -> String {
+        let mut v = serde_json::to_value(self).expect("ref serializes");
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        crate::workflow::soma::canonical_digest(&v)
     }
 }
 
@@ -320,6 +370,12 @@ fn head_revision(repo: &std::path::Path) -> Result<String> {
     run_git(repo, &["rev-parse", "HEAD"])
 }
 
+/// Canonical toplevel path of a git working copy, with symlinks resolved.
+fn toplevel(repo: &std::path::Path) -> Result<std::path::PathBuf> {
+    let s = run_git(repo, &["rev-parse", "--show-toplevel"])?;
+    Ok(std::path::PathBuf::from(s))
+}
+
 fn preserve_files(
     acquired: &AcquiredWorkspace,
     preserve: &PreservationSet,
@@ -384,6 +440,34 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         }
         if manifest.base_revision.is_empty() {
             anyhow::bail!("base revision required");
+        }
+        // Defense in depth: reject any workspace_id that could escape
+        // parent_dir when joined into a filesystem path. Callers (notably
+        // the implement/repair nodes) are expected to validate their own
+        // plan_id / diagnosis_id, but the adapter MUST NOT trust upstream.
+        validate_workspace_id(&manifest.workspace_id)?;
+        // Authority binding (E5/I02 repair): the worktree's source_repo
+        // MUST canonicalize to manifest.repo_identity, otherwise a caller
+        // could pass an arbitrary source_repo and acquire authority over an
+        // unrelated repository. Fail closed on mismatch. We canonicalize
+        // both sides because on Windows `git rev-parse --show-toplevel`
+        // returns a path with forward slashes and no `\\?\` prefix, while
+        // `std::fs::canonicalize` returns the `\\?\` extended form.
+        let declared = std::path::PathBuf::from(&manifest.repo_identity);
+        let actual = toplevel(&self.source_repo).map_err(|e| {
+            anyhow::anyhow!(
+                "source_repo {} is not a git working copy: {e}",
+                self.source_repo.display()
+            )
+        })?;
+        let declared_canon = std::fs::canonicalize(&declared).unwrap_or(declared);
+        let actual_canon = std::fs::canonicalize(&actual).unwrap_or(actual);
+        if actual_canon != declared_canon {
+            anyhow::bail!(
+                "workspace repo identity mismatch: manifest.repo_identity={} but source_repo resolves to {}",
+                declared_canon.display(),
+                actual_canon.display()
+            );
         }
         let path = self.worktree_path(manifest);
         if path.exists() {
@@ -484,7 +568,14 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             Ok(r) => r,
             Err(_) => return reject_or_remap(remap, WorkspaceRefError::Missing),
         };
-        if actual != reference.base_revision || actual != manifest.base_revision {
+        // For post-write refs (headRevision set), the workspace is "pinned"
+        // to the committed HEAD, not the pre-write base. Fall back to
+        // baseRevision for older refs that predate the headRevision field.
+        let pinned = reference
+            .head_revision
+            .as_deref()
+            .unwrap_or(&reference.base_revision);
+        if actual != pinned || actual != manifest.base_revision {
             return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
         }
         Ok(RecoveryOutcome::Resumed(Box::new(AcquiredWorkspace {
@@ -625,7 +716,7 @@ impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     struct TempRepo(std::path::PathBuf);
@@ -669,18 +760,21 @@ mod tests {
         }
     }
 
-    fn writable_manifest(repo: &str, revision: &str) -> WorkspaceManifestV1 {
+    fn writable_manifest(source_repo: &Path, name: &str, revision: &str) -> WorkspaceManifestV1 {
         WorkspaceManifestV1 {
             schema_version: WORKSPACE_SCHEMA_VERSION.into(),
-            workspace_id: format!("ws-{repo}"),
+            workspace_id: format!("ws-{name}"),
             adapter: AdapterKind::GitWorktree,
             adapter_revision: ADAPTER_REVISION.into(),
-            repo_identity: format!("origin/{repo}"),
+            // Authority binding (E5/I02 repair): repo_identity must canonicalize
+            // to the source repo's toplevel, otherwise the new
+            // GitWorktreeWorkspace::acquire authority check rejects the call.
+            repo_identity: source_repo.to_string_lossy().to_string(),
             base_revision: revision.into(),
             branch: None,
             mode: WorkspaceMode::Writable,
             writable_scopes: vec!["work://x".into()],
-            resource_lock_id: format!("lock-{repo}"),
+            resource_lock_id: format!("lock-{name}"),
             created_at: "2026-08-25T00:00:00Z".into(),
             content_digest: None,
         }
@@ -689,7 +783,7 @@ mod tests {
 
     #[test]
     fn manifest_digest_seals_and_verifies() {
-        let m = writable_manifest("t1", &"a".repeat(40));
+        let m = writable_manifest(Path::new("/tmp/dummy"), "t1", &"a".repeat(40));
         let sealed = m.sealed();
         assert!(
             sealed
@@ -716,7 +810,7 @@ mod tests {
 
     #[test]
     fn manifest_parse_rejects_bad_version_identity_and_unscoped_writable() {
-        let m = writable_manifest("guards", &"a".repeat(40));
+        let m = writable_manifest(Path::new("/tmp/dummy"), "guards", &"a".repeat(40));
         let mut v = serde_json::to_value(&m).unwrap();
         v["schemaVersion"] = serde_json::json!("9.9.9");
         let err = WorkspaceManifestV1::parse_json(&v.to_string())
@@ -754,7 +848,7 @@ mod tests {
             source_repo: repo.0.clone(),
         };
         let rev = repo.head();
-        let manifest = writable_manifest("ct", &rev);
+        let manifest = writable_manifest(&repo.0, "ct", &rev);
         let acquired = adapter.acquire(&manifest).expect("worktree created");
         assert_eq!(acquired.revision, rev);
         // Deterministic path from stable identity.
@@ -800,7 +894,7 @@ mod tests {
             parent_dir: repo.0.join("_ws"),
             source_repo: repo.0.clone(),
         };
-        let mut manifest = writable_manifest("stale", &old);
+        let mut manifest = writable_manifest(&repo.0, "stale", &old);
         manifest.base_revision = old.clone();
         let manifest = manifest.sealed();
         let acquired = adapter.acquire(&manifest).unwrap();
@@ -854,7 +948,7 @@ mod tests {
             source_repo: repo.0.clone(),
         };
         let rev = repo.head();
-        let manifest = writable_manifest("rec", &rev);
+        let manifest = writable_manifest(&repo.0, "rec", &rev);
         let reference = manifest.to_reference();
 
         // Missing workspace.
@@ -904,7 +998,7 @@ mod tests {
             assert!(st.success());
         }
         let newer = repo.head();
-        let drifted_manifest = writable_manifest("rec", &newer);
+        let drifted_manifest = writable_manifest(&repo.0, "rec", &newer);
         let drifted_ref = drifted_manifest.to_reference();
         // The drifted manifest digest differs from the on-disk workspace's
         // origin; recovery compares REVISIONS, so present the drifted pair
@@ -944,7 +1038,7 @@ mod tests {
             source_repo: repo.0.clone(),
         };
         let rev = repo.head();
-        let wt_manifest = writable_manifest("mix", &rev);
+        let wt_manifest = writable_manifest(&repo.0, "mix", &rev);
         let reference = wt_manifest.to_reference(); // git-worktree ref
 
         // Presenting a git-worktree reference to the read-only adapter is
@@ -986,13 +1080,32 @@ mod tests {
     #[test]
     fn references_round_trip_without_process_state() {
         let repo = TempRepo::new("rt");
-        let manifest = writable_manifest("rt", &repo.head());
+        let manifest = writable_manifest(&repo.0, "rt", &repo.head());
         let reference = manifest.to_reference();
         let json = reference.to_json().unwrap();
         let parsed = WorkspaceRefV1::parse_json(&json).unwrap();
         assert_eq!(parsed, reference);
-        // No hidden process state: the JSON carries only durable identity.
-        assert!(!json.contains("pid") && !json.contains(std::process::id().to_string().as_str()));
+        // No hidden process state: the JSON must only carry the declared
+        // durable identity keys (E5/I02 repair: the list is exhaustive
+        // because `WorkspaceRefV1` uses `deny_unknown_fields`, so an extra
+        // key would have failed parsing).
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().expect("ref is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "adapter",
+                "adapterRevision",
+                "baseRevision",
+                "contentDigest",
+                "mode",
+                "repoIdentity",
+                "schemaVersion",
+                "workspaceId",
+            ]
+        );
         // Resource-lock identity available for later parallel scheduling.
         assert_eq!(manifest.resource_lock_id, "lock-rt");
     }
@@ -1006,7 +1119,7 @@ mod tests {
         };
         // Nonexistent revision: acquisition must FAIL, and critically the
         // source checkout must be untouched (no silent fallback).
-        let manifest = writable_manifest("fb", &"f".repeat(40));
+        let manifest = writable_manifest(&repo.0, "fb", &"f".repeat(40));
         assert!(adapter.acquire(&manifest).is_err());
         let head_before = repo.head();
         assert_eq!(repo.head(), head_before);
