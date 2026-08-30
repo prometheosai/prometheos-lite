@@ -172,6 +172,10 @@ impl WorkspaceManifestV1 {
     /// pre-write base; post-write refs are built separately by the implement
     /// / repair nodes with `headRevision` set to the committed HEAD.
     /// Emits ref schema `1.1.0` (WorkspaceRefV1 now carries `headRevision`).
+    ///
+    /// The reference's `contentDigest` is the MANIFEST's digest (not the
+    /// reference's own digest). This attests to the originating manifest;
+    /// recovery recomputes the manifest digest and verifies it matches.
     pub fn to_reference(&self) -> WorkspaceRefV1 {
         WorkspaceRefV1 {
             schema_version: WORKSPACE_REF_SCHEMA_VERSION.into(),
@@ -225,6 +229,14 @@ impl WorkspaceRefV1 {
                 r.schema_version,
                 WORKSPACE_REF_SCHEMA_VERSION_V1,
                 WORKSPACE_REF_SCHEMA_VERSION
+            );
+        }
+        // Schema separation: a 1.0.0 ref must NOT carry headRevision. The
+        // field was introduced in 1.1.0; a legacy reader pinned to 1.0.0
+        // with deny_unknown_fields would reject it, so we must too.
+        if r.schema_version == WORKSPACE_REF_SCHEMA_VERSION_V1 && r.head_revision.is_some() {
+            anyhow::bail!(
+                "workspace ref schema 1.0.0 must not contain headRevision (upgrade to {WORKSPACE_REF_SCHEMA_VERSION})"
             );
         }
         Ok(r)
@@ -590,15 +602,28 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                 );
             }
         } else {
-            // Stable-name label: no filesystem or URL binding is possible by
-            // design. The manifest digest still commits the exact string; an
-            // audit of the stderr log will reveal substitutions. We still
-            // require the string to be non-empty (already validated above)
-            // and to be a valid workspace-id-shaped token so it can't be
-            // confused with a path or URL by a downstream consumer.
+            // Stable-name label: bind to the source_repo by requiring an
+            // exact-match named remote. The label is NOT a URL and NOT a
+            // filesystem path — it identifies the repository via a remote
+            // name (e.g. "origin", "upstream"). This prevents arbitrary
+            // labels from silently binding to unrelated repositories.
             validate_workspace_id(identity).map_err(|e| {
-                anyhow::anyhow!("manifest.repo_identity as stable name is unsafe: {e}")
+                anyhow::anyhow!("workspace repo identity: stable-name rejected: {e}")
             })?;
+            let remotes_out = run_git(&self.source_repo, &["remote"])
+                .context("source_repo has no remotes: cannot bind a stable-name identity")?;
+            let has_match = remotes_out.lines().any(|line| line.trim() == identity);
+            if !has_match {
+                anyhow::bail!(
+                    "workspace repo identity mismatch: manifest.repo_identity={} (stable-name) but source_repo has no matching remote (remotes: {})",
+                    identity,
+                    remotes_out
+                        .lines()
+                        .map(|l| l.trim())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
         let path = self.worktree_path(manifest);
         if path.exists() {
@@ -702,24 +727,21 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             Ok(r) => r,
             Err(_) => return reject_or_remap(remap, WorkspaceRefError::Missing),
         };
-        // For post-write refs (headRevision set), the workspace is "pinned"
-        // to the committed HEAD, not the pre-write base. When headRevision
-        // is set, the manifest's base_revision describes the PRE-write state
-        // and must not be compared against the actual HEAD for the resume
-        // decision — the ref's headRevision is the authoritative pin.
-        // For pre-write refs (headRevision absent), keep the pre-existing
-        // strict check against BOTH the ref and the manifest.
+        // Both checks are mandatory for crash-recovery integrity:
+        //  1. reference.baseRevision MUST match manifest.baseRevision — this
+        //     binds the reference to the originating manifest (the manifest's
+        //     base is the acquisition base; the reference must carry the same).
+        //  2. actual HEAD MUST match the pin: reference.headRevision when set
+        //     (post-write ref), or reference.baseRevision (pre-write ref).
+        // Skipping either check allows a stale or orphaned workspace to resume.
+        if reference.base_revision != manifest.base_revision {
+            return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
+        }
         let actual_expected = match &reference.head_revision {
             Some(head) => head.as_str(),
             None => reference.base_revision.as_str(),
         };
         if actual != actual_expected {
-            return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
-        }
-        // For pre-write refs, the manifest must ALSO agree with the ref.
-        // For post-write refs, the manifest may legitimately carry the
-        // pre-write base revision (audit trail), so we skip that check.
-        if reference.head_revision.is_none() && actual != manifest.base_revision {
             return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
         }
         Ok(RecoveryOutcome::Resumed(Box::new(AcquiredWorkspace {

@@ -217,24 +217,22 @@ fn run_implement(args: &serde_json::Value) -> Result<String> {
         ],
     )?;
     let revision = git(&root, &["rev-parse", "HEAD"])?;
-    // E5/I02 repair (P1.3): the emitted ref must carry the committed HEAD so
-    // downstream recovery can revalidate the workspace against the post-write
-    // state, not the pre-write base. We build a fresh ref (baseRevision =
-    // newHEAD, headRevision = Some(newHEAD)) and recompute its digest.
-    // Emits schema 1.1.0 (WORKSPACE_REF_SCHEMA_VERSION) so older readers
-    // fail closed cleanly on the new field.
-    let mut workspace_ref = WorkspaceRefV1 {
+    // E5/I02 repair (P1.3): the emitted ref carries the ORIGINAL acquisition
+    // base (manifest.base_revision) so recovery can bind the reference back to
+    // the originating manifest. headRevision = committed HEAD so recovery can
+    // revalidate the on-disk workspace. content_digest = the manifest's own
+    // digest (attestation of the originating manifest, not the ref's digest).
+    let workspace_ref = WorkspaceRefV1 {
         schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
         workspace_id: workspace_id.clone(),
         adapter: manifest.adapter,
         adapter_revision: manifest.adapter_revision.clone(),
         repo_identity: manifest.repo_identity.clone(),
-        base_revision: revision.clone(),
+        base_revision: manifest.base_revision.clone(),
         mode: manifest.mode,
-        content_digest: String::new(),
+        content_digest: manifest.compute_digest(),
         head_revision: Some(revision.clone()),
     };
-    workspace_ref.content_digest = workspace_ref.compute_digest();
     let workspace_ref_json = workspace_ref.to_json()?;
     let changed_files: Vec<String> = changes
         .iter()
@@ -315,22 +313,21 @@ fn run_repair(args: &serde_json::Value) -> Result<String> {
         ],
     )?;
     let revision = git(&root, &["rev-parse", "HEAD"])?;
-    // E5/I02 repair (P1.3): see run_implement. Build the post-commit ref
-    // (baseRevision = newHEAD, headRevision = Some(newHEAD)) and recompute
-    // its digest so the emitted reference can revalidate the workspace.
-    // Emits schema 1.1.0 (WORKSPACE_REF_SCHEMA_VERSION).
-    let mut workspace_ref = WorkspaceRefV1 {
+    // E5/I02 repair (P1.3): see run_implement. baseRevision = original
+    // acquisition base (manifest.base_revision), headRevision = committed HEAD,
+    // content_digest = manifest's own digest (attestation of originating
+    // manifest). Recovery verifies both base binding and HEAD pin.
+    let workspace_ref = WorkspaceRefV1 {
         schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
         workspace_id: repair_id.clone(),
         adapter: manifest.adapter,
         adapter_revision: manifest.adapter_revision.clone(),
         repo_identity: manifest.repo_identity.clone(),
-        base_revision: revision.clone(),
+        base_revision: manifest.base_revision.clone(),
         mode: manifest.mode,
-        content_digest: String::new(),
+        content_digest: manifest.compute_digest(),
         head_revision: Some(revision.clone()),
     };
-    workspace_ref.content_digest = workspace_ref.compute_digest();
     let workspace_ref_json = workspace_ref.to_json()?;
     let changed_files = vec![format!(
         "prometheos/repairs/{}.repair.json",
