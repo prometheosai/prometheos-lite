@@ -499,6 +499,7 @@ fn defective_variants_fail_per_category_with_specific_diagnostics() {
             let drifted_ref = {
                 let mut r = ro_manifest.to_reference();
                 r.base_revision = "0".repeat(40);
+                r.head_revision = None;
                 r
             };
             match ro_adapter
