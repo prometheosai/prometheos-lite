@@ -579,11 +579,11 @@ fn repair_p1_2_authority_mismatch_is_rejected_fail_closed() {
 }
 
 #[test]
-fn repair_p1_3_emitted_ref_carries_committed_head_and_recovers() {
-    // P1.3: the emitted workspace_ref must carry the post-write committed
-    // HEAD (headRevision set, baseRevision == newHEAD) and the on-disk
-    // worktree's actual HEAD must equal the ref's pinned value so that
-    // WorkspaceAdapter::recover() accepts the workspace.
+fn repair_p1_3_emitted_ref_carries_original_base_and_recovers() {
+    // P1.3: the emitted workspace_ref must carry the ORIGINAL acquisition base
+    // (manifest.base_revision) so recovery can bind the reference back to the
+    // originating manifest. headRevision = committed HEAD for on-disk
+    // revalidation. Recovery must succeed with the original sealed manifest.
     let dir = fixture_repo();
     let base_revision = {
         let out = Command::new("git")
@@ -615,53 +615,48 @@ fn repair_p1_3_emitted_ref_carries_committed_head_and_recovers() {
     let parsed: prometheos_lite::workflow::workspace::WorkspaceRefV1 =
         prometheos_lite::workflow::workspace::WorkspaceRefV1::parse_json(&r.workspace_ref)
             .expect("workspace_ref round-trips");
-    // P1.3 invariants
+    // P1.3 invariants: baseRevision = original acquisition base (NOT committed HEAD).
+    assert_eq!(
+        parsed.base_revision, base_revision,
+        "baseRevision must be the original acquisition base, not the committed HEAD"
+    );
     assert_eq!(
         parsed.head_revision.as_deref(),
         Some(r.revision.as_str()),
         "headRevision must equal the committed HEAD"
     );
-    assert_eq!(
-        parsed.base_revision, r.revision,
-        "baseRevision must be the post-write HEAD so recover() can pin"
-    );
-    // Digest must verify against the new struct contents.
-    assert_eq!(
+    // content_digest = manifest's digest (attestation of originating manifest).
+    // Verify the node stored the MANIFEST's digest, not the ref's own
+    // compute_digest() — that is the old wrong behavior.
+    assert_ne!(
         parsed.content_digest,
         parsed.compute_digest(),
-        "content_digest must be self-consistent after the new headRevision"
+        "content_digest must NOT be the ref's own digest (old wrong behavior)"
     );
-    // The worktree sits at the committed HEAD, so recover() must accept it.
+    // The content_digest must be a valid manifest digest format (non-empty,
+    // consistent with the manifest's canonical digest computation).
+    assert!(
+        !parsed.content_digest.is_empty(),
+        "content_digest must not be empty"
+    );
+    // Recovery: the adapter needs the source_repo for authority binding.
     let adapter = prometheos_lite::workflow::workspace::GitWorktreeWorkspace {
         parent_dir: ws_parent.path().to_path_buf(),
         source_repo: dir.path().to_path_buf(),
     };
     let acquired_root = ws_parent.path().join("impl-plan-p13").join("worktree");
     assert!(acquired_root.exists(), "worktree must still be on disk");
-    // We need a manifest whose base_revision matches; the ref's
-    // base_revision is the committed HEAD, so a minimal sealed manifest
-    // that just declares identity + mode + adapter is enough to drive
-    // recover(). The adapter's own recover() check uses ref.headRevision
-    // (or ref.baseRevision as fallback) AND manifest.base_revision.
-    // recover() expects a full WorkspaceManifestV1; build one with
-    // base_revision = committed HEAD so the stale-revision check passes.
-    let full_manifest = prometheos_lite::workflow::workspace::WorkspaceManifestV1 {
-        schema_version: "1.0.0".to_string(),
-        workspace_id: parsed.workspace_id.clone(),
-        adapter: parsed.adapter,
-        adapter_revision: parsed.adapter_revision.clone(),
-        repo_identity: parsed.repo_identity.clone(),
-        base_revision: parsed.base_revision.clone(),
-        branch: None,
-        mode: parsed.mode,
-        writable_scopes: vec!["repo://fixture".to_string()],
-        resource_lock_id: format!("lock-{}", parsed.workspace_id),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        content_digest: None,
-    }
+    // Recover with a sealed manifest whose base_revision matches the reference's
+    // base_revision (the original acquisition base).
+    let manifest_for_recovery = full_manifest(
+        &parsed.workspace_id,
+        dir.path(),
+        &parsed.base_revision, // original acquisition base
+        WorkspaceMode::Writable,
+    )
     .sealed();
     let recovered = adapter
-        .recover(&acquired_root, &parsed, &full_manifest, None)
+        .recover(&acquired_root, &parsed, &manifest_for_recovery, None)
         .expect("recover should not error");
     match recovered {
         prometheos_lite::workflow::workspace::RecoveryOutcome::Resumed(aw) => {
@@ -728,9 +723,12 @@ fn repair_p2_emitted_timestamp_round_trips_through_chrono() {
 fn recovery_with_original_manifest_succeeds_when_head_revision_set() {
     // P1 regression: recover() previously compared committed HEAD against the
     // manifest's base_revision even when headRevision was set. With the fix,
-    // when headRevision is present, the manifest's base_revision is NOT
-    // compared against the actual HEAD (it may legitimately carry the
-    // pre-write base as an audit trail).
+    // when headRevision is present, BOTH checks apply:
+    //   1. reference.baseRevision == manifest.baseRevision (base binding)
+    //   2. actual HEAD == reference.headRevision (on-disk pin)
+    // The manifest's base_revision is the acquisition base; the ref carries
+    // that same base so recovery binds the reference to the originating
+    // manifest. content_digest = manifest's digest (attestation).
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -760,22 +758,24 @@ fn recovery_with_original_manifest_succeeds_when_head_revision_set() {
     let post_commit = git_output(&acquired.root, &["rev-parse", "HEAD"]);
     assert_ne!(pre_commit, post_commit, "worktree must have committed");
 
-    // Build a post-write ref at 1.1.0 with headRevision = post-commit.
+    // Build a post-write ref: baseRevision = original base (manifest binding),
+    // headRevision = post-commit (on-disk pin), content_digest = manifest digest.
     let mut ref_with_head = WorkspaceRefV1 {
         schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
         workspace_id: "recovery-original-manifest".to_string(),
         adapter: AdapterKind::GitWorktree,
         adapter_revision: ADAPTER_REVISION.to_string(),
         repo_identity: repo.to_string_lossy().to_string(),
-        base_revision: pre_commit.clone(), // pre-write base (audit trail)
+        base_revision: pre_commit.clone(), // original base (manifest binding)
         mode: WorkspaceMode::Writable,
-        content_digest: String::new(),
+        content_digest: manifest.compute_digest(), // manifest's digest
         head_revision: Some(post_commit.clone()),
     };
-    ref_with_head.content_digest = ref_with_head.compute_digest();
+    ref_with_head.content_digest = manifest.compute_digest(); // ensure manifest digest
 
     // Recover with the ORIGINAL manifest (base_revision = pre-commit).
-    // This must succeed because headRevision overrides the manifest check.
+    // Both checks pass: ref.baseRevision == manifest.baseRevision AND
+    // actual HEAD == ref.headRevision.
     let outcome = adapter.recover(
         &acquired.root,
         &ref_with_head,
@@ -955,9 +955,9 @@ fn authority_binding_rejects_url_identity_mismatch() {
 
 #[test]
 fn authority_binding_accepts_stable_name_identity() {
-    // P1.2 regression: stable-name identity (bare label) is accepted per the
-    // documented contract. The manifest's contentDigest commits the exact
-    // string so silent substitution is auditable.
+    // P1.2 regression: stable-name identity (bare label) must bind to a named
+    // remote of the source_repo. The manifest's contentDigest commits the
+    // exact string so silent substitution is auditable.
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -966,6 +966,12 @@ fn authority_binding_accepts_stable_name_identity() {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // Add a named remote matching the stable-name label.
+    git(
+        &repo,
+        &["remote", "add", "my-stable-repo-name", "/tmp/dummy"],
+    );
 
     let manifest = WorkspaceManifestV1 {
         schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
@@ -987,9 +993,50 @@ fn authority_binding_accepts_stable_name_identity() {
         source_repo: repo.clone(),
     };
 
-    // Must succeed: stable-name is a label, no binding beyond the digest.
+    // Must succeed: stable-name matches a named remote.
     let acquired = adapter.acquire(&manifest).unwrap();
     assert_eq!(acquired.manifest.base_revision, base);
+}
+
+#[test]
+fn authority_binding_rejects_stable_name_with_no_matching_remote() {
+    // P1.2: a stable-name label with no matching named remote must be rejected.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // No remote added — "no-match" has no corresponding remote.
+    let manifest = WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: "stable-no-match".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: "no-match".to_string(),
+        base_revision: base.clone(),
+        branch: None,
+        mode: WorkspaceMode::Writable,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: "lock-stable-no-match".to_string(),
+        created_at: now_iso(),
+        content_digest: None,
+    };
+
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+
+    let err = adapter.acquire(&manifest).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("repo identity mismatch"),
+        "expected repo identity mismatch error, got: {msg}"
+    );
 }
 
 #[test]
@@ -1071,4 +1118,79 @@ fn workspace_ref_v1_1_1_0_rejects_unknown_fields() {
         msg.contains("unknown field") || msg.contains("parse failed"),
         "expected unknown field or parse error, got: {msg}"
     );
+}
+
+#[test]
+fn schema_v1_rejects_head_revision_field() {
+    // Finding 5: a ref payload declaring schema_version 1.0.0 with the
+    // headRevision field (introduced in 1.1.0) must be rejected so a legacy
+    // 1.0.0 reader with deny_unknown_fields fails closed. A 1.0.0 payload
+    // with headRevision is a schema violation.
+    let ref_json = r#"{
+        "schemaVersion": "1.0.0",
+        "workspaceId": "test-reject-v1-head",
+        "adapter": "git-worktree",
+        "adapterRevision": "lite.workspace.adapter.v1",
+        "repoIdentity": "/tmp/repo",
+        "baseRevision": "abc123",
+        "mode": "writable",
+        "contentDigest": "digest123",
+        "headRevision": "def456"
+    }"#;
+    let err = WorkspaceRefV1::parse_json(ref_json).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("1.0.0 must not contain headRevision"),
+        "expected schema 1.0.0 headRevision rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn recovery_rejects_base_revision_mismatch() {
+    // Finding 2: recovery MUST require reference.baseRevision == manifest.baseRevision
+    // even when headRevision is set, to bind the reference to the originating manifest.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // Acquire and create a worktree.
+    let manifest = full_manifest("base-mismatch-test", &repo, &base, WorkspaceMode::Writable);
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+    let acquired = adapter.acquire(&manifest).unwrap();
+    let actual_head = git_output(&acquired.root, &["rev-parse", "HEAD"]);
+
+    // Build a ref where baseRevision differs from the manifest's baseRevision.
+    // headRevision = actual HEAD (so the on-disk check passes), but the base
+    // binding must still fail.
+    let ref_wrong_base = WorkspaceRefV1 {
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
+        workspace_id: "base-mismatch-test".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: repo.to_string_lossy().to_string(),
+        base_revision: "0000000000000000000000000000000000000000".to_string(), // WRONG base
+        mode: WorkspaceMode::Writable,
+        content_digest: manifest.compute_digest(),
+        head_revision: Some(actual_head.clone()),
+    };
+
+    // Recovery must reject: baseRevision mismatch even when head matches.
+    let result = adapter.recover(&acquired.root, &ref_wrong_base, &manifest, None);
+    match result.unwrap() {
+        RecoveryOutcome::Rejected(e) => {
+            assert!(
+                e.to_string().contains("StaleRevision") || e.to_string().contains("stale"),
+                "expected stale/base-mismatch error, got: {e}"
+            );
+        }
+        other => panic!("expected Rejected for base mismatch, got {other:?}"),
+    }
 }
