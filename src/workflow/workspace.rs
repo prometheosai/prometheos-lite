@@ -99,7 +99,9 @@ pub struct WorkspaceManifestV1 {
     pub workspace_id: String,
     pub adapter: AdapterKind,
     pub adapter_revision: String,
-    /// Durable repository identity (origin URL or stable name).
+    /// Durable repository identity: an existing source path, a remote URL,
+    /// or a stable-name digest (`stable_repo_identity_digest` of the named
+    /// remote's normalized URL).
     pub repo_identity: String,
     /// Exact commit SHA the workspace is pinned to.
     pub base_revision: String,
@@ -246,16 +248,49 @@ impl WorkspaceRefV1 {
         Ok(serde_json::to_string(self)?)
     }
 
-    /// Canonical digest over every field including `headRevision`. Must be
-    /// recomputed after mutating `headRevision` post-construction (the
-    /// implement / repair nodes do this so the emitted ref attests to the
-    /// committed HEAD, not the pre-write base).
-    pub fn compute_digest(&self) -> String {
-        let mut v = serde_json::to_value(self).expect("ref serializes");
-        if let Some(obj) = v.as_object_mut() {
-            obj.remove("contentDigest");
+    /// Authenticate this reference against the manifest it claims to derive
+    /// from. Fail closed: every durable identity field (`workspace_id`,
+    /// `adapter`, `adapter_revision`, `repo_identity`, `mode`) must match
+    /// the manifest exactly, AND `contentDigest` must equal the manifest's
+    /// own digest (`manifest.compute_digest()`).The reference does NOT
+    /// carry a digest of itself — `contentDigest` is an attestation of the
+    /// ORIGINATING manifest, recomputed here from first principles.
+    ///
+    /// A mismatch is a hard error (never recoverable, never remappable):
+    /// a reference that points at a different manifest than the one it was
+    /// created from is evidence of tampering, not of staleness.
+    pub fn verify_manifest_attestation(&self, manifest: &WorkspaceManifestV1) -> Result<()> {
+        if self.workspace_id != manifest.workspace_id {
+            anyhow::bail!(
+                "workspace ref does not authenticate the supplied manifest: workspaceId mismatch"
+            );
         }
-        crate::workflow::soma::canonical_digest(&v)
+        if self.adapter != manifest.adapter {
+            anyhow::bail!(
+                "workspace ref does not authenticate the supplied manifest: adapter mismatch"
+            );
+        }
+        if self.adapter_revision != manifest.adapter_revision {
+            anyhow::bail!(
+                "workspace ref does not authenticate the supplied manifest: adapterRevision mismatch"
+            );
+        }
+        if self.repo_identity != manifest.repo_identity {
+            anyhow::bail!(
+                "workspace ref does not authenticate the supplied manifest: repoIdentity mismatch"
+            );
+        }
+        if self.mode != manifest.mode {
+            anyhow::bail!(
+                "workspace ref does not authenticate the supplied manifest: mode mismatch"
+            );
+        }
+        if self.content_digest != manifest.compute_digest() {
+            anyhow::bail!(
+                "workspace ref contentDigest does not authenticate the supplied manifest"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -459,30 +494,46 @@ fn looks_like_url_or_git_proto(identity: &str) -> bool {
 /// trailing `.git`, trailing slash, and the `.git@` / `:` SCP separator
 /// before comparing. This is NOT a full URL parser — it's intentionally
 /// minimal and only used in the authority-binding path.
-fn url_or_git_proto_equal(a: &str, b: &str) -> bool {
-    fn normalize_url(s: &str) -> String {
-        let mut s = s.trim().to_lowercase();
-        // Normalize SCP-style `git@host:path` to `ssh://git@host/path`.
-        if let Some(at_pos) = s.find('@') {
-            let host_path = &s[at_pos + 1..];
-            if let Some(colon_pos) = host_path.find(':') {
-                let host = &host_path[..colon_pos];
-                let path = &host_path[colon_pos + 1..];
-                if !host.is_empty() && !path.is_empty() && !path.starts_with("//") {
-                    s = format!("ssh://git@{}/{}", host, path);
-                }
+fn normalize_remote_identity(s: &str) -> String {
+    let mut s = s.trim().to_lowercase();
+    // Normalize SCP-style `git@host:path` to `ssh://git@host/path`.
+    if let Some(at_pos) = s.find('@') {
+        let host_path = &s[at_pos + 1..];
+        if let Some(colon_pos) = host_path.find(':') {
+            let host = &host_path[..colon_pos];
+            let path = &host_path[colon_pos + 1..];
+            if !host.is_empty() && !path.is_empty() && !path.starts_with("//") {
+                s = format!("ssh://git@{}/{}", host, path);
             }
         }
-        // Strip trailing .git and /
-        while s.ends_with(".git") {
-            s.truncate(s.len() - 4);
-        }
-        while s.ends_with('/') {
-            s.truncate(s.len() - 1);
-        }
-        s
     }
-    normalize_url(a) == normalize_url(b)
+    // Strip trailing .git and /
+    while s.ends_with(".git") {
+        s.truncate(s.len() - 4);
+    }
+    while s.ends_with('/') {
+        s.truncate(s.len() - 1);
+    }
+    s
+}
+
+fn url_or_git_proto_equal(a: &str, b: &str) -> bool {
+    normalize_remote_identity(a) == normalize_remote_identity(b)
+}
+
+/// Derive a STABLE, portable repository identity from a durable remote
+/// target (URL, git-protocol string, or canonical remote path). The value
+/// is the canonical SHA-256 digest of the normalized target.
+///
+/// A stable-name `repo_identity` in a workspace manifest MUST equal this
+/// digest for one of the source repository's named remotes. The remote's
+/// *name* is NEVER consulted as the identifier: unrelated repositories
+/// commonly share alias names such as `origin`, so only the independently
+/// derived URL digest can bind authority to a specific repository.
+pub fn stable_repo_identity_digest(remote_target: &str) -> String {
+    crate::workflow::soma::canonical_digest(&serde_json::Value::String(normalize_remote_identity(
+        remote_target,
+    )))
 }
 
 fn preserve_files(
@@ -564,10 +615,11 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         //     the source_repo's origin remote must equal the declared URL.
         //  b) Existing filesystem path -> canonicalize BOTH sides and compare
         //     (the original E5/I02 P1.2 check, preserved).
-        //  c) Fallback: treat it as a stable-name label (no binding beyond
-        //     the recorded identity string). This is the documented contract;
-        //     the manifest's contentDigest still attests to the exact string,
-        //     so silent substitution is detectable on audit.
+        //  c) Stable-name label -> the label is the canonical digest of the
+        //     normalized URL of one named remote on the source repo (see
+        //     `stable_repo_identity_digest`). The remote NAME is never the
+        //     identifier, so alias reuse across unrelated repositories
+        //     cannot satisfy binding.
         //
         // Fail closed: any of the three branches errors on mismatch.
         let identity = &manifest.repo_identity;
@@ -602,20 +654,29 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                 );
             }
         } else {
-            // Stable-name label: bind to the source_repo by requiring an
-            // exact-match named remote. The label is NOT a URL and NOT a
-            // filesystem path — it identifies the repository via a remote
-            // name (e.g. "origin", "upstream"). This prevents arbitrary
-            // labels from silently binding to unrelated repositories.
+            // Stable-name label: the identity is the canonical digest of a
+            // normalized remote URL (see `stable_repo_identity_digest`).
+            // A bare remote NAME (e.g. "origin") is NEVER sufficient proof:
+            // unrelated repositories commonly share the same alias. We
+            // enumerate the source repo's remotes and require one whose
+            // RESOLVED URL digests to the declared identity.
             validate_workspace_id(identity).map_err(|e| {
                 anyhow::anyhow!("workspace repo identity: stable-name rejected: {e}")
             })?;
             let remotes_out = run_git(&self.source_repo, &["remote"])
                 .context("source_repo has no remotes: cannot bind a stable-name identity")?;
-            let has_match = remotes_out.lines().any(|line| line.trim() == identity);
-            if !has_match {
+            let mut matched = false;
+            for name in remotes_out.lines().map(str::trim).filter(|n| !n.is_empty()) {
+                let url = run_git(&self.source_repo, &["remote", "get-url", name])
+                    .with_context(|| format!("failed to resolve remote {name}"))?;
+                if stable_repo_identity_digest(url.trim()) == *identity {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
                 anyhow::bail!(
-                    "workspace repo identity mismatch: manifest.repo_identity={} (stable-name) but source_repo has no matching remote (remotes: {})",
+                    "workspace repo identity mismatch: manifest.repo_identity={} (stable-name) but no remote of source_repo resolves to it (remotes: {})",
                     identity,
                     remotes_out
                         .lines()
@@ -720,6 +781,11 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
             return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
         }
+        // Manifest authentication (E5/I02 repair round 4): the reference
+        // must attest to THIS manifest — every durable identity field plus
+        // contentDigest (the manifest's own digest). Substitution hard-fails
+        // here; it is never a remap candidate.
+        reference.verify_manifest_attestation(manifest)?;
         if !expected_root.exists() {
             return reject_or_remap(remap, WorkspaceRefError::Missing);
         }
@@ -863,6 +929,9 @@ impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
         {
             return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
         }
+        // Manifest authentication (E5/I02 repair round 4): identical to the
+        // git-worktree adapter — the reference must attest to THIS manifest.
+        reference.verify_manifest_attestation(manifest)?;
         if !expected_root.exists() {
             return reject_or_remap(remap, WorkspaceRefError::Missing);
         }
