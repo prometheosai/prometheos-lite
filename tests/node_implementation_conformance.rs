@@ -28,6 +28,7 @@ use prometheos_lite::workflow::workspace::{
     ADAPTER_REVISION, AdapterKind, GitWorktreeWorkspace, RecoveryOutcome,
     WORKSPACE_REF_SCHEMA_VERSION, WORKSPACE_REF_SCHEMA_VERSION_V1, WORKSPACE_SCHEMA_VERSION,
     WorkspaceAdapter, WorkspaceManifestV1, WorkspaceMode, WorkspaceRefError, WorkspaceRefV1,
+    stable_repo_identity_digest,
 };
 
 fn restrictions_with_write() -> LocalRestrictions {
@@ -579,11 +580,13 @@ fn repair_p1_2_authority_mismatch_is_rejected_fail_closed() {
 }
 
 #[test]
-fn repair_p1_3_emitted_ref_carries_original_base_and_recovers() {
+fn repair_p1_3_emitted_ref_carries_original_base_and_authenticates_manifest() {
     // P1.3: the emitted workspace_ref must carry the ORIGINAL acquisition base
     // (manifest.base_revision) so recovery can bind the reference back to the
     // originating manifest. headRevision = committed HEAD for on-disk
-    // revalidation. Recovery must succeed with the original sealed manifest.
+    // revalidation. Round 4: the ref authenticates ONLY the originating
+    // manifest (contentDigest = manifest digest); any other manifest —
+    // even field-identical — must be refused.
     let dir = fixture_repo();
     let base_revision = {
         let out = Command::new("git")
@@ -625,19 +628,18 @@ fn repair_p1_3_emitted_ref_carries_original_base_and_recovers() {
         Some(r.revision.as_str()),
         "headRevision must equal the committed HEAD"
     );
-    // content_digest = manifest's digest (attestation of originating manifest).
-    // Verify the node stored the MANIFEST's digest, not the ref's own
-    // compute_digest() — that is the old wrong behavior.
-    assert_ne!(
-        parsed.content_digest,
-        parsed.compute_digest(),
-        "content_digest must NOT be the ref's own digest (old wrong behavior)"
-    );
-    // The content_digest must be a valid manifest digest format (non-empty,
-    // consistent with the manifest's canonical digest computation).
+    // contentDigest = the ORIGINATING manifest's digest (attestation). It
+    // must be a 64-char lowercase hex SHA-256, i.e. the canonical manifest
+    // digest format. (The misleading per-field reference compute_digest()
+    // was removed in repair round 4; refs no longer digest themselves.)
     assert!(
-        !parsed.content_digest.is_empty(),
-        "content_digest must not be empty"
+        parsed.content_digest.len() == 64
+            && parsed
+                .content_digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "contentDigest must be a canonical manifest digest, got: {}",
+        parsed.content_digest
     );
     // Recovery: the adapter needs the source_repo for authority binding.
     let adapter = prometheos_lite::workflow::workspace::GitWorktreeWorkspace {
@@ -646,27 +648,28 @@ fn repair_p1_3_emitted_ref_carries_original_base_and_recovers() {
     };
     let acquired_root = ws_parent.path().join("impl-plan-p13").join("worktree");
     assert!(acquired_root.exists(), "worktree must still be on disk");
-    // Recover with a sealed manifest whose base_revision matches the reference's
-    // base_revision (the original acquisition base).
-    let manifest_for_recovery = full_manifest(
+    // Repair round 4: the reference authenticates ONLY its originating
+    // manifest. A re-created manifest — even one with matching base/identity
+    // fields — is NOT the originating manifest (its created_at differs), so
+    // recovery must REFUSE it with a manifest-attestation error. (Positive
+    // recovery with the persisted originating manifest is covered by
+    // `recovery_with_original_manifest_succeeds_when_head_revision_set` and
+    // the conformance kit; the node does not re-emit its manifest here.)
+    let mut foreign_manifest = full_manifest(
         &parsed.workspace_id,
         dir.path(),
-        &parsed.base_revision, // original acquisition base
+        &parsed.base_revision, // matching base — but not the origin manifest
         WorkspaceMode::Writable,
-    )
-    .sealed();
-    let recovered = adapter
-        .recover(&acquired_root, &parsed, &manifest_for_recovery, None)
-        .expect("recover should not error");
-    match recovered {
-        prometheos_lite::workflow::workspace::RecoveryOutcome::Resumed(aw) => {
-            assert_eq!(
-                aw.revision, r.revision,
-                "recovered HEAD must equal the committed HEAD"
-            );
-        }
-        other => panic!("expected Resumed, got {other:?}"),
-    }
+    );
+    foreign_manifest.created_at = "2000-01-01T00:00:00Z".to_string(); // definitely foreign
+    let foreign_manifest = foreign_manifest.sealed();
+    let err = adapter
+        .recover(&acquired_root, &parsed, &foreign_manifest, None)
+        .expect_err("recovery must refuse a manifest that is not the originating manifest");
+    assert!(
+        err.to_string().contains("does not authenticate"),
+        "expected manifest-attestation refusal, got: {err}"
+    );
 }
 
 #[test]
@@ -760,7 +763,7 @@ fn recovery_with_original_manifest_succeeds_when_head_revision_set() {
 
     // Build a post-write ref: baseRevision = original base (manifest binding),
     // headRevision = post-commit (on-disk pin), content_digest = manifest digest.
-    let mut ref_with_head = WorkspaceRefV1 {
+    let ref_with_head = WorkspaceRefV1 {
         schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
         workspace_id: "recovery-original-manifest".to_string(),
         adapter: AdapterKind::GitWorktree,
@@ -771,7 +774,6 @@ fn recovery_with_original_manifest_succeeds_when_head_revision_set() {
         content_digest: manifest.compute_digest(), // manifest's digest
         head_revision: Some(post_commit.clone()),
     };
-    ref_with_head.content_digest = manifest.compute_digest(); // ensure manifest digest
 
     // Recover with the ORIGINAL manifest (base_revision = pre-commit).
     // Both checks pass: ref.baseRevision == manifest.baseRevision AND
@@ -823,6 +825,9 @@ fn recovery_rejects_stale_when_head_revision_absent_and_manifest_disagrees() {
     let acquired = adapter.acquire(&acquire_manifest).unwrap();
 
     // Ref without headRevision, base_revision = current.
+    // The ref must attest to the STALE manifest (the one that will be
+    // supplied to recovery) so that the attestation check PASSES and the
+    // revision staleness is the sole rejection reason.
     let ref_no_head = WorkspaceRefV1 {
         schema_version: WORKSPACE_REF_SCHEMA_VERSION_V1.to_string(),
         workspace_id: "stale-manifest".to_string(),
@@ -831,8 +836,8 @@ fn recovery_rejects_stale_when_head_revision_absent_and_manifest_disagrees() {
         repo_identity: repo.to_string_lossy().to_string(),
         base_revision: current.clone(),
         mode: WorkspaceMode::Writable,
-        content_digest: String::new(),
-        head_revision: None, // pre-write ref
+        content_digest: String::new(), // set below after the manifest exists
+        head_revision: None,           // pre-write ref
     };
 
     // Manifest with stale base_revision (the old commit).
@@ -842,6 +847,10 @@ fn recovery_rejects_stale_when_head_revision_absent_and_manifest_disagrees() {
         &base, // stale: does not match current HEAD
         WorkspaceMode::Writable,
     );
+    let ref_no_head = WorkspaceRefV1 {
+        content_digest: stale_manifest.compute_digest(),
+        ..ref_no_head
+    };
 
     let outcome = adapter.recover(&acquired.root, &ref_no_head, &stale_manifest, None);
     match outcome.unwrap() {
@@ -955,9 +964,10 @@ fn authority_binding_rejects_url_identity_mismatch() {
 
 #[test]
 fn authority_binding_accepts_stable_name_identity() {
-    // P1.2 regression: stable-name identity (bare label) must bind to a named
-    // remote of the source_repo. The manifest's contentDigest commits the
-    // exact string so silent substitution is auditable.
+    // Round 4: stable-name identity binds through the named remote's
+    // normalized URL digest. The remote's NAME is deliberately unrelated to
+    // the identity ("arbitrary-alias") to prove the alias itself is never
+    // consulted — only the digest of the URL it points to.
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -967,18 +977,16 @@ fn authority_binding_accepts_stable_name_identity() {
     git(&repo, &["commit", "-q", "-m", "init"]);
     let base = git_output(&repo, &["rev-parse", "HEAD"]);
 
-    // Add a named remote matching the stable-name label.
-    git(
-        &repo,
-        &["remote", "add", "my-stable-repo-name", "/tmp/dummy"],
-    );
+    let trusted_url = "https://github.com/trusted-org/trusted-repo.git";
+    // Remote alias name intentionally unrelated to the identity value.
+    git(&repo, &["remote", "add", "arbitrary-alias", trusted_url]);
 
     let manifest = WorkspaceManifestV1 {
         schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
         workspace_id: "stable-name-test".to_string(),
         adapter: AdapterKind::GitWorktree,
         adapter_revision: ADAPTER_REVISION.to_string(),
-        repo_identity: "my-stable-repo-name".to_string(),
+        repo_identity: stable_repo_identity_digest(trusted_url),
         base_revision: base.clone(),
         branch: None,
         mode: WorkspaceMode::Writable,
@@ -993,14 +1001,17 @@ fn authority_binding_accepts_stable_name_identity() {
         source_repo: repo.clone(),
     };
 
-    // Must succeed: stable-name matches a named remote.
+    // Must succeed: a remote's URL resolves to the declared identity digest.
     let acquired = adapter.acquire(&manifest).unwrap();
     assert_eq!(acquired.manifest.base_revision, base);
 }
 
 #[test]
 fn authority_binding_rejects_stable_name_with_no_matching_remote() {
-    // P1.2: a stable-name label with no matching named remote must be rejected.
+    // Stable-name identity must NOT bind when no remote's URL digest matches,
+    // even if a remote with the identity's string as its NAME exists (the
+    // remote name is not the identifier). But here we go further: no remote
+    // at all means nothing to resolve — rejection must still fail closed.
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -1010,13 +1021,15 @@ fn authority_binding_rejects_stable_name_with_no_matching_remote() {
     git(&repo, &["commit", "-q", "-m", "init"]);
     let base = git_output(&repo, &["rev-parse", "HEAD"]);
 
-    // No remote added — "no-match" has no corresponding remote.
+    // No remote added — the digest has nothing to resolve against.
     let manifest = WorkspaceManifestV1 {
         schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
         workspace_id: "stable-no-match".to_string(),
         adapter: AdapterKind::GitWorktree,
         adapter_revision: ADAPTER_REVISION.to_string(),
-        repo_identity: "no-match".to_string(),
+        repo_identity: stable_repo_identity_digest(
+            "https://github.com/somewhere-else/never-added.git",
+        ),
         base_revision: base.clone(),
         branch: None,
         mode: WorkspaceMode::Writable,
@@ -1036,6 +1049,58 @@ fn authority_binding_rejects_stable_name_with_no_matching_remote() {
     assert!(
         msg.contains("repo identity mismatch"),
         "expected repo identity mismatch error, got: {msg}"
+    );
+}
+
+#[test]
+fn authority_binding_rejects_origin_alias_reuse_across_unrelated_repos() {
+    // Round 4 regression (P1): unrelated repositories commonly have a remote
+    // named "origin". The stable-name identity must NOT bind via the remote
+    // NAME — it must resolve to the URL's digest. A source repo whose
+    // "origin" points to an entirely different repository must be rejected
+    // even when the declared digest matches a DIFFERENT repository's
+    // "origin" remote.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    // The attacker/tampered repo's "origin" points at THEIR repository.
+    let attacker_url = "https://github.com/evil-org/evil-repo.git";
+    git(&repo, &["remote", "add", "origin", attacker_url]);
+
+    // But the manifest declares the digest of the TRUSTED repository.
+    // Alias reuse ("origin" exists) must not satisfy binding.
+    let trusted_digest =
+        stable_repo_identity_digest("https://github.com/trusted-org/trusted-repo.git");
+    let manifest = WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: "alias-reuse".to_string(),
+        adapter: AdapterKind::GitWorktree,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: trusted_digest,
+        base_revision: base.clone(),
+        branch: None,
+        mode: WorkspaceMode::Writable,
+        writable_scopes: vec!["repo://fixture".to_string()],
+        resource_lock_id: "lock-alias-reuse".to_string(),
+        created_at: now_iso(),
+        content_digest: None,
+    };
+
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+
+    let err = adapter.acquire(&manifest).unwrap_err();
+    assert!(
+        err.to_string().contains("repo identity mismatch"),
+        "expected repo identity mismatch error, got: {err}"
     );
 }
 
@@ -1193,4 +1258,111 @@ fn recovery_rejects_base_revision_mismatch() {
         }
         other => panic!("expected Rejected for base mismatch, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Repair round 4 regressions: reference → manifest authentication
+// ---------------------------------------------------------------------------
+//
+// A WorkspaceRefV1 must attest to ONE manifest: every durable identity field
+// must match AND contentDigest must equal that manifest's digest. Any
+// substitution — of the digest itself or of workspace_id / repo_identity /
+// adapter_revision / mode — must HARD-FAIL (not Rejected, not remappable).
+
+/// Shared fixture: acquire a real worktree and build the honest reference
+/// (`manifest.to_reference()`), returning everything a substitution test
+/// needs. Each mutation of the honest ref is then checked to fail closed.
+fn acquired_and_honest_ref(
+    tag: &str,
+) -> (
+    tempfile::TempDir,
+    GitWorktreeWorkspace,
+    std::path::PathBuf,
+    WorkspaceManifestV1,
+    WorkspaceRefV1,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    let manifest = full_manifest(tag, &repo, &base, WorkspaceMode::Writable);
+    let adapter = GitWorktreeWorkspace {
+        parent_dir: dir.path().join("wt"),
+        source_repo: repo.clone(),
+    };
+    let acquired = adapter.acquire(&manifest).unwrap();
+    let reference = manifest.to_reference();
+    (dir, adapter, acquired.root, manifest, reference)
+}
+
+#[test]
+fn recovery_rejects_substituted_manifest_digest() {
+    // Finding (round 4): contentDigest is the manifest attestation — a ref
+    // whose digest does not match the supplied manifest must be refused.
+    let (_dir, adapter, root, manifest, mut reference) = acquired_and_honest_ref("sub-digest");
+    reference.content_digest = "f".repeat(64);
+    let err = adapter
+        .recover(&root, &reference, &manifest, None)
+        .expect_err("substituted contentDigest must hard-fail");
+    assert!(
+        err.to_string().contains("does not authenticate"),
+        "expected manifest attestation refusal, got: {err}"
+    );
+}
+
+#[test]
+fn recovery_rejects_substituted_workspace_id() {
+    let (_dir, adapter, root, manifest, mut reference) = acquired_and_honest_ref("sub-wsid");
+    reference.workspace_id = "attacker-controlled-id".to_string();
+    let err = adapter
+        .recover(&root, &reference, &manifest, None)
+        .expect_err("substituted workspaceId must hard-fail");
+    assert!(
+        err.to_string().contains("does not authenticate"),
+        "expected manifest attestation refusal, got: {err}"
+    );
+}
+
+#[test]
+fn recovery_rejects_substituted_repo_identity() {
+    let (_dir, adapter, root, manifest, mut reference) = acquired_and_honest_ref("sub-repoid");
+    reference.repo_identity = "https://github.com/evil-org/evil-repo.git".to_string();
+    let err = adapter
+        .recover(&root, &reference, &manifest, None)
+        .expect_err("substituted repoIdentity must hard-fail");
+    assert!(
+        err.to_string().contains("does not authenticate"),
+        "expected manifest attestation refusal, got: {err}"
+    );
+}
+
+#[test]
+fn recovery_rejects_substituted_adapter_revision() {
+    let (_dir, adapter, root, manifest, mut reference) = acquired_and_honest_ref("sub-adrev");
+    reference.adapter_revision = "lite.workspace.adapter.v0".to_string();
+    let err = adapter
+        .recover(&root, &reference, &manifest, None)
+        .expect_err("substituted adapterRevision must hard-fail");
+    assert!(
+        err.to_string().contains("does not authenticate"),
+        "expected manifest attestation refusal, got: {err}"
+    );
+}
+
+#[test]
+fn recovery_rejects_substituted_mode() {
+    let (_dir, adapter, root, manifest, mut reference) = acquired_and_honest_ref("sub-mode");
+    reference.mode = WorkspaceMode::ReadOnly; // manifest is Writable
+    let err = adapter
+        .recover(&root, &reference, &manifest, None)
+        .expect_err("substituted mode must hard-fail");
+    assert!(
+        err.to_string().contains("does not authenticate"),
+        "expected manifest attestation refusal, got: {err}"
+    );
 }
