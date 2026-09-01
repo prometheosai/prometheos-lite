@@ -39,6 +39,7 @@ pub const NODE_VALIDATION_VERSION: &str = "1.0.0";
 /// Declared capability names.
 pub const CAP_TEST_DISCOVERY: &str = "test-discovery";
 pub const CAP_VALIDATION: &str = "validation";
+pub const CAP_DIAGNOSTIC: &str = "diagnostic";
 
 /// Default per-command deadline (ms) when callers do not specify one.
 const VALIDATION_DEFAULT_TIMEOUT_MS: u64 = 60_000;
@@ -541,6 +542,294 @@ fn run_validation(args: &serde_json::Value) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Diagnostic (PR3 — issue #127 acceptance criteria 3-4: "Code, test,
+// environment, timeout, and resource failures are distinguished" and
+// "Diagnostic node emits evidence-backed classifications")
+// ---------------------------------------------------------------------------
+
+/// One classification bucket. Each value maps to a kebab-case serde string
+/// in JSON so downstream nodes can dispatch on the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureKindV1 {
+    /// Compile / parse / type error in the candidate code itself.
+    Code,
+    /// Test assertion or test-framework failure.
+    Test,
+    /// Missing tool, missing file, permission denied — infrastructure-side.
+    Environment,
+    /// Killed by the deadline (run had `timedOut == true`).
+    Timeout,
+    /// Out of memory / disk full / other machine-exhaustion signal.
+    Resource,
+    /// No rule matched.
+    Unknown,
+}
+
+impl FailureKindV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureKindV1::Code => "code",
+            FailureKindV1::Test => "test",
+            FailureKindV1::Environment => "environment",
+            FailureKindV1::Timeout => "timeout",
+            FailureKindV1::Resource => "resource",
+            FailureKindV1::Unknown => "unknown",
+        }
+    }
+}
+
+/// One classification outcome for one failed command run.
+///
+/// `signals` lists the substrings (lowercased) that triggered the
+/// classification, so downstream consumers can audit the rationale without
+/// re-running the rule set. `evidenceRef` is a canonical digest of the
+/// classification inputs and result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassificationV1 {
+    pub command: String,
+    pub args: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub kind: FailureKindV1,
+    pub signals: Vec<String>,
+    /// Canonical digest of `{command, args, exitCode, timedOut, stderrTail,
+    /// stdoutTail, kind, signals}` — the evidence-backed provenance
+    /// asserted by acceptance criterion 4.
+    pub evidence_ref: String,
+}
+
+/// Output of the `diagnostic` node: a per-run classification for every
+/// command in the supplied validation result (including the
+/// already-passed runs, with kind `Unknown` and a note that no failure was
+/// observed; the issue's distinction is about FAILURES so the summary
+/// focuses on failed runs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticReportV1 {
+    pub schema_version: String,
+    pub repo_root: String,
+    /// Identifier carried from the validation result (its `runsDigest`),
+    /// so the diagnostic ties back to the validation run that produced
+    /// the evidence.
+    pub validation_run_id: String,
+    /// Digest over the `classifications` array.
+    pub report_digest: String,
+    /// Total number of command runs in the validation result.
+    pub total_runs: usize,
+    /// Number of failed command runs (timed_out OR non-zero exit).
+    pub failed_runs: usize,
+    /// Counts per failure kind — convenience view for the routing layer
+    /// in #106 epic.
+    #[serde(default)]
+    pub summary_by_kind: Vec<FailureCountV1>,
+    pub classifications: Vec<ClassificationV1>,
+    /// Constraints observed during classification (read-only, no
+    /// repository access required).
+    pub constraints: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureCountV1 {
+    pub kind: FailureKindV1,
+    pub count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Pattern-based classification rules
+// ---------------------------------------------------------------------------
+
+/// One rule: a set of substrings (lowercased). If any substring appears in
+/// the (lowercased) combined stdout/stderr tail, the kind is returned along
+/// with the matched substrings.
+struct KindRule {
+    kind: FailureKindV1,
+    patterns: &'static [&'static str],
+}
+
+/// Pattern order matters — first match wins. We order by specificity:
+/// `Timeout` is decided by `timed_out` before any rule fires;
+/// `Resource` beats `Environment`; `Environment` beats `Code`/`Test` only
+/// when no code/test signal is present.
+const KIND_RULES: &[KindRule] = &[
+    // Resource: OOM / disk full.
+    KindRule {
+        kind: FailureKindV1::Resource,
+        patterns: &[
+            "cannot allocate memory",
+            "out of memory",
+            "oom",
+            "no space left on device",
+            "enospc",
+            "enOMEM",
+        ],
+    },
+    // Environment: missing tool, missing file, permission denied.
+    KindRule {
+        kind: FailureKindV1::Environment,
+        patterns: &[
+            "command not found",
+            "not recognized as an internal or external command",
+            "no such file or directory",
+            "permission denied",
+            "is not recognized",
+            "enoent",
+            "eacces",
+        ],
+    },
+    // Test: assertion / test-framework failure markers.
+    KindRule {
+        kind: FailureKindV1::Test,
+        patterns: &[
+            "failed",
+            "assertion",
+            "assertion failed",
+            "panicked at",
+            "test result: failed",
+            "expected",
+        ],
+    },
+    // Code: compile / parse / type errors.
+    KindRule {
+        kind: FailureKindV1::Code,
+        patterns: &[
+            "error[",
+            "error:",
+            "cannot find",
+            "cannot find type",
+            "unresolved",
+            "syntaxerror",
+            "nameerror",
+            "parse error",
+            "type mismatch",
+            "borrow checker",
+        ],
+    },
+];
+
+fn classify_one(run: &CommandRunV1) -> ClassificationV1 {
+    if run.timed_out {
+        let signals = vec!["timed-out".to_string()];
+        let evidence_ref = classification_evidence_ref(run, FailureKindV1::Timeout, &signals);
+        return ClassificationV1 {
+            command: run.command.clone(),
+            args: run.args.clone(),
+            exit_code: run.exit_code,
+            timed_out: true,
+            kind: FailureKindV1::Timeout,
+            signals,
+            evidence_ref,
+        };
+    }
+    let haystack = format!("{}\n{}", run.stdout_tail, run.stderr_tail).to_lowercase();
+    for rule in KIND_RULES {
+        let mut matched = Vec::new();
+        for pat in rule.patterns {
+            if haystack.contains(pat) {
+                matched.push((*pat).to_string());
+            }
+        }
+        if !matched.is_empty() {
+            let evidence_ref = classification_evidence_ref(run, rule.kind, &matched);
+            return ClassificationV1 {
+                command: run.command.clone(),
+                args: run.args.clone(),
+                exit_code: run.exit_code,
+                timed_out: run.timed_out,
+                kind: rule.kind,
+                signals: matched,
+                evidence_ref,
+            };
+        }
+    }
+    // No rule matched.
+    let signals = Vec::new();
+    let evidence_ref = classification_evidence_ref(run, FailureKindV1::Unknown, &signals);
+    ClassificationV1 {
+        command: run.command.clone(),
+        args: run.args.clone(),
+        exit_code: run.exit_code,
+        timed_out: run.timed_out,
+        kind: FailureKindV1::Unknown,
+        signals,
+        evidence_ref,
+    }
+}
+
+fn classification_evidence_ref(
+    run: &CommandRunV1,
+    kind: FailureKindV1,
+    signals: &[String],
+) -> String {
+    canonical_digest(&serde_json::json!({
+        "command": run.command,
+        "args": run.args,
+        "exitCode": run.exit_code,
+        "timedOut": run.timed_out,
+        "kind": kind.as_str(),
+        "signals": signals,
+        "stdoutTail": run.stdout_tail,
+        "stderrTail": run.stderr_tail,
+    }))
+    .unwrap_or_default()
+}
+
+fn run_diagnostic(args: &serde_json::Value) -> Result<String> {
+    let repo_root = args
+        .get("repoRoot")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("diagnostic requires a repoRoot string"))?;
+    let validation_json = args
+        .get("validationEvidence")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("diagnostic requires validationEvidence (ValidationResultV1 JSON)")
+        })?;
+    let validation: ValidationResultV1 = serde_json::from_str(validation_json)
+        .context("diagnostic: validationEvidence unparseable")?;
+
+    let mut classifications = Vec::with_capacity(validation.runs.len());
+    let mut failed = 0usize;
+    for run in &validation.runs {
+        let is_failure = run.timed_out || !matches!(run.exit_code, Some(0));
+        if is_failure {
+            failed += 1;
+        }
+        classifications.push(classify_one(run));
+    }
+
+    // Summary counts.
+    let mut counts: std::collections::BTreeMap<FailureKindV1, usize> =
+        std::collections::BTreeMap::new();
+    for c in &classifications {
+        *counts.entry(c.kind).or_insert(0) += 1;
+    }
+    let summary_by_kind: Vec<FailureCountV1> = counts
+        .into_iter()
+        .map(|(kind, count)| FailureCountV1 { kind, count })
+        .collect();
+
+    let report_digest = canonical_digest(&serde_json::json!(&classifications))?;
+    let out = DiagnosticReportV1 {
+        schema_version: NODE_VALIDATION_VERSION.to_string(),
+        repo_root: repo_root.to_string(),
+        validation_run_id: validation.runs_digest.clone(),
+        report_digest,
+        total_runs: validation.runs.len(),
+        failed_runs: failed,
+        summary_by_kind,
+        classifications,
+        constraints: vec![
+            "read-only: diagnostic performs no repository access".to_string(),
+            "classification is deterministic and pattern-based".to_string(),
+        ],
+    };
+    serde_json::to_string(&out).map_err(Into::into)
+}
+
+// ---------------------------------------------------------------------------
 // Registry + manifest helpers
 // ---------------------------------------------------------------------------
 
@@ -569,8 +858,18 @@ pub fn validation_registry() -> CapabilityRegistry {
     reg
 }
 
-/// Combined registry: discovery + validation. PR3 will add `diagnostic` to
-/// this surface when the diagnostic node lands.
+/// Declare only the diagnostic node.
+pub fn diagnostic_registry() -> CapabilityRegistry {
+    let mut reg = CapabilityRegistry::new();
+    reg.declare(
+        CAP_DIAGNOSTIC,
+        Capability::deterministic(&["repoRoot", "validationEvidence"], run_diagnostic),
+    );
+    reg
+}
+
+/// Combined registry: discovery + validation. PR3 also adds `diagnostic`
+/// here so the full pipeline is available in one declaration.
 pub fn validation_pipeline_registry() -> CapabilityRegistry {
     let mut reg = test_discovery_registry();
     reg.declare(
@@ -579,6 +878,10 @@ pub fn validation_pipeline_registry() -> CapabilityRegistry {
             &["repoRoot", "workspaceParent", "baseRevision"],
             run_validation,
         ),
+    );
+    reg.declare(
+        CAP_DIAGNOSTIC,
+        Capability::deterministic(&["repoRoot", "validationEvidence"], run_diagnostic),
     );
     reg
 }
@@ -635,6 +938,30 @@ pub fn validation_node_manifest(node_id: &str) -> NodeManifestV1 {
         .to_string(),
     )
     .expect("validation manifest is well-formed")
+}
+
+/// Build a `lite.node.v1` manifest for the diagnostic node. The node is
+/// pure: it consumes a serialized validation result and emits typed
+/// classifications; it does not touch the repository, so `writableScopes`
+/// is empty.
+pub fn diagnostic_node_manifest(node_id: &str) -> NodeManifestV1 {
+    NodeManifestV1::parse_json(
+        &serde_json::json!({
+            "schemaVersion": NODE_VALIDATION_VERSION,
+            "nodeId": node_id,
+            "purpose": CAP_DIAGNOSTIC,
+            "inputs": [
+                io("repoRoot", "core.Path"),
+                io("validationEvidence", "lite.node.validation.Result"),
+            ],
+            "outputs": [io("diagnostic", "lite.node.diagnostic.Report")],
+            "readableScopes": ["repo://fixture"],
+            "writableScopes": [],
+            "retry": {"maxAttempts": 1, "retryableClasses": []}
+        })
+        .to_string(),
+    )
+    .expect("diagnostic manifest is well-formed")
 }
 
 #[cfg(test)]
@@ -715,6 +1042,158 @@ mod tests {
         assert_eq!(pa.discovery_digest, pb.discovery_digest);
         for (ca, cb) in pa.commands.iter().zip(pb.commands.iter()) {
             assert_eq!(ca.evidence_ref, cb.evidence_ref);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Diagnostic classifier (PR3)
+    // -------------------------------------------------------------------
+
+    fn synthetic_run(stderr_tail: &str, exit_code: Option<i32>, timed_out: bool) -> CommandRunV1 {
+        CommandRunV1 {
+            command: "test".to_string(),
+            args: vec![],
+            exit_code,
+            duration_ms: 0,
+            timed_out,
+            stdout_tail: String::new(),
+            stderr_tail: stderr_tail.to_string(),
+            evidence_ref: String::new(),
+        }
+    }
+
+    #[test]
+    fn classifier_kind_timeout_when_timed_out() {
+        let run = synthetic_run("", None, true);
+        let c = classify_one(&run);
+        assert_eq!(c.kind, FailureKindV1::Timeout);
+        assert!(c.timed_out);
+        assert_eq!(c.signals, vec!["timed-out"]);
+        assert_eq!(c.evidence_ref.len(), 64);
+    }
+
+    #[test]
+    fn classifier_kind_resource_for_oom_signal() {
+        let run = synthetic_run(
+            "error: cannot allocate memory (os error 1455)",
+            Some(1),
+            false,
+        );
+        let c = classify_one(&run);
+        assert_eq!(c.kind, FailureKindV1::Resource);
+        assert!(c.signals.iter().any(|s| s.contains("memory")));
+        assert_eq!(c.evidence_ref.len(), 64);
+    }
+
+    #[test]
+    fn classifier_kind_environment_for_command_not_found() {
+        let run = synthetic_run("/bin/sh: cargo: command not found", Some(127), false);
+        let c = classify_one(&run);
+        assert_eq!(c.kind, FailureKindV1::Environment);
+        assert!(c.signals.iter().any(|s| s.contains("command not found")));
+        assert_eq!(c.evidence_ref.len(), 64);
+    }
+
+    #[test]
+    fn classifier_kind_test_for_assertion_failure() {
+        let run = synthetic_run(
+            "thread 't' panicked at 'assertion failed: add(1, 2) == 4', src/lib.rs:12",
+            Some(101),
+            false,
+        );
+        let c = classify_one(&run);
+        assert_eq!(c.kind, FailureKindV1::Test);
+        assert!(
+            c.signals
+                .iter()
+                .any(|s| s.contains("assertion") || s.contains("panicked")),
+            "signals should cite the matched pattern: {:?}",
+            c.signals
+        );
+    }
+
+    #[test]
+    fn classifier_kind_code_for_compile_error() {
+        let run = synthetic_run(
+            "error[E0425]: cannot find value `x` in this scope",
+            Some(1),
+            false,
+        );
+        let c = classify_one(&run);
+        assert_eq!(c.kind, FailureKindV1::Code);
+        assert!(
+            c.signals
+                .iter()
+                .any(|s| s.contains("error") || s.contains("cannot find")),
+            "signals should cite the matched pattern: {:?}",
+            c.signals
+        );
+    }
+
+    #[test]
+    fn classifier_kind_unknown_when_no_pattern_matches() {
+        let run = synthetic_run("some unfamiliar failure output", Some(1), false);
+        let c = classify_one(&run);
+        assert_eq!(c.kind, FailureKindV1::Unknown);
+        assert!(c.signals.is_empty());
+        // Unknown still gets an evidence_ref so the report links the
+        // classification to its inputs.
+        assert_eq!(c.evidence_ref.len(), 64);
+    }
+
+    #[test]
+    fn classifier_evidence_ref_is_deterministic() {
+        let run = synthetic_run("error[E0425]: cannot find", Some(1), false);
+        let a = classify_one(&run);
+        let b = classify_one(&run);
+        assert_eq!(a.evidence_ref, b.evidence_ref);
+        assert_eq!(a.kind, FailureKindV1::Code);
+    }
+
+    #[test]
+    fn diagnostic_report_summarizes_failure_kinds() {
+        // End-to-end: feed a synthetic validation result to the node and
+        // assert the summary counts.
+        let validation = ValidationResultV1 {
+            schema_version: NODE_VALIDATION_VERSION.to_string(),
+            repo_root: ".".to_string(),
+            base_revision: "abc".to_string(),
+            worktree_head_revision: "abc".to_string(),
+            run_id: "val-test".to_string(),
+            runs_digest: "d".repeat(64),
+            runs: vec![
+                synthetic_run("error: cannot find value `x`", Some(1), false),
+                synthetic_run("panicked at 'assertion failed'", Some(101), false),
+                synthetic_run("command not found", Some(127), false),
+                synthetic_run("", None, true),     // timed out
+                synthetic_run("", Some(0), false), // passed
+            ],
+            constraints: vec![],
+        };
+        let args = serde_json::json!({
+            "repoRoot": ".",
+            "validationEvidence": serde_json::to_string(&validation).unwrap(),
+        });
+        let out = run_diagnostic(&args).unwrap();
+        let report: DiagnosticReportV1 = serde_json::from_str(&out).unwrap();
+        assert_eq!(report.total_runs, 5);
+        assert_eq!(report.failed_runs, 4);
+        // 4 failures + 1 passed (Unknown with no signals).
+        assert_eq!(report.classifications.len(), 5);
+        // Summary counts include every observed kind.
+        let kinds: Vec<FailureKindV1> = report.classifications.iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&FailureKindV1::Code));
+        assert!(kinds.contains(&FailureKindV1::Test));
+        assert!(kinds.contains(&FailureKindV1::Environment));
+        assert!(kinds.contains(&FailureKindV1::Timeout));
+        // Summary by kind is sorted (BTreeMap) and each entry is non-zero.
+        assert!(!report.summary_by_kind.is_empty());
+        for entry in &report.summary_by_kind {
+            assert!(entry.count > 0);
+        }
+        // Every classification carries a 64-hex evidence_ref.
+        for c in &report.classifications {
+            assert_eq!(c.evidence_ref.len(), 64);
         }
     }
 }
