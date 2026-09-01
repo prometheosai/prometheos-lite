@@ -25,10 +25,10 @@ use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, Nod
 use prometheos_lite::workflow::now_iso;
 use prometheos_lite::workflow::policy::LocalRestrictions;
 use prometheos_lite::workflow::workspace::{
-    ADAPTER_REVISION, AdapterKind, GitWorktreeWorkspace, RecoveryOutcome,
-    WORKSPACE_REF_SCHEMA_VERSION, WORKSPACE_REF_SCHEMA_VERSION_V1, WORKSPACE_SCHEMA_VERSION,
-    WorkspaceAdapter, WorkspaceManifestV1, WorkspaceMode, WorkspaceRefError, WorkspaceRefV1,
-    stable_repo_identity_digest,
+    ADAPTER_REVISION, AdapterKind, ExistingReadOnlyWorkspace, GitWorktreeWorkspace,
+    RecoveryOutcome, WORKSPACE_REF_SCHEMA_VERSION, WORKSPACE_REF_SCHEMA_VERSION_V1,
+    WORKSPACE_SCHEMA_VERSION, WorkspaceAdapter, WorkspaceManifestV1, WorkspaceMode,
+    WorkspaceRefError, WorkspaceRefV1, stable_repo_identity_digest,
 };
 
 fn restrictions_with_write() -> LocalRestrictions {
@@ -1365,4 +1365,145 @@ fn recovery_rejects_substituted_mode() {
         err.to_string().contains("does not authenticate"),
         "expected manifest attestation refusal, got: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Repair round 5 regression: read-only adapter must enforce the same
+// manifest-schema gate and base-binding check that the git-worktree adapter
+// enforces. Without these, a reference can authenticate the manifest's
+// identity fields and resume against a manifest whose acquisition base
+// differs from the reference's base — silently re-basing authority onto a
+// different lineage.
+// ---------------------------------------------------------------------------
+
+fn readonly_fixture_repo(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join("init.txt"), "seed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let base_a = git_output(&repo, &["rev-parse", "HEAD"]);
+    // Second commit so we have a distinct SHA to use as a wrong base.
+    std::fs::write(repo.join("second.txt"), "second").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "second"]);
+    let base_b = git_output(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(base_a, base_b);
+    // Roll HEAD back to base_a so the checkout matches the reference we will
+    // recover against (the actual-HEAD check must not fire before the
+    // base-binding check in this test).
+    git(&repo, &["reset", "--hard", &base_a]);
+    assert_eq!(git_output(&repo, &["rev-parse", "HEAD"]), base_a);
+    let _ = tag;
+    (dir, repo, base_a)
+}
+
+fn readonly_manifest(workspace_id: &str, repo: &Path, base_revision: &str) -> WorkspaceManifestV1 {
+    WorkspaceManifestV1 {
+        schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
+        workspace_id: workspace_id.to_string(),
+        adapter: AdapterKind::ExistingReadOnly,
+        adapter_revision: ADAPTER_REVISION.to_string(),
+        repo_identity: repo.to_string_lossy().to_string(),
+        base_revision: base_revision.to_string(),
+        branch: None,
+        mode: WorkspaceMode::ReadOnly,
+        writable_scopes: vec![],
+        resource_lock_id: format!("lock-ro-{workspace_id}"),
+        created_at: now_iso(),
+        content_digest: None,
+    }
+}
+
+#[test]
+fn readonly_recovery_rejects_base_revision_mismatch_against_manifest() {
+    // Round 5: ExistingReadOnlyWorkspace::recover MUST require
+    // reference.baseRevision == manifest.baseRevision, matching the
+    // git-worktree adapter. Otherwise a reference whose base matches the
+    // on-disk HEAD can resume against a manifest carrying a DIFFERENT
+    // acquisition base — re-basing authority onto a different lineage.
+    let (_dir, repo, base) = readonly_fixture_repo("ro-base");
+    let ro_adapter = ExistingReadOnlyWorkspace::bound_to(repo.clone());
+
+    // Honest read-only manifest pinned to the actual checkout HEAD.
+    let honest_manifest = readonly_manifest("ro-base-test", &repo, &base);
+    // Build a "foreign" manifest with a different base_revision. The
+    // read-only adapter's `acquire` will not be called here; we exercise
+    // recover() directly against a manifest the ref does NOT attest to.
+    let mut foreign_manifest = honest_manifest.clone();
+    foreign_manifest.base_revision = "0".repeat(40);
+    // The reference carries the FOREIGN manifest's content digest so
+    // verify_manifest_attestation passes — but the reference's own
+    // base_revision is the actual checkout HEAD. This means:
+    //   - the new base-binding check `reference.baseRevision !=
+    //     manifest.baseRevision` (base != 0..0) MUST fire for rejection;
+    //   - the trailing on-disk HEAD check (`actual != reference.baseRevision`)
+    //     would NOT fire (actual == base == reference.baseRevision);
+    //   - without the new check, recovery would Resume successfully.
+    // The assertion therefore isolates the new check.
+    let reference = WorkspaceRefV1 {
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
+        workspace_id: foreign_manifest.workspace_id.clone(),
+        adapter: AdapterKind::ExistingReadOnly,
+        adapter_revision: foreign_manifest.adapter_revision.clone(),
+        repo_identity: foreign_manifest.repo_identity.clone(),
+        base_revision: base.clone(), // matches actual HEAD, != manifest base
+        mode: WorkspaceMode::ReadOnly,
+        content_digest: foreign_manifest.compute_digest(), // ref attests to foreign manifest
+        head_revision: None,
+    };
+
+    let outcome = ro_adapter
+        .recover(&repo, &reference, &foreign_manifest, None)
+        .expect("recover returns a RecoveryOutcome, not Err");
+    match outcome {
+        RecoveryOutcome::Rejected(e) => {
+            assert!(
+                matches!(e, WorkspaceRefError::StaleRevision),
+                "expected Rejected(StaleRevision) for base mismatch, got {e:?}"
+            );
+        }
+        other => panic!("expected Rejected(StaleRevision), got {other:?}"),
+    }
+}
+
+#[test]
+fn readonly_recovery_rejects_manifest_schema_version_mismatch() {
+    // Round 5: ExistingReadOnlyWorkspace::recover MUST enforce
+    // manifest.schemaVersion == WORKSPACE_SCHEMA_VERSION, matching the
+    // git-worktree adapter. Without this, a manifest at a non-current schema
+    // could authorize recovery through a misconfigured adapter.
+    let (_dir, repo, base) = readonly_fixture_repo("ro-schema");
+    let ro_adapter = ExistingReadOnlyWorkspace::bound_to(repo.clone());
+
+    let mut bogus_manifest = readonly_manifest("ro-schema-test", &repo, &base);
+    bogus_manifest.schema_version = "9.9.9".to_string();
+    // Authenticate the bogus-schema manifest so the ref passes
+    // verify_manifest_attestation (which does not check schema).
+    let reference = WorkspaceRefV1 {
+        schema_version: WORKSPACE_REF_SCHEMA_VERSION.to_string(),
+        workspace_id: bogus_manifest.workspace_id.clone(),
+        adapter: AdapterKind::ExistingReadOnly,
+        adapter_revision: bogus_manifest.adapter_revision.clone(),
+        repo_identity: bogus_manifest.repo_identity.clone(),
+        base_revision: bogus_manifest.base_revision.clone(),
+        mode: WorkspaceMode::ReadOnly,
+        content_digest: bogus_manifest.compute_digest(),
+        head_revision: None,
+    };
+
+    let outcome = ro_adapter
+        .recover(&repo, &reference, &bogus_manifest, None)
+        .expect("recover returns a RecoveryOutcome, not Err");
+    match outcome {
+        RecoveryOutcome::Rejected(e) => {
+            assert!(
+                matches!(e, WorkspaceRefError::IncompatibleSchema),
+                "expected Rejected(IncompatibleSchema) for bad manifest schema, got {e:?}"
+            );
+        }
+        other => panic!("expected Rejected(IncompatibleSchema), got {other:?}"),
+    }
 }

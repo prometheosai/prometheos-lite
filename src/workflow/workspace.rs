@@ -932,6 +932,19 @@ impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
         // Manifest authentication (E5/I02 repair round 4): identical to the
         // git-worktree adapter — the reference must attest to THIS manifest.
         reference.verify_manifest_attestation(manifest)?;
+        // Round 5 parity: the read-only adapter must apply the same base
+        // binding and manifest-schema gate as the git-worktree adapter.
+        // Without these, a ref that authenticates the manifest's identity
+        // fields can still resume against a manifest carrying a DIFFERENT
+        // acquisition base — silently re-basing authority onto a different
+        // lineage. The git-worktree path enforces this; the read-only path
+        // must too.
+        if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
+            return reject_or_remap(remap, WorkspaceRefError::IncompatibleSchema);
+        }
+        if reference.base_revision != manifest.base_revision {
+            return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
+        }
         if !expected_root.exists() {
             return reject_or_remap(remap, WorkspaceRefError::Missing);
         }
