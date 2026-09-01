@@ -21,6 +21,10 @@ use prometheos_lite::workflow::node_library::{
     intake_discovery_planning_registry, node_manifest,
 };
 use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
+use prometheos_lite::workflow::node_validation::{
+    CAP_TEST_DISCOVERY, TestDiscoveryResultV1, node_manifest as validation_node_manifest,
+    test_discovery_registry,
+};
 use prometheos_lite::workflow::policy::LocalRestrictions;
 
 fn restrictions() -> LocalRestrictions {
@@ -328,4 +332,119 @@ fn governed_path_bypass_is_blocked_for_undeclared_capability() {
         "bypass",
     );
     assert!(res.is_err(), "undeclared capability must not run");
+}
+
+// ---------------------------------------------------------------------------
+// E5/I03 (issue #127) — test discovery
+// ---------------------------------------------------------------------------
+
+fn validation_runner() -> NodeRunner {
+    NodeRunner::new(test_discovery_registry())
+}
+
+/// Build a small git repository with the named manifest files at the root.
+fn fixture_repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "ci@example.com"]);
+    git(root, &["config", "user.name", "ci"]);
+    for (path, contents) in files {
+        let full = root.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full, contents).unwrap();
+    }
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "initial"]);
+    dir
+}
+
+#[test]
+fn test_discovery_records_why_for_each_command() {
+    // Issue #127 acceptance criterion 1: test discovery records why each
+    // command was selected.
+    let dir = fixture_repo_with(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+    let mut runner = validation_runner();
+    let caps = restrictions();
+    let m = validation_node_manifest("node-test-discovery");
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_TEST_DISCOVERY,
+        json!({"repoRoot": dir.path().to_str().unwrap()}),
+        "disc-why",
+    )
+    .expect("test-discovery completes");
+    assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
+
+    let d: TestDiscoveryResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    // Cargo rule + meta-assertion.
+    assert!(d.commands.len() >= 2);
+    for c in &d.commands {
+        assert!(
+            !c.why.is_empty(),
+            "every discovered command must carry a non-empty `why` (got {:?})",
+            c
+        );
+        assert!(
+            !c.source.is_empty(),
+            "every discovered command must carry a non-empty `source` (got {:?})",
+            c
+        );
+    }
+    // The cargo rule's `why` must reference the manifest that triggered it.
+    let cargo = d
+        .commands
+        .iter()
+        .find(|c| c.command == "cargo")
+        .expect("cargo command present");
+    assert!(
+        cargo.why.contains("Cargo.toml"),
+        "cargo rule's `why` must cite the manifest: {}",
+        cargo.why
+    );
+}
+
+#[test]
+fn test_discovery_emits_deterministic_evidence_refs() {
+    // Each command's `evidence_ref` is a 64-char lowercase hex digest of
+    // `{command, args, why, source}` and is stable across runs.
+    let dir = fixture_repo_with(&[
+        ("Cargo.toml", "[package]\nname = \"x\"\n"),
+        ("package.json", r#"{"name":"x","scripts":{"test":"true"}}"#),
+    ]);
+    let mut runner = validation_runner();
+    let caps = restrictions();
+    let m = validation_node_manifest("node-test-discovery");
+
+    let a = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_TEST_DISCOVERY,
+        json!({"repoRoot": dir.path().to_str().unwrap()}),
+        "disc-det-a",
+    )
+    .expect("first run");
+    let b = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_TEST_DISCOVERY,
+        json!({"repoRoot": dir.path().to_str().unwrap()}),
+        "disc-det-b",
+    )
+    .expect("second run");
+
+    let pa: TestDiscoveryResultV1 = serde_json::from_str(&a.output).unwrap();
+    let pb: TestDiscoveryResultV1 = serde_json::from_str(&b.output).unwrap();
+    assert_eq!(pa.discovery_digest, pb.discovery_digest);
+    for (ca, cb) in pa.commands.iter().zip(pb.commands.iter()) {
+        assert_eq!(ca.evidence_ref, cb.evidence_ref);
+        assert_eq!(ca.evidence_ref.len(), 64);
+        assert!(ca.evidence_ref.chars().all(|x| x.is_ascii_hexdigit()));
+    }
 }
