@@ -22,8 +22,9 @@ use prometheos_lite::workflow::node_library::{
 };
 use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use prometheos_lite::workflow::node_validation::{
-    CAP_TEST_DISCOVERY, CAP_VALIDATION, TestDiscoveryResultV1, ValidationResultV1,
-    node_manifest as validation_node_manifest, test_discovery_registry,
+    CAP_DIAGNOSTIC, CAP_TEST_DISCOVERY, CAP_VALIDATION, CommandRunV1, DiagnosticReportV1,
+    FailureKindV1, TestDiscoveryResultV1, ValidationResultV1, diagnostic_node_manifest,
+    diagnostic_registry, node_manifest as validation_node_manifest, test_discovery_registry,
     validation_node_manifest as validation_pipeline_manifest, validation_registry,
 };
 use prometheos_lite::workflow::policy::LocalRestrictions;
@@ -583,4 +584,181 @@ fn validation_records_exit_code_and_evidence_for_failing_command() {
     // The overall result still Completed — the node records failures; it
     // does not abort on a non-zero command.
     assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
+}
+
+// ---------------------------------------------------------------------------
+// E5/I03 (issue #127) — diagnostic
+// ---------------------------------------------------------------------------
+
+fn diagnostic_pipeline_runner() -> NodeRunner {
+    NodeRunner::new(diagnostic_registry())
+}
+
+#[test]
+fn diagnostic_distinguishes_code_test_environment_timeout_and_resource() {
+    // Issue #127 acceptance criterion 3: "Code, test, environment, timeout,
+    // and resource failures are distinguished." Feed the diagnostic node
+    // a synthetic validation result with one run per failure kind and
+    // assert each is correctly classified.
+    let mut runs = Vec::new();
+    let make = |stderr: &str, exit: Option<i32>, timed_out: bool, command: &str| CommandRunV1 {
+        command: command.to_string(),
+        args: vec![],
+        exit_code: exit,
+        duration_ms: 0,
+        timed_out,
+        stdout_tail: String::new(),
+        stderr_tail: stderr.to_string(),
+        evidence_ref: String::new(),
+    };
+    runs.push(make(
+        "error[E0425]: cannot find value `x` in this scope",
+        Some(1),
+        false,
+        "cargo",
+    ));
+    runs.push(make(
+        "thread 't' panicked at 'assertion failed', src/lib.rs:1",
+        Some(101),
+        false,
+        "cargo-test",
+    ));
+    runs.push(make(
+        "sh: tool: command not found",
+        Some(127),
+        false,
+        "missing",
+    ));
+    runs.push(make(
+        "fatal error: out of memory (os error 1455)",
+        Some(1),
+        false,
+        "rustc",
+    ));
+    runs.push(make("", None, true, "hung"));
+    let validation = ValidationResultV1 {
+        schema_version: "1.0.0".to_string(),
+        repo_root: ".".to_string(),
+        base_revision: "abc".to_string(),
+        worktree_head_revision: "abc".to_string(),
+        run_id: "v-fixture".to_string(),
+        runs_digest: "d".repeat(64),
+        runs,
+        constraints: vec![],
+    };
+    let mut runner = diagnostic_pipeline_runner();
+    let caps = restrictions();
+    let m = diagnostic_node_manifest("node-diagnostic");
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_DIAGNOSTIC,
+        json!({
+            "repoRoot": ".",
+            "validationEvidence": serde_json::to_string(&validation).unwrap(),
+        }),
+        "diag-distinguish",
+    )
+    .expect("diagnostic completes");
+    assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
+
+    let report: DiagnosticReportV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(report.classifications.len(), 5);
+    assert_eq!(report.total_runs, 5);
+    assert_eq!(report.failed_runs, 5);
+    let by_kind: std::collections::HashMap<FailureKindV1, usize> = report
+        .summary_by_kind
+        .iter()
+        .map(|c| (c.kind, c.count))
+        .collect();
+    assert_eq!(by_kind.get(&FailureKindV1::Code), Some(&1));
+    assert_eq!(by_kind.get(&FailureKindV1::Test), Some(&1));
+    assert_eq!(by_kind.get(&FailureKindV1::Environment), Some(&1));
+    assert_eq!(by_kind.get(&FailureKindV1::Resource), Some(&1));
+    assert_eq!(by_kind.get(&FailureKindV1::Timeout), Some(&1));
+
+    // Per-run kind matches the input we fed in (in order).
+    let kinds: Vec<FailureKindV1> = report.classifications.iter().map(|c| c.kind).collect();
+    assert_eq!(kinds[0], FailureKindV1::Code);
+    assert_eq!(kinds[1], FailureKindV1::Test);
+    assert_eq!(kinds[2], FailureKindV1::Environment);
+    assert_eq!(kinds[3], FailureKindV1::Resource);
+    assert_eq!(kinds[4], FailureKindV1::Timeout);
+
+    // Each classification's `signals` cites the substring(s) that
+    // triggered the rule.
+    for c in &report.classifications {
+        assert!(
+            !c.signals.is_empty(),
+            "kind {:?} must carry at least one signal",
+            c.kind
+        );
+    }
+}
+
+#[test]
+fn diagnostic_emits_evidence_backed_classifications() {
+    // Issue #127 acceptance criterion 4: "Diagnostic node emits
+    // evidence-backed classifications." Every classification must carry
+    // a 64-char lowercase hex evidence_ref that ties the classification
+    // to its inputs (command, exit code, captured output, kind, signals).
+    let validation = ValidationResultV1 {
+        schema_version: "1.0.0".to_string(),
+        repo_root: ".".to_string(),
+        base_revision: "abc".to_string(),
+        worktree_head_revision: "abc".to_string(),
+        run_id: "v-ev".to_string(),
+        runs_digest: "d".repeat(64),
+        runs: vec![CommandRunV1 {
+            command: "cargo".to_string(),
+            args: vec!["test".to_string()],
+            exit_code: Some(101),
+            duration_ms: 0,
+            timed_out: false,
+            stdout_tail: String::new(),
+            stderr_tail: "panicked at 'assertion failed'".to_string(),
+            evidence_ref: String::new(),
+        }],
+        constraints: vec![],
+    };
+    let mut runner = diagnostic_pipeline_runner();
+    let caps = restrictions();
+    let m = diagnostic_node_manifest("node-diagnostic-ev");
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_DIAGNOSTIC,
+        json!({
+            "repoRoot": ".",
+            "validationEvidence": serde_json::to_string(&validation).unwrap(),
+        }),
+        "diag-ev",
+    )
+    .expect("diagnostic completes");
+    let report: DiagnosticReportV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(report.classifications.len(), 1);
+    let c = &report.classifications[0];
+    assert_eq!(c.evidence_ref.len(), 64);
+    assert!(c.evidence_ref.chars().all(|x| x.is_ascii_hexdigit()));
+    // Determinism: running the same input again produces the same
+    // evidence_ref.
+    let outcome2 = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_DIAGNOSTIC,
+        json!({
+            "repoRoot": ".",
+            "validationEvidence": serde_json::to_string(&validation).unwrap(),
+        }),
+        "diag-ev",
+    )
+    .expect("diagnostic completes (second run)");
+    let report2: DiagnosticReportV1 = serde_json::from_str(&outcome2.output).unwrap();
+    assert_eq!(
+        report.classifications[0].evidence_ref,
+        report2.classifications[0].evidence_ref
+    );
 }
