@@ -22,8 +22,9 @@ use prometheos_lite::workflow::node_library::{
 };
 use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use prometheos_lite::workflow::node_validation::{
-    CAP_TEST_DISCOVERY, TestDiscoveryResultV1, node_manifest as validation_node_manifest,
-    test_discovery_registry,
+    CAP_TEST_DISCOVERY, CAP_VALIDATION, TestDiscoveryResultV1, ValidationResultV1,
+    node_manifest as validation_node_manifest, test_discovery_registry,
+    validation_node_manifest as validation_pipeline_manifest, validation_registry,
 };
 use prometheos_lite::workflow::policy::LocalRestrictions;
 
@@ -75,6 +76,21 @@ fn git(root: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn git_output(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git available in test environment");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// Build a small git repository to discover: two source files + one test file.
@@ -447,4 +463,124 @@ fn test_discovery_emits_deterministic_evidence_refs() {
         assert_eq!(ca.evidence_ref.len(), 64);
         assert!(ca.evidence_ref.chars().all(|x| x.is_ascii_hexdigit()));
     }
+}
+
+// ---------------------------------------------------------------------------
+// E5/I03 (issue #127) — validation
+// ---------------------------------------------------------------------------
+
+fn validation_pipeline_runner() -> NodeRunner {
+    NodeRunner::new(validation_registry())
+}
+
+#[test]
+fn validation_never_mutates_source_repository() {
+    // Issue #127 acceptance criterion 2: Validation never mutates the
+    // original repository. The validation node runs commands inside an
+    // isolated GitWorktreeWorkspace; the source checkout's HEAD and
+    // working-tree status must be identical before and after the run.
+    let dir = fixture_repo_with(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+    let head_before = git_output(dir.path(), &["rev-parse", "HEAD"]);
+    let status_before = git_output(dir.path(), &["status", "--porcelain"]);
+    assert!(status_before.is_empty(), "fixture must start clean");
+
+    let ws_parent = tempfile::tempdir().unwrap();
+    let mut runner = validation_pipeline_runner();
+    let caps = restrictions();
+    let m = validation_pipeline_manifest("node-validation-isolated");
+
+    // Use a cross-platform, deterministic command. `git rev-parse HEAD`
+    // proves the worktree is pinned to baseRevision and produces a
+    // non-empty stdout we can compare; we deliberately do NOT depend on
+    // `cargo` or any other toolchain.
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_VALIDATION,
+        json!({
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+            "baseRevision": head_before,
+            "commands": [
+                {"command": "git", "args": ["rev-parse", "HEAD"]},
+            ],
+        }),
+        "val-isolated",
+    )
+    .expect("validation completes against the worktree");
+    assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
+
+    let v: ValidationResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    // Worktree head equals the pinned base revision (we never committed).
+    assert_eq!(v.worktree_head_revision, head_before);
+    // One run was executed.
+    assert_eq!(v.runs.len(), 1);
+    let r = &v.runs[0];
+    assert_eq!(r.command, "git");
+    assert_eq!(r.exit_code, Some(0));
+    assert!(!r.timed_out);
+    assert_eq!(r.evidence_ref.len(), 64);
+    // The git command's stdout_tail is the worktree head, which equals
+    // the source HEAD (same commit) — but the SOURCE repository is
+    // unchanged.
+    let head_via_worktree = r.stdout_tail.trim().to_string();
+    assert_eq!(head_via_worktree, head_before);
+
+    // Source repository invariants.
+    let head_after = git_output(dir.path(), &["rev-parse", "HEAD"]);
+    let status_after = git_output(dir.path(), &["status", "--porcelain"]);
+    assert_eq!(
+        head_before, head_after,
+        "source HEAD must not move during validation"
+    );
+    assert_eq!(
+        status_before, status_after,
+        "source working tree must be untouched"
+    );
+    assert!(
+        status_after.is_empty(),
+        "source working tree must remain clean"
+    );
+}
+
+#[test]
+fn validation_records_exit_code_and_evidence_for_failing_command() {
+    // Failing commands are recorded honestly: non-zero exit code, captured
+    // stderr, and a per-run evidence_ref that ties the run to its output.
+    let dir = fixture_repo_with(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+    let head = git_output(dir.path(), &["rev-parse", "HEAD"]);
+    let ws_parent = tempfile::tempdir().unwrap();
+    let mut runner = validation_pipeline_runner();
+    let caps = restrictions();
+    let m = validation_pipeline_manifest("node-validation-fail");
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_VALIDATION,
+        json!({
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+            "baseRevision": head,
+            "commands": [
+                {"command": "git", "args": ["log", "--not-a-real-flag"]},
+            ],
+        }),
+        "val-fail",
+    )
+    .expect("validation completes even when the command fails");
+    let v: ValidationResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(v.runs.len(), 1);
+    let r = &v.runs[0];
+    assert_eq!(r.command, "git");
+    // git exits 129 on unknown flag; what matters is non-zero + evidence
+    // capture, not the precise code (which can vary by git version).
+    assert!(matches!(r.exit_code, Some(c) if c != 0));
+    assert!(!r.timed_out);
+    assert!(!r.stderr_tail.is_empty(), "stderr must be captured");
+    assert_eq!(r.evidence_ref.len(), 64);
+    // The overall result still Completed — the node records failures; it
+    // does not abort on a non-zero command.
+    assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
 }
