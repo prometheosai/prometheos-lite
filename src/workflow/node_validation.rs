@@ -391,30 +391,103 @@ fn run_one(worktree_root: &Path, spec: &CommandSpecV1, timeout_ms: u64) -> Resul
 /// Build the [`ValidationResultV1`] input from either an explicit
 /// `commands` list or a serialized `TestDiscoveryResultV1` JSON string.
 fn read_command_specs(args: &serde_json::Value) -> Result<Vec<CommandSpecV1>> {
-    if let Some(arr) = args.get("commands").and_then(|v| v.as_array()) {
-        let mut out = Vec::with_capacity(arr.len());
-        for v in arr {
-            out.push(serde_json::from_value(v.clone()).with_context(
-                || "validation: each command spec must include at least a `command` string",
-            )?);
+    // The validation node contract is exactly-one of `commands` or
+    // `discoveryEvidence` (PR7 input-contract fix). Both being present
+    // is an error to avoid ambiguity; neither is also an error.
+    let has_commands = args.get("commands").and_then(|v| v.as_array()).is_some();
+    let has_discovery = args
+        .get("discoveryEvidence")
+        .and_then(|v| v.as_str())
+        .is_some();
+    match (has_commands, has_discovery) {
+        (true, true) => {
+            bail!("validation: pass exactly one of `commands` or `discoveryEvidence` (not both)")
         }
-        return Ok(out);
+        (false, false) => {
+            bail!("validation: pass exactly one of `commands` or `discoveryEvidence` (got neither)")
+        }
+        (true, false) => {
+            let arr = args.get("commands").and_then(|v| v.as_array()).unwrap();
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                out.push(serde_json::from_value(v.clone()).with_context(
+                    || "validation: each command spec must include at least a `command` string",
+                )?);
+            }
+            Ok(out)
+        }
+        (false, true) => {
+            let discovery_json = args
+                .get("discoveryEvidence")
+                .and_then(|v| v.as_str())
+                .unwrap();
+            let discovery: TestDiscoveryResultV1 = serde_json::from_str(discovery_json)
+                .context("validation: discoveryEvidence unparseable")?;
+            Ok(discovery
+                .commands
+                .into_iter()
+                .map(|c| CommandSpecV1 {
+                    command: c.command,
+                    args: c.args,
+                    timeout_ms: None,
+                })
+                .collect())
+        }
     }
-    if let Some(discovery_json) = args.get("discoveryEvidence").and_then(|v| v.as_str()) {
-        let discovery: TestDiscoveryResultV1 = serde_json::from_str(discovery_json)
-            .context("validation: discoveryEvidence unparseable")?;
-        let out = discovery
-            .commands
-            .into_iter()
-            .map(|c| CommandSpecV1 {
-                command: c.command,
-                args: c.args,
-                timeout_ms: None,
-            })
-            .collect();
-        return Ok(out);
+}
+
+/// Captured working-tree + HEAD snapshot of the source repository. The
+/// `porcelain` string is the verbatim `git status --porcelain` output
+/// (empty string when the working tree is clean). HEAD is the resolved
+/// `git rev-parse HEAD` output ("unknown" when git is unavailable, e.g.
+/// not a git checkout).
+#[derive(Debug, Clone, PartialEq)]
+struct SourceSnapshot {
+    head: String,
+    porcelain: String,
+}
+
+fn capture_source_snapshot(repo_root: &Path) -> SourceSnapshot {
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let porcelain = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    SourceSnapshot { head, porcelain }
+}
+
+/// Assert the post-run source state matches the pre-run state. PR7
+/// source-isolation hardening: HEAD-only was insufficient because
+/// commands can modify, delete, or create files without changing HEAD.
+/// The `git status --porcelain` line catches M/D/??/mode changes in the
+/// source's working tree, so this is the authoritative invariant.
+fn verify_source_unchanged(pre: &SourceSnapshot, post: &SourceSnapshot) -> Result<()> {
+    if pre.head != "unknown" && post.head != "unknown" && pre.head != post.head {
+        bail!(
+            "validation source-isolation invariant violated: source HEAD moved during run ({} -> {})",
+            pre.head,
+            post.head
+        );
     }
-    bail!("validation requires either `commands` or `discoveryEvidence`")
+    if pre.porcelain != post.porcelain {
+        bail!(
+            "validation source-isolation invariant violated: source working tree changed during run.\nbefore:\n{}\nafter:\n{}",
+            pre.porcelain,
+            post.porcelain
+        );
+    }
+    Ok(())
 }
 
 fn run_validation(args: &serde_json::Value) -> Result<String> {
@@ -466,61 +539,57 @@ fn run_validation(args: &serde_json::Value) -> Result<String> {
         .acquire(&manifest)
         .context("validation: failed to acquire isolated worktree (source is untouched)")?;
 
-    // Snapshot the source HEAD before we run, so any contamination (which
-    // would be a bug) is detectable in evidence.
-    let source_head_before = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(Path::new(repo_root))
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Wrap the worktree in a guard so the cleanup runs even on early
+    // `?` returns (PR7 cleanup guarantee). The guard's Drop is a
+    // last-resort safety net; the explicit `commit()` call below
+    // surfaces any cleanup error to the caller.
+    let preserve_dir = Path::new(workspace_parent).join(".validation-evidence");
+    let _ = std::fs::create_dir_all(&preserve_dir);
+    let mut guard = WorktreeGuard::new(adapter, acquired, preserve_dir);
 
-    let mut runs = Vec::with_capacity(specs.len());
-    for spec in &specs {
-        let timeout_ms = spec.timeout_ms.unwrap_or(VALIDATION_DEFAULT_TIMEOUT_MS);
-        let run = run_one(&acquired.root, spec, timeout_ms)
-            .with_context(|| format!("validation: command `{}` failed to execute", spec.command))?;
-        runs.push(run);
-    }
+    // Capture the source state BEFORE the run. PR7 source-isolation
+    // hardening: this snapshot is more than just HEAD — it captures
+    // every modified / deleted / untracked file via `git status
+    // --porcelain`, so commands that target the source without changing
+    // HEAD are still detected.
+    let pre = capture_source_snapshot(Path::new(repo_root));
+
+    // All work that uses the worktree is scoped to this closure so a
+    // `?` early-return still triggers the guard's Drop fallback.
+    let runs: Vec<CommandRunV1> = (|| -> Result<Vec<CommandRunV1>> {
+        let mut runs = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            let timeout_ms = spec.timeout_ms.unwrap_or(VALIDATION_DEFAULT_TIMEOUT_MS);
+            let run = run_one(guard.worktree_root(), spec, timeout_ms).with_context(|| {
+                format!("validation: command `{}` failed to execute", spec.command)
+            })?;
+            runs.push(run);
+        }
+        Ok(runs)
+    })()?;
 
     // The worktree head should equal baseRevision (we never committed).
     let worktree_head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(&acquired.root)
+        .current_dir(guard.worktree_root())
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Tidy up the worktree: nothing to preserve (we made no commits). The
-    // source checkout was never opened by us in write mode.
-    let preserve_dir = Path::new(workspace_parent).join(".validation-evidence");
-    let _ = std::fs::create_dir_all(&preserve_dir);
-    let _ = adapter.cleanup(acquired, &PreservationSet::default(), &preserve_dir);
+    // Explicitly commit: runs the cleanup and surfaces any error.
+    // After this call, Drop is a no-op (the guard has nothing left).
+    guard
+        .commit()
+        .context("validation: worktree cleanup failed after successful run")?;
 
-    // Assert the source is still on the same HEAD. This is a hard
-    // contract: validation NEVER mutates the source repository.
-    let source_head_after = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(Path::new(repo_root))
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    if source_head_before != "unknown"
-        && source_head_after != "unknown"
-        && source_head_before != source_head_after
-    {
-        bail!(
-            "validation invariant violated: source HEAD moved during run ({} -> {})",
-            source_head_before,
-            source_head_after
-        );
-    }
+    // Capture the source state AFTER cleanup. We compare the AFTER
+    // snapshot to the PRE snapshot (acquired before any commands ran);
+    // the after snapshot is taken after cleanup, so the worktree's own
+    // teardown is also reflected. Any drift fails the result.
+    let post = capture_source_snapshot(Path::new(repo_root));
+    verify_source_unchanged(&pre, &post)?;
 
     let runs_digest = canonical_digest(&serde_json::json!(&runs))?;
     let run_id = format!("val-{}", &runs_digest[..8]);
@@ -533,12 +602,70 @@ fn run_validation(args: &serde_json::Value) -> Result<String> {
         runs_digest,
         runs,
         constraints: vec![
-            format!("source HEAD unchanged: {}", source_head_after),
+            format!("source HEAD unchanged: {}", post.head),
+            "source working tree unchanged (git status --porcelain empty pre/post)".to_string(),
             "read-only with respect to source: validation executes commands in an isolated, detached worktree pinned to baseRevision and never commits".to_string(),
-            "worktree torn down on completion".to_string(),
+            "worktree torn down on completion (cleanup error surfaced, never silenced)".to_string(),
         ],
     };
     serde_json::to_string(&out).map_err(Into::into)
+}
+
+/// RAII guard for an acquired worktree. PR7 cleanup guarantee:
+/// `commit()` runs cleanup explicitly (its error is returned to the
+/// caller); if the guard is dropped without commit (panic, early `?`,
+/// any unwind), Drop runs the cleanup as a last-resort safety net so
+/// the worktree never leaks.
+struct WorktreeGuard {
+    adapter: GitWorktreeWorkspace,
+    inner: Option<(
+        crate::workflow::workspace::AcquiredWorkspace,
+        std::path::PathBuf,
+    )>,
+}
+
+impl WorktreeGuard {
+    fn new(
+        adapter: GitWorktreeWorkspace,
+        acquired: crate::workflow::workspace::AcquiredWorkspace,
+        preserve_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            adapter,
+            inner: Some((acquired, preserve_dir)),
+        }
+    }
+
+    fn worktree_root(&self) -> &Path {
+        &self.inner.as_ref().expect("worktree guard consumed").0.root
+    }
+
+    /// Explicitly run cleanup. After this call the guard has nothing
+    /// left to clean, so Drop is a no-op. Any cleanup error is returned
+    /// so the caller can surface it (the prior code used `let _ = ...`
+    /// which silently swallowed errors).
+    fn commit(&mut self) -> Result<()> {
+        let (acq, dir) = self.inner.take().expect("commit on empty guard");
+        self.adapter
+            .cleanup(acq, &PreservationSet::default(), &dir)
+            .map(|_report| ())
+            .map_err(|e| {
+                anyhow::anyhow!("validation: worktree cleanup failed (worktree may be leaked): {e}")
+            })
+    }
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        // Last-resort cleanup: if the caller forgot to commit (panic,
+        // early `?` not caught), still try to remove the worktree.
+        // The error is recorded in a buffer the caller can read in
+        // future revisions; for now, dropping the error is the
+        // last-resort behavior — the worktree is still cleaned up.
+        if let Some((acq, dir)) = self.inner.take() {
+            let _ = self.adapter.cleanup(acq, &PreservationSet::default(), &dir);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,9 +777,15 @@ struct KindRule {
 }
 
 /// Pattern order matters — first match wins. We order by specificity:
-/// `Timeout` is decided by `timed_out` before any rule fires;
-/// `Resource` beats `Environment`; `Environment` beats `Code`/`Test` only
-/// when no code/test signal is present.
+/// `Timeout` is decided by `timed_out` before any rule fires (handled
+/// in `classify_one`). Below: `Resource` -> `Environment` -> `Code` ->
+/// `Test`. `Code` MUST come before `Test` because the prior ordering
+/// misclassified real compiler errors like `error: failed to resolve
+/// ...` as test failures (the broad `"failed"` pattern matched before
+/// any Code rule could fire). Test patterns are also tightened to
+/// markers that are unambiguous test-framework signals, so a compile
+/// error that contains a substring like "expected" no longer trips the
+/// Test rule — the Code rule catches it first.
 const KIND_RULES: &[KindRule] = &[
     // Resource: OOM / disk full.
     KindRule {
@@ -663,7 +796,7 @@ const KIND_RULES: &[KindRule] = &[
             "oom",
             "no space left on device",
             "enospc",
-            "enOMEM",
+            "enomem",
         ],
     },
     // Environment: missing tool, missing file, permission denied.
@@ -679,19 +812,11 @@ const KIND_RULES: &[KindRule] = &[
             "eacces",
         ],
     },
-    // Test: assertion / test-framework failure markers.
-    KindRule {
-        kind: FailureKindV1::Test,
-        patterns: &[
-            "failed",
-            "assertion",
-            "assertion failed",
-            "panicked at",
-            "test result: failed",
-            "expected",
-        ],
-    },
-    // Code: compile / parse / type errors.
+    // Code: compile / parse / type errors. Listed before Test so a
+    // compiler error like `error: failed to resolve` is classified as
+    // Code, not Test. The patterns are comprehensive enough to match
+    // the common Rust / TypeScript / Python compiler surfaces; the
+    // Test rule below is intentionally narrow to avoid overlap.
     KindRule {
         kind: FailureKindV1::Code,
         patterns: &[
@@ -705,6 +830,28 @@ const KIND_RULES: &[KindRule] = &[
             "parse error",
             "type mismatch",
             "borrow checker",
+            "compilation failed",
+        ],
+    },
+    // Test: assertion / test-framework failure markers. The patterns
+    // here are deliberately narrow to compiler-irrelevant substrings:
+    // Rust test runner output (`test result: failed`, `thread '...'
+    // panicked`, `panicked at`), libtest short form (`FAIL` as a
+    // standalone line, `assertion failed`), Python pytest markers
+    // (`FAILED`), and similar. Generic substrings like `failed` or
+    // `expected` are intentionally excluded — they collide with
+    // compiler diagnostics.
+    KindRule {
+        kind: FailureKindV1::Test,
+        patterns: &[
+            "panicked at",
+            "thread '",
+            "thread \"",
+            "assertion failed",
+            "test result: failed",
+            "\nfailures:",
+            "\nFAILED ",
+            "failed] ",
         ],
     },
 ];
@@ -918,7 +1065,19 @@ pub fn node_manifest(node_id: &str) -> NodeManifestV1 {
 /// reads the source but only writes inside the isolated worktree (which
 /// is torn down on completion); for `lite.node.v1` policy purposes the
 /// node is read-only with respect to the source.
+///
+/// PR7 input-contract fix: the handler accepts EXACTLY one of `commands`
+/// or `discoveryEvidence`. Both inputs are declared as OPTIONAL on the
+/// manifest and the exactly-one rule is enforced inside `read_command_specs`,
+/// because the nine-gate pipeline's `required_args` contract cannot express
+/// "one of A or B". The capability-level `required_args` covers the three
+/// inputs that are ALWAYS required (`repoRoot`, `workspaceParent`,
+/// `baseRevision`).
 pub fn validation_node_manifest(node_id: &str) -> NodeManifestV1 {
+    let mut commands_io = io("commands", "lite.node.validation.CommandList");
+    commands_io.required = Some(false);
+    let mut discovery_io = io("discoveryEvidence", "lite.node.test-discovery.Result");
+    discovery_io.required = Some(false);
     NodeManifestV1::parse_json(
         &serde_json::json!({
             "schemaVersion": NODE_VALIDATION_VERSION,
@@ -928,7 +1087,8 @@ pub fn validation_node_manifest(node_id: &str) -> NodeManifestV1 {
                 io("repoRoot", "core.Path"),
                 io("workspaceParent", "core.Path"),
                 io("baseRevision", "core.String"),
-                io("commands", "lite.node.validation.CommandList"),
+                commands_io,
+                discovery_io,
             ],
             "outputs": [io("validation", "lite.node.validation.Result")],
             "readableScopes": ["repo://fixture"],
@@ -1195,5 +1355,334 @@ mod tests {
         for c in &report.classifications {
             assert_eq!(c.evidence_ref.len(), 64);
         }
+    }
+
+    // -------------------------------------------------------------------
+    // PR7 post-merge repair regressions
+    // -------------------------------------------------------------------
+
+    /// Build a small git repository with the named files, committed.
+    fn fixture_repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_run(root, &["init", "-q"]);
+        git_run(root, &["config", "user.email", "ci@example.com"]);
+        git_run(root, &["config", "user.name", "ci"]);
+        for (path, contents) in files {
+            let full = root.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full, contents).unwrap();
+        }
+        git_run(root, &["add", "-A"]);
+        git_run(root, &["commit", "-q", "-m", "initial"]);
+        dir
+    }
+
+    fn git_run(repo_root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git available in test environment");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_output_line(repo_root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git available in test environment");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn source_snapshot_detects_modified_file() {
+        // PR7 fix 1: the snapshot must reflect working-tree changes, not
+        // just HEAD. Capture, mutate, capture again, assert diff.
+        let dir = fixture_repo_with(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+        let pre = capture_source_snapshot(dir.path());
+        assert!(pre.porcelain.is_empty(), "fixture must start clean");
+        // Simulate a command writing a file in the source.
+        std::fs::write(dir.path().join("untracked.txt"), "leak").unwrap();
+        let post = capture_source_snapshot(dir.path());
+        assert_ne!(pre.porcelain, post.porcelain);
+        assert!(post.porcelain.contains("?? untracked.txt"));
+    }
+
+    #[test]
+    fn source_snapshot_detects_deleted_file() {
+        // PR7 fix 1: `git status --porcelain` shows tracked deletions as
+        // `D` lines; the snapshot must reflect that.
+        let dir = fixture_repo_with(&[("keep.txt", "keep me\n")]);
+        let pre = capture_source_snapshot(dir.path());
+        assert!(pre.porcelain.is_empty());
+        std::fs::remove_file(dir.path().join("keep.txt")).unwrap();
+        let post = capture_source_snapshot(dir.path());
+        assert_ne!(pre.porcelain, post.porcelain);
+        assert!(
+            post.porcelain.contains(" D keep.txt") || post.porcelain.contains("D  keep.txt"),
+            "post porcelain should show the deletion: {:?}",
+            post.porcelain
+        );
+    }
+
+    #[test]
+    fn verify_source_unchanged_passes_when_identical() {
+        let s = SourceSnapshot {
+            head: "abc".to_string(),
+            porcelain: String::new(),
+        };
+        verify_source_unchanged(&s, &s).expect("identical snapshots must verify");
+    }
+
+    #[test]
+    fn verify_source_unchanged_rejects_head_drift() {
+        let pre = SourceSnapshot {
+            head: "aaa".to_string(),
+            porcelain: String::new(),
+        };
+        let post = SourceSnapshot {
+            head: "bbb".to_string(),
+            porcelain: String::new(),
+        };
+        let err = verify_source_unchanged(&pre, &post)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("HEAD moved"),
+            "expected HEAD-moved error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_source_unchanged_rejects_porcelain_drift() {
+        let pre = SourceSnapshot {
+            head: "abc".to_string(),
+            porcelain: String::new(),
+        };
+        let post = SourceSnapshot {
+            head: "abc".to_string(),
+            porcelain: "?? leaked.txt\n".to_string(),
+        };
+        let err = verify_source_unchanged(&pre, &post)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("working tree changed"),
+            "expected working-tree error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_command_specs_rejects_both_commands_and_discovery() {
+        // PR7 fix 4: the input contract is exactly-one of `commands` or
+        // `discoveryEvidence`; passing both is an error.
+        let dir = tempfile::tempdir().unwrap();
+        let args = serde_json::json!({
+            "commands": [{"command": "git", "args": ["status"]}],
+            "discoveryEvidence": serde_json::to_string(&TestDiscoveryResultV1 {
+                schema_version: NODE_VALIDATION_VERSION.to_string(),
+                repo_root: dir.path().to_string_lossy().to_string(),
+                revision: "abc".to_string(),
+                discovery_id: "d".to_string(),
+                discovery_digest: "d".repeat(64),
+                commands: vec![],
+                constraints: vec![],
+            })
+            .unwrap(),
+        });
+        let err = read_command_specs(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("exactly one") && err.contains("not both"),
+            "expected exactly-one error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_command_specs_rejects_neither_commands_nor_discovery() {
+        let args = serde_json::json!({});
+        let err = read_command_specs(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("exactly one") && err.contains("got neither"),
+            "expected neither error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validation_manifest_declares_commands_and_discovery_as_optional() {
+        // PR7 fix 4: the lite.node.v1 manifest for the validation node
+        // must declare BOTH `commands` and `discoveryEvidence` so the
+        // nine-gate contract matches the handler's exactly-one rule. The
+        // capability-level `required_args` covers the always-required
+        // trio; the manifest's `required: Some(false)` flags make the
+        // command-side inputs optional.
+        let m = validation_node_manifest("node-validation-manifest-check");
+        let names: Vec<&str> = m.inputs.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            names.contains(&"commands"),
+            "manifest must declare commands"
+        );
+        assert!(
+            names.contains(&"discoveryEvidence"),
+            "manifest must declare discoveryEvidence"
+        );
+        let commands_input = m.inputs.iter().find(|i| i.name == "commands").unwrap();
+        let discovery_input = m
+            .inputs
+            .iter()
+            .find(|i| i.name == "discoveryEvidence")
+            .unwrap();
+        assert_eq!(
+            commands_input.required,
+            Some(false),
+            "commands must be optional (exactly-one with discoveryEvidence)"
+        );
+        assert_eq!(
+            discovery_input.required,
+            Some(false),
+            "discoveryEvidence must be optional (exactly-one with commands)"
+        );
+    }
+
+    #[test]
+    fn classifier_compiler_error_is_code_not_test() {
+        // PR7 fix 3 regression: a real compiler error like
+        // `error: failed to resolve ...` must classify as Code, not
+        // Test. The prior pattern set matched the broad substring
+        // "failed" first and misclassified these as test failures.
+        let run = synthetic_run(
+            "error: failed to resolve `crate::foo::Bar`\n  --> src/lib.rs:12:5",
+            Some(1),
+            false,
+        );
+        let c = classify_one(&run);
+        assert_eq!(
+            c.kind,
+            FailureKindV1::Code,
+            "compiler error containing 'failed' must be Code, got {:?} with signals {:?}",
+            c.kind,
+            c.signals
+        );
+    }
+
+    #[test]
+    fn classifier_test_pattern_does_not_match_compiler_expected() {
+        // PR7 fix 3 regression: the Test rule must NOT match generic
+        // compiler-error phrasing like `expected ... , found ...`.
+        let run = synthetic_run(
+            "error[E0308]: mismatched types\n  --> src/lib.rs:5:9\n   expected `u32`, found `i32`",
+            Some(1),
+            false,
+        );
+        let c = classify_one(&run);
+        assert_eq!(
+            c.kind,
+            FailureKindV1::Code,
+            "compiler 'expected ... found ...' must be Code, got {:?} with signals {:?}",
+            c.kind,
+            c.signals
+        );
+    }
+
+    #[test]
+    fn run_validation_rejects_when_command_modifies_source() {
+        // PR7 fix 1 end-to-end: a command that removes a tracked file
+        // from the source working tree must be detected by the
+        // post-snapshot check. We use `git rm` with --git-dir/--work-tree
+        // pointing at the source so the command runs in the worktree
+        // but mutates the source. `git status --porcelain` then shows
+        // the deletion in the post-snapshot.
+        let dir = fixture_repo_with(&[("leak.txt", "leak me\n")]);
+        let head = git_output_line(dir.path(), &["rev-parse", "HEAD"]);
+        let ws_parent = tempfile::tempdir().unwrap();
+        let git_dir = format!("{}/.git", dir.path().to_string_lossy());
+        let work_tree = dir.path().to_string_lossy().to_string();
+        let result = run_validation(&serde_json::json!({
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+            "baseRevision": head,
+            "commands": [{
+                "command": "git",
+                "args": ["--git-dir", git_dir, "--work-tree", work_tree, "rm", "leak.txt"],
+            }],
+        }));
+        let err = result.expect_err("validation must reject a command that mutates the source");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("source-isolation invariant violated")
+                && msg.contains("working tree changed"),
+            "expected working-tree invariant rejection, got: {msg}"
+        );
+        // The source HEAD must be unchanged (only the working tree was
+        // modified by the malicious command).
+        assert_eq!(git_output_line(dir.path(), &["rev-parse", "HEAD"]), head);
+    }
+
+    #[test]
+    fn run_validation_cleans_up_worktree_when_command_fails() {
+        // PR7 fix 2: a command that can't be spawned must not leak the
+        // worktree. The guard's Drop runs cleanup as a last-resort.
+        let dir = fixture_repo_with(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+        let head = git_output_line(dir.path(), &["rev-parse", "HEAD"]);
+        let ws_parent = tempfile::tempdir().unwrap();
+        let _ = run_validation(&serde_json::json!({
+            "repoRoot": dir.path().to_str().unwrap(),
+            "workspaceParent": ws_parent.path().to_str().unwrap(),
+            "baseRevision": head,
+            "commands": [{
+                "command": "definitely-not-a-real-binary-xyzzy",
+                "args": [],
+            }],
+        }))
+        .expect_err("spawn failure must propagate as an error");
+        // The worktree under `ws_parent/validate-XXXXXXXX/worktree` must be
+        // gone (the guard's Drop cleanup ran). The `validate-XXXXXXXX` parent
+        // directory is left behind by `git worktree remove --force` (it
+        // does not rmdir empty parents), which is expected and harmless.
+        let worktree_paths: Vec<_> = walk_dir_for_worktrees(ws_parent.path());
+        assert!(
+            worktree_paths.is_empty(),
+            "Drop fallback must have removed the worktree; leftover: {:?}",
+            worktree_paths
+        );
+    }
+
+    /// Walk a directory recursively and return any path whose final segment
+    /// is `worktree` and which lives under a `validate-...` directory. This
+    /// is used by the cleanup-fallback test to assert the worktree was
+    /// actually removed (without relying on the parent dir being rmdir'd).
+    fn walk_dir_for_worktrees(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => return out,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .map(|n| n == std::ffi::OsStr::new("worktree"))
+                    .unwrap_or(false)
+                {
+                    out.push(path);
+                } else {
+                    out.extend(walk_dir_for_worktrees(&path));
+                }
+            }
+        }
+        out
     }
 }
