@@ -1,3 +1,15 @@
+## Unreleased
+
+- E5/I04 (#128) — `src/workflow/node_review.rs`: governed `security-review`,
+  `evidence-audit`, and `independent-review` `lite.node` capabilities.
+  Deterministic, read-only, no model, no apply/merge authority. The
+  independent-review node composes an `approve | changes-required | reject`
+  verdict from the upstream security and audit kinds and explicitly
+  records "review does not authorize apply or merge" in its reasons.
+  Conformance: 25 in-module unit tests + 5 conformance tests in
+  `tests/node_library_conformance.rs` (980 lib + 18 lib-conformance +
+  30 impl-conformance + 2 kit tests passing on this branch).
+
 ## V1.7.0 Fast Governed Loop V1 — Evaluation Pipeline
 
 - Added the **Fast Governed Loop V1** automated evaluation pipeline (`src/workflow/evaluate.rs`):
