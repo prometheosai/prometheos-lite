@@ -2,8 +2,8 @@ use super::types::{AppConfig, BillingSource, LlmProviderConfig, LlmRoutingConfig
 
 #[test]
 fn test_default_config_builds() {
-    let config: AppConfig = serde_json::from_str(r#"{"configVersion":"1.0.0"}"#)
-        .expect("default config should parse");
+    let config: AppConfig =
+        serde_json::from_str(r#"{"configVersion":"1.0.0"}"#).expect("default config should parse");
     assert_eq!(config.provider, "openrouter");
     assert_eq!(config.base_url, "https://openrouter.ai/api");
     assert_eq!(config.model, "meta-llama/llama-3.3-8b-instruct:free");
