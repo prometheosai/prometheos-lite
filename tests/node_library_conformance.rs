@@ -20,6 +20,10 @@ use prometheos_lite::workflow::node_library::{
     CAP_DISCOVERY, CAP_INTAKE, CAP_PLANNING, DiscoveryResultV1, IntakeTaskManifestV1, ScopedPlanV1,
     intake_discovery_planning_registry, node_manifest,
 };
+use prometheos_lite::workflow::node_review::{
+    CAP_EVIDENCE_AUDIT, CAP_INDEPENDENT_REVIEW, CAP_SECURITY_REVIEW, IndependentReviewResultV1,
+    ReviewKind, SecurityReviewResultV1, review_node_manifest, review_registry,
+};
 use prometheos_lite::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use prometheos_lite::workflow::node_validation::{
     CAP_DIAGNOSTIC, CAP_TEST_DISCOVERY, CAP_VALIDATION, CommandRunV1, DiagnosticReportV1,
@@ -761,4 +765,204 @@ fn diagnostic_emits_evidence_backed_classifications() {
         report.classifications[0].evidence_ref,
         report2.classifications[0].evidence_ref
     );
+}
+
+// ---------------------------------------------------------------------------
+// E5/I04 (issue #128) — security review, evidence audit, and
+// independent correctness review nodes.
+// ---------------------------------------------------------------------------
+
+fn review_runner() -> NodeRunner {
+    NodeRunner::new(review_registry())
+}
+
+#[test]
+fn security_review_rejects_critical_secret_in_candidate_diff() {
+    // Acceptance: security review covers secrets. A hard-coded PEM
+    // private key in the candidate diff must emit a critical finding
+    // and force the verdict to `reject`.
+    let mut runner = review_runner();
+    let caps = restrictions();
+    let m = review_node_manifest("node-security-review", CAP_SECURITY_REVIEW);
+    let diff = "diff --git a/keys.txt b/keys.txt\n+++ b/keys.txt\n+-----BEGIN RSA PRIVATE KEY-----\nMIIEog==\n";
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_SECURITY_REVIEW,
+        json!({
+            "repoRoot": std::env::temp_dir().to_string_lossy(),
+            "candidateDiff": diff,
+        }),
+        "sec-secret",
+    )
+    .expect("security-review completes");
+    let r: SecurityReviewResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(r.kind, ReviewKind::Reject);
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.category == "secrets" && f.severity == "critical"),
+        "expected a critical secrets finding, got: {:?}",
+        r.findings
+    );
+    assert_eq!(r.result_digest.len(), 64);
+}
+
+#[test]
+fn security_review_flags_introduced_dependency_as_changes_required() {
+    // Acceptance: security review covers dependencies. A new
+    // dependency must force `changes-required` (warning, not
+    // critical) so the operator gets to confirm.
+    let mut runner = review_runner();
+    let caps = restrictions();
+    let m = review_node_manifest("node-security-review", CAP_SECURITY_REVIEW);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_SECURITY_REVIEW,
+        json!({
+            "repoRoot": std::env::temp_dir().to_string_lossy(),
+            "introducedDependencies": [
+                {"crateName": "tokio", "version": "1.2.3"}
+            ],
+        }),
+        "sec-dep",
+    )
+    .expect("security-review completes");
+    let r: SecurityReviewResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(r.kind, ReviewKind::ChangesRequired);
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.message.contains("new dependency"))
+    );
+}
+
+#[test]
+fn security_review_rejects_git_command_with_external_git_dir() {
+    // Acceptance: security review covers commands. A git command that
+    // would escape the worktree via --git-dir/--work-tree must be
+    // rejected at plan time, before any process is spawned.
+    let mut runner = review_runner();
+    let caps = restrictions();
+    let m = review_node_manifest("node-security-review", CAP_SECURITY_REVIEW);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_SECURITY_REVIEW,
+        json!({
+            "repoRoot": std::env::temp_dir().to_string_lossy(),
+            "candidateCommands": [
+                {
+                    "command": "git",
+                    "args": ["--git-dir", "/tmp/somewhere/.git",
+                             "--work-tree", "/tmp/somewhere", "rm", "leak.txt"]
+                }
+            ],
+        }),
+        "sec-git-escape",
+    )
+    .expect("security-review completes");
+    let r: SecurityReviewResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(r.kind, ReviewKind::Reject);
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.message.contains("escape the worktree"))
+    );
+}
+
+#[test]
+fn evidence_audit_rejects_when_expected_artifacts_missing() {
+    // Acceptance: evidence audit fails closed on missing artifacts.
+    let mut runner = review_runner();
+    let caps = restrictions();
+    let m = review_node_manifest("node-evidence-audit", CAP_EVIDENCE_AUDIT);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_EVIDENCE_AUDIT,
+        json!({
+            "workId": "w-1",
+            "expected": ["plan-evidence", "validation-evidence", "implement-evidence"],
+            "observed": {
+                "plan-evidence": "a".repeat(64),
+                "validation-evidence": "b".repeat(64)
+                // implement-evidence intentionally missing
+            }
+        }),
+        "audit-missing",
+    )
+    .expect("evidence-audit completes");
+    let report: serde_json::Value = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(report["kind"], "reject");
+    let missing = report["missing"].as_array().unwrap();
+    assert!(
+        missing.iter().any(|v| v == "implement-evidence"),
+        "expected implement-evidence to be reported missing: {missing:?}"
+    );
+}
+
+#[test]
+fn independent_review_composes_security_and_audit() {
+    // Acceptance: independent review emits `approve | changes-
+    // required | reject` and the node does NOT authorize apply/merge.
+    let mut runner = review_runner();
+    let caps = restrictions();
+    let m = review_node_manifest("node-independent-review", CAP_INDEPENDENT_REVIEW);
+
+    // All three composition cases in one test (deterministic).
+    let cases = [
+        (
+            ReviewKind::Approve,
+            ReviewKind::Approve,
+            ReviewKind::Approve,
+        ),
+        (
+            ReviewKind::Approve,
+            ReviewKind::ChangesRequired,
+            ReviewKind::ChangesRequired,
+        ),
+        (
+            ReviewKind::ChangesRequired,
+            ReviewKind::Approve,
+            ReviewKind::ChangesRequired,
+        ),
+        (ReviewKind::Approve, ReviewKind::Reject, ReviewKind::Reject),
+        (ReviewKind::Reject, ReviewKind::Approve, ReviewKind::Reject),
+        (ReviewKind::Reject, ReviewKind::Reject, ReviewKind::Reject),
+    ];
+    for (key, (sec, aud, expected)) in cases.into_iter().enumerate() {
+        let outcome = run_node(
+            &mut runner,
+            &m,
+            &caps,
+            CAP_INDEPENDENT_REVIEW,
+            json!({
+                "workId": "w-comp",
+                "securityKind": sec,
+                "auditKind": aud,
+                "securityDigest": "a".repeat(64),
+                "auditDigest": "b".repeat(64)
+            }),
+            &format!("review-comp-{key}"),
+        )
+        .expect("independent-review completes");
+        let r: IndependentReviewResultV1 = serde_json::from_str(&outcome.output).unwrap();
+        assert_eq!(
+            r.kind, expected,
+            "security={sec:?} audit={aud:?} expected={expected:?}, got={:?}",
+            r.kind
+        );
+        // The review MUST NOT emit any "apply" / "merge" signal.
+        let reasons_joined = r.reasons.join("\n");
+        assert!(
+            reasons_joined.contains("does not authorize apply or merge"),
+            "reasons must explicitly state no apply/merge authority: {reasons_joined}"
+        );
+    }
 }
