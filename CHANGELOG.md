@@ -1,5 +1,18 @@
 ## Unreleased
 
+- E6/I01 (#130) Slice B — `AppConfig::configVersion` field added
+  and required; `#[serde(deny_unknown_fields)]` enabled at the top
+  level. The loader fails closed when `configVersion` is missing,
+  malformed, or has a different major from the binary's
+  `CONFIG_SCHEMA_VERSION` (currently `1.0.0`); minor/patch
+  differences are forward-compatible. The committed
+  `prometheos.config.json` is updated to set `configVersion:
+  "1.0.0"`. 5 new in-module unit tests in `src/config/settings/
+  loader.rs` (load default version → ok; missing → fail; unknown
+  major → fail; minor bump → ok; unknown field → fail). 1 existing
+  fixture in `src/workflow/redaction.rs` is updated to include
+  `configVersion`. 998 → 1003 lib tests passing on this branch.
+
 - E5/I04 (#128) — `src/workflow/node_review.rs`: governed `security-review`,
   `evidence-audit`, and `independent-review` `lite.node` capabilities.
   Deterministic, read-only, no model, no apply/merge authority. The
