@@ -16,6 +16,10 @@ use anyhow::Result;
 use serde_json::json;
 
 use prometheos_lite::workflow::node_contracts::{NodeManifestV1, OutcomeKind};
+use prometheos_lite::workflow::node_doc_release::{
+    CAP_DOC_IMPACT, CAP_RELEASE_PREP, DocImpactResultV1, ReleasePrepResultV1,
+    doc_release_node_manifest, doc_release_registry,
+};
 use prometheos_lite::workflow::node_library::{
     CAP_DISCOVERY, CAP_INTAKE, CAP_PLANNING, DiscoveryResultV1, IntakeTaskManifestV1, ScopedPlanV1,
     intake_discovery_planning_registry, node_manifest,
@@ -965,4 +969,139 @@ fn independent_review_composes_security_and_audit() {
             "reasons must explicitly state no apply/merge authority: {reasons_joined}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// E5/I05 (issue #129) — documentation-impact and release-preparation
+// nodes.
+// ---------------------------------------------------------------------------
+
+fn doc_release_runner() -> NodeRunner {
+    NodeRunner::new(doc_release_registry())
+}
+
+#[test]
+fn doc_impact_flags_changelog_change_as_changes_required() {
+    // Acceptance: documentation changes stay within approved scope
+    // (the node classifies but never writes). A CHANGELOG.md change
+    // must surface as a `required`-severity finding.
+    let mut runner = doc_release_runner();
+    let caps = restrictions();
+    let m = doc_release_node_manifest("node-doc-impact", CAP_DOC_IMPACT);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_DOC_IMPACT,
+        json!({
+            "repoRoot": std::env::temp_dir().to_string_lossy(),
+            "changedPaths": ["CHANGELOG.md"]
+        }),
+        "doc-changelog",
+    )
+    .expect("doc-impact completes");
+    assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
+    let r: DocImpactResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(r.kind, ReviewKind::ChangesRequired);
+    assert!(
+        r.findings.iter().any(|f| f.severity == "required"
+            && matches!(
+                f.category,
+                prometheos_lite::workflow::node_doc_release::DocCategoryV1::Changelog
+            )),
+        "expected a required CHANGELOG finding, got: {:?}",
+        r.findings
+    );
+    // The node is read-only: no file was created or modified on disk.
+    assert!(r.constraints.iter().any(|c| c.contains("read-only")));
+}
+
+#[test]
+fn doc_impact_classifies_user_guide_change_as_recommended_approve() {
+    let mut runner = doc_release_runner();
+    let caps = restrictions();
+    let m = doc_release_node_manifest("node-doc-impact", CAP_DOC_IMPACT);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_DOC_IMPACT,
+        json!({
+            "repoRoot": std::env::temp_dir().to_string_lossy(),
+            "changedPaths": ["docs/guides/how-flows-work.md"]
+        }),
+        "doc-userguide",
+    )
+    .expect("doc-impact completes");
+    let r: DocImpactResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(r.kind, ReviewKind::Approve);
+    assert!(r.findings.iter().any(|f| f.severity == "recommended"
+        && matches!(
+            f.category,
+            prometheos_lite::workflow::node_doc_release::DocCategoryV1::UserGuide
+        )));
+}
+
+#[test]
+fn release_prep_includes_approvals_and_no_authorization_field() {
+    // Acceptance: release output links implementation / validation /
+    // review / human-decision evidence AND no node performs merge /
+    // publish / deployment without explicit authority. The
+    // release-prep node must produce a document with explicit
+    // approval requirements; it must NOT carry any field that
+    // authorizes publish/merge/deploy.
+    let mut runner = doc_release_runner();
+    let caps = restrictions();
+    let m = doc_release_node_manifest("node-release-prep", CAP_RELEASE_PREP);
+    let outcome = run_node(
+        &mut runner,
+        &m,
+        &caps,
+        CAP_RELEASE_PREP,
+        json!({
+            "workId": "w-release-1",
+            "assumedVerdict": "approve",
+            "changeSummary": "Adds doc-impact + release-prep nodes.",
+            "implementationDigest": "a".repeat(64),
+            "validationDigest": "b".repeat(64),
+            "auditDigest": "c".repeat(64),
+            "independentReviewDigest": "d".repeat(64),
+            "docImpactDigest": "e".repeat(64)
+        }),
+        "release-prep-1",
+    )
+    .expect("release-prep completes");
+    assert_eq!(outcome.result.outcome, OutcomeKind::Completed);
+    let r: ReleasePrepResultV1 = serde_json::from_str(&outcome.output).unwrap();
+    // Operator + reviewer approvals always present.
+    let roles: Vec<&str> = r.approvals.iter().map(|a| a.role.as_str()).collect();
+    assert!(roles.contains(&"operator"));
+    assert!(roles.contains(&"reviewer"));
+    // Every cited upstream digest appears in the document.
+    for d in ["a", "b", "c", "d", "e"].iter() {
+        assert!(r.cited_digests.contains(&d.repeat(64)));
+    }
+    // The output JSON must NOT contain any field that could be
+    // interpreted as "apply" / "publish" / "merge" / "tag" / "push"
+    // authorization. Defensive: assert the wire format.
+    let raw: serde_json::Value = serde_json::from_str(&outcome.output).unwrap();
+    for forbidden in [
+        "authorized",
+        "apply",
+        "merge",
+        "publish",
+        "tag",
+        "push",
+        "deploy",
+    ] {
+        assert!(
+            !raw.as_object().unwrap().contains_key(forbidden),
+            "release-prep output must not carry a `{forbidden}` field"
+        );
+    }
+    // Constraints must assert the node has no side effects.
+    let constraints_joined = r.constraints.join("\n");
+    assert!(constraints_joined.contains("no file writes"));
+    assert!(constraints_joined.contains("no side effects"));
+    assert!(constraints_joined.contains("operator must perform the actual merge"));
 }

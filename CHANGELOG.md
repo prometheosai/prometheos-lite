@@ -9,6 +9,21 @@
   Conformance: 25 in-module unit tests + 5 conformance tests in
   `tests/node_library_conformance.rs` (980 lib + 18 lib-conformance +
   30 impl-conformance + 2 kit tests passing on this branch).
+- E5/I05 (#129) — `src/workflow/node_doc_release.rs`: governed
+  `doc-impact` and `release-prep` `lite.node` capabilities.
+  `doc-impact` is a read-only classifier that maps the candidate's
+  changed paths to doc zones (user-guide, architecture, api-reference,
+  tutorial, changelog, readme) and emits findings with severity
+  `required` (CHANGELOG / README) or `recommended` (other zones).
+  `release-prep` composes a release-note artifact from upstream
+  evidence (implementation, validation, audit, independent-review,
+  doc-impact) and enumerates the operator / security / reviewer / doc
+  approvals required BEFORE any release action. The node carries
+  NO authorization field; it is an artifact producer, not a
+  publisher. Conformance: 18 in-module unit tests + 3 conformance
+  tests in `tests/node_library_conformance.rs` (998 lib + 21
+  lib-conformance + 30 impl-conformance + 2 kit tests passing on this
+  branch).
 
 ## V1.7.0 Fast Governed Loop V1 — Evaluation Pipeline
 
