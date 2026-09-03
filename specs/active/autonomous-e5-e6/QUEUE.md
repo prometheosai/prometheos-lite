@@ -75,24 +75,76 @@ workarounds.
      pass the conformance suite.
 3. Update handoff and `specs/loop-engineering/changes/` once both
    items merge; close epic #106.
+4. **R3 — E5 closeout bookkeeping (PR3)** — the E5 epic closeout
+   PR: a one-commit PR that records the E5 closeout comment on
+   #106, updates the queue doc, and closes any loose bookkeeping.
+   It exists so the E5→E6 transition is a clean handoff, not a
+   silent cut. (Already completed in this session: comment on
+   #106 + queue-doc update.)
 
 ### Phase 2 — E6 (developer-facing product, experimental surfaces)
 
-4. **#130 — E6/I01: stabilize CLI, project config, and workflow
-   templates** (PR3)
-   - No new experimental surface; documentation, error messages,
-     config validation, and template ergonomics only.
-5. **#131 — E6/I02: run inspector, evidence viewer, human-decision
-   interface** (PR4)
-6. **#132 — E6/I03: local API + durable execution event stream** (PR5)
-7. **#133 — E6/I04: provider routing, policy profiles, cost accounting**
-   (PR6)
-8. **#134 — E6/I05: repository onboarding + actionable diagnostics**
-   (PR7)
-9. #135 — E6/I06 (local web dashboard) is **experimental**; the
-   canonical roadmap and `product-surface-inventory.md` list it as
-   such. Out of scope for the alpha promise; deferred to a later
-   issue once #130-#134 ship.
+The E6 issues are each large enough to span multiple PRs. The
+queue below documents the **first bounded slice** of each issue
+that fits the 5-file/200-LOC default PR budget and ships real
+value. Additional slices are added to the queue after the first
+slice of each issue merges, in dependency order.
+
+5. **R4 — #130 (E6/I01) Slice B: config version + invalid-config
+   diagnostics** (PR4)
+   - Add a `configVersion: String` field to `AppConfig`; the
+     loader rejects unknown versions with a message naming the
+     `configVersion` field and the supported range.
+   - Add an integration test that loads a fixture config and
+     asserts the error message names the field and the
+     supported versions.
+   - Comparator: ≥ 2 new integration tests; `cargo test --test
+     config_loader_tests` (or equivalent) green; no
+     `Cargo.toml`/`Cargo.lock` changes.
+6. **R5 — #130 Slice C: workflow templates for bug-fix / feature
+   / refactor / test / docs / review** (PR5)
+   - Add 6 new flow YAMLs under `flows/`, registered in
+     `TemplateLoader`; each is parseable and a unit test asserts
+     the loader enumerates it.
+7. **R6 — #130 Slice A: CLI contract integration tests** (PR6)
+   - Add CLI-parse-only tests (no runtime needed) for each
+     top-level `Commands` variant, asserting the clap parser
+     accepts the documented invocation and rejects malformed
+     ones with an actionable error.
+8. **R7 — #131 (E6/I02) Run inspector, evidence viewer, human-decision
+   interface** (PR7+)
+   - First slice: a read-only `prometheos work inspect <work_id>`
+     subcommand that prints graph state, node attempts, evidence
+     chain, and approval history to stdout. The interface cannot
+     mutate state. Companion conformance tests drive it through
+     the CLI parser + a synthetic work fixture.
+9. **R8 — #132 (E6/I03) Local API + durable execution event stream**
+   (PR8+)
+   - The existing `src/api/` surface already implements the
+     headless runtime control boundary. The first slice is a
+     regression that locks the API's read-model rebuild property
+     (cursors, idempotent mutations) with a dedicated test
+     suite, not new endpoints.
+10. **R9 — #133 (E6/I04) Provider routing, policy profiles, cost
+    accounting** (PR9+)
+    - First slice: an explicit `CompatibilityDecision` record
+    wired into the existing `node_runner` path; the
+    `prometheosai/soma#83` semantics are documented in code
+    (an enum + the `WorkRequirements ∩ RuntimeCapabilitySet
+    ∩ effective ExecutionProfile = CompatibilityDecision`
+    formula) but a full SOMA-published contract consumer is out
+    of scope here.
+11. **R10 — #134 (E6/I05) Repository onboarding + actionable
+    diagnostics** (PR10+)
+    - First slice: a deterministic, rule-based detector for
+    the most common languages + package systems + test
+    commands (Cargo, npm, Go, Python, Make). Confidence +
+    evidence are emitted in the output. The detector NEVER
+    modifies project files; the operator must approve.
+12. #135 — E6/I06 (local web dashboard) is **experimental**; the
+    canonical roadmap and `product-surface-inventory.md` list it as
+    such. Out of scope for the alpha promise; deferred to a later
+    issue once #130-#134 ship.
 
 ### Phase 3 — P1 follow-ups from the canonical roadmap
 
@@ -173,3 +225,11 @@ recorded in the PR body.
 
 - 2026-09-02: queue opened; baseline captured (Phase 0).
 - 2026-09-02: ready to begin Phase 1.
+- 2026-09-03: **Phase 1 (E5 closeout) complete.** PR #207 (E5/I04
+  review-nodes, merge 6e11a72) and PR #208 (E5/I05 doc/release-nodes,
+  merge fa305e0) merged. Issues #128 and #129 closed. E5 epic #106
+  delivery checklist 5/5; closeout comment posted. 998 lib + 21
+  lib-conformance + 30 impl-conformance + 2 kit tests passing.
+- 2026-09-03: **Phase 2 opened.** E6 work is now picked up per
+  the per-slice plan in this doc. First task: R4 (#130 Slice B —
+  config version + diagnostics).
