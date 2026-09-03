@@ -28,6 +28,7 @@ pub mod memory_contracts;
 pub mod node_contracts;
 pub mod node_implementation;
 pub mod node_library;
+pub mod node_review;
 pub mod node_runner;
 pub mod node_validation;
 pub mod policy;
