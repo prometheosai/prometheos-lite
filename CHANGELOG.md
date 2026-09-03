@@ -81,6 +81,21 @@
   lib-conformance + 30 impl-conformance + 2 kit tests passing on this
   branch).
 
+## E5 — Governed node library (epic closeout, 2026-09-03)
+
+The E5 epic ([#106](https://github.com/prometheosai/prometheos-lite/issues/106)) is now complete end-to-end with all five task-level issues closed:
+- #125 — `intake` / `repo-discovery` / `planning` (E5/I01, PR #194)
+- #126 — `implement` / `repair` (E5/I02, PR #196 + repair rounds 1–5, PRs #197–#201)
+- #127 — `test-discovery` / `validation` / `diagnostic` (E5/I03, PRs #202–#204 + repair rounds 1–2, PRs #205–#206)
+- #128 — `security-review` / `evidence-audit` / `independent-review` (E5/I04, PR #207)
+- #129 — `doc-impact` / `release-prep` (E5/I05, PR #208)
+
+All eight E5 capabilities are deterministic, read-only with respect to the source repository (every manifest declares `writableScopes: []`), and pass through the generic nine-gate `NodeRunner` with the same conformance machinery (`tests/node_library_conformance.rs`). The node library exposes a consistent contract surface (typed inputs, typed outputs, evidence digests) and a uniform registry/macro pattern.
+
+The E5 exit criteria are met: the core coding workflow now uses independently governed nodes; every node emits typed evidence and terminal outcomes; failure routing targets the correct specialist (e.g. `diagnostic` after `validation`; `independent-review` after `security-review` + `evidence-audit`); and the independent-review node records "does not authorize apply or merge" in its reasons, ensuring the review path cannot itself trigger an apply.
+
+The next autonomous-loop task is `R3` (close E5 epic bookkeeping + advance to E6) and then `R4..N` (E6 in scope: CLI stabilization, run inspector, API, provider routing, repository onboarding).
+
 ## V1.7.0 Fast Governed Loop V1 — Evaluation Pipeline
 
 - Added the **Fast Governed Loop V1** automated evaluation pipeline (`src/workflow/evaluate.rs`):
