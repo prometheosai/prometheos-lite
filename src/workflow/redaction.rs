@@ -286,7 +286,7 @@ mod tests {
         let cfg = dir.path().join("prometheos.config.json");
         std::fs::write(
             &cfg,
-            r#"{"llm_routing":{"providers":[{"name":"p","provider_type":"openai","enabled":true,"base_url":"https://api.example.com","model":"m","api_key_env":"PROMETHEOS_TEST_PROVIDER_KEY"}]}}"#,
+            r#"{"configVersion":"1.0.0","llm_routing":{"providers":[{"name":"p","provider_type":"openai","enabled":true,"base_url":"https://api.example.com","model":"m","api_key_env":"PROMETHEOS_TEST_PROVIDER_KEY"}]}}"#,
         )
         .expect("write config");
         unsafe {

@@ -3,7 +3,19 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
+    /// Schema version of this config file. The loader fails closed if
+    /// the major version differs from the supported
+    /// `CONFIG_SCHEMA_VERSION`. Bumping the major is a breaking change
+    /// (the loader rejects); a minor/patch bump is forward-compatible
+    /// (the loader accepts and default-fills any new fields).
+    ///
+    /// REQUIRED. A missing or empty `configVersion` is rejected with
+    /// an actionable error that names the field and the supported
+    /// range. This is the schema-validation entry point for #130.
+    #[serde(rename = "configVersion")]
+    pub config_version: String,
     #[serde(default = "super::defaults::default_provider")]
     pub provider: String,
     #[serde(default = "super::defaults::default_base_url")]
