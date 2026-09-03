@@ -150,9 +150,7 @@ mod tests {
         let path = dir.path().join("c.json");
         std::fs::write(
             &path,
-            format!(
-                r#"{{"configVersion":"{CONFIG_SCHEMA_VERSION}","unknownKey":1}}"#
-            ),
+            format!(r#"{{"configVersion":"{CONFIG_SCHEMA_VERSION}","unknownKey":1}}"#),
         )
         .unwrap();
         let result = AppConfig::load_from(&path);
