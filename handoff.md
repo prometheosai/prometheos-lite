@@ -37,14 +37,50 @@ merged back into it as the PRs land.
 
 ### Active queue
 
-`specs/active/autonomous-e5-e6/QUEUE.md` (Phase 1 → Phase 3).
-The agent does not require further operator approval to proceed
-through Phase 1 and Phase 2 items; Phase 3 items marked
-HARD-STOP are recorded, not worked around.
+`specs/active/autonomous-e5-e6/QUEUE.md` (Phase 2: E6). The
+per-slice plan for E6 is documented in that doc; each E6 issue is
+split into bounded PRs (default 5-file/200-LOC budget) so each
+integration is reviewable and atomic. Phase 1 (E5) is complete.
+Phase 3 items marked HARD-STOP are recorded, not worked around.
 
 ### In progress
 
-None yet. Phase 1 PR1 (E5/I04 #128) is the next task.
+R3 (E5 closeout bookkeeping): E5 epic #106 closeout comment
+posted; queue doc updated with the per-slice E6 plan; CHANGELOG
+epic-closeout entry added; spec/loop-engineering/changes/
+2026-09-03-e5i05-doc-release-nodes.md recorded.
+
+### Completed in this session
+
+- 2026-09-02: opened the autonomous-loop queue with a
+  comparator baseline on main @ d7c0b33 (955 lib + 13
+  lib-conformance + 30 impl-conformance + 2 kit tests passing,
+  fmt + clippy clean).
+- 2026-09-03: **R1 — E5/I04 (#128) merged via PR #207** (commit
+  6e11a72). Three new Lite-owned, read-only, deterministic
+  `lite.node` capabilities: `security-review`, `evidence-audit`,
+  `independent-review`. +25 in-module tests, +5 conformance
+  tests, no `Cargo.toml`/`Cargo.lock` changes. Issue #128 closed.
+- 2026-09-03: **R2 — E5/I05 (#129) merged via PR #208** (commit
+  fa305e0). Two new Lite-owned, read-only, deterministic
+  `lite.node` capabilities: `doc-impact` and `release-prep`.
+  +18 in-module tests, +3 conformance tests, no
+  `Cargo.toml`/`Cargo.lock` changes. Issue #129 closed.
+- 2026-09-03: **Final E5 closeout.** All five E5 task-level
+  issues closed (#125, #126, #127, #128, #129). The E5 node
+  library exposes 8 capabilities: `intake`, `repo-discovery`,
+  `planning`, `implement`, `repair`, `test-discovery`,
+  `validation`, `diagnostic`, `security-review`, `evidence-audit`,
+  `independent-review`, `doc-impact`, `release-prep` (13
+  capabilities; some are inside the same task). Final test
+  counts on `main` (after E5/I05 merge): 998 lib + 21
+  lib-conformance + 30 impl-conformance + 2 kit = 1051 tests,
+  0 failed, 1 ignored.
+
+### Next task
+
+R4 — #130 (E6/I01) Slice B: config version + invalid-config
+diagnostics. Bounded, atomic, and unblocks the rest of E6/I01.
 
 ## Session Changes
 
