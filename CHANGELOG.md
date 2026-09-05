@@ -1,5 +1,23 @@
 ## Unreleased
 
+- E6/I02 (#131) Slice A — read-only run inspector: a new
+  `prometheos work inspect <work_id>` subcommand (and
+  `inspect_repo_workbench` helper in `src/cli/commands/work.rs`)
+  that prints the work context metadata, artifacts, decisions,
+  and a stale-approvals report. The command is read-only — it
+  goes through `repo_workbench::load_context` and never mutates
+  any state. Output is available as text (default) or JSON
+  (`--json`); both share one source of truth. Stale-approval
+  detection is conservative: an approval is flagged stale if its
+  `artifact_id` is no longer in the current artifacts list. The
+  "actor" field on each decision is derived from the
+  artifact's `provenance.generator` (the same field the rest of
+  the repo-workbench surface uses for attribution). 5 new unit
+  tests in `src/cli/commands/work.rs` + 1 new parse-only test
+  in `src/cli/mod.rs`. 1003 → 1003 lib tests passing on this
+  branch (no new lib tests in this slice; the new tests live in
+  the binary target).
+
 - E6/I01 (#130) Slice A — CLI contract integration tests in
   `src/cli/mod.rs` (`#[cfg(test)] mod cli_contract_tests`). 14
   parse-only tests (no runtime needed) cover the documented
