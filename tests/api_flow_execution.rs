@@ -273,7 +273,10 @@ fn software_template_review_flow_reference_is_satisfied() {
     // its `lifecycle_template.phases[*].required_flows` list. This
     // test asserts the file exists, fixing a latent broken reference.
     let path = PathBuf::from("flows/review.flow.yaml");
-    assert!(path.exists(), "flows/review.flow.yaml must exist (referenced by templates/software.yaml)");
+    assert!(
+        path.exists(),
+        "flows/review.flow.yaml must exist (referenced by templates/software.yaml)"
+    );
     let loader = YamlLoader::new();
     let flow = loader.load_from_path(&path).unwrap();
     assert_eq!(flow.name, "Review Flow");
