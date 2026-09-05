@@ -1,0 +1,43 @@
+version: "1.0"
+name: "Refactor Flow"
+description: "Improve the internal structure of existing code without changing its observable behavior; existing tests must still pass."
+
+inputs:
+  required:
+    - "target_path"
+
+outputs:
+  primary: "refactor_patch"
+  include:
+    - "refactor_patch"
+    - "behavior_preserved_evidence"
+
+nodes:
+  - id: "baseline"
+    node_type: "inspect_repo"
+    config:
+      goal: "snapshot the existing behavior; enumerate the tests that cover the target"
+  - id: "refactor"
+    node_type: "patch"
+    config:
+      mode: "internal_only"
+      preserve_public_api: true
+  - id: "verify"
+    node_type: "test_runner"
+    config:
+      must_match_baseline: true
+  - id: "end"
+    node_type: "terminal"
+
+transitions:
+  - from: "baseline"
+    action: "continue"
+    to: "refactor"
+  - from: "refactor"
+    action: "continue"
+    to: "verify"
+  - from: "verify"
+    action: "continue"
+    to: "end"
+
+start_node: "baseline"

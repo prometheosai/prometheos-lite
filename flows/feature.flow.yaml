@@ -1,0 +1,51 @@
+version: "1.0"
+name: "Feature Flow"
+description: "Plan, implement, document, and test a new feature end-to-end."
+
+inputs:
+  required:
+    - "feature_description"
+
+outputs:
+  primary: "implementation"
+  include:
+    - "implementation"
+    - "tests"
+    - "documentation"
+
+nodes:
+  - id: "plan"
+    node_type: "planning"
+    config:
+      goal: "decompose the feature into a sequence of testable, reviewable steps"
+  - id: "implement"
+    node_type: "patch"
+    config:
+      mode: "additive"
+      verify: "tests_pass"
+  - id: "document"
+    node_type: "patch"
+    config:
+      mode: "docs"
+  - id: "test"
+    node_type: "patch"
+    config:
+      mode: "tests"
+  - id: "end"
+    node_type: "terminal"
+
+transitions:
+  - from: "plan"
+    action: "continue"
+    to: "implement"
+  - from: "implement"
+    action: "continue"
+    to: "document"
+  - from: "document"
+    action: "continue"
+    to: "test"
+  - from: "test"
+    action: "continue"
+    to: "end"
+
+start_node: "plan"

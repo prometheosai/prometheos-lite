@@ -1,5 +1,17 @@
 ## Unreleased
 
+- E6/I01 (#130) Slice C — six new workflow templates under
+  `flows/` for the six workflow kinds required by E6/I01:
+  `bug_fix.flow.yaml`, `feature.flow.yaml`, `refactor.flow.yaml`,
+  `test.flow.yaml`, `docs.flow.yaml`, `review.flow.yaml`. Each
+  is a minimal valid `FlowFile` with a real `start_node`, real
+  nodes, and real transitions; each is loaded by the existing
+  `YamlLoader`. The new `flows/review.flow.yaml` also fixes a
+  latent broken reference in `templates/software.yaml` (the
+  software template's lifecycle declares `review.flow.yaml` as a
+  required flow). 2 new tests in `tests/api_flow_execution.rs`
+  (loader shape + reference fix).
+
 - E6/I01 (#130) Slice B — `AppConfig::configVersion` field added
   and required; `#[serde(deny_unknown_fields)]` enabled at the top
   level. The loader fails closed when `configVersion` is missing,

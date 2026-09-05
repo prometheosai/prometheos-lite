@@ -1,0 +1,43 @@
+version: "1.0"
+name: "Documentation Flow"
+description: "Generate or update documentation for a code surface; preserve the existing public contract and reference stable identifiers."
+
+inputs:
+  required:
+    - "target"
+
+outputs:
+  primary: "documentation"
+  include:
+    - "documentation"
+    - "examples"
+
+nodes:
+  - id: "inspect"
+    node_type: "inspect_repo"
+    config:
+      goal: "understand the public surface of {{target}} and the existing doc state"
+  - id: "draft"
+    node_type: "patch"
+    config:
+      mode: "docs_only"
+      reference_stable_ids: true
+  - id: "verify"
+    node_type: "test_runner"
+    config:
+      doc_examples_pass: true
+  - id: "end"
+    node_type: "terminal"
+
+transitions:
+  - from: "inspect"
+    action: "continue"
+    to: "draft"
+  - from: "draft"
+    action: "continue"
+    to: "verify"
+  - from: "verify"
+    action: "continue"
+    to: "end"
+
+start_node: "inspect"
