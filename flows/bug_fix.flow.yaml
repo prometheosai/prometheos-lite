@@ -1,0 +1,46 @@
+version: "1.0"
+name: "Bug Fix Flow"
+description: "Reproduce, localize, and fix a reported bug; record the reproducer + fix as durable evidence."
+
+inputs:
+  required:
+    - "bug_report"
+
+outputs:
+  primary: "fix_patch"
+  include:
+    - "fix_patch"
+    - "reproducer_test"
+    - "root_cause"
+
+nodes:
+  - id: "localize"
+    node_type: "inspect_repo"
+    config:
+      goal: "find the smallest source region that explains the reported bug"
+  - id: "reproducer"
+    node_type: "llm"
+    config:
+      prompt_template: |
+        Write the smallest failing test that reproduces the bug.
+        Bug report: {{bug_report}}
+  - id: "fix"
+    node_type: "patch"
+    config:
+      mode: "minimal"
+      verify: "reproducer_passes"
+  - id: "end"
+    node_type: "terminal"
+
+transitions:
+  - from: "localize"
+    action: "continue"
+    to: "reproducer"
+  - from: "reproducer"
+    action: "continue"
+    to: "fix"
+  - from: "fix"
+    action: "continue"
+    to: "end"
+
+start_node: "localize"

@@ -1,0 +1,48 @@
+version: "1.0"
+name: "Review Flow"
+description: "Independent code review of a proposed patch; emit approve, changes-required, or reject with reasons."
+
+inputs:
+  required:
+    - "candidate_ref"
+
+outputs:
+  primary: "review_verdict"
+  include:
+    - "review_verdict"
+    - "review_reasons"
+    - "evidence_refs"
+
+nodes:
+  - id: "security_review"
+    node_type: "security_review"
+    config:
+      review_paths: "true"
+      review_commands: "true"
+      review_dependencies: "true"
+      review_secrets: "true"
+      review_authority: "true"
+  - id: "evidence_audit"
+    node_type: "evidence_audit"
+    config:
+      fail_closed_on_missing: "true"
+  - id: "independent_review"
+    node_type: "independent_review"
+    config:
+      compose: "most_severe_wins"
+      authorize_apply: "false"
+  - id: "end"
+    node_type: "terminal"
+
+transitions:
+  - from: "security_review"
+    action: "continue"
+    to: "evidence_audit"
+  - from: "evidence_audit"
+    action: "continue"
+    to: "independent_review"
+  - from: "independent_review"
+    action: "continue"
+    to: "end"
+
+start_node: "security_review"

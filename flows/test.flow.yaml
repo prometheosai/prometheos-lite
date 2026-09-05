@@ -1,0 +1,43 @@
+version: "1.0"
+name: "Test Flow"
+description: "Author deterministic tests against existing or new code; assert behavior matches the documented contract."
+
+inputs:
+  required:
+    - "target"
+
+outputs:
+  primary: "tests"
+  include:
+    - "tests"
+    - "coverage_report"
+
+nodes:
+  - id: "read_target"
+    node_type: "inspect_repo"
+    config:
+      goal: "understand the public surface and existing tests of {{target}}"
+  - id: "author"
+    node_type: "patch"
+    config:
+      mode: "tests_only"
+      must_pass: true
+  - id: "verify"
+    node_type: "test_runner"
+    config:
+      all_pass: true
+  - id: "end"
+    node_type: "terminal"
+
+transitions:
+  - from: "read_target"
+    action: "continue"
+    to: "author"
+  - from: "author"
+    action: "continue"
+    to: "verify"
+  - from: "verify"
+    action: "continue"
+    to: "end"
+
+start_node: "read_target"

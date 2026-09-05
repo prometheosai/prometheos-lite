@@ -211,3 +211,73 @@ fn test_flow_selector_default_flow() {
     let default = selector.default_flow();
     assert!(default.ends_with("chat.flow.yaml"));
 }
+
+// ---------------------------------------------------------------------------
+// E6/I01 Slice C (R5): workflow templates for bug fix / feature /
+// refactor / test / docs / review workflows. Each new flow is a
+// minimal valid FlowFile with a real start_node, real nodes, and
+// real transitions. Acceptance: the templates cover all six
+// workflow kinds (issue #130).
+// ---------------------------------------------------------------------------
+
+const E6I01_WORKFLOW_TEMPLATES: &[(&str, &str, &str)] = &[
+    ("flows/bug_fix.flow.yaml", "Bug Fix Flow", "localize"),
+    ("flows/feature.flow.yaml", "Feature Flow", "plan"),
+    ("flows/refactor.flow.yaml", "Refactor Flow", "baseline"),
+    ("flows/test.flow.yaml", "Test Flow", "read_target"),
+    ("flows/docs.flow.yaml", "Documentation Flow", "inspect"),
+    ("flows/review.flow.yaml", "Review Flow", "security_review"),
+];
+
+#[test]
+fn e6i01_six_workflow_templates_load_and_have_valid_shape() {
+    let loader = YamlLoader::new();
+    for (path, expected_name, expected_start) in E6I01_WORKFLOW_TEMPLATES {
+        let flow_path = PathBuf::from(path);
+        let flow = loader
+            .load_from_path(&flow_path)
+            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
+        assert_eq!(flow.version, "1.0", "{path}: version must be 1.0");
+        assert_eq!(flow.name, *expected_name, "{path}: name mismatch");
+        assert_eq!(
+            flow.start_node, *expected_start,
+            "{path}: start_node mismatch"
+        );
+        assert!(
+            !flow.nodes.is_empty(),
+            "{path}: must declare at least one node"
+        );
+        assert!(
+            !flow.transitions.is_empty(),
+            "{path}: must declare at least one transition"
+        );
+        // Every transition's from/to must appear in the node set.
+        for t in &flow.transitions {
+            assert!(
+                flow.nodes.iter().any(|n| n.id == t.from),
+                "{path}: transition from={} has no node",
+                t.from
+            );
+            assert!(
+                flow.nodes.iter().any(|n| n.id == t.to),
+                "{path}: transition to={} has no node",
+                t.to
+            );
+        }
+    }
+}
+
+#[test]
+fn software_template_review_flow_reference_is_satisfied() {
+    // The `templates/software.yaml` file lists `review.flow.yaml` in
+    // its `lifecycle_template.phases[*].required_flows` list. This
+    // test asserts the file exists, fixing a latent broken reference.
+    let path = PathBuf::from("flows/review.flow.yaml");
+    assert!(
+        path.exists(),
+        "flows/review.flow.yaml must exist (referenced by templates/software.yaml)"
+    );
+    let loader = YamlLoader::new();
+    let flow = loader.load_from_path(&path).unwrap();
+    assert_eq!(flow.name, "Review Flow");
+}
