@@ -1,5 +1,18 @@
 ## Unreleased
 
+- E6/I01 (#130) Slice A — CLI contract integration tests in
+  `src/cli/mod.rs` (`#[cfg(test)] mod cli_contract_tests`). 14
+  parse-only tests (no runtime needed) cover the documented
+  invocations and the failure cases for every top-level
+  `Commands` variant (Flow / Harness / Serve / Bench / Work /
+  RepoWorkbench / Templates / Workflow / Diagnostics) plus
+  unknown-subcommand and unknown-top-level-command cases. Tests
+  live inside the `cli` module (not as an integration test in
+  `tests/`) because the `Cli` enum is a binary-only type, not
+  re-exported from the library. The `clap::Parser` derives on
+  each subcommand carry `#[command(about = "...")]` doc strings;
+  this slice adds the integration-test side of the contract.
+
 - E6/I01 (#130) Slice C — six new workflow templates under
   `flows/` for the six workflow kinds required by E6/I01:
   `bug_fix.flow.yaml`, `feature.flow.yaml`, `refactor.flow.yaml`,
