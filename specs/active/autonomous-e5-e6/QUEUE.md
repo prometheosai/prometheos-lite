@@ -162,6 +162,31 @@ slice of each issue merges, in dependency order.
 14. #140 — paid design-partner pilot (**HARD-STOP**: external commercial
     relationship).
 
+### Status checkpoint (2026-09-05)
+
+The autonomous loop has driven the following work in this session,
+all under the operator-mandated independent-reviewer protocol with a
+comparative control gate per PR:
+
+- Phase 1 (E5 closeout) complete. PRs #207 (E5/I04 review nodes) and
+  #208 (E5/I05 doc/release nodes) merged. Issues #128, #129 closed.
+- Phase 2 opened. E6/I01 (#130) closed via three PRs (#209 Slice B
+  config version + diagnostics; #210 Slice C workflow templates;
+  #211 Slice A CLI contract tests).
+- E6/I02 (#131) Slice A complete. PR #212 (read-only run inspector)
+  merged. Issue #131 still open; the inspector slice delivered all
+  five acceptance bullets within the repo-workbench scope. The
+  remaining work (pre-apply hook, graph-state inspector, content-
+  hash stale-approval check) is documented in the R7 change
+  record.
+
+The next E6 tasks (R8: #132 local API + event stream, R9: #133
+provider routing, R10: #134 repo onboarding) are downstream of
+this checkpoint. A session-level status report is recorded in
+`handoff.md` so the operator can see exactly which PRs / commits /
+issues the autonomous loop has driven, which safety-gate hard-
+blockers were honoured, and which deferred work remains.
+
 ### Hard-stops the agent must NOT work around
 
 - Promoting the frontend or API server to stable alpha.
