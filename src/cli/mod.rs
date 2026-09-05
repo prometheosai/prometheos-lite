@@ -193,6 +193,20 @@ mod cli_contract_tests {
     }
 
     #[test]
+    fn cli_parses_work_inspect() {
+        // E6/I02 Slice A (R7): the read-only run inspector.
+        // `prometheos work inspect <id>` accepts an optional `--json`
+        // flag. The inspect command itself is a thin shell that
+        // delegates to the repo-workbench loader; the load is
+        // exercised by the unit tests in `src/cli/commands/work.rs`.
+        let cli1 = parse(&["work", "inspect", "wf-1"]).expect("work inspect wf-1 must parse");
+        let _ = cli1;
+        let cli2 = parse(&["work", "inspect", "wf-1", "--json"])
+            .expect("work inspect wf-1 --json must parse");
+        let _ = cli2;
+    }
+
+    #[test]
     fn cli_rejects_unknown_subcommand() {
         let err = parse(&["flow", "frobnicate"]).expect_err("parse must fail");
         let msg = err.to_string();
