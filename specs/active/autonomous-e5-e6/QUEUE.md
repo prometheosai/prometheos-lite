@@ -179,8 +179,15 @@ comparative control gate per PR:
   remaining work (pre-apply hook, graph-state inspector, content-
   hash stale-approval check) is documented in the R7 change
   record.
+- E6/I03 (#132) Slice A complete (2026-09-06). PR #213 merged —
+  five integration tests locking the existing API's read-model
+  rebuild / durable-state / stable-read-cursor properties (1100
+  tests total; comparator preserved-or-improved). Remaining #132
+  work: durable event-stream subscription cursors (Slice B) and
+  idempotency-key upsert on `POST /work-contexts` (Slice C). Both
+  require production-code changes → their own review cycles.
 
-The next E6 tasks (R8: #132 local API + event stream, R9: #133
+The next E6 tasks (R8 continued: #132 Slice B, then R9: #133
 provider routing, R10: #134 repo onboarding) are downstream of
 this checkpoint. A session-level status report is recorded in
 `handoff.md` so the operator can see exactly which PRs / commits /
@@ -256,5 +263,10 @@ recorded in the PR body.
   delivery checklist 5/5; closeout comment posted. 998 lib + 21
   lib-conformance + 30 impl-conformance + 2 kit tests passing.
 - 2026-09-03: **Phase 2 opened.** E6 work is now picked up per
-  the per-slice plan in this doc. First task: R4 (#130 Slice B —
-  config version + diagnostics).
+  the per-slice plan in this doc.
+- 2026-09-05: R4–R7 merged (#209–#212). #130 closed; #131 Slice A
+  complete.
+- 2026-09-06: **R8 complete.** PR #213 merged (E6/I03 #132 Slice A:
+  API read-model rebuild property tests, merge 2ab82db). 1100 tests
+  total. Next: #132 Slice B (durable event-stream cursors — production
+  change, own review cycle) or R9 (#133 provider routing).
