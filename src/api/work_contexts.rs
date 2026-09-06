@@ -16,6 +16,90 @@ use crate::harness::{
 };
 use crate::work::types::{WorkDomain, WorkStatus};
 
+/// Query parameters for the cursorable event read endpoint.
+///
+/// `after` is the rowid cursor returned as `next_cursor` by a previous
+/// page (0 or absent = from the beginning). `limit` is clamped to
+/// 1..=500 server-side.
+#[derive(Debug, Deserialize)]
+pub struct WorkContextEventsQuery {
+    pub user_id: String,
+    #[serde(default)]
+    pub after: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One event in a cursor page. `cursor` is the event's durable rowid.
+#[derive(Debug, Serialize)]
+pub struct WorkContextEventResponse {
+    pub cursor: i64,
+    pub id: String,
+    pub event_type: String,
+    pub data: serde_json::Value,
+    pub created_at: String,
+}
+
+/// A page of events plus the cursor to resume from. `next_cursor` equals
+/// the cursor of the last event in `events`, or the caller's `after`
+/// cursor when the page is empty — reconnecting with `after = next_cursor`
+/// resumes the stream with no gaps and no duplication.
+#[derive(Debug, Serialize)]
+pub struct WorkContextEventsPage {
+    pub events: Vec<WorkContextEventResponse>,
+    pub next_cursor: i64,
+}
+
+/// Cursorable read of a WorkContext's durable event stream.
+///
+/// READ-ONLY. This endpoint only projects the authoritative
+/// `work_context_events` table; it never mutates state.
+pub async fn get_work_context_events(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<WorkContextEventsQuery>,
+) -> Result<Json<WorkContextEventsPage>, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let after = query.after.unwrap_or(0);
+    if after < 0 {
+        return Err(ApiError::BadRequest(
+            "after cursor must be >= 0".to_string(),
+        ));
+    }
+    // Ownership scoping: the requester may only observe events for a
+    // context they own — the same rule every other read on this router
+    // applies (404 unknown, 403 wrong user).
+    let _context = get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let work_context_service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
+
+    let limit = query.limit.unwrap_or(50);
+    let rows = work_context_service
+        .list_events_after(&id, Some(after), limit)
+        .map_err(|e| ApiError::Internal(format!("Failed to read events: {}", e)))?;
+
+    let next_cursor = rows.last().map(|(rowid, _)| *rowid).unwrap_or(after);
+    let events = rows
+        .into_iter()
+        .map(|(rowid, event)| WorkContextEventResponse {
+            cursor: rowid,
+            id: event.id,
+            event_type: event.event_type,
+            data: event.data,
+            created_at: event.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(WorkContextEventsPage {
+        events,
+        next_cursor,
+    }))
+}
+
 /// Request to create a new WorkContext
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkContextRequest {

@@ -32,6 +32,25 @@
   lexeme-independence regressions (reviewer P1 fix). Suite: 1003 lib /
   39 bin / 21+30+2 conformance / 5 api read-model / 2 soma-ast fixture
   / 10 new number-policy tests - no regressions.
+- E6/I03 (#132) Slice B — cursorable durable event stream: new
+  read-only endpoint `GET /work-contexts/:id/events?user_id=..&after=..
+  &limit=..` returns a page of the context's `work_context_events`
+  (the same rows `WorkContextService` writes) ordered by SQLite rowid,
+  plus a `next_cursor` to resume from. The rowid cursor is
+  insertion-ordered, strictly monotonic, and durable, so event
+  consumers can reconnect and resume with no gaps and no duplication
+  (#132 acceptance bullet). Ownership scoping matches every other
+  read route (404 unknown context, 403 wrong user, 400 missing
+  user_id / negative cursor). `WorkContextService::list_events_after`
+  exposes the same cursor read to the CLI path. `limit` is clamped
+  to 1..=500. Invariant: the cursor scheme relies on the events table
+  never being VACUUMed (rowid reassignment); an invariant comment is
+  recorded in `src/db/repository/work_context_events.rs`. Six new
+  integration tests in `tests/api_event_cursor.rs` cover: first page,
+  gap-free/dup-free resume, rebuild-from-db_path resume, limit
+  pagination completeness+uniqueness, 400/403/404 input validation,
+  and read stability (repeated reads identical; CLI-written events
+  visible through the API projection).
 
 - E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild
