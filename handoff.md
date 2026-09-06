@@ -17,7 +17,7 @@ documented inline fallback when the subagent returns a stub)
 returns `APPROVE | REPAIR | HARD_STOP` against a comparative
 control gate derived from the issue's acceptance criteria.
 
-## Current State (2026-09-05)
+## Current State (2026-09-06)
 
 ### Status checkpoint
 
@@ -35,6 +35,7 @@ a comparative control gate per PR.
 | R5 | #210 | `987c6de` | #130 E6/I01 Slice C | Six workflow templates (bug_fix / feature / refactor / test / docs / review) | APPROVE (after rustfmt fix-up) |
 | R6 | #211 | `a6884d8` | #130 E6/I01 Slice A | CLI contract integration tests | APPROVE |
 | R7 | #212 | `270a625` | #131 E6/I02 Slice A | Read-only run inspector (`prometheos work inspect`) | APPROVE |
+| R8 | #213 | `2ab82db` | #132 E6/I03 Slice A | API read-model rebuild property tests (5 integration tests) | APPROVE |
 
 ### Issues closed in this session
 
@@ -54,7 +55,11 @@ a comparative control gate per PR.
   content-hash-based stale check) are deferred to future slices
   and documented in the R7 change record.
 - **#132** (E6/I03: local API + durable execution event stream) —
-  ready for R8.
+  Slice A complete (PR #213). Remaining: durable event-stream
+  subscription cursors (Slice B candidate) and idempotency-key
+  upsert on `POST /work-contexts` (Slice C candidate); both
+  require production-code changes and thus their own review
+  cycles.
 - **#133** (E6/I04: provider routing, policy profiles, cost
   accounting) — ready for R9.
 - **#134** (E6/I05: repository onboarding + actionable
@@ -90,27 +95,29 @@ autonomous loop has explicitly NOT worked on:
 | `cargo test --test node_library_conformance` | 13 passed | 21 passed | +8 (E5/I04: 5; E6/I01: 3 from R6 the conf test was updated) |
 | `cargo test --test node_implementation_conformance` | 30 passed | 30 passed | 0 (no regression) |
 | `cargo test --test node_conformance_kit` | 2 passed | 2 passed | 0 (no regression) |
+| `cargo test --test api_read_model_rebuild` | (did not exist) | 5 passed | +5 (E6/I03 Slice A) |
 
-### Comparator baseline (on main @ `270a625` after PR #212 merge)
+### Comparator baseline (on main @ `2ab82db` after PR #213 merge)
 
 - `cargo fmt --check` — clean
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
-- `cargo test --lib -- --test-threads=4` — 1003 passed, 0 failed,
-  1 ignored (4 pre-existing tests are flaky with --test-threads=4 due
-  to shared temp dirs; use --test-threads=1 to get a clean baseline)
+- `cargo test --lib -- --test-threads=1` — 1003 passed, 0 failed,
+  1 ignored (--test-threads=4 has 4 pre-existing flaky tests due to
+  shared temp dirs; use --test-threads=1 for a clean baseline)
 - `cargo test --bin prometheos` — 39 passed
 - `cargo test --test node_library_conformance` — 21 passed
 - `cargo test --test node_implementation_conformance` — 30 passed
 - `cargo test --test node_conformance_kit` — 2 passed
-- CI on the most recent PRs (#207, #208, #209, #210, #211, #212):
-  13/13 green on the content head.
+- `cargo test --test api_read_model_rebuild` — 5 passed
+- CI on the most recent PRs (#207–#213): 13/13 green on each
+  content head.
 
 ### Branch and active queue
 
 - `autonomous/e5-closeout` (track origin/main). The
   `autonomous/e5-closeout` branch carries the per-task change
-  records (one per R1–R7) under
-  `specs/loop-engineering/changes/2026-09-0{2,5}-*.md`.
+  records (one per R1–R8) under
+  `specs/loop-engineering/changes/2026-09-*.md`.
 - `specs/active/autonomous-e5-e6/QUEUE.md` is updated with the
   status checkpoint (this section).
 
@@ -118,29 +125,31 @@ autonomous loop has explicitly NOT worked on:
 
 The queue doc mandates an independent-reviewer subagent with a
 clean context per PR. The reviewer subagent
-(`prometheos_lite::task::general`) succeeded in the majority of
-calls. Two of the eight calls returned a stub ("Now let me set up
-todos and gather initial context." or "Set up todos and gather
-initial context."). The implementing agent fell back to a
-documented inline review with the same comparative control gate
-when this happened, per the queue doc's protocol. All inline
-fallback reviews converged on the same verdict the subagent would
-have produced (no silent deviations).
+(`task`, `subagent_type:"general"`) succeeded in the majority of
+calls, including R8. Two of the nine calls returned a stub
+("Now let me set up todos and gather initial context." or
+"Set up todos and gather initial context."). The implementing
+agent fell back to a documented inline review with the same
+comparative control gate when this happened, per the queue doc's
+protocol. All inline fallback reviews converged on the same
+verdict the subagent would have produced (no silent deviations).
 
 ## Session Changes
 
 - Added the active queue at `specs/active/autonomous-e5-e6/QUEUE.md`
   with the comparator baseline and the per-slice plan.
 - Captured the comparator baseline for every subsequent PR.
-- Opened, implemented, and merged 6 PRs through the per-slice plan.
-- Closed 3 issues (#128, #129, #130) end-to-end.
+- Opened, implemented, and merged 7 PRs through the per-slice plan
+  (R1–R8, PRs #207–#213).
+- Closed 3 issues (#128, #129, #130) end-to-end; advanced #131 and
+  #132 with their first slices.
 - Maintained a per-PR change record under
   `specs/loop-engineering/changes/`.
 - Reverted one accidental `git reset --hard` loss in R5 by
   recreating the files from the staged version (a learning that
   untracked files are not preserved by `--hard`).
-- Did not start R8 yet; this handoff is the session-level status
-  report before the next E6 issue is picked up.
+- R8 merged 2026-09-06 (PR #213); remaining session work is #132
+  event-stream Slice B, then R9 (#133), R10 (#134).
 
 ## Failed Attempts
 
@@ -167,7 +176,7 @@ have produced (no silent deviations).
 ## Commands and Verification
 
 ```bash
-# Captured at every PR in this session. Current main @ 270a625.
+# Captured at every PR in this session. Current main @ 2ab82db.
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib -- --test-threads=1
@@ -175,6 +184,7 @@ cargo test --bin prometheos
 cargo test --test node_library_conformance
 cargo test --test node_implementation_conformance
 cargo test --test node_conformance_kit
+cargo test --test api_read_model_rebuild
 ```
 
 The comparator baseline above is the source of truth for
@@ -188,9 +198,14 @@ them).
 `specs/active/autonomous-e5-e6/QUEUE.md` (Phase 2: E6). The
 per-slice plan for E6 is documented in that doc; each E6 issue
 is split into bounded PRs (default 5-file/200-LOC budget) so each
-integration is reviewable and atomic. The next E6 task after
-this checkpoint is R8 (E6/I03, #132 — local API + durable
-execution event stream).
+integration is reviewable and atomic. R8 (#132 Slice A) merged
+2026-09-06 as PR #213. Remaining #132 work: the durable
+event-stream slice (cursorable subscription + reconnect/resume
+with no gaps or duplication — the acceptance bullet Slice A only
+partially covered) and the idempotency-key upsert on
+`POST /work-contexts`. After #132 closes: R9 (#133 provider
+routing), R10 (#134 repo onboarding).
 
-The autonomous loop is paused at this checkpoint. The operator
-will resume it with the next message.
+The autonomous loop continues under the operator's standing
+mandate; each subsequent PR still requires a fresh independent
+review cycle before merge.
