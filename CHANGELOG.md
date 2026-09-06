@@ -1,5 +1,22 @@
 ## Unreleased
 
+- E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
+  integration tests that lock the API's read-model rebuild
+  property without adding new endpoints. Tests cover:
+  (1) API and CLI share the same durable state (the API writes
+  via `WorkContextService`, the CLI reads from the same `Db` over
+  the same `db_path` and agrees); (2) the read model is rebuildable
+  (a fresh `AppState` + `Db` over the same `db_path` returns the
+  same data); (3) duplicate `POST /work-contexts` calls each
+  persist their own row (the current contract — implicit-id
+  creates are NOT collapsed; an idempotency-key-based upsert is a
+  future API slice); (4) status updates survive the rebuild;
+  (5) a stable read across rebuilds is the "cursor" property.
+  No production-code changes. No `Cargo.toml` / `Cargo.lock`
+  changes. No new dependencies. 1003 lib / 39 binary / 21 / 30
+  / 2 baseline preserved-or-improved (5 new integration tests
+  in `api_read_model_rebuild`).
+
 - E6/I02 (#131) Slice A — read-only run inspector: a new
   `prometheos work inspect <work_id>` subcommand (and
   `inspect_repo_workbench` helper in `src/cli/commands/work.rs`)
