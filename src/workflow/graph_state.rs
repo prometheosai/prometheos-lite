@@ -184,9 +184,12 @@ impl GraphManifestV1 {
     /// Seal the manifest with its canonical digest.
     pub fn sealed(mut self) -> Self {
         self.content_digest = None;
-        let d = crate::workflow::soma::canonical_digest(
+        // Lite-constructed record: violation unreachable per the invariant
+        // in `soma::canonical` ("Call-site contract").
+        let d = crate::workflow::soma::try_canonical_digest(
             &serde_json::to_value(&self).expect("manifest serializes"),
-        );
+        )
+        .expect("canonical digest of Lite-constructed record cannot fail");
         self.content_digest = Some(d);
         self
     }
@@ -197,7 +200,8 @@ impl GraphManifestV1 {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("contentDigest");
         }
-        crate::workflow::soma::canonical_digest(&v)
+        crate::workflow::soma::try_canonical_digest(&v)
+            .expect("canonical digest of Lite-constructed record cannot fail")
     }
 
     /// Fail-closed parse: version gate, structure validation, digest verify.
@@ -462,7 +466,8 @@ impl GraphRunStateV1 {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("contentDigest");
         }
-        crate::workflow::soma::canonical_digest(&v)
+        crate::workflow::soma::try_canonical_digest(&v)
+            .expect("canonical digest of Lite-constructed record cannot fail")
     }
 
     /// TRANSACTION LAW 1: apply a node completion; legal only when the node

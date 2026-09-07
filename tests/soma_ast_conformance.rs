@@ -114,7 +114,7 @@ fn canonical_digests_reproduce_fixture_pins() {
     // The sanctioned all-zeros placeholder pin (wf-cmp-0007) is skipped:
     // that artifact intentionally carries a duplicate key and cannot have
     // trustworthy canonical bytes.
-    use prometheos_lite::workflow::soma::canonical_digest;
+    use prometheos_lite::workflow::soma::try_canonical_digest;
     let manifest = fixture_manifest();
     let mut checked = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -125,7 +125,8 @@ fn canonical_digests_reproduce_fixture_pins() {
         let path = format!("{VENDORED}/{}", fx.path);
         let text = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let computed = canonical_digest(&value);
+        let computed = try_canonical_digest(&value)
+            .expect("vendored fixtures must not violate the number policy");
         checked += 1;
         if computed != fx.sha256 {
             failures.push(format!("{}: got {computed} want {}", fx.path, fx.sha256));

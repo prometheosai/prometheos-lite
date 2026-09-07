@@ -540,7 +540,8 @@ fn advance(current: &mut GateStage, to: GateStage) -> Result<()> {
 
 fn journal_entry_digest(entry: &JournalEntryV1) -> String {
     let v = serde_json::to_value(entry).expect("journal entry serializes");
-    crate::workflow::soma::canonical_digest(&v)
+    crate::workflow::soma::try_canonical_digest(&v)
+        .expect("canonical digest of Lite-constructed record cannot fail")
 }
 
 #[cfg(test)]

@@ -221,7 +221,11 @@ impl WorkEvent {
     /// Canonical digest over the event's semantic payload (the content that
     /// must survive handoffs): eventType/version/repoRevision/implementation/
     /// payload. Mirrors the published bridge's `_event_semantic_digest`.
-    pub fn computed_semantic_digest(&self) -> String {
+    ///
+    /// Fail closed: a number-policy violation in the payload surfaces as an
+    /// error; callers turn it into a CMP-0004-family diagnostic (the digest
+    /// cannot be verified, so verification does not pass).
+    pub fn computed_semantic_digest(&self) -> Result<String, super::canonical::CanonicalError> {
         let mut content = serde_json::Map::new();
         content.insert("eventType".into(), self.event_type.clone().into());
         content.insert("version".into(), self.version.clone().into());
@@ -236,7 +240,7 @@ impl WorkEvent {
         {
             content.insert("payload".into(), v);
         }
-        super::canonical::canonical_digest(&serde_json::Value::Object(content))
+        super::canonical::try_canonical_digest(&serde_json::Value::Object(content))
     }
 
     /// Audit against a supported bundle version.
@@ -269,23 +273,35 @@ impl WorkEvent {
         }
 
         // SOMA-CMP-0004: asserted vs computed semantic digest.
-        let computed = self.computed_semantic_digest();
-        if computed != self.semantic_digest.as_str() {
-            out.push(Diagnostic::related(
-                "SOMA-CMP-0004",
-                "semantic digest does not verify",
-                self.id.clone(),
-            ));
+        match self.computed_semantic_digest() {
+            Ok(computed) => {
+                if computed != self.semantic_digest.as_str() {
+                    out.push(Diagnostic::related(
+                        "SOMA-CMP-0004",
+                        "semantic digest does not verify",
+                        self.id.clone(),
+                    ));
+                }
+            }
+            Err(e) => {
+                // Fail closed: an uncomputable digest can never "verify".
+                out.push(Diagnostic::related(
+                    "SOMA-CMP-0004",
+                    format!("semantic digest unavailable ({e})"),
+                    self.id.clone(),
+                ));
+            }
         }
 
         // SOMA-EVT-0004: result/outcome events need BOUND evidence.
         if self.event_type == "result" || self.event_type == "outcome" {
-            let bound_to = self.computed_semantic_digest();
-            let bound = self
-                .evidence
-                .iter()
-                .flatten()
-                .any(|e| bound_to == e.event_digest.as_str());
+            let bound_to = self.computed_semantic_digest().ok();
+            let bound = bound_to.is_some_and(|bound_to| {
+                self.evidence
+                    .iter()
+                    .flatten()
+                    .any(|e| bound_to == e.event_digest.as_str())
+            });
             if !bound {
                 out.push(Diagnostic::related(
                     "SOMA-EVT-0004",

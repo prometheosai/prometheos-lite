@@ -140,7 +140,8 @@ impl WorkspaceManifestV1 {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("contentDigest");
         }
-        crate::workflow::soma::canonical_digest(&v)
+        crate::workflow::soma::try_canonical_digest(&v)
+            .expect("canonical digest of Lite-constructed record cannot fail")
     }
 
     /// Fail-closed parse: version gate, structural checks, digest verify.
@@ -531,9 +532,10 @@ fn url_or_git_proto_equal(a: &str, b: &str) -> bool {
 /// commonly share alias names such as `origin`, so only the independently
 /// derived URL digest can bind authority to a specific repository.
 pub fn stable_repo_identity_digest(remote_target: &str) -> String {
-    crate::workflow::soma::canonical_digest(&serde_json::Value::String(normalize_remote_identity(
-        remote_target,
-    )))
+    crate::workflow::soma::try_canonical_digest(&serde_json::Value::String(
+        normalize_remote_identity(remote_target),
+    ))
+    .expect("canonical digest of a string value cannot fail")
 }
 
 fn preserve_files(
