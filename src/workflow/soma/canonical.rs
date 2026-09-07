@@ -342,11 +342,14 @@ fn check_number_lexeme(lexeme: &str) -> Result<(), CanonicalError> {
     };
     // SOMA DecimalV2: the VALUE must stay within (10^-10000, 10^10000).
     // lead_e10 > bound is definite overflow; lead_e10 == bound is only the
-    // exact value 1e10000 (significand "1"); anything larger at that
-    // exponent (e.g. 9.5e10000) exceeds the bound. Symmetric on the tiny
-    // end.
+    // exact value ±10^10000 (normalized significand "1" — trailing zeros
+    // stripped); anything larger at that exponent (e.g. 9.5e10000) exceeds
+    // the bound. The comparison is on the VALUE, not the lexeme: "10e9999"
+    // and "1.0e10000" both normalize to sig "1" and are in policy.
+    // Symmetric on the tiny end.
+    let sig_normalized = sig.trim_end_matches('0');
     if !(-MAX_NUMBER_EXPONENT_ABS..=MAX_NUMBER_EXPONENT_ABS).contains(&lead_e10)
-        || (lead_e10 == MAX_NUMBER_EXPONENT_ABS && sig != "1")
+        || (lead_e10 == MAX_NUMBER_EXPONENT_ABS && sig_normalized != "1")
     {
         return Err(CanonicalError::MagnitudeExceeded(lexeme.to_string()));
     }

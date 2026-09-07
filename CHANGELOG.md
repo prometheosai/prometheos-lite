@@ -24,13 +24,14 @@
   truncated by serde at parse time; canonical byte-identity with SOMA
   for those requires enabling `serde_json/arbitrary_precision`, a
   separately gated decision.
-- New tests `tests/soma_number_policy.rs` (9 tests): in-policy numbers
+- New tests `tests/soma_number_policy.rs` (10 tests): in-policy numbers
   unchanged byte-for-byte; >400-digit and >1e10000 lexemes rejected;
   grammar junk classified as malformed, not policy; today's serde
   invariants locked (`1e999` fails at parse; `Number::from_f64(NaN)`
-  returns None); digest determinism. Suite: 1003 lib / 39 bin / 21+30+2
-  conformance / 5 api read-model / 2 soma-ast fixture / 9 new
-  number-policy tests — no regressions.
+  returns None); digest determinism; magnitude-boundary test with 12
+  lexeme-independence regressions (reviewer P1 fix). Suite: 1003 lib /
+  39 bin / 21+30+2 conformance / 5 api read-model / 2 soma-ast fixture
+  / 10 new number-policy tests - no regressions.
 
 - E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild
