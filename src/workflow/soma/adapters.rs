@@ -502,12 +502,20 @@ fn audit_roundtrip(
         ));
         return;
     }
-    let computed = super::canonical::canonical_digest(&serde_json::Value::Object(restored.clone()));
-    if computed != s.semantic_digest.as_str() {
-        out.push(Diagnostic::new(
+    match super::canonical::try_canonical_digest(&serde_json::Value::Object(restored.clone())) {
+        Ok(computed) => {
+            if computed != s.semantic_digest.as_str() {
+                out.push(Diagnostic::new(
+                    "SOMA-CMP-0004",
+                    "restored canonical semantic digest mismatch",
+                ));
+            }
+        }
+        // Fail closed: an uncomputable digest can never verify.
+        Err(e) => out.push(Diagnostic::new(
             "SOMA-CMP-0004",
-            "restored canonical semantic digest mismatch",
-        ));
+            format!("restored canonical digest cannot be recomputed ({e})"),
+        )),
     }
 }
 

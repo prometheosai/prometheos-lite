@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::workflow::graph_state::{GraphManifestV1, OutcomeCategory, RouteDecisionV1};
-use crate::workflow::soma::canonical_digest;
+use crate::workflow::soma::try_canonical_digest;
 
 /// Schema version for human decision records.
 pub const HUMAN_DECISION_VERSION: &str = "1.0.0";
@@ -166,7 +166,9 @@ impl HumanDecisionRecordV1 {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("contentDigest");
         }
-        canonical_digest(&v)
+        // Lite-constructed record: violation unreachable per the invariant in
+        // `soma::canonical` ("Call-site contract"); panic if it ever breaks.
+        try_canonical_digest(&v).expect("canonical digest of Lite-constructed record cannot fail")
     }
 
     /// Fail-closed parse: version gate, digest verify, machine-actor refusal.
@@ -798,7 +800,8 @@ mod tests {
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("contentDigest");
             }
-            crate::workflow::soma::canonical_digest(&v)
+            crate::workflow::soma::try_canonical_digest(&v)
+                .expect("canonical digest of Lite-constructed record cannot fail")
         }
     }
 }

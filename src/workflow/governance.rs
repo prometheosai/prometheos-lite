@@ -380,7 +380,10 @@ impl GovernanceDecisionRecordV1 {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("contentDigest");
         }
-        crate::workflow::soma::canonical_digest(&v)
+        // Lite-constructed record: violation unreachable per the invariant in
+        // `soma::canonical` ("Call-site contract"); panic if it ever breaks.
+        crate::workflow::soma::try_canonical_digest(&v)
+            .expect("canonical digest of Lite-constructed record cannot fail")
     }
 
     pub fn sealed(mut self) -> Self {

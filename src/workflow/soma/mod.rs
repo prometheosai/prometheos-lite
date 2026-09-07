@@ -92,8 +92,14 @@ fn category_for(code: &str) -> &'static str {
 }
 
 /// Canonical digest of a parsed JSON value (normative decimal-v2 policy).
-pub fn canonical_digest(value: &serde_json::Value) -> String {
-    canonical::canonical_digest(value)
+/// Fail closed: number-policy violations (non-finite / magnitude /
+/// precision) are errors, never substituted values. Inputs that did not
+/// pass [`canonical::validate_number_lexemes`] at the text boundary can
+/// reach here only via programmatically constructed values.
+pub fn try_canonical_digest(
+    value: &serde_json::Value,
+) -> Result<String, canonical::CanonicalError> {
+    canonical::try_canonical_digest(value)
 }
 
 /// Normalized fixed-point lexeme for a JSON number (governance/budget use);
@@ -143,6 +149,20 @@ pub fn validate_artifact_text(artifact_kind: &str, text: &str) -> Result<Vec<Dia
             )]);
         }
         Ok(None) => {}
+    }
+    // Number-policy scan before parsing: with `arbitrary_precision` off,
+    // serde silently rewrites lexemes (`1.10` → `1.1`) and truncates past
+    // ~17 significant digits, so this raw-text guard is the only layer that
+    // can refuse such inputs instead of silently altering them.
+    let raw_bytes = text.as_bytes();
+    match canonical::validate_number_lexemes(raw_bytes) {
+        Ok(()) => {}
+        // Malformed number grammar is a malformed document, not a policy
+        // decision; keep that classification distinct from policy refusals.
+        Err(canonical::CanonicalError::MalformedLexeme(e)) => {
+            return Err(format!("malformed json: {e}"));
+        }
+        Err(e) => return Err(format!("number policy violation: {e}")),
     }
     let raw: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("schema violation: {e}"))?;

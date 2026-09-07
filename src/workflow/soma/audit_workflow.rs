@@ -49,12 +49,23 @@ impl WorkflowDefinition {
                     if let Some(obj) = value.as_object_mut() {
                         obj.remove("contentDigest");
                     }
-                    let computed = super::canonical::canonical_digest(&value);
-                    if computed != declared.as_str() {
-                        out.push(Diagnostic::new(
-                            "SOMA-CMP-0004",
-                            "declared contentDigest does not verify",
-                        ));
+                    // Fail closed: an uncomputable digest can never verify —
+                    // report it under the same code, never substitute a value.
+                    match super::canonical::try_canonical_digest(&value) {
+                        Ok(computed) => {
+                            if computed != declared.as_str() {
+                                out.push(Diagnostic::new(
+                                    "SOMA-CMP-0004",
+                                    "declared contentDigest does not verify",
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            out.push(Diagnostic::new(
+                                "SOMA-CMP-0004",
+                                format!("contentDigest cannot be recomputed ({e})"),
+                            ));
+                        }
                     }
                 }
             }

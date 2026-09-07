@@ -91,15 +91,17 @@ pub fn resume_run(
                 // resumed frontier (no fabricated zero digests, no free text in
                 // the timestamp field). The returned state's digest is resealed
                 // below so any caller-side save-after-resume round-trips.
-                let auth_digest = crate::workflow::soma::canonical_digest(&serde_json::json!({
-                    "kind": "replay-authorization",
-                    "authorizedBy": auth.authorized_by,
-                    "reason": auth.reason,
-                }));
-                let frontier_digest = crate::workflow::soma::canonical_digest(&serde_json::json!({
-                    "runId": state.run_id,
-                    "frontier": state.frontier,
-                }));
+                let auth_digest =
+                    crate::workflow::soma::try_canonical_digest(&serde_json::json!({
+                        "kind": "replay-authorization",
+                        "authorizedBy": auth.authorized_by,
+                        "reason": auth.reason,
+                    }))?;
+                let frontier_digest =
+                    crate::workflow::soma::try_canonical_digest(&serde_json::json!({
+                        "runId": state.run_id,
+                        "frontier": state.frontier,
+                    }))?;
                 state
                     .evidence_refs
                     .push(super::memory_contracts::EvidenceReferenceV1 {

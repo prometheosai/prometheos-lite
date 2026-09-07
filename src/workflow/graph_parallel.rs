@@ -28,7 +28,7 @@ use super::graph_state::{
     GraphEdgeV1, GraphManifestV1, GraphRunStateV1, NodeAttemptRecordV1, OutcomeCategory,
     RouteDecisionV1,
 };
-use super::soma::canonical_digest;
+use super::soma::try_canonical_digest;
 
 // ---------------------------------------------------------------------------
 // JoinPolicyV1 + JoinEvaluationV1
@@ -102,7 +102,7 @@ impl JoinEvaluationV1 {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("contentDigest");
         }
-        canonical_digest(&v)
+        try_canonical_digest(&v).expect("canonical digest of Lite-constructed record cannot fail")
     }
 
     fn seal_in_place(&mut self) {
@@ -402,7 +402,7 @@ fn compute_index_digest(idx: &GraphEvidenceIndexV1) -> String {
     if let Some(obj) = v.as_object_mut() {
         obj.remove("contentDigest");
     }
-    canonical_digest(&v)
+    try_canonical_digest(&v).expect("canonical digest of Lite-constructed record cannot fail")
 }
 
 // ---------------------------------------------------------------------------

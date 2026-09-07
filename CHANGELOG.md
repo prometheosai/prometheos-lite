@@ -1,5 +1,37 @@
 ## Unreleased
 
+- SOMA canonical layer: fail-closed number policy (audit follow-up,
+  operator-mandated). In `src/workflow/soma/canonical.rs`: (1)
+  `format_number` is no longer infallible — the branch that silently
+  substituted `"0"` for unrepresentable numbers is removed;
+  `try_canonical_bytes` / `try_canonical_digest` propagate
+  `CanonicalError` (`NonFiniteNumber` / `MagnitudeExceeded` /
+  `PrecisionExceeded`) to every digest call site. (2) New raw-text guard
+  `validate_number_lexemes` enforces SOMA's DecimalV2 limits (>400
+  significant digits; |value| >= 1e10000 rejected, exact 1e10000 allowed,
+  zero exempt) on JSON text BEFORE serde_json parses it — the only layer
+  that still sees the original number lexeme; wired into
+  `soma::validate_artifact_text` ahead of parsing. (3) The lexeme checks
+  reuse the existing duplicate-key scanner's parser via a `detect_dups`
+  flag, so CMP-0007 duplicate-key behavior is unchanged (conformance
+  fixtures still pass). Internal `compute_digest`/`sealed` helpers keep
+  infallible signatures via `.expect()` under a documented invariant
+  (serde_json without `arbitrary_precision` cannot construct an
+  out-of-policy `Number`); audit/adapter/event digest verification now
+  fails closed with SOMA-CMP-0004 diagnostics when a digest cannot be
+  recomputed. Known limitation (tracked as a follow-up item): numbers
+  with 18+ significant digits within the DecimalV2 limits are still
+  truncated by serde at parse time; canonical byte-identity with SOMA
+  for those requires enabling `serde_json/arbitrary_precision`, a
+  separately gated decision.
+- New tests `tests/soma_number_policy.rs` (9 tests): in-policy numbers
+  unchanged byte-for-byte; >400-digit and >1e10000 lexemes rejected;
+  grammar junk classified as malformed, not policy; today's serde
+  invariants locked (`1e999` fails at parse; `Number::from_f64(NaN)`
+  returns None); digest determinism. Suite: 1003 lib / 39 bin / 21+30+2
+  conformance / 5 api read-model / 2 soma-ast fixture / 9 new
+  number-policy tests — no regressions.
+
 - E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild
   property without adding new endpoints. Tests cover:
