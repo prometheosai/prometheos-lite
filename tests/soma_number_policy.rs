@@ -103,6 +103,47 @@ fn lexeme_guard_rejects_magnitude_beyond_1e10000() {
 }
 
 #[test]
+fn lexeme_guard_boundary_is_lexeme_independent() {
+    // Reviewer P1: the magnitude boundary is a property of the VALUE, not
+    // of the text. Exactly 10^10000 is in policy no matter how it is
+    // spelled; anything strictly above it is out.
+    let in_policy = [
+        "[1e10000]".to_string(),
+        "[1.0e10000]".to_string(),
+        "[10e9999]".to_string(),
+        "[100e9998]".to_string(),
+        "[0.1e10001]".to_string(),
+        // 1 followed by 300 zeros via exponent shifting.
+        format!("[1{}e9700]", "0".repeat(300)),
+        // negative sign changes nothing about the magnitude rule.
+        "[-1e10000]".to_string(),
+        "[-10e9999]".to_string(),
+    ];
+    for text in &in_policy {
+        assert!(
+            matches!(validate_number_lexemes(text.as_bytes()), Ok(())),
+            "{text:?} equals exactly ±1e10000 and must be in policy"
+        );
+    }
+    let out_of_policy = [
+        // Just above 1e10000 in various spellings.
+        "[10.00000001e9999]".to_string(),
+        "[1.00000001e10000]".to_string(),
+        "[2e10000]".to_string(),
+        "[1.5e10000]".to_string(),
+    ];
+    for text in &out_of_policy {
+        assert!(
+            matches!(
+                validate_number_lexemes(text.as_bytes()),
+                Err(CanonicalError::MagnitudeExceeded(_))
+            ),
+            "{text:?} exceeds 1e10000 and must be out of policy"
+        );
+    }
+}
+
+#[test]
 fn lexeme_guard_flags_grammar_garbage_as_malformed_not_policy() {
     for text in ["[1..2]", "[1e]", "[.5]", "[01x]"] {
         match validate_number_lexemes(text.as_bytes()) {
