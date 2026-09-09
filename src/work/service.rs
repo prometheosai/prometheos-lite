@@ -114,14 +114,17 @@ impl WorkContextService {
     }
 
     /// Cursorable event read: up to `limit` events for the context whose
-    /// durable rowid is strictly greater than `after` (0 = from the
-    /// beginning), each paired with its rowid cursor. `limit` is clamped
+    /// durable `seq` is strictly greater than `after` (0 = from the
+    /// beginning), each paired with its `seq` cursor. `limit` is clamped
     /// to 1..=500 so a caller cannot request an unbounded page.
     ///
-    /// The rowid cursor is insertion-ordered and survives process
-    /// restarts and read-model rebuilds because it lives in the durable
-    /// store, so consumers can reconnect and resume with no gaps and no
-    /// duplication (see WorkContextEventOperations::get_events_for_context_after).
+    /// The `seq` cursor (`INTEGER PRIMARY KEY AUTOINCREMENT`) is
+    /// insertion-ordered, never reused after deletions, and stable across
+    /// VACUUM, process restarts, and read-model rebuilds because it lives
+    /// in the durable store, so consumers can reconnect and resume with no
+    /// gaps and no duplication
+    /// (see WorkContextEventOperations::get_events_for_context_after).
+    /// Corrupt rows surface as errors (fail-closed), never fabricated events.
     pub fn list_events_after(
         &self,
         context_id: &str,

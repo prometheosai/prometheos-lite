@@ -221,7 +221,8 @@ impl Db {
         self.conn
             .execute(
                 "CREATE TABLE IF NOT EXISTS work_context_events (
-                id TEXT PRIMARY KEY,
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT UNIQUE NOT NULL,
                 work_context_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 data TEXT NOT NULL,
@@ -231,6 +232,86 @@ impl Db {
                 [],
             )
             .context("Failed to create work_context_events table")?;
+
+        // Migration (E6/I03 Slice B P1): databases created before the
+        // durable-cursor fix have `id TEXT PRIMARY KEY` with no `seq`
+        // column and an implicit rowid cursor. Rebuild the table so the
+        // cursor is an explicit `INTEGER PRIMARY KEY AUTOINCREMENT`
+        // sequence: AUTOINCREMENT advances `sqlite_sequence`, never reuses
+        // deleted maxima, and is stable across VACUUM — unlike implicit
+        // rowids on a TEXT-PK table, which VACUUM may renumber.
+        // `ALTER TABLE ... ADD COLUMN` cannot add a PRIMARY KEY, so this
+        // is a copy-and-rename migration preserving insertion order.
+        let has_seq: bool = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = 'seq'",
+            )
+            .context("Failed to inspect work_context_events schema")?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|count| count > 0)
+            .context("Failed to inspect work_context_events schema")?;
+        if !has_seq {
+            // Backfill must preserve every legacy row, including any event
+            // whose parent context row is absent (foreign-key enforcement
+            // varies by environment: the `bundled` rusqlite build enforces
+            // FKs, so a plain INSERT...SELECT would fail the migration on
+            // orphans instead of preserving them). Disable enforcement for
+            // the copy and restore the previous setting afterwards.
+            let fk_on: i64 = self
+                .conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+                .context("Failed to read foreign_keys pragma")?;
+            if fk_on != 0 {
+                self.conn
+                    .execute_batch("PRAGMA foreign_keys=OFF")
+                    .context("Failed to suspend foreign_keys pragma")?;
+            }
+            self.conn
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS work_context_events_new (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT UNIQUE NOT NULL,
+                    work_context_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+                )",
+                    [],
+                )
+                .context("Failed to create migrated work_context_events table")?;
+            self.conn
+                .execute(
+                    "INSERT INTO work_context_events_new
+                        (id, work_context_id, event_type, data, created_at)
+                     SELECT id, work_context_id, event_type, data, created_at
+                     FROM work_context_events ORDER BY rowid ASC",
+                    [],
+                )
+                .context("Failed to backfill work_context_events sequence")?;
+            self.conn
+                .execute("DROP TABLE work_context_events", [])
+                .context("Failed to drop legacy work_context_events table")?;
+            self.conn
+                .execute(
+                    "ALTER TABLE work_context_events_new RENAME TO work_context_events",
+                    [],
+                )
+                .context("Failed to rename migrated work_context_events table")?;
+            if fk_on != 0 {
+                self.conn
+                    .execute_batch("PRAGMA foreign_keys=ON")
+                    .context("Failed to restore foreign_keys pragma")?;
+            }
+        }
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_work_context_events_context_seq
+                 ON work_context_events(work_context_id, seq)",
+                [],
+            )
+            .ok(); // Ignore if already exists
 
         self.conn
             .execute(

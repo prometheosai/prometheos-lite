@@ -18,9 +18,9 @@ use crate::work::types::{WorkDomain, WorkStatus};
 
 /// Query parameters for the cursorable event read endpoint.
 ///
-/// `after` is the rowid cursor returned as `next_cursor` by a previous
-/// page (0 or absent = from the beginning). `limit` is clamped to
-/// 1..=500 server-side.
+/// `after` is the durable `seq` cursor returned as `next_cursor` by a
+/// previous page (0 or absent = from the beginning). `limit` is clamped
+/// to 1..=500 server-side.
 #[derive(Debug, Deserialize)]
 pub struct WorkContextEventsQuery {
     pub user_id: String,
@@ -30,7 +30,9 @@ pub struct WorkContextEventsQuery {
     pub limit: Option<usize>,
 }
 
-/// One event in a cursor page. `cursor` is the event's durable rowid.
+/// One event in a cursor page. `cursor` is the event's durable `seq`
+/// (`INTEGER PRIMARY KEY AUTOINCREMENT`: monotonic, never reused,
+/// VACUUM-stable).
 #[derive(Debug, Serialize)]
 pub struct WorkContextEventResponse {
     pub cursor: i64,

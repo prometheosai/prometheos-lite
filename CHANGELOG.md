@@ -35,22 +35,27 @@
 - E6/I03 (#132) Slice B — cursorable durable event stream: new
   read-only endpoint `GET /work-contexts/:id/events?user_id=..&after=..
   &limit=..` returns a page of the context's `work_context_events`
-  (the same rows `WorkContextService` writes) ordered by SQLite rowid,
-  plus a `next_cursor` to resume from. The rowid cursor is
-  insertion-ordered, strictly monotonic, and durable, so event
-  consumers can reconnect and resume with no gaps and no duplication
-  (#132 acceptance bullet). Ownership scoping matches every other
-  read route (404 unknown context, 403 wrong user, 400 missing
+  (the same rows `WorkContextService` writes) ordered by a durable
+  `seq` cursor, plus a `next_cursor` to resume from. The cursor is an
+  explicit `seq INTEGER PRIMARY KEY AUTOINCREMENT` column: strictly
+  monotonic in insertion order, never reused after deletions, and
+  stable across VACUUM (reviewer P1 fix — implicit rowids on a TEXT-PK
+  table may be renumbered by VACUUM and may reuse deleted maxima).
+  Pre-fix databases migrate via copy-and-rename backfill preserving
+  insertion order. Row parsing is fail-closed (reviewer P1 fix):
+  corrupt `data` JSON and malformed `created_at` timestamps surface as
+  typed conversion errors (HTTP 500 on the endpoint), never fabricated
+  `null` payloads and never a panic. Ownership scoping matches every
+  other read route (404 unknown context, 403 wrong user, 400 missing
   user_id / negative cursor). `WorkContextService::list_events_after`
   exposes the same cursor read to the CLI path. `limit` is clamped
-  to 1..=500. Invariant: the cursor scheme relies on the events table
-  never being VACUUMed (rowid reassignment); an invariant comment is
-  recorded in `src/db/repository/work_context_events.rs`. Six new
-  integration tests in `tests/api_event_cursor.rs` cover: first page,
-  gap-free/dup-free resume, rebuild-from-db_path resume, limit
-  pagination completeness+uniqueness, 400/403/404 input validation,
-  and read stability (repeated reads identical; CLI-written events
-  visible through the API projection).
+  to 1..=500. Eleven integration tests in `tests/api_event_cursor.rs`
+  cover: first page, gap-free/dup-free resume, rebuild-from-db_path
+  resume, limit pagination completeness+uniqueness, 400/403/404 input
+  validation, read stability (repeated reads identical; CLI-written
+  events visible through the API projection), VACUUM stability,
+  delete non-reuse, corrupt-data fail-closed, malformed-timestamp
+  fail-closed, and legacy-table migration/backfill (+ post-VACUUM).
 
 - E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild
