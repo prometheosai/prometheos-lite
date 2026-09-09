@@ -262,47 +262,46 @@ impl Db {
                 .conn
                 .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
                 .context("Failed to read foreign_keys pragma")?;
+            // deterministic retry cleanup: any prior failed run left a
+            // straggler `_new` table; drop it before retrying the copy.
+            self.conn
+                .execute("DROP TABLE IF EXISTS work_context_events_new", [])
+                .context("Failed to drop prior migration attempt's work_context_events_new")?;
             if fk_on != 0 {
                 self.conn
-                    .execute_batch("PRAGMA foreign_keys=OFF")
+                    .execute("PRAGMA foreign_keys=OFF", [])
                     .context("Failed to suspend foreign_keys pragma")?;
             }
+            // Atomic via single-threaded batch: BEGIN IMMEDIATE ... COMMIT
+            // envelops create/copy/drop/rename; any failure aborts the batch
+            // and leaves the original table (and release of the write lock)
+            // intact, so the next startup sees either the full legacy table
+            // (retryable) or the full migrated table, never an empty one.
             self.conn
-                .execute(
-                    "CREATE TABLE IF NOT EXISTS work_context_events_new (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id TEXT UNIQUE NOT NULL,
-                    work_context_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    data TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-                )",
-                    [],
-                )
-                .context("Failed to create migrated work_context_events table")?;
-            self.conn
-                .execute(
-                    "INSERT INTO work_context_events_new
-                        (id, work_context_id, event_type, data, created_at)
-                     SELECT id, work_context_id, event_type, data, created_at
-                     FROM work_context_events ORDER BY rowid ASC",
-                    [],
-                )
-                .context("Failed to backfill work_context_events sequence")?;
-            self.conn
-                .execute("DROP TABLE work_context_events", [])
-                .context("Failed to drop legacy work_context_events table")?;
-            self.conn
-                .execute(
-                    "ALTER TABLE work_context_events_new RENAME TO work_context_events",
-                    [],
-                )
-                .context("Failed to rename migrated work_context_events table")?;
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     CREATE TABLE work_context_events_new (
+                         seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                         id TEXT UNIQUE NOT NULL,
+                         work_context_id TEXT NOT NULL,
+                         event_type TEXT NOT NULL,
+                         data TEXT NOT NULL,
+                         created_at TEXT NOT NULL,
+                         FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+                     );
+                     INSERT INTO work_context_events_new
+                         (id, work_context_id, event_type, data, created_at)
+                         SELECT id, work_context_id, event_type, data, created_at
+                         FROM work_context_events ORDER BY rowid ASC;
+                     DROP TABLE work_context_events;
+                     ALTER TABLE work_context_events_new RENAME TO work_context_events;
+                     COMMIT;",
+                )?;
+            // restore FK pragma after batch (whether success or failure)
             if fk_on != 0 {
                 self.conn
-                    .execute_batch("PRAGMA foreign_keys=ON")
-                    .context("Failed to restore foreign_keys pragma")?;
+                    .execute("PRAGMA foreign_keys=ON", [])
+                    .context("Failed to restore foreign_keys pragma after migration")?;
             }
         }
         self.conn
@@ -311,7 +310,7 @@ impl Db {
                  ON work_context_events(work_context_id, seq)",
                 [],
             )
-            .ok(); // Ignore if already exists
+            .context("Failed to create work_context_events(seq) index")?;
 
         self.conn
             .execute(
