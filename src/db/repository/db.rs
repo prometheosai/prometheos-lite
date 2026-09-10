@@ -262,8 +262,9 @@ impl Db {
                 .conn
                 .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
                 .context("Failed to read foreign_keys pragma")?;
-            // deterministic retry cleanup: any prior failed run left a
-            // straggler `_new` table; drop it before retrying the copy.
+            // Deterministic retry cleanup: any prior failed run may have
+            // left a straggler `_new` table; drop it before retrying the
+            // copy so the retry is non-retryable-state-free.
             self.conn
                 .execute("DROP TABLE IF EXISTS work_context_events_new", [])
                 .context("Failed to drop prior migration attempt's work_context_events_new")?;
@@ -272,15 +273,17 @@ impl Db {
                     .execute("PRAGMA foreign_keys=OFF", [])
                     .context("Failed to suspend foreign_keys pragma")?;
             }
-            // Atomic via single-threaded batch: BEGIN IMMEDIATE ... COMMIT
-            // envelops create/copy/drop/rename; any failure aborts the batch
-            // and leaves the original table (and release of the write lock)
-            // intact, so the next startup sees either the full legacy table
-            // (retryable) or the full migrated table, never an empty one.
-            self.conn
-                .execute_batch(
-                    "BEGIN IMMEDIATE;
-                     CREATE TABLE work_context_events_new (
+            // Atomic migration: a rusqlite transaction wraps
+            // create/copy/drop/rename. On error the transaction object's
+            // Drop issues ROLLBACK, so a failed migration leaves the
+            // original table fully intact (never an empty table) and the
+            // whole attempt is safely retryable. FK pragma changes are
+            // no-ops inside a transaction per SQLite, so the suspension
+            // above and the restoration below both happen outside it.
+            let migration_result = (|| -> rusqlite::Result<()> {
+                let tx = self.conn.unchecked_transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE work_context_events_new (
                          seq INTEGER PRIMARY KEY AUTOINCREMENT,
                          id TEXT UNIQUE NOT NULL,
                          work_context_id TEXT NOT NULL,
@@ -294,14 +297,25 @@ impl Db {
                          SELECT id, work_context_id, event_type, data, created_at
                          FROM work_context_events ORDER BY rowid ASC;
                      DROP TABLE work_context_events;
-                     ALTER TABLE work_context_events_new RENAME TO work_context_events;
-                     COMMIT;",
+                     ALTER TABLE work_context_events_new RENAME TO work_context_events;",
                 )?;
-            // restore FK pragma after batch (whether success or failure)
-            if fk_on != 0 {
-                self.conn
-                    .execute("PRAGMA foreign_keys=ON", [])
-                    .context("Failed to restore foreign_keys pragma after migration")?;
+                tx.commit()
+            })();
+            // Guaranteed pragma restoration: runs unconditionally, on every
+            // success AND failure path, before any error is propagated. The
+            // FK setting never leaks out of a failed migration.
+            let restore_result = if fk_on != 0 {
+                Some(
+                    self.conn
+                        .execute("PRAGMA foreign_keys=ON", [])
+                        .context("Failed to restore foreign_keys pragma"),
+                )
+            } else {
+                None
+            };
+            migration_result.context("work_context_events migration failed")?;
+            if let Some(restore) = restore_result {
+                restore?;
             }
         }
         self.conn

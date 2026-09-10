@@ -571,6 +571,192 @@ async fn malformed_timestamp_fails_closed_without_panic() {
 }
 
 #[test]
+fn failed_migration_preserves_original_table_and_retry_succeeds() {
+    // P1 regression (review round 2): the migration must be transactional —
+    // a failed attempt leaves the original table fully intact (never an
+    // empty table), restores the foreign_keys pragma, cleans up any
+    // straggler `_new` table, and is safely retryable.
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir
+        .path()
+        .join("failed_migration_test.db")
+        .to_str()
+        .expect("db path")
+        .to_string();
+
+    // Legacy shape WITHOUT the UNIQUE constraint on `id`, containing a
+    // duplicate id — the migration's INSERT into the UNIQUEd `_new` table
+    // must fail deterministically. Also install a straggler `_new` table
+    // with junk rows, simulating a prior aborted attempt.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("open legacy db");
+        conn.execute_batch(
+            "CREATE TABLE work_context_events (
+                id TEXT,
+                work_context_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO work_context_events VALUES
+                ('dup-id', 'ctx-f', 'context_created', '{\"a\":1}', '2026-09-01T00:00:00+00:00'),
+                ('dup-id', 'ctx-f', 'status_changed', '{\"a\":2}', '2026-09-02T00:00:00+00:00');
+            CREATE TABLE work_context_events_new (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT UNIQUE NOT NULL,
+                work_context_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO work_context_events_new
+                (id, work_context_id, event_type, data, created_at)
+                VALUES ('junk', 'ctx-f', 'junk', '{}', '2020-01-01T00:00:00+00:00');",
+        )
+        .expect("legacy fixture");
+    }
+
+    // First attempt must fail closed (UNIQUE violation inside the batch).
+    {
+        let err = match prometheos_lite::db::Db::new(&db_path) {
+            Err(e) => e,
+            Ok(_) => panic!("migration with duplicate ids must fail"),
+        };
+        assert!(
+            format!("{err:?}").contains("work_context_events"),
+            "error must identify the failing migration: {err:?}"
+        );
+    }
+
+    // Original table fully intact: still no `seq`, both legacy rows present,
+    // and the straggler `_new` table was deterministically dropped (the
+    // rollback of the failed batch means even the batch-created `_new` is
+    // gone; the pre-existing one was eagerly dropped up front).
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db");
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM work_context_events", [], |r| r.get(0))
+            .expect("original table must still exist with its rows");
+        assert_eq!(row_count, 2, "original rows must survive failed migration");
+        let still_legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = 'seq'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema probe");
+        assert_eq!(still_legacy, 0, "legacy table must NOT be half-migrated");
+        let new_table_leftover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+                 AND name = 'work_context_events_new'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("table probe");
+        assert_eq!(
+            new_table_leftover, 0,
+            "no straggler _new table may survive a failed migration"
+        );
+    }
+
+    // Deterministic retry: remove the duplicate row, retry the migration.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db");
+        conn.execute(
+            "DELETE FROM work_context_events WHERE rowid IN
+                 (SELECT MAX(rowid) FROM work_context_events)",
+            [],
+        )
+        .expect("dedupe");
+    }
+    let db = prometheos_lite::db::Db::new(&db_path).expect("retry must succeed");
+
+    // Retry succeeded: one row migrated with a positive seq, cursor read
+    // works, and the foreign_keys pragma is restored to its default-on
+    // value on the surviving connection (guaranteed restoration).
+    let fk_restored: i64 = db
+        .conn()
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .expect("fk pragma readable");
+    assert_eq!(fk_restored, 1, "foreign_keys pragma must be restored");
+    let seqs: Vec<(i64, String)> = {
+        use std::sync::Arc;
+        let svc = prometheos_lite::work::WorkContextService::new(Arc::new(db));
+        svc.list_events_after("ctx-f", Some(0), 50)
+            .expect("cursor read after retry")
+            .into_iter()
+            .map(|(seq, ev)| (seq, ev.id))
+            .collect()
+    };
+    assert_eq!(seqs.len(), 1);
+    assert_eq!(seqs[0].1, "dup-id");
+    assert!(seqs[0].0 > 0);
+}
+
+#[test]
+fn migration_is_idempotent_and_leaves_no_artifacts() {
+    // P1 regression (review round 2): re-opening an already-migrated
+    // database must be a no-op — no reworked backfill, no `_new` table,
+    // seqs unchanged, FK pragma on.
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir
+        .path()
+        .join("idempotent_migration_test.db")
+        .to_str()
+        .expect("db path")
+        .to_string();
+
+    let ctx_id;
+    let first_seqs: Vec<i64> = {
+        let db = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("initial db"));
+        let svc = prometheos_lite::work::WorkContextService::new(db);
+        let ctx = svc
+            .create_context(
+                "user-idem".to_string(),
+                "idem".to_string(),
+                prometheos_lite::work::types::WorkDomain::General,
+                "g".to_string(),
+            )
+            .expect("create context");
+        ctx_id = ctx.id.clone();
+        svc.list_events_after(&ctx.id, Some(0), 50)
+            .expect("read")
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect()
+    };
+    assert_eq!(first_seqs.len(), 1);
+
+    // Second open on the same file: migration must not re-run.
+    let second_seqs: Vec<i64> = {
+        let db = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("reopen db"));
+        let has_new_table: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+                 AND name = 'work_context_events_new'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("probe");
+        assert_eq!(has_new_table, 0, "no _new table on re-open");
+        let fk_on: i64 = db
+            .conn()
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .expect("fk pragma readable");
+        assert_eq!(fk_on, 1, "foreign_keys pragma remains on");
+        let svc = prometheos_lite::work::WorkContextService::new(db);
+        svc.list_events_after(&ctx_id, Some(0), 50)
+            .expect("read contexts table unaffected")
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect()
+    };
+    assert_eq!(first_seqs, second_seqs, "seqs stable across re-open");
+}
+
+#[test]
 fn legacy_event_table_migrates_to_durable_seq_in_insertion_order() {
     // P1 regression: databases created before the fix have no `seq`
     // column. Opening them via `Db` must backfill an AUTOINCREMENT `seq`
