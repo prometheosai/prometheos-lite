@@ -49,13 +49,23 @@
   other read route (404 unknown context, 403 wrong user, 400 missing
   user_id / negative cursor). `WorkContextService::list_events_after`
   exposes the same cursor read to the CLI path. `limit` is clamped
-  to 1..=500. Eleven integration tests in `tests/api_event_cursor.rs`
+  to 1..=500. The migration itself is transactional (review round 2
+  fix): a rusqlite transaction wraps create/copy/drop/rename so a
+  failed attempt rolls back and leaves the legacy table intact and
+  retryable (never an empty table); a pre-existing `_new` straggler
+  from an aborted attempt is deterministically dropped before the
+  copy; and the `foreign_keys` pragma suspension is restored
+  unconditionally — on success and on failure — before any error is
+  propagated. Index creation errors are surfaced, not swallowed.
+  Thirteen integration tests in `tests/api_event_cursor.rs`
   cover: first page, gap-free/dup-free resume, rebuild-from-db_path
   resume, limit pagination completeness+uniqueness, 400/403/404 input
   validation, read stability (repeated reads identical; CLI-written
   events visible through the API projection), VACUUM stability,
   delete non-reuse, corrupt-data fail-closed, malformed-timestamp
-  fail-closed, and legacy-table migration/backfill (+ post-VACUUM).
+  fail-closed, legacy-table migration/backfill (+ post-VACUUM),
+  failed-migration rollback + deterministic retry + pragma
+  restoration, and migration idempotency on re-open.
 
 - E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild
