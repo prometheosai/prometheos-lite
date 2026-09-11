@@ -113,6 +113,33 @@ impl WorkContextService {
         Ok(())
     }
 
+    /// Cursorable event read: up to `limit` events for the context whose
+    /// durable `seq` is strictly greater than `after` (0 = from the
+    /// beginning), each paired with its `seq` cursor. `limit` is clamped
+    /// to 1..=500 so a caller cannot request an unbounded page.
+    ///
+    /// The `seq` cursor (`INTEGER PRIMARY KEY AUTOINCREMENT`) is
+    /// insertion-ordered, never reused after deletions, and stable across
+    /// VACUUM, process restarts, and read-model rebuilds because it lives
+    /// in the durable store, so consumers can reconnect and resume with no
+    /// gaps and no duplication
+    /// (see WorkContextEventOperations::get_events_for_context_after).
+    /// Corrupt rows surface as errors (fail-closed), never fabricated events.
+    pub fn list_events_after(
+        &self,
+        context_id: &str,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, WorkContextEvent)>> {
+        let clamped = limit.clamp(1, 500);
+        WorkContextEventOperations::get_events_for_context_after(
+            &*self.db,
+            context_id,
+            after.unwrap_or(0),
+            clamped,
+        )
+    }
+
     /// Update the status of a WorkContext
     pub fn update_status(&self, context: &mut WorkContext, status: WorkStatus) -> Result<()> {
         if context.domain == WorkDomain::Software && status == WorkStatus::Completed {

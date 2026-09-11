@@ -32,6 +32,40 @@
   lexeme-independence regressions (reviewer P1 fix). Suite: 1003 lib /
   39 bin / 21+30+2 conformance / 5 api read-model / 2 soma-ast fixture
   / 10 new number-policy tests - no regressions.
+- E6/I03 (#132) Slice B — cursorable durable event stream: new
+  read-only endpoint `GET /work-contexts/:id/events?user_id=..&after=..
+  &limit=..` returns a page of the context's `work_context_events`
+  (the same rows `WorkContextService` writes) ordered by a durable
+  `seq` cursor, plus a `next_cursor` to resume from. The cursor is an
+  explicit `seq INTEGER PRIMARY KEY AUTOINCREMENT` column: strictly
+  monotonic in insertion order, never reused after deletions, and
+  stable across VACUUM (reviewer P1 fix — implicit rowids on a TEXT-PK
+  table may be renumbered by VACUUM and may reuse deleted maxima).
+  Pre-fix databases migrate via copy-and-rename backfill preserving
+  insertion order. Row parsing is fail-closed (reviewer P1 fix):
+  corrupt `data` JSON and malformed `created_at` timestamps surface as
+  typed conversion errors (HTTP 500 on the endpoint), never fabricated
+  `null` payloads and never a panic. Ownership scoping matches every
+  other read route (404 unknown context, 403 wrong user, 400 missing
+  user_id / negative cursor). `WorkContextService::list_events_after`
+  exposes the same cursor read to the CLI path. `limit` is clamped
+  to 1..=500. The migration itself is transactional (review round 2
+  fix): a rusqlite transaction wraps create/copy/drop/rename so a
+  failed attempt rolls back and leaves the legacy table intact and
+  retryable (never an empty table); a pre-existing `_new` straggler
+  from an aborted attempt is deterministically dropped before the
+  copy; and the `foreign_keys` pragma suspension is restored
+  unconditionally — on success and on failure — before any error is
+  propagated. Index creation errors are surfaced, not swallowed.
+  Thirteen integration tests in `tests/api_event_cursor.rs`
+  cover: first page, gap-free/dup-free resume, rebuild-from-db_path
+  resume, limit pagination completeness+uniqueness, 400/403/404 input
+  validation, read stability (repeated reads identical; CLI-written
+  events visible through the API projection), VACUUM stability,
+  delete non-reuse, corrupt-data fail-closed, malformed-timestamp
+  fail-closed, legacy-table migration/backfill (+ post-VACUUM),
+  failed-migration rollback + deterministic retry + pragma
+  restoration, and migration idempotency on re-open.
 
 - E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild

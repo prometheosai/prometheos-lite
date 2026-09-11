@@ -221,7 +221,8 @@ impl Db {
         self.conn
             .execute(
                 "CREATE TABLE IF NOT EXISTS work_context_events (
-                id TEXT PRIMARY KEY,
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT UNIQUE NOT NULL,
                 work_context_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 data TEXT NOT NULL,
@@ -231,6 +232,99 @@ impl Db {
                 [],
             )
             .context("Failed to create work_context_events table")?;
+
+        // Migration (E6/I03 Slice B P1): databases created before the
+        // durable-cursor fix have `id TEXT PRIMARY KEY` with no `seq`
+        // column and an implicit rowid cursor. Rebuild the table so the
+        // cursor is an explicit `INTEGER PRIMARY KEY AUTOINCREMENT`
+        // sequence: AUTOINCREMENT advances `sqlite_sequence`, never reuses
+        // deleted maxima, and is stable across VACUUM — unlike implicit
+        // rowids on a TEXT-PK table, which VACUUM may renumber.
+        // `ALTER TABLE ... ADD COLUMN` cannot add a PRIMARY KEY, so this
+        // is a copy-and-rename migration preserving insertion order.
+        let has_seq: bool = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = 'seq'",
+            )
+            .context("Failed to inspect work_context_events schema")?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|count| count > 0)
+            .context("Failed to inspect work_context_events schema")?;
+        if !has_seq {
+            // Backfill must preserve every legacy row, including any event
+            // whose parent context row is absent (foreign-key enforcement
+            // varies by environment: the `bundled` rusqlite build enforces
+            // FKs, so a plain INSERT...SELECT would fail the migration on
+            // orphans instead of preserving them). Disable enforcement for
+            // the copy and restore the previous setting afterwards.
+            let fk_on: i64 = self
+                .conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+                .context("Failed to read foreign_keys pragma")?;
+            // Deterministic retry cleanup: any prior failed run may have
+            // left a straggler `_new` table; drop it before retrying the
+            // copy so the retry is non-retryable-state-free.
+            self.conn
+                .execute("DROP TABLE IF EXISTS work_context_events_new", [])
+                .context("Failed to drop prior migration attempt's work_context_events_new")?;
+            if fk_on != 0 {
+                self.conn
+                    .execute("PRAGMA foreign_keys=OFF", [])
+                    .context("Failed to suspend foreign_keys pragma")?;
+            }
+            // Atomic migration: a rusqlite transaction wraps
+            // create/copy/drop/rename. On error the transaction object's
+            // Drop issues ROLLBACK, so a failed migration leaves the
+            // original table fully intact (never an empty table) and the
+            // whole attempt is safely retryable. FK pragma changes are
+            // no-ops inside a transaction per SQLite, so the suspension
+            // above and the restoration below both happen outside it.
+            let migration_result = (|| -> rusqlite::Result<()> {
+                let tx = self.conn.unchecked_transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE work_context_events_new (
+                         seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                         id TEXT UNIQUE NOT NULL,
+                         work_context_id TEXT NOT NULL,
+                         event_type TEXT NOT NULL,
+                         data TEXT NOT NULL,
+                         created_at TEXT NOT NULL,
+                         FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+                     );
+                     INSERT INTO work_context_events_new
+                         (id, work_context_id, event_type, data, created_at)
+                         SELECT id, work_context_id, event_type, data, created_at
+                         FROM work_context_events ORDER BY rowid ASC;
+                     DROP TABLE work_context_events;
+                     ALTER TABLE work_context_events_new RENAME TO work_context_events;",
+                )?;
+                tx.commit()
+            })();
+            // Guaranteed pragma restoration: runs unconditionally, on every
+            // success AND failure path, before any error is propagated. The
+            // FK setting never leaks out of a failed migration.
+            let restore_result = if fk_on != 0 {
+                Some(
+                    self.conn
+                        .execute("PRAGMA foreign_keys=ON", [])
+                        .context("Failed to restore foreign_keys pragma"),
+                )
+            } else {
+                None
+            };
+            migration_result.context("work_context_events migration failed")?;
+            if let Some(restore) = restore_result {
+                restore?;
+            }
+        }
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_work_context_events_context_seq
+                 ON work_context_events(work_context_id, seq)",
+                [],
+            )
+            .context("Failed to create work_context_events(seq) index")?;
 
         self.conn
             .execute(
