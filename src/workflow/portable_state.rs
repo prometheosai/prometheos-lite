@@ -24,6 +24,16 @@
 //! [`state_digest`], and [`export_portable_state`] first run full validation
 //! and refuse to emit bytes for an invalid state.
 //!
+//! ## This is path B — do not conflate it with paths A or C (#215)
+//!
+//! Number rendering comes from `serde_json` (integral floats keep their
+//! fraction: `1.0` → `1.0`), which intentionally differs from
+//! `soma::canonical` (path A, `1.0` → `1`, DecimalV2 fail-closed). Digests
+//! of this path are **not interchangeable** with SOMA canonical digests or
+//! with checkpoint digests from `memory_contracts`. `tests/canonical_policy_conformance.rs`
+//! pins the current behavior — any deliberate byte change must update the
+//! pins explicitly.
+//!
 //! Import ([`import_portable_state`]) runs a strict pipeline — parse →
 //! version → migrate legacy → typed-validate → invariants → refs → decision
 //! graph → repository compatibility (when expected metadata is supplied) — and

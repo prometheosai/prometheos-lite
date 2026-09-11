@@ -217,6 +217,15 @@ pub struct ContextBlock {
 }
 
 /// Recursively key-sorted compact canonical JSON (SOMA convention).
+///
+/// #215 — this is **path C** of the repository's three canonicalization
+/// policies. It uses `serde_json` scalar rendering (`1.0` → `1.0`, not `1`)
+/// and does NOT apply the set-like normalization that `portable_state`
+/// (path B) performs. Checkpoint digests computed here are therefore
+/// distinct identities from `portable_state::state_digest` and from
+/// `soma::canonical::try_canonical_digest`; they must never be
+/// cross-compared. `tests/canonical_policy_conformance.rs` pins the
+/// current behavior so divergence changes fail loudly.
 pub fn to_canonical_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
@@ -242,7 +251,8 @@ pub fn to_canonical_json(value: &Value) -> String {
     }
 }
 
-/// SHA-256 lowercase hex over [`to_canonical_json`].
+/// SHA-256 lowercase hex over [`to_canonical_json`]. NOT interchangeable
+/// with `soma::canonical` or `portable_state::state_digest` digests (see #215).
 pub fn canonical_digest(value: &Value) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();

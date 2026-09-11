@@ -54,6 +54,23 @@
 //!   of silently minting `"0"`. Converting ~80 such call sites to `Result`
 //!   would be noise with no reachable behavior change; the lexeme guard
 //!   below is where untrusted inputs are actually refused.
+//!
+//! ## Three canonicalization policies coexist — do not conflate them (#215)
+//!
+//! This module is **path A** (SOMA interop). Two neighbors exist:
+//!
+//! - **`portable_state::{to_canonical_json, state_digest}`** (path B): Lite's
+//!   portable-export policy — serde_json's own number rendering after Lite's
+//!   own normalization. Integral `f64`s render WITH the fraction (`1.0`),
+//!   diverging from this module's `1`. See its module docs.
+//! - **`memory_contracts::canonical_digest`** (path C): recursive
+//!   `serde_json` value digest used by `ProjectCheckpoint`; no set-like
+//!   normalization. See its module docs.
+//!
+//! Digests computed by A, B, and C over the same semantic value are
+//! **not interchangeable identities**; they must not be compared across
+//! paths. The overlap domain (non-integral floats only) is pinned in
+//! `tests/canonical_policy_conformance.rs`.
 
 use sha2::{Digest as _, Sha256};
 

@@ -1,5 +1,20 @@
 ## Unreleased
 
+- #215 Option 3 — canonicalization policy conformance pins. Documents the
+  three existing canonical JSON policies as distinct identities that must
+  not be cross-compared: **A** (`soma::canonical`, SOMA interop, custom
+  number rendering with DecimalV2 limits, fail-closed), **B**
+  (`portable_state`, serde_json rendering after normalization — integral
+  floats keep their fraction), and **C** (`memory_contracts::canonical_digest`
+  / `ProjectCheckpoint` — serde_json rendering with **no** set-like
+  normalization). New registry of conformance pins in
+  `tests/canonical_policy_conformance.rs` (8 tests): corpus pins for
+  `1.0` vs `1`, key ordering, nested structures, escaping, DecimalV2
+  rejection boundaries (`validate_number_lexemes` vs `try_canonical_bytes`),
+  the state/checkpoint digest divergence on a real fixture, and the
+  set-like normalization gap between B and C. Module docs in all three
+  canonical paths now cross-reference the policy layers. `arbitrary_precision`
+  stays disabled; no persisted-digest or schema migration in this PR.
 - SOMA canonical layer: fail-closed number policy (audit follow-up,
   operator-mandated). In `src/workflow/soma/canonical.rs`: (1)
   `format_number` is no longer infallible — the branch that silently
