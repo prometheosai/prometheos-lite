@@ -194,13 +194,27 @@ fn decimal_v2_boundaries_pinned() {
 }
 
 // ---------------------------------------------------------------------------
-// Corpus 6 — SHARED TYPED FIXTURE golden digests for all three paths.
-// The fixture has NO integral floats (0.7, 0.9 …) and its set-like arrays
-// are already in sorted order — so on this fixture, all three paths agree.
+// Corpus 6 — SHARED TYPED FIXTURE: golden byte fixtures + golden digests
+// for all three paths, on three variants of the SAME portable state.
+//
+// The fixture has NON-integral floats (0.7, 0.9 …) and set-like arrays in
+// sorted order; under those circumstances all three paths happen to agree on
+// the base state. The variants break that agreement deliberately:
+//   - conf1: confidence 0.7 → 1.0 makes A diverge (1 vs 1.0).
+//   - rev: reversed set-like arrays make A and C diverge from B (B
+//     normalizes order; A and C preserve the caller's array order).
+//
+// Byte pins come from golden fixture files; these were GENERATED from the
+// current implementation and are now the locked policy. Any change to any
+// path must update the generated fixture file in the same diff, making the
+// before/after byte-level consequence visible in review.
 // ---------------------------------------------------------------------------
 
+use std::fs;
+use std::path::PathBuf;
+
 fn fixture_state() -> PortableWorkState {
-    let text = std::fs::read_to_string(concat!(
+    let text = fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/portable-work-state/current-v1/portable_work_state.json"
     ))
@@ -208,7 +222,7 @@ fn fixture_state() -> PortableWorkState {
     import_portable_state(&text, None).expect("fixture imports")
 }
 
-/// The fixture, two ways: (a) as-is; (b) with decisions[0].confidence.value = 1.0.
+/// The fixture with decisions[0].confidence = 1.0.
 fn fixture_state_with_1p0() -> PortableWorkState {
     let mut s = fixture_state();
     s.decisions[0].confidence = Some(Confidence {
@@ -218,7 +232,7 @@ fn fixture_state_with_1p0() -> PortableWorkState {
     s
 }
 
-/// The fixture with reversed set-like collections (required_capabilities,
+/// The fixture with set-like collections reversed (required_capabilities,
 /// allowed_paths).
 fn fixture_state_set_reversed() -> PortableWorkState {
     let mut s = fixture_state();
@@ -227,81 +241,110 @@ fn fixture_state_set_reversed() -> PortableWorkState {
     s
 }
 
-#[test]
-fn fixture_agreement_domain_pinned_all_three_paths() {
-    let state = fixture_state();
+fn golden(stem: &str, path_letter: &str) -> Vec<u8> {
+    fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/canonical-policy/current-v1")
+            .join(format!("{stem}.{path_letter}.json")),
+    )
+    .unwrap_or_else(|e| {
+        panic!("golden fixture {stem}.{path_letter}.json missing: {e}")
+    })
+}
 
-    let a = try_canonical_digest(&serde_json::to_value(&state).unwrap()).unwrap();
-    let b = state_digest(&state).unwrap();
-    let c = ProjectCheckpoint::from_portable_work_state(&state)
-        .unwrap()
-        .state_digest;
+fn digest_of(bytes: &[u8]) -> String {
+    prometheos_lite::workflow::soma::canonical::sha256_hex(bytes)
+}
 
-    // Golden pin (all three agree on this fixture).
+/// Golden digests keyed by (variant, path).
+#[track_caller]
+fn pin_variant(stem: &str, state: &PortableWorkState, digests: [&str; 3]) {
+    let v = serde_json::to_value(state).expect("state to value");
+
+    // Bytes — through the public per-path entry points.
+    let a_bytes = try_canonical_bytes(&v).expect("path A bytes");
+    let b_bytes = prometheos_lite::workflow::portable_state::to_canonical_json(state)
+        .expect("path B bytes")
+        .into_bytes();
+    let c_bytes = prometheos_lite::workflow::memory_contracts::to_canonical_json(&v).into_bytes();
+
     assert_eq!(
-        b, "e233e4c6d2f4690754683cb3ed46b0dcf079d916523480f33e8be9206080508f",
-        "path B digest of current-v1 fixture — golden pin"
+        a_bytes,
+        golden(stem, "a"),
+        "path A bytes on {stem} must match the golden fixture"
     );
-    assert_eq!(a, b, "path A agrees with B on this float-free fixture");
     assert_eq!(
-        c, b,
-        "path C agrees with B on this normalized-order fixture"
+        b_bytes,
+        golden(stem, "b"),
+        "path B bytes on {stem} must match the golden fixture"
+    );
+    assert_eq!(
+        c_bytes,
+        golden(stem, "c"),
+        "path C bytes on {stem} must match the golden fixture"
+    );
+
+    // Digests — recomputed from the same bytes AND through the public
+    // digest functions (they must agree by construction).
+    assert_eq!(
+        try_canonical_digest(&v).unwrap(),
+        digests[0],
+        "path A digest on {stem} — golden pin"
+    );
+    assert_eq!(digest_of(&a_bytes), digests[0]);
+    assert_eq!(
+        state_digest(state).unwrap(),
+        digests[1],
+        "path B digest on {stem} — golden pin"
+    );
+    assert_eq!(digest_of(&b_bytes), digests[1]);
+    assert_eq!(
+        canonical_digest(&v).unwrap(),
+        digests[2],
+        "path C digest on {stem} — golden pin"
+    );
+    assert_eq!(digest_of(&c_bytes), digests[2]);
+
+    // Public checkpoint entrypoint agrees with canonical_digest(v).
+    assert_eq!(
+        ProjectCheckpoint::from_portable_work_state(state)
+            .unwrap()
+            .state_digest,
+        digests[2],
+        "ProjectCheckpoint digest must equal canonical_digest(to_value(state)) on {stem}"
     );
 }
 
+const BASE_DIGEST: &str = "e233e4c6d2f4690754683cb3ed46b0dcf079d916523480f33e8be9206080508f";
+const CONF1_A_DIGEST: &str = "ae257cce5f13147625e0e0ef42ac55bad559a0a1123a37356918884e363c55bd";
+const CONF1_BC_DIGEST: &str = "74f0a34cb0cf96b3acf7e8c8f13f5686ccc2d4cc6c036e30fa79e4493b6da36d";
+const REV_AC_DIGEST: &str = "3d4d7e0af5d2cd94ddb926d35babe819dcf155f963b9aabdb69df4354b07cba6";
+
 #[test]
-fn integral_float_variant_divergence_pinned_all_three_paths() {
-    let s = fixture_state_with_1p0();
-
-    let a = try_canonical_digest(&serde_json::to_value(&s).unwrap()).unwrap();
-    let b = state_digest(&s).unwrap();
-    let c = ProjectCheckpoint::from_portable_work_state(&s)
-        .unwrap()
-        .state_digest;
-
-    // B and C still agree (both serde renderers, no normalization difference
-    // on this single-value variant).
-    assert_eq!(
-        b, "74f0a34cb0cf96b3acf7e8c8f13f5686ccc2d4cc6c036e30fa79e4493b6da36d",
-        "path B digest with confidence=1.0 — golden pin"
-    );
-    assert_eq!(c, b);
-
-    // A diverges from B/C because of the 1 → 1.0 rendering difference.
-    assert_eq!(
-        a, "ae257cce5f13147625e0e0ef42ac55bad559a0a1123a37356918884e363c55bd",
-        "path A digest with confidence=1.0 — golden pin"
-    );
-    assert_ne!(a, b);
+fn golden_fixture_base_all_paths_agree() {
+    pin_variant("base", &fixture_state(), [BASE_DIGEST, BASE_DIGEST, BASE_DIGEST]);
 }
 
 #[test]
-fn set_like_order_gap_pinned_between_b_and_c() {
-    let base = fixture_state();
-    let rev = fixture_state_set_reversed();
+fn golden_fixture_integral_float_splits_path_a() {
+    let state = fixture_state_with_1p0();
+    pin_variant("conf1", &state, [CONF1_A_DIGEST, CONF1_BC_DIGEST, CONF1_BC_DIGEST]);
 
-    // Path B normalizes set-like arrays: digest unchanged.
-    let b_base = state_digest(&base).unwrap();
-    let b_rev = state_digest(&rev).unwrap();
-    assert_eq!(
-        b_base, b_rev,
-        "path B is order-insensitive for set-like collections"
-    );
+    // The one byte difference must be `1.0` vs `1` for confidence.value.
+    let a = golden("conf1", "a");
+    let b = golden("conf1", "b");
+    assert!(String::from_utf8(b).unwrap().contains(r#""value":1.0"#));
+    assert!(String::from_utf8(a).unwrap().contains(r#""value":1"#));
+}
 
-    // Path C digests input order: reversal changes the checkpoint digest.
-    let c_base = ProjectCheckpoint::from_portable_work_state(&base)
-        .unwrap()
-        .state_digest;
-    let c_rev = ProjectCheckpoint::from_portable_work_state(&rev)
-        .unwrap()
-        .state_digest;
-    assert_eq!(
-        c_base, "e233e4c6d2f4690754683cb3ed46b0dcf079d916523480f33e8be9206080508f",
-        "path C order-sensitive digest (base order) — golden pin"
+#[test]
+fn golden_fixture_set_order_reversal_splits_path_b() {
+    let state = fixture_state_set_reversed();
+    // A and C preserve array order → both change identically.
+    // B normalizes set-like collections → unchanged.
+    pin_variant(
+        "rev",
+        &state,
+        [REV_AC_DIGEST, BASE_DIGEST, REV_AC_DIGEST],
     );
-    assert_eq!(
-        c_rev, "3d4d7e0af5d2cd94ddb926d35babe819dcf155f963b9aabdb69df4354b07cba6",
-        "path C order-sensitive digest (reversed order) — golden pin"
-    );
-    assert_ne!(c_base, c_rev);
 }
