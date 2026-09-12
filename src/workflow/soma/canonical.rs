@@ -57,19 +57,24 @@
 //!
 //! ## Three canonicalization policies coexist — do not conflate them (#215)
 //!
-//! This module is **path A** (SOMA interop). Two neighbors exist:
+//! This module is **path A** (SOMA interop; fixed-point non-integral
+//! rendering, DecimalV2 limits fail-closed at parse/call boundaries). Two
+//! neighbors exist:
 //!
 //! - **`portable_state::{to_canonical_json, state_digest}`** (path B): Lite's
-//!   portable-export policy — serde_json's own number rendering after Lite's
-//!   own normalization. Integral `f64`s render WITH the fraction (`1.0`),
-//!   diverging from this module's `1`. See its module docs.
-//! - **`memory_contracts::canonical_digest`** (path C): recursive
-//!   `serde_json` value digest used by `ProjectCheckpoint`; no set-like
-//!   normalization. See its module docs.
+//!   portable-export policy — serde_json scalar rendering after Lite's
+//!   set-like normalization of the typed state. `1.0` stays `1.0`;
+//!   `1e30` stays `1e+30` (vs `1e30` → a 31-digit integer literal here).
+//!   Divergence requires an integral float or a float that needs
+//!   scientific notation; plain non-integral values like `0.7` agree.
+//! - **`memory_contracts::canonical_digest`** (path C): same serde_json
+//!   renderer as B but applied to `serde_json::to_value(pws)` with NO
+//!   set-like normalization, so array order is digested as-is.
 //!
 //! Digests computed by A, B, and C over the same semantic value are
 //! **not interchangeable identities**; they must not be compared across
-//! paths. The overlap domain (non-integral floats only) is pinned in
+//! paths. The exact divergence boundaries (integral floats, notation
+//! thresholds, order sensitivity) are golden-pinned in
 //! `tests/canonical_policy_conformance.rs`.
 
 use sha2::{Digest as _, Sha256};

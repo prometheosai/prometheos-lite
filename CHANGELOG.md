@@ -1,20 +1,23 @@
 ## Unreleased
 
-- #215 Option 3 — canonicalization policy conformance pins. Documents the
-  three existing canonical JSON policies as distinct identities that must
-  not be cross-compared: **A** (`soma::canonical`, SOMA interop, custom
-  number rendering with DecimalV2 limits, fail-closed), **B**
-  (`portable_state`, serde_json rendering after normalization — integral
-  floats keep their fraction), and **C** (`memory_contracts::canonical_digest`
-  / `ProjectCheckpoint` — serde_json rendering with **no** set-like
-  normalization). New registry of conformance pins in
-  `tests/canonical_policy_conformance.rs` (8 tests): corpus pins for
-  `1.0` vs `1`, key ordering, nested structures, escaping, DecimalV2
-  rejection boundaries (`validate_number_lexemes` vs `try_canonical_bytes`),
-  the state/checkpoint digest divergence on a real fixture, and the
-  set-like normalization gap between B and C. Module docs in all three
-  canonical paths now cross-reference the policy layers. `arbitrary_precision`
-  stays disabled; no persisted-digest or schema migration in this PR.
+- #215 Option 3, repair round 2 — hardened conformance pins. All three
+  canonicalization paths now carry golden byte/digest constants instead of
+  relative `assert_ne!` checks: path A (`soma::canonical`), path B
+  (`portable_state`), path C (`memory_contracts::canonical_digest`). On the
+  shared typed fixture (#151's `current-v1`): all three digests pinned for
+  the base state (agreement domain: fixture has no integral floats), for
+  the `confidence=1.0` variant (A diverges on `1.0` vs `1`), and for
+  set-like order reversal (B normalizes [digest unchanged], C digests
+  input order [digest changes]). Additional pins: scientific-notation
+  divergence (`1e30` → A writes a 31-digit integer, C writes `1e+30`);
+  non-integral agreement domain (`0.7` renders identically in all paths);
+  DecimalV2 layered boundaries (text guard rejects >400-digit lexemes;
+  value-level writer accepts the f64-truncated form). Documentation
+  corrected in all three module docs: path C is no longer described as
+  "SOMA convention"; the divergence claims are scoped to integral floats
+  and scientific-notation values, not "every f64"; B/C agreement requires
+  sorted set-like input order. 8 tests in
+  `tests/canonical_policy_conformance.rs`.
 - SOMA canonical layer: fail-closed number policy (audit follow-up,
   operator-mandated). In `src/workflow/soma/canonical.rs`: (1)
   `format_number` is no longer infallible — the branch that silently

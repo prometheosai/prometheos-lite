@@ -27,11 +27,16 @@
 //! ## This is path B — do not conflate it with paths A or C (#215)
 //!
 //! Number rendering comes from `serde_json` (integral floats keep their
-//! fraction: `1.0` → `1.0`), which intentionally differs from
-//! `soma::canonical` (path A, `1.0` → `1`, DecimalV2 fail-closed). Digests
-//! of this path are **not interchangeable** with SOMA canonical digests or
-//! with checkpoint digests from `memory_contracts`. `tests/canonical_policy_conformance.rs`
-//! pins the current behavior — any deliberate byte change must update the
+//! fraction and large/small magnitudes keep scientific notation: `1.0` →
+//! `1.0`, `1e30` → `1e+30`). This intentionally differs from
+//! `soma::canonical` (path A, `1.0` → `1`, fixed-point expansion,
+//! DecimalV2 fail-closed). `memory_contracts::canonical_digest` (path C)
+//! shares this renderer but operates on the **un-normalized** state, so B
+//! and C agree ONLY when set-like collections are already in sorted
+//! order. Digests of this path are **not interchangeable identities** with
+//! SOMA canonical digests or checkpoint digests.
+//! `tests/canonical_policy_conformance.rs` pins the exact byte/digest
+//! constants for all three paths — any deliberate change must update the
 //! pins explicitly.
 //!
 //! Import ([`import_portable_state`]) runs a strict pipeline — parse →

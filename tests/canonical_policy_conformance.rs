@@ -1,202 +1,202 @@
-//! Cross-path canonicalization conformance pins (#215 — Option 3).
+//! Cross-path canonicalization golden pins (#215 — Option 3).
 //!
-//! THREE canonicalization policies exist in this repository and are now
-//! pinned to their current bytes/digests so any drift fails loudly:
+//! Three canonicalization policies exist in this repository; this file
+//! pins their CURRENT bytes and digests with fixed golden constants so
+//! unilateral drift in any single path fails immediately (not merely
+//! `assert_ne!`-relative checks).
 //!
-//!   - **PATH A — `soma::canonical`** (`try_canonical_bytes` /
-//!     `try_canonical_digest`): the SOMA interop policy. Custom
-//!     `format_number` (integral floats render as integers: `1.0` → `1`),
-//!     Python-`json.dumps(ensure_ascii=False)` escaping, byte-lexicographic
-//!     key sort, and the DecimalV2 number policy enforced fail-closed
-//!     (≤400 significant digits; |exponent| ≤ 1e10000; no NaN/±Inf).
+//!   - **PATH A — `soma::canonical::{try_canonical_bytes,try_canonical_digest}`**:
+//!     SOMA interop policy. Custom `format_number`: integral floats render
+//!     as integers (`1.0` → `1`); shortest-round-trip fixed-point for
+//!     non-integral floats (NO scientific notation); DecimalV2 limits
+//!     (≤400 significant digits at text layer; |exponent| ≤ 1e10000)
+//!     enforced fail-closed.
+//!   - **PATH B — `portable_state::{to_canonical_json, state_digest}`**:
+//!     Lite portable export. serde_json scalar rendering on the
+//!     Lite-normalized state (`normalized_state` sorts set-like
+//!     collections before serialization).
+//!   - **PATH C — `memory_contracts::{to_canonical_json, canonical_digest}`**
+//!     as applied by `ProjectCheckpoint::from_portable_work_state`:
+//!     serde_json scalar rendering on the RAW `serde_json::to_value(pws)`
+//!     — set-like collection ORDER is digested as-is (no normalization).
 //!
-//!   - **PATH B — `portable_state`** (`to_canonical_json` / `state_digest`):
-//!     the Lite portable-export policy. serde_json serialization after
-//!     validated normalization (set-like collections sorted, keys sorted
-//!     recursively, compact). serde renders integral floats WITH the
-//!     fraction (`1.0` → `1.0`), so digests differ from path A for any
-//!     `f64`-bearing state (e.g. `Confidence.value`).
+//! § LOCKS: `state_digest` (B), checkpoint digest (C), and SOMA canonical
+//! digest (A) are **not interchangeable identities**. Divergences that
+//! currently exist (all pinned below):
+//!   1. **Integral floats**: A `1.0`→`1`; B/C `1.0`→`1.0`.
+//!      (Not EVERY f64 diverges: e.g. `0.7` renders `0.7` identically in
+//!      all three paths.)
+//!   2. **Floats outside fixed-point range**: A expands to fixed decimal
+//!      digits (`1e30` → the 31-digit integer literal); serde paths
+//!      (B/C) use scientific notation (`1e+30` / `1.5e-10`).
+//!   3. **Set-like collection order**: B normalizes (sorted) before
+//!      digests; C digests input order as-is. A operates on whatever
+//!      Value it is handed.
 //!
-//!   - **PATH C — `memory_contracts::canonical_digest`** (used by
-//!     `ProjectCheckpoint::from_portable_work_state`): an independent
-//!     recursive renderer over `serde_json::to_value(pws)` — string-key
-//!     sort, but **no set-like collection normalization**: capability /
-//!     allowed-path array ORDER is baked into the checkpoint digest,
-//!     whereas path B normalizes it away.
-//!
-//! § LOCK: a `state_digest` (B), a checkpoint digest (C), and a SOMA
-//! canonical digest (A) are **not interchangeable identities**. They must
-//! not be compared across paths, and changing any policy is a breaking
-//! change to every artifact that embeds that digest.
-//!
-//! The pins below record each path's CURRENT (pre-unification) behavior,
-//! deliberately including divergences. They are regression locks, not
-//! endorsements of the divergence. Unification behind a schema-version
-//! gate is a deferred product decision (#215 body); `serde_json` feature
+//! All pins are regression locks of behavior as of `main @ ...`, NOT
+//! endorsements of divergence. Unification behind a schema-version gate
+//! is a deferred product decision (see #215). `serde_json` feature
 //! `arbitrary_precision` stays disabled.
 
 use prometheos_lite::workflow::memory_contracts::{ProjectCheckpoint, canonical_digest};
 use prometheos_lite::workflow::portable_state::{
-    Confidence, PortableWorkState, import_portable_state, state_digest, to_canonical_json,
+    Confidence, PortableWorkState, import_portable_state, state_digest,
 };
-use prometheos_lite::workflow::soma::canonical::{try_canonical_bytes, try_canonical_digest};
+use prometheos_lite::workflow::soma::canonical::{
+    try_canonical_bytes, try_canonical_digest, validate_number_lexemes,
+};
 use serde_json::{Value, json};
 
-/// Helper: bytes of a compact serde_json rendering for reference against
-/// path A's custom writer.
-fn serde_bytes(v: &Value) -> Vec<u8> {
-    serde_json::to_string(v).unwrap().into_bytes()
-}
-
 // ---------------------------------------------------------------------------
-// Corpus 1 — `1.0` vs `1`: path A renders integral floats as integers;
-// serde-based paths B/C keep the fraction. Divergence is pinned, not fixed.
+// Corpus 1 — Integral float `1.0`: exact byte + digest pins, all three paths.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn integral_float_divergence_is_pinned() {
+fn integral_float_1_0_golden_pins() {
     let v = json!({"value": 1.0});
 
-    let a_bytes = try_canonical_bytes(&v).expect("path A accepts a plain 1.0");
+    // Path A bytes + digest
+    let a_bytes = try_canonical_bytes(&v).unwrap();
+    assert_eq!(String::from_utf8(a_bytes).unwrap(), "{\"value\":1}");
     assert_eq!(
-        String::from_utf8(a_bytes).unwrap(),
-        r#"{"value":1}"#,
-        "path A renders 1.0 as integer"
+        try_canonical_digest(&v).unwrap(),
+        "48208f9428d64634bd8e28ff345bf0eab60d53c18fa2fbdb0b9bc1e84df2b5f6"
     );
 
-    let c_bytes = serde_bytes(&v);
+    // Path C bytes + digest (raw serde_json rendering with fraction kept)
+    let c_json = prometheos_lite::workflow::memory_contracts::to_canonical_json(&v);
+    assert_eq!(c_json, "{\"value\":1.0}");
     assert_eq!(
-        String::from_utf8(c_bytes).unwrap(),
-        r#"{"value":1.0}"#,
-        "serde_json (path B/C backing renderer) keeps fraction"
+        canonical_digest(&v).unwrap(),
+        "3a7d647740ec6f86b72e0bf3948ab456551e07e9605e3a2785de1c66842ebb48"
     );
 
-    // Divergence pinned: same logical number, different digests.
+    // The 1.0 digests differ (divergence pinned).
     assert_ne!(
         try_canonical_digest(&v).unwrap(),
-        canonical_digest(&v).unwrap(),
-        "A digest and C digest of the SAME value must differ for 1.0 (pin)"
+        canonical_digest(&v).unwrap()
     );
 }
 
 // ---------------------------------------------------------------------------
-// Corpus 2 — non-integral values where all three policies agree. This corpus
-// documents the safe overlap domain; any change here is a hard break of all
-// three, so it is pinned to equality.
+// Corpus 2 — Non-integral f64 where ALL three agree (0.7). Pins the
+// agreement domain explicitly so the divergence claim stays bounded.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn non_integral_agreement_domain_is_pinned() {
-    let v = json!({
-        "rate": 0.75,
-        "epsilon": 0.1,
-        "count": 42,
-        "label": "portable",
-        "flags": [true, false],
-        "nested": {"b": 2, "a": [3, null]}
-    });
+fn non_integral_agreement_domain_0_7_pin() {
+    let v = json!({"value": 0.7});
+    let expected_bytes = "{\"value\":0.7}";
 
-    let a_bytes = try_canonical_bytes(&v).unwrap();
-    let c_json = serde_json::to_string(&v).unwrap();
     assert_eq!(
-        String::from_utf8(a_bytes).unwrap(),
-        c_json,
-        "on non-integral corpus, custom A writer must be byte-identical to serde compact output"
+        String::from_utf8(try_canonical_bytes(&v).unwrap()).unwrap(),
+        expected_bytes
+    );
+    assert_eq!(
+        prometheos_lite::workflow::memory_contracts::to_canonical_json(&v),
+        expected_bytes
     );
     assert_eq!(
         try_canonical_digest(&v).unwrap(),
         canonical_digest(&v).unwrap(),
-        "on non-integral corpus, A and C digests must agree"
+        "0.7 renders identically under A and C — agreement domain pin"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Corpus 3 — key ordering: byte-lexicographic sort, keys out of order on
-// input produce canonical order. Pinned on both custom writer A and C path.
+// Corpus 3 — Scientific-notation divergence: A expands to fixed-point,
+// serde (B/C) keeps exponent. Pinned at both values.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn key_ordering_is_pinned() {
-    let v = json!({"zulu": 1, "apple": ["gamma", "alpha"], "middle": {"z": 0, "a": 1}});
+fn scientific_notation_divergence_pinned() {
+    let big = json!({"value": 1e30});
+    assert_eq!(
+        String::from_utf8(try_canonical_bytes(&big).unwrap()).unwrap(),
+        "{\"value\":1000000000000000000000000000000}"
+    );
+    assert_eq!(
+        prometheos_lite::workflow::memory_contracts::to_canonical_json(&big),
+        "{\"value\":1e+30}"
+    );
 
-    let a = String::from_utf8(try_canonical_bytes(&v).unwrap()).unwrap();
-    let c = serde_json::to_string(&v).unwrap();
-    let expected = r#"{"apple":["gamma","alpha"],"middle":{"a":1,"z":0},"zulu":1}"#;
-    assert_eq!(a, expected, "path A key order");
-    assert_eq!(c, expected, "path C key order");
-    assert_eq!(a, c);
+    let small = json!({"value": 1.5e-10});
+    assert_eq!(
+        String::from_utf8(try_canonical_bytes(&small).unwrap()).unwrap(),
+        "{\"value\":0.00000000015}"
+    );
+    assert_eq!(
+        prometheos_lite::workflow::memory_contracts::to_canonical_json(&small),
+        "{\"value\":1.5e-10}"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Corpus 4 — nested empty objects/arrays and string escaping.
+// Corpus 4 — Key order + nesting + escaping (path A must byte-match compact
+// serde_json on these — they share the same convention in this domain).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn nested_and_escaping_pinned() {
-    let v = json!({
+fn key_order_nesting_and_escaping_byte_pins() {
+    let v = json!({"zulu": 1, "apple": ["gamma", "alpha"], "middle": {"z": 0, "a": 1}});
+    let expected = r#"{"apple":["gamma","alpha"],"middle":{"a":1,"z":0},"zulu":1}"#;
+    let a = String::from_utf8(try_canonical_bytes(&v).unwrap()).unwrap();
+    let c = prometheos_lite::workflow::memory_contracts::to_canonical_json(&v);
+    assert_eq!(a, expected);
+    assert_eq!(c, expected);
+
+    let v2 = json!({
         "empty_obj": {},
         "empty_arr": [],
         "esc": "line\nbreak\t\"quoted\"",
         "unicode": "héllo→世界"
     });
-
-    let a = String::from_utf8(try_canonical_bytes(&v).unwrap()).unwrap();
-    let c = serde_json::to_string(&v).unwrap();
-    let expected =
-        r#"{"empty_arr":[],"empty_obj":{},"esc":"line\nbreak\t\"quoted\"","unicode":"héllo→世界"}"#;
-    assert_eq!(a, expected, "path A nested/escaping");
-    assert_eq!(c, expected, "path C nested/escaping");
+    let expected2 = "{\"empty_arr\":[],\"empty_obj\":{},\"esc\":\"line\\nbreak\\t\\\"quoted\\\"\",\"unicode\":\"héllo→世界\"}";
+    assert_eq!(
+        String::from_utf8(try_canonical_bytes(&v2).unwrap()).unwrap(),
+        expected2
+    );
+    assert_eq!(
+        prometheos_lite::workflow::memory_contracts::to_canonical_json(&v2),
+        expected2
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Corpus 5 — DecimalV2 rejection boundaries. Path A enforces the limits at
-// TWO layers with deliberately different reach (see #216):
-//   - `validate_number_lexemes` (text level): sees the original lexemes,
-//     rejects >400 significant digits — the ONLY layer that can.
-//   - `try_canonical_bytes` (Value level): by then serde has already
-//     truncated to f64 (<=17 sig digits), so the limit can never fire; this
-//     asymmetry is pinned, not a bug.
-// Paths B/C carry NO DecimalV2 policy at all: the corpus parses and digests
-// serde-side regardless of the text-level count.
+// Corpus 5 — DecimalV2 rejection boundaries (A path ONLY: B/C have no
+// DecimalV2 policy). Layered behavior pinned.
 // ---------------------------------------------------------------------------
-
-use prometheos_lite::workflow::soma::canonical::validate_number_lexemes;
 
 #[test]
 fn decimal_v2_boundaries_pinned() {
-    // 400 significant digits: ok at the text layer (A policy).
+    // 400 significant digits: ok at the text guard.
     let ok_text = format!("{{\"n\": 1.{}0}}", "1".repeat(398));
     assert!(validate_number_lexemes(ok_text.as_bytes()).is_ok());
 
-    // 401 significant digits: rejected at the text layer.
+    // 401 significant digits: rejected at the text guard.
     let too_many_text = format!("{{\"n\": 1.{}1}}", "1".repeat(399));
     assert!(
         validate_number_lexemes(too_many_text.as_bytes()).is_err(),
         "text guard must reject 401 significant digits"
     );
 
-    // After serde parses the same text, the Value is f64-truncated, so the
-    // value-level writer CANNOT observe the original 401 digits — pinned: it
-    // accepts what parse produced.
+    // By Value level serde has already truncated to f64 — pinned: the value
+    // writer accepts the truncated form (guard is text-layer only).
     let v: Value = serde_json::from_str(&too_many_text).expect("serde parses 401-digit f64");
-    assert!(
-        try_canonical_bytes(&v).is_ok(),
-        "value-level A writer accepts f64-truncated form: the precision guard is text-only (pinned)"
-    );
+    assert!(try_canonical_bytes(&v).is_ok());
 
-    // Magnitude: exactly 1e10000 is in policy at the TEXT guard but exceeds
-    // f64 range, so serde parse fails while the text guard accepts.
+    // Magnitude: exactly 1e10000 passes the guard but exceeds f64 → parse fails.
     assert!(validate_number_lexemes(b"{\"n\": 1e10000}").is_ok());
     assert!(validate_number_lexemes(b"{\"n\": 1e10001}").is_err());
-    assert!(serde_json::from_str::<Value>("{\"n\": 1e10001}").is_err());
     assert!(serde_json::from_str::<Value>("{\"n\": 1e10000}").is_err());
+    assert!(serde_json::from_str::<Value>("{\"n\": 1e10001}").is_err());
     assert!(serde_json::from_str::<Value>("{\"n\": 1e300}").is_ok());
 }
 
 // ---------------------------------------------------------------------------
-// Corpus 6 — Three-path identity pins on a REAL fixture state. Digests are
-// per-path sha256 hex constants; changing path semantics must touch this
-// test deliberately.
+// Corpus 6 — SHARED TYPED FIXTURE golden digests for all three paths.
+// The fixture has NO integral floats (0.7, 0.9 …) and its set-like arrays
+// are already in sorted order — so on this fixture, all three paths agree.
 // ---------------------------------------------------------------------------
 
 fn fixture_state() -> PortableWorkState {
@@ -208,7 +208,7 @@ fn fixture_state() -> PortableWorkState {
     import_portable_state(&text, None).expect("fixture imports")
 }
 
-/// Mutate the fixture: set one decision's confidence to exactly 1.0.
+/// The fixture, two ways: (a) as-is; (b) with decisions[0].confidence.value = 1.0.
 fn fixture_state_with_1p0() -> PortableWorkState {
     let mut s = fixture_state();
     s.decisions[0].confidence = Some(Confidence {
@@ -218,87 +218,90 @@ fn fixture_state_with_1p0() -> PortableWorkState {
     s
 }
 
+/// The fixture with reversed set-like collections (required_capabilities,
+/// allowed_paths).
+fn fixture_state_set_reversed() -> PortableWorkState {
+    let mut s = fixture_state();
+    s.compatibility.required_capabilities.reverse();
+    s.authority.allowed_paths.reverse();
+    s
+}
+
 #[test]
-fn three_path_digest_identities_are_pinned_on_fixture() {
+fn fixture_agreement_domain_pinned_all_three_paths() {
     let state = fixture_state();
 
-    // Path B digest of the fixture: sha256 of `to_canonical_json(state)`.
-    let b = state_digest(&state).expect("path B digest");
+    let a = try_canonical_digest(&serde_json::to_value(&state).unwrap()).unwrap();
+    let b = state_digest(&state).unwrap();
+    let c = ProjectCheckpoint::from_portable_work_state(&state)
+        .unwrap()
+        .state_digest;
+
+    // Golden pin (all three agree on this fixture).
     assert_eq!(
         b, "e233e4c6d2f4690754683cb3ed46b0dcf079d916523480f33e8be9206080508f",
-        "path B digest of current-v1 fixture is pinned; any change here is a deliberate policy revision"
+        "path B digest of current-v1 fixture — golden pin"
     );
-
-    // Path A digest over the same state; the fixture carries only
-    // non-integral floats (0.7, 0.9), so A and B agree here.
-    let a = try_canonical_digest(&serde_json::to_value(&state).unwrap())
-        .expect("path A digest of same state");
+    assert_eq!(a, b, "path A agrees with B on this float-free fixture");
     assert_eq!(
-        a, b,
-        "fixture has no integral floats: A and B agree (pin confirms the overlap domain)"
-    );
-
-    // With an integral float (confidence 1.0), the paths diverge.
-    let state_1p0 = fixture_state_with_1p0();
-    let a1 = try_canonical_digest(&serde_json::to_value(&state_1p0).unwrap()).unwrap();
-    let b1 = state_digest(&state_1p0).unwrap();
-    assert_ne!(
-        a1, b1,
-        "with an integral float (confidence=1.0), A digest 1.0 as integer, B keeps 1.0 — pinned divergence"
-    );
-
-    // Path C checkpoint digest of the ORIGINAL state (right now: no set normalization).
-    let cp = ProjectCheckpoint::from_portable_work_state(&state).expect("checkpoint");
-    assert_eq!(
-        cp.state_digest, b,
-        "path C (canonical_digest over serde value) on the fixture matches path B: float-free state falls in the shared domain"
+        c, b,
+        "path C agrees with B on this normalized-order fixture"
     );
 }
 
 #[test]
-fn integral_float_divergence_reaches_state_digest() {
-    let s1p0 = fixture_state_with_1p0();
-    let s0 = fixture_state();
+fn integral_float_variant_divergence_pinned_all_three_paths() {
+    let s = fixture_state_with_1p0();
 
-    let b0 = state_digest(&s0).unwrap();
-    let b1 = state_digest(&s1p0).unwrap();
+    let a = try_canonical_digest(&serde_json::to_value(&s).unwrap()).unwrap();
+    let b = state_digest(&s).unwrap();
+    let c = ProjectCheckpoint::from_portable_work_state(&s)
+        .unwrap()
+        .state_digest;
 
-    // Sanity: forcing 1.0 changes the state's computed digest (f64 present).
-    assert_ne!(b0, b1, "confidence 0.7 vs 1.0 → different state digest");
-
-    // And the raw canonical bytes under A vs B diverge on 1.0:
-    let value = serde_json::to_value(&s1p0).expect("state to value");
-    let a_bytes = String::from_utf8(try_canonical_bytes(&value).unwrap()).unwrap();
-    let b_bytes = to_canonical_json(&s1p0)
-        .expect("path B canonical")
-        .to_string();
-    assert_ne!(
-        a_bytes, b_bytes,
-        "1.0 renders as 1 under A and 1.0 under B — divergence pinned at the state level"
+    // B and C still agree (both serde renderers, no normalization difference
+    // on this single-value variant).
+    assert_eq!(
+        b, "74f0a34cb0cf96b3acf7e8c8f13f5686ccc2d4cc6c036e30fa79e4493b6da36d",
+        "path B digest with confidence=1.0 — golden pin"
     );
+    assert_eq!(c, b);
+
+    // A diverges from B/C because of the 1 → 1.0 rendering difference.
+    assert_eq!(
+        a, "ae257cce5f13147625e0e0ef42ac55bad559a0a1123a37356918884e363c55bd",
+        "path A digest with confidence=1.0 — golden pin"
+    );
+    assert_ne!(a, b);
 }
 
 #[test]
-fn set_like_normalization_gap_between_b_and_c_is_pinned() {
-    // Two states differing ONLY in set-like collection order.
-    let s1 = fixture_state();
-    let mut s2 = fixture_state();
-    s2.compatibility.required_capabilities.reverse();
-    s2.authority.allowed_paths.reverse();
+fn set_like_order_gap_pinned_between_b_and_c() {
+    let base = fixture_state();
+    let rev = fixture_state_set_reversed();
 
-    // Path B normalizes set-like collections before digests.
+    // Path B normalizes set-like arrays: digest unchanged.
+    let b_base = state_digest(&base).unwrap();
+    let b_rev = state_digest(&rev).unwrap();
     assert_eq!(
-        state_digest(&s1).unwrap(),
-        state_digest(&s2).unwrap(),
-        "path B: set-like order must not affect the digest"
+        b_base, b_rev,
+        "path B is order-insensitive for set-like collections"
     );
 
-    // Path C (checkpoint) does NOT normalize: same state identity,
-    // different checkpoint digest depending on input order. Pinned gap.
-    let c1 = ProjectCheckpoint::from_portable_work_state(&s1).unwrap();
-    let c2 = ProjectCheckpoint::from_portable_work_state(&s2).unwrap();
-    assert_ne!(
-        c1.state_digest, c2.state_digest,
-        "path C checkpoint digest is order-sensitive to set-like collections — pinned gap"
+    // Path C digests input order: reversal changes the checkpoint digest.
+    let c_base = ProjectCheckpoint::from_portable_work_state(&base)
+        .unwrap()
+        .state_digest;
+    let c_rev = ProjectCheckpoint::from_portable_work_state(&rev)
+        .unwrap()
+        .state_digest;
+    assert_eq!(
+        c_base, "e233e4c6d2f4690754683cb3ed46b0dcf079d916523480f33e8be9206080508f",
+        "path C order-sensitive digest (base order) — golden pin"
     );
+    assert_eq!(
+        c_rev, "3d4d7e0af5d2cd94ddb926d35babe819dcf155f963b9aabdb69df4354b07cba6",
+        "path C order-sensitive digest (reversed order) — golden pin"
+    );
+    assert_ne!(c_base, c_rev);
 }
