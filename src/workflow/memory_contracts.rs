@@ -216,7 +216,26 @@ pub struct ContextBlock {
     pub selected_because: String,
 }
 
-/// Recursively key-sorted compact canonical JSON (SOMA convention).
+/// Recursively key-sorted compact canonical JSON.
+///
+/// #215 — this is **path C** of the repository's three canonicalization
+/// policies (path A = `soma::canonical` for SOMA interop; path B =
+/// `portable_state` normalization; see their module docs and
+/// `tests/canonical_policy_conformance.rs`). This is a renderer local to
+/// this crate, not a SOMA reference implementation — do not call it SOMA
+/// canonical.
+///
+/// It uses `serde_json` scalar rendering (`1.0` → `1.0`, and scientific
+/// notation outside fixed-point range, e.g. `1e30` → `1e+30`) and does NOT
+/// apply the set-like normalization that `portable_state` (path B)
+/// performs. Digests computed here therefore only agree with path B when
+/// the state's set-like collections were already in normalized order, and
+/// only agree with path A for values within the fixed-point non-integral
+/// agreement domain (see the conformance test for the pinned boundaries).
+/// Checkpoint digests computed here are **not interchangeable identities**
+/// with `portable_state::state_digest` or `soma::canonical` digests; they
+/// must never be cross-compared. `tests/canonical_policy_conformance.rs`
+/// pins the current behavior so divergence changes fail loudly.
 pub fn to_canonical_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
@@ -242,7 +261,8 @@ pub fn to_canonical_json(value: &Value) -> String {
     }
 }
 
-/// SHA-256 lowercase hex over [`to_canonical_json`].
+/// SHA-256 lowercase hex over [`to_canonical_json`]. NOT interchangeable
+/// with `soma::canonical` or `portable_state::state_digest` digests (see #215).
 pub fn canonical_digest(value: &Value) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();

@@ -1,5 +1,23 @@
 ## Unreleased
 
+- #215 Option 3, repair round 2 — hardened conformance pins. All three
+  canonicalization paths now carry golden byte/digest constants instead of
+  relative `assert_ne!` checks: path A (`soma::canonical`), path B
+  (`portable_state`), path C (`memory_contracts::canonical_digest`). On the
+  shared typed fixture (#151's `current-v1`): all three digests pinned for
+  the base state (agreement domain: fixture has no integral floats), for
+  the `confidence=1.0` variant (A diverges on `1.0` vs `1`), and for
+  set-like order reversal (B normalizes [digest unchanged], C digests
+  input order [digest changes]). Additional pins: scientific-notation
+  divergence (`1e30` → A writes a 31-digit integer, C writes `1e+30`);
+  non-integral agreement domain (`0.7` renders identically in all paths);
+  DecimalV2 layered boundaries (text guard rejects >400-digit lexemes;
+  value-level writer accepts the f64-truncated form). Documentation
+  corrected in all three module docs: path C is no longer described as
+  "SOMA convention"; the divergence claims are scoped to integral floats
+  and scientific-notation values, not "every f64"; B/C agreement requires
+  sorted set-like input order. 8 tests in
+  `tests/canonical_policy_conformance.rs`.
 - SOMA canonical layer: fail-closed number policy (audit follow-up,
   operator-mandated). In `src/workflow/soma/canonical.rs`: (1)
   `format_number` is no longer infallible — the branch that silently
