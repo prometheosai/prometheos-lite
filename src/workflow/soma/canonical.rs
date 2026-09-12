@@ -54,6 +54,28 @@
 //!   of silently minting `"0"`. Converting ~80 such call sites to `Result`
 //!   would be noise with no reachable behavior change; the lexeme guard
 //!   below is where untrusted inputs are actually refused.
+//!
+//! ## Three canonicalization policies coexist — do not conflate them (#215)
+//!
+//! This module is **path A** (SOMA interop; fixed-point non-integral
+//! rendering, DecimalV2 limits fail-closed at parse/call boundaries). Two
+//! neighbors exist:
+//!
+//! - **`portable_state::{to_canonical_json, state_digest}`** (path B): Lite's
+//!   portable-export policy — serde_json scalar rendering after Lite's
+//!   set-like normalization of the typed state. `1.0` stays `1.0`;
+//!   `1e30` stays `1e+30` (vs `1e30` → a 31-digit integer literal here).
+//!   Divergence requires an integral float or a float that needs
+//!   scientific notation; plain non-integral values like `0.7` agree.
+//! - **`memory_contracts::canonical_digest`** (path C): same serde_json
+//!   renderer as B but applied to `serde_json::to_value(pws)` with NO
+//!   set-like normalization, so array order is digested as-is.
+//!
+//! Digests computed by A, B, and C over the same semantic value are
+//! **not interchangeable identities**; they must not be compared across
+//! paths. The exact divergence boundaries (integral floats, notation
+//! thresholds, order sensitivity) are golden-pinned in
+//! `tests/canonical_policy_conformance.rs`.
 
 use sha2::{Digest as _, Sha256};
 
