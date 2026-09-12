@@ -247,9 +247,7 @@ fn golden(stem: &str, path_letter: &str) -> Vec<u8> {
             .join("tests/fixtures/canonical-policy/current-v1")
             .join(format!("{stem}.{path_letter}.json")),
     )
-    .unwrap_or_else(|e| {
-        panic!("golden fixture {stem}.{path_letter}.json missing: {e}")
-    })
+    .unwrap_or_else(|e| panic!("golden fixture {stem}.{path_letter}.json missing: {e}"))
 }
 
 fn digest_of(bytes: &[u8]) -> String {
@@ -322,13 +320,21 @@ const REV_AC_DIGEST: &str = "3d4d7e0af5d2cd94ddb926d35babe819dcf155f963b9aabdb69
 
 #[test]
 fn golden_fixture_base_all_paths_agree() {
-    pin_variant("base", &fixture_state(), [BASE_DIGEST, BASE_DIGEST, BASE_DIGEST]);
+    pin_variant(
+        "base",
+        &fixture_state(),
+        [BASE_DIGEST, BASE_DIGEST, BASE_DIGEST],
+    );
 }
 
 #[test]
 fn golden_fixture_integral_float_splits_path_a() {
     let state = fixture_state_with_1p0();
-    pin_variant("conf1", &state, [CONF1_A_DIGEST, CONF1_BC_DIGEST, CONF1_BC_DIGEST]);
+    pin_variant(
+        "conf1",
+        &state,
+        [CONF1_A_DIGEST, CONF1_BC_DIGEST, CONF1_BC_DIGEST],
+    );
 
     // The one byte difference must be `1.0` vs `1` for confidence.value.
     let a = golden("conf1", "a");
@@ -342,9 +348,5 @@ fn golden_fixture_set_order_reversal_splits_path_b() {
     let state = fixture_state_set_reversed();
     // A and C preserve array order → both change identically.
     // B normalizes set-like collections → unchanged.
-    pin_variant(
-        "rev",
-        &state,
-        [REV_AC_DIGEST, BASE_DIGEST, REV_AC_DIGEST],
-    );
+    pin_variant("rev", &state, [REV_AC_DIGEST, BASE_DIGEST, REV_AC_DIGEST]);
 }
