@@ -1,5 +1,15 @@
 ## Unreleased
 
+- #132 Slice C (repair round 3) — optimistic-concurrency guard on
+  `update_work_context`: the full-row write is conditioned on
+  `WHERE id = ? AND status <> 'Cancelled'`, so a stale snapshot held by
+  an in-flight/paused execution can no longer flip a cancelled
+  context back to a live state after the cancel lands. Owner-facing
+  handlers (cancel, status, continue, run-until-complete, harness)
+  confirm the invariant end-to-end via the `paused_execution_cannot_
+  overwrite_cancellation` regression: connection 1 reads a `Draft`
+  snapshot, connection 2 cancels, connection 1's `update_status`
+  hits the guard and the durable row stays Cancelled.
 - #132 Slice C — governed WorkContext cancellation (repaired round).
   `WorkStatus::Cancelled` is terminal and end-to-end enforced across
   handler, service, and orchestrator/execution boundaries. Cancellation

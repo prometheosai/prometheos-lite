@@ -626,3 +626,62 @@ async fn refused_states_report_full_set() {
         );
     }
 }
+
+#[tokio::test]
+async fn paused_execution_cannot_overwrite_cancellation() {
+    // Deterministic reconciliation-race regression (#220):
+    //   [snapshot taken while Draft] → [cancel commits] →
+    //   [execution resumes with stale snapshot and tries to persist].
+    //
+    // Execution holds a stale WorkContext read BEFORE the cancel, then
+    // calls update_status to move the work forward. The durable write
+    // REFUSES because work_contexts.status in the DB is now Cancelled
+    // (guarded by the conditional UPDATE in update_work_context).
+    let (state, db_path, _tmp) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let id = create_context(&app, "owner", "cancel-paused-execution").await;
+
+    // Connection 1: loads the snapshot; its view is Draft.
+    let db1 = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db1"));
+    let svc1 = WorkContextService::new(db1);
+    let mut stale_ctx = svc1.get_context(&id).expect("load").expect("exists");
+    assert_eq!(
+        stale_ctx.status,
+        prometheos_lite::work::types::WorkStatus::Draft
+    );
+
+    // Concurrent writer cancels with its own independent connection.
+    let db2 = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db2"));
+    let svc2 = WorkContextService::new(db2);
+    let mut canceller = svc2.get_context(&id).expect("load").expect("exists");
+    svc2.cancel_context(&mut canceller, "operator killed")
+        .unwrap();
+
+    // Sender side returns; receiver-side cancel of app occurs
+    // (deterministic: no actual async race required).
+
+    // stale_ctx is STILL Draft. Executor-side write (update_status) must
+    // refuse: the DB row is now Cancelled, so the full-row persist refuses.
+    let err = svc1
+        .update_status(
+            &mut stale_ctx,
+            prometheos_lite::work::types::WorkStatus::InProgress,
+        )
+        .expect_err("stale snapshot must not overwrite Cancelled");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cancelled") || msg.contains("Cancelled"),
+        "error must cite terminal state: {msg}"
+    );
+
+    // Durable state is still Cancelled.
+    let probe = rusqlite::Connection::open(&db_path).expect("verify conn");
+    let status: String = probe
+        .query_row(
+            "SELECT status FROM work_contexts WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "\"Cancelled\"");
+}
