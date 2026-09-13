@@ -1,6 +1,7 @@
 //! WorkContextService - core business logic for WorkContext lifecycle
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use rusqlite::{OptionalExtension, params};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -177,40 +178,127 @@ impl WorkContextService {
 
     /// Cancel a WorkContext (#132 Slice C). Terminal transition: sets
     /// status to `Cancelled` and records a `context_cancelled` durable
-    /// event with the reason. Fail-closed on terminal states — cancelled,
-    /// completed, failed, archived — and idempotent: calling it on an
-    /// already-cancelled context is a no-op success (no duplicate event).
+    /// event with the reason — IN ONE SQL TRANSACTION so an agent can
+    /// never observe "cancelled but no audit event" or the reverse. The
+    /// status predicate `WHERE status NOT IN ('Completed','Failed',`Archived`,`Cancelled`)` is inside the UPDATE so concurrent
+    /// cancels collapse: exactly one writer transitions, the rest either
+    /// (a) fail closed on terminal states, or (b) idempotently succeed on
+    /// an already-cancelled context without writing a duplicate event.
     pub fn cancel_context(&self, context: &mut WorkContext, reason: &str) -> Result<()> {
         if reason.trim().is_empty() {
             anyhow::bail!("cancel requires a non-empty reason");
         }
-        match context.status {
-            WorkStatus::Cancelled => {
-                // Idempotent: already cancelled → success, no duplicate event.
-                return Ok(());
-            }
-            WorkStatus::Completed | WorkStatus::Failed | WorkStatus::Archived => anyhow::bail!(
-                "cannot cancel WorkContext in terminal state {:?}",
-                context.status
-            ),
-            _ => {}
+
+        let conn = self.db.conn();
+        let tx = conn.unchecked_transaction()?;
+
+        // Read-most-recent inside the transaction: the loaded-state caller
+        // may be holding a stale snapshot.
+        let current_status: String = tx
+            .query_row(
+                "SELECT status FROM work_contexts WHERE id = ?1",
+                params![context.id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context.id))?;
+
+        let decoded: WorkStatus = serde_json::from_str(&current_status)
+            .context("stored work_contexts.status must be valid WorkStatus")?;
+
+        if matches!(
+            decoded,
+            WorkStatus::Completed | WorkStatus::Failed | WorkStatus::Archived
+        ) {
+            tx.rollback()?;
+            anyhow::bail!("cannot cancel WorkContext in terminal state {:?}", decoded);
         }
 
-        let old_status = context.status;
-        // Audit trail must land BEFORE the state change commits: a failed
-        // event write must not leave a cancelled context with no evidence.
+        if decoded == WorkStatus::Cancelled {
+            tx.rollback()?;
+            // Idempotent: caller already holds a cancelled context.
+            context.status = WorkStatus::Cancelled;
+            return Ok(());
+        }
+
+        // Conditional transition: forbidden targets excluded at the SQL
+        // layer, so two racing writers can't both insert the event.
+        // Status is stored JSON-quoted ("Cancelled"), so predicates must
+        // compare against the JSON form, not the Rust name.
+        let cancelled_json = serde_json::to_string(&WorkStatus::Cancelled)?;
+        let terminal_json: Vec<String> = [
+            WorkStatus::Completed,
+            WorkStatus::Failed,
+            WorkStatus::Archived,
+            WorkStatus::Cancelled,
+        ]
+        .iter()
+        .map(|s| serde_json::to_string(s).expect("WorkStatus serializes"))
+        .collect();
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        let affected = tx.execute(
+            "UPDATE work_contexts
+             SET status = ?1, updated_at = ?2
+             WHERE id = ?3
+               AND status NOT IN (?4, ?5, ?6, ?7)",
+            params![
+                cancelled_json,
+                updated_at,
+                context.id,
+                terminal_json[0],
+                terminal_json[1],
+                terminal_json[2],
+                terminal_json[3],
+            ],
+        )?;
+        if affected == 0 {
+            tx.rollback()?;
+            // A racing writer updated the row between our pre-read and the
+            // conditional UPDATE. Re-read to disambiguate: Cancelled means
+            // idempotent success (someone else already cancelled); anything
+            // else is a genuine terminal-state conflict.
+            let after: String = self
+                .db
+                .conn()
+                .query_row(
+                    "SELECT status FROM work_contexts WHERE id = ?1",
+                    params![context.id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context.id))?;
+            let after: WorkStatus = serde_json::from_str(&after)
+                .context("stored work_contexts.status must be valid WorkStatus")?;
+            if after == WorkStatus::Cancelled {
+                context.status = WorkStatus::Cancelled;
+                return Ok(());
+            }
+            anyhow::bail!("cannot cancel WorkContext in terminal state {:?}", after);
+        }
+
+        // Audit trail INSIDE the same transaction: rollback if insert fails.
         let event = WorkContextEvent::new(
             Uuid::new_v4().to_string(),
             context.id.clone(),
             "context_cancelled".to_string(),
-            serde_json::json!({ "from": old_status, "to": WorkStatus::Cancelled, "reason": reason }),
+            serde_json::json!({ "from": decoded, "to": WorkStatus::Cancelled, "reason": reason }),
         );
-        WorkContextEventOperations::create_event(&*self.db, &event)?;
+        tx.execute(
+            "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &event.id,
+                &event.work_context_id,
+                &event.event_type,
+                &serde_json::to_string(&event.data)?,
+                &event.created_at.to_rfc3339(),
+            ],
+        )
+        .context("failed to record context_cancelled event")?;
 
+        tx.commit()?;
         context.status = WorkStatus::Cancelled;
         context.touch();
-        WorkContextOperations::update_work_context(&*self.db, context)?;
-
         Ok(())
     }
 

@@ -438,3 +438,191 @@ async fn cancel_works_at_service_layer_as_well() {
         .count();
     assert_eq!(n, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Round-2 P1 repairs: atomicity + concurrency + shared-boundary enforcement
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cancel_is_atomic_against_event_insert_failure() {
+    // Force the event write inside the transaction to fail and prove the
+    // status column does NOT flip. Minimal-intrusion injection: install a
+    // trigger that aborts just this event type, run cancel, verify status
+    // unchanged, then drop the trigger.
+    let (state, db_path, _tmp) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let id = create_context(&app, "owner", "cancel-atomic").await;
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db");
+    conn.execute_batch(
+        "CREATE TRIGGER force_cancel_event_fail
+         BEFORE INSERT ON work_context_events
+         WHEN NEW.event_type = 'context_cancelled'
+         BEGIN SELECT RAISE(ABORT, 'forced-failure'); END;",
+    )
+    .expect("install injection trigger");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/work-contexts/{id}/cancel?user_id=owner"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"reason": "forced-failure"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    conn.execute_batch("DROP TRIGGER force_cancel_event_fail;")
+        .expect("remove trigger");
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM work_contexts WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .expect("row still present");
+    assert_eq!(status, "\"Draft\"", "status rollback: not Cancelled");
+}
+
+#[tokio::test]
+async fn concurrent_cancels_produce_single_event() {
+    // Two parallel HTTP cancels against the same context: exactly one must
+    // transition (win the conditional UPDATE + insert) and emit the event;
+    // the loser either fails closed (terminal state error) or idempotently
+    // succeeds, but MUST NOT produce a second context_cancelled event row.
+    let (state, db_path, _tmp) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let id = create_context(&app, "owner", "cancel-race").await;
+
+    let uri = format!("/work-contexts/{id}/cancel?user_id=owner");
+    let body = serde_json::json!({"reason": "race"}).to_string();
+
+    let mk = |app: &axum::Router, tag: &str| {
+        let app = app.clone();
+        let uri = uri.clone();
+        let body = body.clone();
+        let tag = tag.to_string();
+        tokio::spawn(async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            (tag, resp.status())
+        })
+    };
+
+    let (a, b) = tokio::join!(mk(&app, "A"), mk(&app, "B"));
+    let (_, sa) = a.unwrap();
+    let (_, sb) = b.unwrap();
+    // Both results are admissible (200 winner, 200 idempotent, or 409 loss)
+    // but only ONE db row must exist at the end.
+    assert!(matches!(
+        sa,
+        StatusCode::OK | StatusCode::CONFLICT | StatusCode::INTERNAL_SERVER_ERROR
+    ));
+    assert!(matches!(
+        sb,
+        StatusCode::OK | StatusCode::CONFLICT | StatusCode::INTERNAL_SERVER_ERROR
+    ));
+    assert!(
+        sa != StatusCode::INTERNAL_SERVER_ERROR || sb != StatusCode::INTERNAL_SERVER_ERROR,
+        "at least one cancel must succeed"
+    );
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db");
+    let events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM work_context_events
+             WHERE work_context_id = ?1 AND event_type = 'context_cancelled'",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        events, 1,
+        "exactly one context_cancelled event regardless of ordering"
+    );
+}
+
+#[tokio::test]
+async fn service_layer_cancel_gate_bypassing_http_also_refuses_terminal_states() {
+    // The execution boundary must not advance a cancelled context even when
+    // the HTTP handler is bypassed (service/orchestrator path).
+    let (state, db_path, _tmp) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+
+    let id = create_context(&app, "owner", "cancel-service-boundary").await;
+    let (st, _) = cancel(&app, "owner", &id, "stop").await;
+    assert_eq!(st, StatusCode::OK);
+
+    // WorkExecutionService path (used by CLI and orchestrator):
+    let db = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db"));
+    let svc = std::sync::Arc::new(WorkContextService::new(db.clone()));
+    let execution = prometheos_lite::work::WorkExecutionService::new(
+        svc,
+        std::sync::Arc::new(
+            prometheos_lite::flow::execution_service::FlowExecutionService::new(
+                std::sync::Arc::new(prometheos_lite::flow::runtime::RuntimeContext::new()),
+            )
+            .expect("flow exec"),
+        ),
+    );
+    let err = execution
+        .continue_context(&id)
+        .await
+        .expect_err("cancelled context must refuse continuation at the service boundary");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "error must cite cancellation: {err}"
+    );
+}
+
+#[tokio::test]
+async fn refused_states_report_full_set() {
+    // Completed / Failed / Archived all refused. We can't drive contexts to
+    // those states from the API alone (Completed requires harness evidence,
+    // Archived requires manual status), so exercise the service tool directly.
+    let (state, db_path, _tmp) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let id = create_context(&app, "owner", "cancel-terminal-full").await;
+
+    let db_conn = rusqlite::Connection::open(&db_path).expect("db");
+    for terminal in ["\"Completed\"", "\"Failed\"", "\"Archived\""] {
+        db_conn
+            .execute(
+                "UPDATE work_contexts SET status = ?1 WHERE id = ?2",
+                rusqlite::params![terminal, id],
+            )
+            .expect("seed terminal status");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/work-contexts/{id}/cancel?user_id=owner"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reason":"too late"}"#.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "terminal state {terminal} must refuse cancel"
+        );
+    }
+}

@@ -268,6 +268,13 @@ impl WorkExecutionService {
             .get_context(context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found"))?;
 
+        // Cancellation is terminal and checked at the shared execution
+        // boundary, not only at the HTTP handler: service-layer callers
+        // (CLI, orchestrator paths) must not advance cancelled work either.
+        if context.is_cancelled() {
+            anyhow::bail!("cancelled WorkContext cannot continue: {context_id}");
+        }
+
         // Check if context is blocked
         if context.is_blocked() {
             anyhow::bail!("Context is blocked: {:?}", context.blocked_reason);

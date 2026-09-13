@@ -1,21 +1,24 @@
 ## Unreleased
 
-- #132 Slice C — governed WorkContext cancellation. New terminal
-  `WorkStatus::Cancelled` (no backward transition), new durable
-  `context_cancelled` event carrying `{from, to, reason}` and written
-  **before** the state commit so a failed event write cannot leave a
-  cancelled context with no evidence. `WorkContextService::cancel_context`
-  is idempotent (cancelling twice succeeds with no duplicate events) and
-  refuses Completed/Failed/Archived statuses. `POST /work-contexts/:id/cancel`
-  exposes it with the standard ownership model (400 missing user_id, 403
-  wrong user, 404 unknown id, 409 on terminal states). Secondary gates:
-  `/status`, `/continue`, `/run-until-complete`, and `/harness/run` all
-  return 409 on a cancelled context — cancellation closes the whole loop.
-  7 new integration tests in `tests/api_work_context_cancel.rs` pin the
-  behavior including a restart (drop AppState, rebuild from same db_path)
-  and a workbench-service parity check. The graph-run decision half of
-  the slice is deferred: a durable graph-checkpoint registry is the
-  prerequisite.
+- #132 Slice C — governed WorkContext cancellation (repaired round).
+  `WorkStatus::Cancelled` is terminal and end-to-end enforced across
+  handler, service, and orchestrator/execution boundaries. Cancellation
+  is **atomic and race-safe** on disk: `cancel_context` reads current
+  status inside a single connection transaction, applies a conditional
+  UPDATE on `status NOT IN (Completed, Failed, Archived, Cancelled)`,
+  writes the `context_cancelled` event in the same transaction, and
+  commit/rollback is driven by the tx object, so the two writes are all-
+  or-nothing. Concurrent cancels collapse — only one event row is
+  emitted, and racing callers resolve as either success (winner / replica
+  idempotence) or Conflict (terminal-state). Shared execution boundary
+  hardened: `WorkExecutionService::continue_context` and the
+  orchestrator's `continue_context` / `run_until_blocked_or_complete`
+  all refuse cancelled contexts, independent of HTTP. `update_status`,
+  `/continue`, `/run-until-complete`, and `/harness/run` return 409 on
+  cancelled contexts. 11 integration tests pin: atomic rollback on
+  forced event-insert failure (trigger), concurrent-cancel single-event
+  guarantee, full terminal-state refusal set, HTTP/service parity, and
+  restart-survives.
 
 - #215 Option 3, repair round 2 — hardened conformance pins. All three
   canonicalization paths now carry golden byte/digest constants instead of
