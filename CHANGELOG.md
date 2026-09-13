@@ -1,5 +1,22 @@
 ## Unreleased
 
+- #132 Slice C — governed WorkContext cancellation. New terminal
+  `WorkStatus::Cancelled` (no backward transition), new durable
+  `context_cancelled` event carrying `{from, to, reason}` and written
+  **before** the state commit so a failed event write cannot leave a
+  cancelled context with no evidence. `WorkContextService::cancel_context`
+  is idempotent (cancelling twice succeeds with no duplicate events) and
+  refuses Completed/Failed/Archived statuses. `POST /work-contexts/:id/cancel`
+  exposes it with the standard ownership model (400 missing user_id, 403
+  wrong user, 404 unknown id, 409 on terminal states). Secondary gates:
+  `/status`, `/continue`, `/run-until-complete`, and `/harness/run` all
+  return 409 on a cancelled context — cancellation closes the whole loop.
+  7 new integration tests in `tests/api_work_context_cancel.rs` pin the
+  behavior including a restart (drop AppState, rebuild from same db_path)
+  and a workbench-service parity check. The graph-run decision half of
+  the slice is deferred: a durable graph-checkpoint registry is the
+  prerequisite.
+
 - #215 Option 3, repair round 2 — hardened conformance pins. All three
   canonicalization paths now carry golden byte/digest constants instead of
   relative `assert_ne!` checks: path A (`soma::canonical`), path B

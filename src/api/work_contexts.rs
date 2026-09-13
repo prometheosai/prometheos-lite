@@ -152,6 +152,12 @@ fn default_harness_mode() -> HarnessMode {
     HarnessMode::Review
 }
 
+/// Request to cancel a WorkContext
+#[derive(Debug, Deserialize)]
+pub struct CancelWorkContextRequest {
+    pub reason: String,
+}
+
 /// Request to update WorkContext status
 #[derive(Debug, Deserialize)]
 pub struct UpdateStatusRequest {
@@ -306,6 +312,13 @@ pub async fn update_work_context_status(
 
     let mut context = get_context_for_user_or_404(&state, &id, user_id).await?;
 
+    // Cancelled is terminal — only the dedicated cancel path may reach it.
+    if context.status == WorkStatus::Cancelled {
+        return Err(ApiError::Conflict(
+            "cancelled WorkContext accepts no status changes".to_string(),
+        ));
+    }
+
     let new_status = match req.status.to_lowercase().as_str() {
         "draft" => WorkStatus::Draft,
         "in_progress" => WorkStatus::InProgress,
@@ -323,6 +336,41 @@ pub async fn update_work_context_status(
     work_context_service
         .update_status(&mut context, new_status)
         .map_err(|e| ApiError::Internal(format!("Failed to update status: {}", e)))?;
+
+    Ok(Json(WorkContextResponse::from(context)))
+}
+
+/// Cancel a WorkContext (#132 Slice C). Terminal transition recorded in
+/// the durable event stream (`context_cancelled` with reason). Idempotent:
+/// re-cancelling returns success without duplicating the event.
+pub async fn cancel_work_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(identity): Query<UserIdentityQuery>,
+    Json(req): Json<CancelWorkContextRequest>,
+) -> Result<Json<WorkContextResponse>, ApiError> {
+    let user_id = required_user_id(&identity)?;
+    if req.reason.trim().is_empty() {
+        return Err(ApiError::BadRequest("reason is required".to_string()));
+    }
+    let mut context = get_context_for_user_or_404(&state, &id, user_id).await?;
+
+    let work_context_service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
+
+    work_context_service
+        .cancel_context(&mut context, &req.reason)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("cancelled WorkContext accepts no further status transitions")
+                || msg.contains("cannot cancel WorkContext in terminal state")
+            {
+                ApiError::Conflict(msg)
+            } else {
+                ApiError::Internal(format!("Failed to cancel context: {msg}"))
+            }
+        })?;
 
     Ok(Json(WorkContextResponse::from(context)))
 }
@@ -370,7 +418,12 @@ pub async fn continue_work_context(
     Query(identity): Query<UserIdentityQuery>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
     let user_id = required_user_id(&identity)?;
-    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    let context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    if context.is_cancelled() {
+        return Err(ApiError::Conflict(
+            "cancelled WorkContext cannot be continued".to_string(),
+        ));
+    }
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -407,7 +460,12 @@ pub async fn run_until_complete(
     Json(req): Json<RunContextRequest>,
 ) -> Result<Json<WorkContextResponse>, ApiError> {
     let user_id = required_user_id(&identity)?;
-    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    let context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    if context.is_cancelled() {
+        return Err(ApiError::Conflict(
+            "cancelled WorkContext cannot be run".to_string(),
+        ));
+    }
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -432,7 +490,12 @@ pub async fn run_harness(
     Json(req): Json<HarnessRunRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = required_user_id(&identity)?;
-    let _context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    let context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    if context.is_cancelled() {
+        return Err(ApiError::Conflict(
+            "cancelled WorkContext rejects harness runs".to_string(),
+        ));
+    }
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;

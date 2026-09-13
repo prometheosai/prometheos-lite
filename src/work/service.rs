@@ -142,6 +142,9 @@ impl WorkContextService {
 
     /// Update the status of a WorkContext
     pub fn update_status(&self, context: &mut WorkContext, status: WorkStatus) -> Result<()> {
+        if context.status == WorkStatus::Cancelled {
+            anyhow::bail!("cancelled WorkContext accepts no further status transitions");
+        }
         if context.domain == WorkDomain::Software && status == WorkStatus::Completed {
             let completion_ok = context
                 .harness_metadata()
@@ -168,6 +171,45 @@ impl WorkContextService {
             serde_json::json!({ "from": old_status, "to": status }),
         );
         let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+
+        Ok(())
+    }
+
+    /// Cancel a WorkContext (#132 Slice C). Terminal transition: sets
+    /// status to `Cancelled` and records a `context_cancelled` durable
+    /// event with the reason. Fail-closed on terminal states — cancelled,
+    /// completed, failed, archived — and idempotent: calling it on an
+    /// already-cancelled context is a no-op success (no duplicate event).
+    pub fn cancel_context(&self, context: &mut WorkContext, reason: &str) -> Result<()> {
+        if reason.trim().is_empty() {
+            anyhow::bail!("cancel requires a non-empty reason");
+        }
+        match context.status {
+            WorkStatus::Cancelled => {
+                // Idempotent: already cancelled → success, no duplicate event.
+                return Ok(());
+            }
+            WorkStatus::Completed | WorkStatus::Failed | WorkStatus::Archived => anyhow::bail!(
+                "cannot cancel WorkContext in terminal state {:?}",
+                context.status
+            ),
+            _ => {}
+        }
+
+        let old_status = context.status;
+        // Audit trail must land BEFORE the state change commits: a failed
+        // event write must not leave a cancelled context with no evidence.
+        let event = WorkContextEvent::new(
+            Uuid::new_v4().to_string(),
+            context.id.clone(),
+            "context_cancelled".to_string(),
+            serde_json::json!({ "from": old_status, "to": WorkStatus::Cancelled, "reason": reason }),
+        );
+        WorkContextEventOperations::create_event(&*self.db, &event)?;
+
+        context.status = WorkStatus::Cancelled;
+        context.touch();
+        WorkContextOperations::update_work_context(&*self.db, context)?;
 
         Ok(())
     }

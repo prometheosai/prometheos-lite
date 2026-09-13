@@ -262,6 +262,11 @@ impl WorkContext {
         self.status == WorkStatus::Completed
     }
 
+    /// Check if the context is cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.status == WorkStatus::Cancelled
+    }
+
     /// Check if all completion criteria are satisfied
     pub fn is_completion_satisfied(&self) -> bool {
         self.completion_criteria.iter().all(|c| c.satisfied)
@@ -315,6 +320,10 @@ pub enum WorkStatus {
     Blocked,
     Completed,
     Failed,
+    /// Governed cancellation (#132 Slice C): the owner explicitly stopped
+    /// the work. Terminal like `Completed`/`Failed` — cancelled contexts do
+    /// not accept further status transitions.
+    Cancelled,
     Archived,
 }
 
