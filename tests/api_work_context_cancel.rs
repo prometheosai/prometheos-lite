@@ -685,3 +685,102 @@ async fn paused_execution_cannot_overwrite_cancellation() {
         .unwrap();
     assert_eq!(status, "\"Cancelled\"");
 }
+
+#[test]
+fn two_connection_cancel_race_under_sqlite_busy() {
+    // Genuine cross-connection SQLite BUSY race. Connection A holds the
+    // write lock; connection B's cancel must fail fast (BUSY), produce
+    // NO event and NO status change. After A releases (rollback), B's
+    // cancel succeeds and writes exactly one context_cancelled row.
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir
+        .path()
+        .join("cancel_busy_test.db")
+        .to_str()
+        .expect("db path")
+        .to_string();
+
+    // Bootstrap schema + context on one service.
+    let create_db = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db1"));
+    let create_svc = WorkContextService::new(create_db);
+    let ctx = create_svc
+        .create_context(
+            "owner".into(),
+            "busy-race".into(),
+            prometheos_lite::work::types::WorkDomain::Operations,
+            "goal".into(),
+        )
+        .expect("create");
+
+    // Connection A holds the writer.
+    let conn_a = rusqlite::Connection::open(&db_path).expect("conn A");
+    let a_tx = conn_a.unchecked_transaction().expect("a tx");
+    a_tx.execute(
+        "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
+             VALUES (?1, ?2, 'lock_probe', '\"probe\"', ?3)",
+        rusqlite::params![
+            uuid::Uuid::new_v4().to_string(),
+            ctx.id,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .expect("hold the write lock via real write");
+
+    // Connection B (independent Db / independent SQLite connection)
+    // drives the cancel.
+    let cancel_db = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db2"));
+    let cancel_svc = WorkContextService::new(cancel_db.clone());
+    let mut canceller = cancel_svc
+        .get_context(&ctx.id)
+        .expect("load")
+        .expect("exists");
+
+    let busy_err = cancel_svc
+        .cancel_context(&mut canceller, "must block on write lock")
+        .expect_err("while A holds the writer, the cancel must fail");
+    let msg = format!("{:?}", busy_err);
+    assert!(
+        msg.contains("lock")
+            || msg.contains("busy")
+            || msg.contains("cannot cancel")
+            || msg.contains("terminal"),
+        "error must surface the locked state or terminal conflict, got: {msg}"
+    );
+
+    // While A holds the lock: no event yet, status still Draft.
+    let pre: i64 = conn_a
+        .query_row(
+            "SELECT COUNT(*) FROM work_context_events WHERE work_context_id = ?1 AND event_type = 'context_cancelled'",
+            rusqlite::params![ctx.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pre, 0, "no event before the lock frees");
+
+    a_tx.rollback().expect("rollback A");
+    drop(conn_a);
+
+    // Now the cancel succeeds and produces exactly one event row.
+    cancel_svc
+        .cancel_context(&mut canceller, "must succeed after release")
+        .expect("cancel after release");
+
+    let post: i64 = cancel_db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM work_context_events WHERE work_context_id = ?1 AND event_type = 'context_cancelled'",
+            rusqlite::params![ctx.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(post, 1, "exactly one cancel event after the retry");
+    let status: String = cancel_db
+        .conn()
+        .query_row(
+            "SELECT status FROM work_contexts WHERE id = ?1",
+            rusqlite::params![ctx.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "\"Cancelled\"");
+}
