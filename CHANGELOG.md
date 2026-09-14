@@ -1,5 +1,22 @@
 ## Unreleased
 
+- #132 Slice C (repair round 4) — two-connection `SQLITE_BUSY` race test
+  (`two_connection_cancel_race_under_sqlite_busy`): an independent
+  connection holds the writer via `BEGIN IMMEDIATE`; the canceller's
+  conditional UPDATE fails cleanly with a lock error (no partial write,
+  no duplicate event); after the lock is released and rolled back, a
+  retry succeeds and produces exactly one `context_cancelled` row and a
+  final `Cancelled` status. Complements the same-process test
+  `concurrent_cancels_produce_single_event` by exercising true
+  cross-process busyness, where per-connection `busy_timeout` and
+  journal mode actually matter.
+- #132 Slice C — in-flight execution interruption: explicitly deferred.
+  Cancellation closes the durable state (status flip + event) and blocks
+  all execution-boundary re-entry, but it does NOT interrupt an already
+  running execution iteration cancel-style: the current iteration must
+  finish on its own. Cooperative cancellation (issue #222) is a follow-up
+  slice that needs a `CancellationToken` plumbed through
+  `WorkExecutionService` / `WorkOrchestrator` — out of scope here.
 - #132 Slice C (repair round 3) — optimistic-concurrency guard on
   `update_work_context`: the full-row write is conditioned on
   `WHERE id = ? AND status <> 'Cancelled'`, so a stale snapshot held by
