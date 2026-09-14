@@ -345,6 +345,21 @@ impl Db {
 
         self.conn
             .execute(
+                "CREATE TABLE IF NOT EXISTS graph_checkpoints (
+                work_context_id TEXT NOT NULL,
+                graph_run_id TEXT NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                checkpoint_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (work_context_id, graph_run_id),
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create graph_checkpoints table")?;
+
+        self.conn
+            .execute(
                 "CREATE TABLE IF NOT EXISTS conversation_work_contexts (
                 conversation_id TEXT NOT NULL,
                 work_context_id TEXT NOT NULL,

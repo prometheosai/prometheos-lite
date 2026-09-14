@@ -1,6 +1,16 @@
 ## Unreleased
 
-- #132 Slice C (repair round 4) — two-connection `SQLITE_BUSY` race test
+- #221 (E6/I03 prerequisite) — durable graph checkpoint registry.
+  `graph_checkpoints` stores (work_context_id, graph_run_id) →
+  checkpoint JSON blob + freshly recomputed SHA-256, FK-cascade from
+  `work_contexts` so orphan checkpoints cannot exist, and a wrongful
+  registration against a non-existent context fails closed. The registry
+  is the seam the decide endpoint will read from: ownership is inherited
+  from the parent work context (user_id verified at the service boundary),
+  and the digest is *recomputed* from bytes after each write so a
+  stale/ forged digest can never misrepresent the blob. Additive to the
+  schema; no existing tables or in-flight behavior touched.
+
   (`two_connection_cancel_race_under_sqlite_busy`): an independent
   connection holds the writer via `BEGIN IMMEDIATE`; the canceller's
   conditional UPDATE fails cleanly with a lock error (no partial write,
