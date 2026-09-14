@@ -1,5 +1,52 @@
 ## Unreleased
 
+- #132 Slice C (repair round 4) — two-connection `SQLITE_BUSY` race test
+  (`two_connection_cancel_race_under_sqlite_busy`): an independent
+  connection holds the writer via `BEGIN IMMEDIATE`; the canceller's
+  conditional UPDATE fails cleanly with a lock error (no partial write,
+  no duplicate event); after the lock is released and rolled back, a
+  retry succeeds and produces exactly one `context_cancelled` row and a
+  final `Cancelled` status. Complements the same-process test
+  `concurrent_cancels_produce_single_event` by exercising true
+  cross-process busyness, where per-connection `busy_timeout` and
+  journal mode actually matter.
+- #132 Slice C — in-flight execution interruption: explicitly deferred.
+  Cancellation closes the durable state (status flip + event) and blocks
+  all execution-boundary re-entry, but it does NOT interrupt an already
+  running execution iteration cancel-style: the current iteration must
+  finish on its own. Cooperative cancellation (issue #222) is a follow-up
+  slice that needs a `CancellationToken` plumbed through
+  `WorkExecutionService` / `WorkOrchestrator` — out of scope here.
+- #132 Slice C (repair round 3) — optimistic-concurrency guard on
+  `update_work_context`: the full-row write is conditioned on
+  `WHERE id = ? AND status <> 'Cancelled'`, so a stale snapshot held by
+  an in-flight/paused execution can no longer flip a cancelled
+  context back to a live state after the cancel lands. Owner-facing
+  handlers (cancel, status, continue, run-until-complete, harness)
+  confirm the invariant end-to-end via the `paused_execution_cannot_
+  overwrite_cancellation` regression: connection 1 reads a `Draft`
+  snapshot, connection 2 cancels, connection 1's `update_status`
+  hits the guard and the durable row stays Cancelled.
+- #132 Slice C — governed WorkContext cancellation (repaired round).
+  `WorkStatus::Cancelled` is terminal and end-to-end enforced across
+  handler, service, and orchestrator/execution boundaries. Cancellation
+  is **atomic and race-safe** on disk: `cancel_context` reads current
+  status inside a single connection transaction, applies a conditional
+  UPDATE on `status NOT IN (Completed, Failed, Archived, Cancelled)`,
+  writes the `context_cancelled` event in the same transaction, and
+  commit/rollback is driven by the tx object, so the two writes are all-
+  or-nothing. Concurrent cancels collapse — only one event row is
+  emitted, and racing callers resolve as either success (winner / replica
+  idempotence) or Conflict (terminal-state). Shared execution boundary
+  hardened: `WorkExecutionService::continue_context` and the
+  orchestrator's `continue_context` / `run_until_blocked_or_complete`
+  all refuse cancelled contexts, independent of HTTP. `update_status`,
+  `/continue`, `/run-until-complete`, and `/harness/run` return 409 on
+  cancelled contexts. 11 integration tests pin: atomic rollback on
+  forced event-insert failure (trigger), concurrent-cancel single-event
+  guarantee, full terminal-state refusal set, HTTP/service parity, and
+  restart-survives.
+
 - #215 Option 3, repair round 2 — hardened conformance pins. All three
   canonicalization paths now carry golden byte/digest constants instead of
   relative `assert_ne!` checks: path A (`soma::canonical`), path B

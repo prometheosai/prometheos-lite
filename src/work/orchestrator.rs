@@ -291,6 +291,10 @@ impl WorkOrchestrator {
             .get_context(&context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
 
+        if context.is_cancelled() {
+            anyhow::bail!("cancelled WorkContext is terminal: {context_id}");
+        }
+
         // Clear blocked reason if set, then execute
         if context.is_blocked() {
             self.work_context_service
@@ -322,6 +326,10 @@ impl WorkOrchestrator {
             .work_context_service
             .get_context(&context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
+
+        if context.is_cancelled() {
+            anyhow::bail!("cancelled WorkContext cannot be run: {context_id}");
+        }
 
         // Explicit run request is also a human approval signal.
         if context.autonomy_level == AutonomyLevel::Chat {

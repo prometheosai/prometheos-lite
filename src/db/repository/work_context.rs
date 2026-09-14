@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 
 use super::AsDb;
@@ -158,8 +159,20 @@ impl<T: AsDb> WorkContextOperations for T {
     fn update_work_context(&self, context: &WorkContext) -> anyhow::Result<()> {
         let conn = self.as_db().conn();
 
-        conn.execute(
-            "UPDATE work_contexts SET
+        // Optimistic concurrency guard (#132 / PR #220 repair): every
+        // write through this path is conditioned on the stored row being
+        // non-Cancelled. Persisting a stale in-memory snapshot taken
+        // before a concurrent cancel MUST NOT resurrect that context by
+        // clobbering the terminal Cancelled status in the full-row
+        // UPDATE below. Cancellation itself goes through
+        // WorkContextService::cancel_context (its own conditional
+        // transaction), so this "no-overwrite" rule does not fight it.
+        let cancelled_json = serde_json::to_string(&crate::work::types::WorkStatus::Cancelled)
+            .context("WorkStatus serialization")?;
+
+        let affected = conn
+            .execute(
+                "UPDATE work_contexts SET
                 title = ?1, domain = ?2, domain_profile_id = ?3, context_type = ?4,
                 project_id = ?5, conversation_id = ?6, parent_context_id = ?7, priority = ?8, due_at = ?9,
                 goal = ?10, requirements = ?11, constraints = ?12, status = ?13, current_phase = ?14,
@@ -167,44 +180,71 @@ impl<T: AsDb> WorkContextOperations for T {
                 decisions = ?20, flow_runs = ?21, tool_trace = ?22, execution_metadata = ?23, open_questions = ?24,
                 autonomy_level = ?25, approval_policy = ?26, summary = ?27, completion_criteria = ?28,
                 last_activity_at = ?29, metadata = ?30, playbook_id = ?31, evaluation_result = ?32, updated_at = ?33
-             WHERE id = ?34",
-            params![
-                &context.title,
-                serde_json::to_string(&context.domain)?,
-                &context.domain_profile_id,
-                &context.context_type,
-                &context.project_id,
-                &context.conversation_id,
-                &context.parent_context_id,
-                serde_json::to_string(&context.priority)?,
-                &context.due_at.map(|d| d.to_rfc3339()),
-                &context.goal,
-                serde_json::to_string(&context.requirements)?,
-                serde_json::to_string(&context.constraints)?,
-                serde_json::to_string(&context.status)?,
-                serde_json::to_string(&context.current_phase)?,
-                &context.blocked_reason,
-                serde_json::to_string(&context.plan)?,
-                serde_json::to_string(&context.approved_plan)?,
-                serde_json::to_string(&context.artifacts)?,
-                serde_json::to_string(&context.memory_refs)?,
-                serde_json::to_string(&context.decisions)?,
-                serde_json::to_string(&context.flow_runs)?,
-                serde_json::to_string(&context.tool_trace)?,
-                serde_json::to_string(&context.execution_metadata)?,
-                serde_json::to_string(&context.open_questions)?,
-                serde_json::to_string(&context.autonomy_level)?,
-                serde_json::to_string(&context.approval_policy)?,
-                &context.summary,
-                serde_json::to_string(&context.completion_criteria)?,
-                &context.last_activity_at.to_rfc3339(),
-                serde_json::to_string(&context.metadata)?,
-                &context.playbook_id,
-                &context.evaluation_result.as_ref().and_then(|v| serde_json::to_string(v).ok()),
-                &context.updated_at.to_rfc3339(),
-                &context.id,
-            ],
-        ).context("Failed to update work context")?;
+             WHERE id = ?34 AND status <> ?35",
+                params![
+                    &context.title,
+                    serde_json::to_string(&context.domain)?,
+                    &context.domain_profile_id,
+                    &context.context_type,
+                    &context.project_id,
+                    &context.conversation_id,
+                    &context.parent_context_id,
+                    serde_json::to_string(&context.priority)?,
+                    &context.due_at.map(|d| d.to_rfc3339()),
+                    &context.goal,
+                    serde_json::to_string(&context.requirements)?,
+                    serde_json::to_string(&context.constraints)?,
+                    serde_json::to_string(&context.status)?,
+                    serde_json::to_string(&context.current_phase)?,
+                    &context.blocked_reason,
+                    serde_json::to_string(&context.plan)?,
+                    serde_json::to_string(&context.approved_plan)?,
+                    serde_json::to_string(&context.artifacts)?,
+                    serde_json::to_string(&context.memory_refs)?,
+                    serde_json::to_string(&context.decisions)?,
+                    serde_json::to_string(&context.flow_runs)?,
+                    serde_json::to_string(&context.tool_trace)?,
+                    serde_json::to_string(&context.execution_metadata)?,
+                    serde_json::to_string(&context.open_questions)?,
+                    serde_json::to_string(&context.autonomy_level)?,
+                    serde_json::to_string(&context.approval_policy)?,
+                    &context.summary,
+                    serde_json::to_string(&context.completion_criteria)?,
+                    &context.last_activity_at.to_rfc3339(),
+                    serde_json::to_string(&context.metadata)?,
+                    &context.playbook_id,
+                    &context
+                        .evaluation_result
+                        .as_ref()
+                        .and_then(|v| serde_json::to_string(v).ok()),
+                    &context.updated_at.to_rfc3339(),
+                    &context.id,
+                    &cancelled_json,
+                ],
+            )
+            .context("Failed to update work context")?;
+
+        if affected == 0 {
+            // Either no such id, or the row is currently Cancelled. Distinguish
+            // so that the caller sees a terminal-state conflict, not a bare
+            // not-found.
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM work_contexts WHERE id = ?1 LIMIT 1",
+                    params![context.id],
+                    |_| Ok(true),
+                )
+                .optional()
+                .context("Failed to re-check work context")?
+                .unwrap_or(false);
+            if !exists {
+                anyhow::bail!("work context not found: {}", context.id);
+            }
+            anyhow::bail!(
+                "work context {} is Cancelled; refusing to overwrite terminal state",
+                context.id
+            );
+        }
 
         Ok(())
     }
