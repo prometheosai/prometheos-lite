@@ -1,6 +1,14 @@
 ## Unreleased
 
-- #221 (E6/I03 prerequisite) — durable graph checkpoint registry.
+- #221 (E6/I03 prerequisite) — durable graph checkpoint registry, repaired fields. 9 tests
+  now cover: digest recomputed from blob on every read (a corrupted row
+  surfaces as a read error, not a stale digest), structural identity
+  validation on write AND read (missing `schemaVersion` / `runId` /
+  `graphId` / `graphManifestDigest` rejected at both), ownership gates
+  with FK enforcement explicitly enabled per connection at
+  `Db::init_schema` (was implicit), whitespace-only id rejection, created_at
+  preservation across upsert overwrites, restart/reconnect durability,
+  and cross-user read/write refusal.
   `graph_checkpoints` stores (work_context_id, graph_run_id) →
   checkpoint JSON blob + freshly recomputed SHA-256, FK-cascade from
   `work_contexts` so orphan checkpoints cannot exist, and a wrongful
