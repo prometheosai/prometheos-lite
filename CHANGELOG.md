@@ -1,14 +1,24 @@
 ## Unreleased
 
-- #221 (E6/I03 prerequisite) — durable graph checkpoint registry, repaired fields. 9 tests
-  now cover: digest recomputed from blob on every read (a corrupted row
-  surfaces as a read error, not a stale digest), structural identity
-  validation on write AND read (missing `schemaVersion` / `runId` /
-  `graphId` / `graphManifestDigest` rejected at both), ownership gates
-  with FK enforcement explicitly enabled per connection at
-  `Db::init_schema` (was implicit), whitespace-only id rejection, created_at
-  preservation across upsert overwrites, restart/reconnect durability,
-  and cross-user read/write refusal.
+- #221 (E6/I03 prerequisite, repair round) — review-requested upgrades on
+  the graph checkpoint registry. New guarantees:
+  (1) digest is recomputed on READ and must equal the stored one or the
+  read fails — no silent acceptance of a tampered/stale value;
+  (2) the registry key MUST match `runId` inside the blob, and the blob
+  must carry the graph-state identity fields (`schemaVersion`, `runId`,
+  `graphId`, `graphManifestDigest`), so a registry row can't claim a run
+  its bytes don't own;
+  (3) foreign keys are now *explicitly* enforced per connection at
+  `Db::init_schema` (beta pragma set + verified, startup fails if it
+  doesn't take), with a regression test for the accidental-off case;
+  (4) upsert retains the original `created_at` (overwrite is a
+  timestamp-preserving re-pin, no history churn);
+  (5) +3 new tests: tampered-digest read fails; blob/key identity
+  mismatch refused on both paths; FK pragma regression. Corrects the
+  "DB can't be relied upon" note since the underlying sqlite file for
+  the test tempfile is now held for the test's full lifetime — the
+  earlier in-tests regression check only worked by accident on Windows
+  where the dropped temp dir wasn't yet visible.
   `graph_checkpoints` stores (work_context_id, graph_run_id) →
   checkpoint JSON blob + freshly recomputed SHA-256, FK-cascade from
   `work_contexts` so orphan checkpoints cannot exist, and a wrongful

@@ -117,6 +117,22 @@ fn validate_checkpoint_json(blob: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Binding rule: the registry key `graph_run_id` and the blob's internal
+/// `runId` must agree. A checkpoint registered under the wrong run id makes
+/// reads later answer "run for X" with a blob that says it is run Y —
+/// treat that as tampering and refuse. Called on both write and read.
+fn assert_blob_run_id_matches(blob: &str, graph_run_id: &str) -> anyhow::Result<()> {
+    let v: serde_json::Value =
+        serde_json::from_str(blob).context("checkpoint blob is not valid JSON")?;
+    match v.get("runId") {
+        Some(serde_json::Value::String(inner)) if inner == graph_run_id => Ok(()),
+        Some(serde_json::Value::String(inner)) => anyhow::bail!(
+            "checkpoint blob claims runId '{inner}' but registry key expects '{graph_run_id}'"
+        ),
+        _ => anyhow::bail!("checkpoint blob has no runId"),
+    }
+}
+
 /// Register a checkpoint under (context, run), conditioned on ownership.
 /// Replaces the existing row if it exists. `created_at` reflects the first
 /// registration for the (context, run) pair and does NOT change on replace.
@@ -132,6 +148,7 @@ pub fn upsert_checkpoint<T: AsDb>(
     let graph_run_id = normalize_id(graph_run_id, "graph_run_id")?;
     ensure_owned_by(db, &work_context_id, user_id)?;
     validate_checkpoint_json(checkpoint_json)?;
+    assert_blob_run_id_matches(checkpoint_json, &graph_run_id)?;
 
     let digest = digest_of(checkpoint_json);
     let now = Utc::now().to_rfc3339();
@@ -150,9 +167,12 @@ pub fn upsert_checkpoint<T: AsDb>(
 }
 
 /// Read the checkpoint blob + digest back; ownership is enforced same as
-/// upsert. The returned digest is recomputed from the blob — if the stored
-/// digest ever disagrees, that is flagged on read (the caller holds a good
-/// blob; the stored digest value itself is irrelevant past this point).
+/// upsert.
+///
+/// The blob's internal `runId` must match the key it was registered under —
+/// a checkpoint claiming a different run refuses to read. A stored digest
+/// doesn't match the recomputed one → read fails closed (tamper detection),
+/// never silently accepted.
 pub fn get_checkpoint<T: AsDb>(
     db: &T,
     user_id: &str,
@@ -163,21 +183,27 @@ pub fn get_checkpoint<T: AsDb>(
     let graph_run_id = normalize_id(graph_run_id, "graph_run_id")?;
     ensure_owned_by(db, &work_context_id, user_id)?;
 
-    let raw: Option<String> = db
+    let raw: Option<(String, String)> = db
         .as_db()
         .conn()
         .query_row(
-            "SELECT checkpoint_json FROM graph_checkpoints WHERE work_context_id = ?1 AND graph_run_id = ?2",
+            "SELECT checkpoint_json, checkpoint_digest FROM graph_checkpoints WHERE work_context_id = ?1 AND graph_run_id = ?2",
             params![work_context_id, graph_run_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .context("failed to query checkpoint")?;
 
-    raw.map(|blob| {
+    raw.map(|(blob, stored_digest)| {
         validate_checkpoint_json(&blob)?;
-        let digest = digest_of(&blob);
-        Ok((blob, digest))
+        assert_blob_run_id_matches(&blob, &graph_run_id)?;
+        let recomputed = digest_of(&blob);
+        if recomputed != stored_digest {
+            anyhow::bail!(
+                "checkpoint digest mismatch for run {graph_run_id}: stored {stored_digest} vs computed {recomputed}"
+            );
+        }
+        Ok((blob, recomputed))
     })
     .transpose()
 }
@@ -237,6 +263,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// Create a Db whose backing file lives inside `dir`. The caller MUST
+    /// keep `dir` alive for the test's duration — dropping it early deletes
+    /// the SQLite file underneath, which is a sneakster Windows bug and a
+    /// real one on Linux.
     fn db_in(dir: &tempfile::TempDir) -> (Arc<crate::db::Db>, String) {
         let db_path = dir.path().join("gc.db").to_str().unwrap().to_string();
         let db = Arc::new(crate::db::Db::new(&db_path).expect("db"));
@@ -269,7 +299,8 @@ mod tests {
 
     #[test]
     fn write_read_update_roundtrip() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path);
 
         let d1 =
@@ -283,8 +314,9 @@ mod tests {
         assert_eq!(blob, valid_checkpoint("run-1"));
         assert_eq!(digest, d1);
 
+        // Content change with the SAME runId (a legit graph-step overwrite):
         let blob2 =
-            valid_checkpoint("run-1").replace("\"runId\":\"run-1\"", "\"runId\":\"run-1x\"");
+            valid_checkpoint("run-1").replace("repoRevision\":\"r\"", "repoRevision\":\"r2\"");
         let d2 = upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &blob2).unwrap();
         assert_ne!(d1, d2);
         let (blob2_read, digest2) = get_checkpoint(&*db, "owner", &ctx_id, "run-1")
@@ -292,11 +324,19 @@ mod tests {
             .unwrap();
         assert_eq!(blob2_read, blob2);
         assert_eq!(digest2, d2);
+
+        // A DIFFERENT runId as key is refused: blob stating a different
+        // run than the key is a sign of misregistration/tampering.
+        let bad_blob = valid_checkpoint("run-2");
+        let err = upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &bad_blob)
+            .expect_err("runId mismatch must refuse");
+        assert!(format!("{:?}", err).contains("checkpoint blob claims runId"));
     }
 
     #[test]
     fn owner_gate_blocks_other_users_reads_and_writes() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path); // owned by "owner"
 
         upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &valid_checkpoint("run-1")).unwrap();
@@ -312,7 +352,8 @@ mod tests {
 
     #[test]
     fn normalized_ids_ignore_surrounding_whitespace() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path);
 
         upsert_checkpoint(
@@ -332,7 +373,8 @@ mod tests {
 
     #[test]
     fn empty_ids_refused() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path);
         assert!(upsert_checkpoint(&*db, "owner", "", "run-1", &valid_checkpoint("run-1")).is_err());
         assert!(
@@ -342,7 +384,8 @@ mod tests {
 
     #[test]
     fn overwrite_keeps_original_created_at_not_churn() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path);
 
         upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &valid_checkpoint("run-1")).unwrap();
@@ -363,7 +406,8 @@ mod tests {
 
     #[test]
     fn restart_survives_service_reset_and_reconnect() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path);
         upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &valid_checkpoint("run-1")).unwrap();
         drop(db);
@@ -383,7 +427,9 @@ mod tests {
 
     #[test]
     fn orphan_registration_fails_closed() {
-        let (db, _db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, _db_path) = db_in(&dir);
+        let _ = &db;
         assert!(
             upsert_checkpoint(
                 &*db,
@@ -398,7 +444,8 @@ mod tests {
 
     #[test]
     fn structure_validation_refuses_missing_identity_fields() {
-        let (db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
         let ctx_id = seed_context(&db_path);
         let blob = r#"{"foo":1}"#;
         let err = upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", blob)
@@ -435,7 +482,8 @@ mod tests {
     fn failing_fk_off_does_not_hide_orphans() {
         // Turn FK off (broken environment), then insert an orphan. Fail the
         // whole call because the contract requires it.
-        let (_db, db_path) = db_in(&tempfile::tempdir().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (_db, db_path) = db_in(&dir);
 
         // Enforce FK to verify our invariant, then disable it on this
         // connection to simulate a busted config.
