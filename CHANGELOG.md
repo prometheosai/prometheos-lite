@@ -1,5 +1,16 @@
 ## Unreleased
 
+- #132 graph-decide slice — `POST /work-contexts/:id/graph-runs/:run_id/decisions` on
+  top of the #221 registry. The endpoint gates on ownership (same user_id
+  everywhere), work-context not cancelled, the graph checkpoint must exist
+  and hold a matching runId, manifest semantic digest pin verification, a
+  decision whose `basisResultDigest` must be among the journaled
+  completions, no decide on terminated runs; accepts one route decision and
+  persists the resulting graph checkpoint via the registry; emits a durable
+  `graph_decision` event on the work-context event stream. Five tests pin the
+  happy path (state changes) with unknown-run (404), wrong-user (403),
+  cancel (409 — cancelled context refuses post-cancel decisions),
+  already-terminated (409 — no further decision), and UnjournaledBasis (409).
 - #221 (repair round 4, review-driven) — registry repair testlab is
   actually present now:
 
