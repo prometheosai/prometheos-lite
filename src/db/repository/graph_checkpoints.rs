@@ -210,6 +210,13 @@ pub fn get_checkpoint<T: AsDb>(
 
 /// List all registered checkpoint references for a context; Owned-same
 /// gating as the rest.
+///
+/// Verifies:
+/// - structure (schemaVersion/runId/graphId/graphManifestDigest shape);
+/// - blob.runId == stored key (graph_run_id);
+/// - recomputed digest == stored digest.
+///
+/// A row that fails any of these fails the whole list; nothing is returned.
 pub fn list_checkpoints<T: AsDb>(
     db: &T,
     user_id: &str,
@@ -221,7 +228,7 @@ pub fn list_checkpoints<T: AsDb>(
     let conn = db.as_db().conn();
     let mut stmt = conn
         .prepare(
-            "SELECT work_context_id, graph_run_id, checkpoint_json, created_at
+            "SELECT work_context_id, graph_run_id, checkpoint_json, checkpoint_digest, created_at
              FROM graph_checkpoints WHERE work_context_id = ?1
              ORDER BY created_at ASC, graph_run_id ASC",
         )
@@ -232,28 +239,32 @@ pub fn list_checkpoints<T: AsDb>(
             let id: String = row.get(0)?;
             let run: String = row.get(1)?;
             let blob: String = row.get(2)?;
-            validate_checkpoint_json(&blob).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        e.to_string(),
-                    )),
-                )
-            })?;
-            Ok(GraphCheckpointRef {
-                work_context_id: id.clone(),
-                graph_run_id: run,
-                checkpoint_digest: digest_of(&blob),
-                created_at: row.get(3)?,
-            })
+            let stored_digest: String = row.get(3)?;
+            let ts: String = row.get(4)?;
+            Ok((id, run, blob, stored_digest, ts))
         })
         .context("failed to query checkpoints list")?;
 
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.context("failed to read checkpoint row")?);
+        let (id, run, blob, stored_digest, ts) = row.context("failed to read checkpoint row")?;
+
+        // Exact same gates as get_checkpoint: structure, key-binding, digest.
+        validate_checkpoint_json(&blob)?;
+        assert_blob_run_id_matches(&blob, &run)?;
+        let recomputed = digest_of(&blob);
+        if recomputed != stored_digest {
+            anyhow::bail!(
+                "checkpoint digest mismatch for run {run}: stored {stored_digest} vs computed {recomputed}"
+            );
+        }
+
+        out.push(GraphCheckpointRef {
+            work_context_id: id,
+            graph_run_id: run,
+            checkpoint_digest: stored_digest,
+            created_at: ts,
+        });
     }
     Ok(out)
 }
@@ -479,57 +490,128 @@ mod tests {
     }
 
     #[test]
-    fn failing_fk_off_does_not_hide_orphans() {
-        // Turn FK off (broken environment), then insert an orphan. Fail the
-        // whole call because the contract requires it.
+    fn stored_digest_tamper_is_detected_on_read_and_list() {
+        // Proof that digest enforcement is real: write a valid checkpoint,
+        // then rewrite ONLY the stored digest column to a tampered value via
+        // a raw connection (bypassing the typed layer). Both read endpoints
+        // must refuse with an error — not return a tampered row.
         let dir = tempfile::tempdir().unwrap();
-        let (_db, db_path) = db_in(&dir);
+        let (db, db_path) = db_in(&dir);
+        let ctx_id = seed_context(&db_path);
 
-        // Enforce FK to verify our invariant, then disable it on this
-        // connection to simulate a busted config.
-        let probe = rusqlite::Connection::open(&db_path).unwrap();
-        probe.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        let fk: i64 = probe
-            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fk, 1, "FK must be ON by default after Db::new");
+        upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &valid_checkpoint("run-1"))
+            .expect("seed");
 
-        probe.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-        let fk_after: i64 = probe
-            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fk_after, 0, "FK turns off when explicitly disabled");
+        // Corrupt the stored digest (keeping the blob intact).
+        let conn = rusqlite::Connection::open(&db_path).expect("probe");
+        conn.execute(
+            "UPDATE graph_checkpoints SET checkpoint_digest = 'deadbeef'
+             WHERE work_context_id = ?1 AND graph_run_id = 'run-1'",
+            rusqlite::params![ctx_id],
+        )
+        .expect("tamper");
 
-        // Now insert an orphan via the same raw connection (bypassing the
-        // typed layer to isolate the failure mode). This isn't a code change
-        // to the registry itself; it proves the FK really is the backstop.
-        probe.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-        let err = probe.execute(
-            "INSERT INTO graph_checkpoints (work_context_id, graph_run_id, checkpoint_json, checkpoint_digest, created_at)
-             VALUES ('ghost', 'r', '{}', 'x', '2026-01-01T00:00:00Z')",
-            [],
-        );
-        // sqlite allows the insert when FK is off — that's the behavior we
-        // detect. But our *typed* layer always checks ownership first, so
-        // this path is unreachable through upsert_checkpoint; the test is
-        // demonstrating the DB-level guard has teeth — FK on vs off.
+        let get_err = get_checkpoint(&*db, "owner", &ctx_id, "run-1").expect_err("get must fail");
         assert!(
-            err.is_ok(),
-            "INSERT bypasses FK when disabled (as documented)"
+            format!("{:?}", get_err).contains("digest mismatch"),
+            "get must surface the mismatch: {get_err:?}"
         );
 
-        // Re-enable FK, verify the ownership-defense would still catch
-        // orphan insertion through the typed layer (regardless of pragma).
-        // The seed context here is created as "owner" via the same service.
-        let owned_ctx = seed_context(&db_path);
-        let svc_db = Arc::new(crate::db::Db::new(&db_path).unwrap());
-        let _svc = crate::work::WorkContextService::new(svc_db.clone());
-        std::mem::drop(_svc);
-        let check = svc_db.conn().query_row(
-            "SELECT COUNT(*) FROM work_contexts WHERE id = ?1 AND user_id = 'owner'",
-            params![owned_ctx],
-            |r| r.get::<_, i64>(0),
+        let list_err = list_checkpoints(&*db, "owner", &ctx_id).expect_err("list must fail");
+        assert!(
+            format!("{:?}", list_err).contains("digest mismatch"),
+            "list must surface the mismatch: {list_err:?}"
         );
-        assert!(matches!(check, Ok(1)));
+    }
+
+    #[test]
+    fn cascade_delete_removes_registry_entry_with_context() {
+        // FK ON DELETE CASCADE is the registry's orphan-protection of last
+        // resort: when a context is deleted, its checkpoint registry rows
+        // must vanish in the same transaction.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
+        let ctx_id = seed_context(&db_path);
+
+        upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &valid_checkpoint("run-1"))
+            .expect("seed");
+
+        // Delete the parent work_context row directly; cascade must remove
+        // the child registry row too.
+        let conn = rusqlite::Connection::open(&db_path).expect("probe");
+        conn.execute(
+            "DELETE FROM work_contexts WHERE id = ?1",
+            rusqlite::params![ctx_id],
+        )
+        .expect("delete parent");
+
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM graph_checkpoints WHERE work_context_id = ?1",
+                rusqlite::params![ctx_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rows, 0,
+            "cascade must clean up registry rows on parent delete"
+        );
+    }
+
+    #[test]
+    fn blob_claiming_different_run_is_refused_on_write_and_read() {
+        // Pins both directions of the runId binding: blob claiming a
+        // different run than the key is given is misregistration.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
+        let ctx_id = seed_context(&db_path);
+
+        let blob = valid_checkpoint("run-B");
+        let err = upsert_checkpoint(&*db, "owner", &ctx_id, "run-A", &blob)
+            .expect_err("write must refuse blob claiming a different run");
+        assert!(format!("{:?}", err).contains("claims runId"));
+
+        // Same blob must also fail on read if it ever got in. Inject via raw UPDATE.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO graph_checkpoints (work_context_id, graph_run_id, checkpoint_json, checkpoint_digest, created_at)
+             VALUES (?1, 'run-A', ?2, 'd', '2026-01-01T00:00:00Z')",
+            rusqlite::params![ctx_id, blob],
+        )
+        .expect("seed bad row");
+        let err = get_checkpoint(&*db, "owner", &ctx_id, "run-A").expect_err("read must refuse");
+        assert!(format!("{:?}", err).contains("claims runId"));
+    }
+
+    #[test]
+    fn fk_pragma_is_on_and_cascade_actually_works() {
+        // The review point: PRAGMA checks must come from the same connection
+        // the schema was initialized on, not a shed connection.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, db_path) = db_in(&dir);
+        let ctx_id = seed_context(&db_path);
+
+        // Verify: Db::init Schema set and kept foreign_keys=ON on the
+        // connection that owns the schema.
+        let fk: i64 = db
+            .conn()
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "FK is on at Db::new time");
+
+        // Cascade: deleting the parent removes the registry row.
+        upsert_checkpoint(&*db, "owner", &ctx_id, "run-1", &valid_checkpoint("run-1")).unwrap();
+        db.conn()
+            .execute("DELETE FROM work_contexts WHERE id = ?1", params![ctx_id])
+            .unwrap();
+        let rows: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM graph_checkpoints WHERE work_context_id = ?1",
+                params![ctx_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "cascade did its job on the same connection");
     }
 }
