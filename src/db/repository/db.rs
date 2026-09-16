@@ -41,6 +41,22 @@ impl Db {
 
     /// Initialize database schema
     fn init_schema(&self) -> anyhow::Result<()> {
+        // FK enforcement must be explicitly enabled per connection — pr#223
+        // P1. Rusqlite enables it by default on modern versions, but that is
+        // silent default behavior; the graph_checkpoints table and every
+        // other FK'd table's orphan protection rely on it. Make it a hard
+        // requirement instead of trusting a transitive setting.
+        self.conn
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .context("Failed to enable foreign_keys pragma")?;
+        let fk_on: i64 = self
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .context("Failed to check foreign_keys pragma")?;
+        if fk_on != 1 {
+            anyhow::bail!("foreign_keys pragma failed to engage at startup");
+        }
+
         self.conn
             .execute(
                 "CREATE TABLE IF NOT EXISTS projects (
@@ -342,6 +358,21 @@ impl Db {
                 [],
             )
             .context("Failed to create harness_run_metrics table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS graph_checkpoints (
+                work_context_id TEXT NOT NULL,
+                graph_run_id TEXT NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                checkpoint_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (work_context_id, graph_run_id),
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .context("Failed to create graph_checkpoints table")?;
 
         self.conn
             .execute(

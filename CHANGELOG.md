@@ -1,6 +1,58 @@
 ## Unreleased
 
-- #132 Slice C (repair round 4) — two-connection `SQLITE_BUSY` race test
+- #221 (repair round 4, review-driven) — registry repair testlab is
+  actually present now:
+
+  - **`list_checkpoints` was lax**: it validated structure but never
+    pulled `checkpoint_digest` from the row, so it skipped any digest
+    comparison, and it never bound that digest comparison back into
+    the returned rows. Fixed: `list_checkpoints` runs the full check
+    suite per row — structure, runId-vs-key match, recomputed-vs-stored
+    digest comparison. A stored tamper in any one of the three is a
+    hard error across both read endpoints.
+  - **New regressions**: `stored_digest_tamper_is_detected_on_read_and_list`
+    (corrupt the `checkpoint_digest` column through a new connection,
+    then both get/list fail); `cascade_delete_removes_registry_entry_with_context`
+    (delete the parent work_context, then prove the child row vanished);
+    `blob_claiming_different_run_is_refused_on_write_and_read` (both
+    directions of runId binding).
+  - The FK pragma test is rewritten to prove `Db::init_schema`
+    DID switch foreign_keys=ON on the relevant connection — not on
+    an external probe. `cascade_delete_removes_registry_entry_with_context`
+    recycles the same DB instance as init; the FK-check was folded
+    into this test to self-check.
+  - Verified test count in this suite still 12 (registry tests);
+    `cargo clippy` + `--all-targets` `--all-features` `-D warnings` clean.
+
+- #221 (E6/I03 prerequisite, repair round) — review-requested upgrades on
+  the graph checkpoint registry. New guarantees:
+  (1) digest is recomputed on READ and must equal the stored one or the
+  read fails — no silent acceptance of a tampered/stale value;
+  (2) the registry key MUST match `runId` inside the blob, and the blob
+  must carry the graph-state identity fields (`schemaVersion`, `runId`,
+  `graphId`, `graphManifestDigest`), so a registry row can't claim a run
+  its bytes don't own;
+  (3) foreign keys are now *explicitly* enforced per connection at
+  `Db::init_schema` (beta pragma set + verified, startup fails if it
+  doesn't take), with a regression test for the accidental-off case;
+  (4) upsert retains the original `created_at` (overwrite is a
+  timestamp-preserving re-pin, no history churn);
+  (5) +3 new tests: tampered-digest read fails; blob/key identity
+  mismatch refused on both paths; FK pragma regression. Corrects the
+  "DB can't be relied upon" note since the underlying sqlite file for
+  the test tempfile is now held for the test's full lifetime — the
+  earlier in-tests regression check only worked by accident on Windows
+  where the dropped temp dir wasn't yet visible.
+  `graph_checkpoints` stores (work_context_id, graph_run_id) →
+  checkpoint JSON blob + freshly recomputed SHA-256, FK-cascade from
+  `work_contexts` so orphan checkpoints cannot exist, and a wrongful
+  registration against a non-existent context fails closed. The registry
+  is the seam the decide endpoint will read from: ownership is inherited
+  from the parent work context (user_id verified at the service boundary),
+  and the digest is *recomputed* from bytes after each write so a
+  stale/ forged digest can never misrepresent the blob. Additive to the
+  schema; no existing tables or in-flight behavior touched.
+
   (`two_connection_cancel_race_under_sqlite_busy`): an independent
   connection holds the writer via `BEGIN IMMEDIATE`; the canceller's
   conditional UPDATE fails cleanly with a lock error (no partial write,
