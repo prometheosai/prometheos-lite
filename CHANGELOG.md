@@ -1,5 +1,29 @@
 ## Unreleased
 
+- #221 (repair round 4, review-driven) — registry repair testlab is
+  actually present now:
+
+  - **`list_checkpoints` was lax**: it validated structure but never
+    pulled `checkpoint_digest` from the row, so it skipped any digest
+    comparison, and it never bound that digest comparison back into
+    the returned rows. Fixed: `list_checkpoints` runs the full check
+    suite per row — structure, runId-vs-key match, recomputed-vs-stored
+    digest comparison. A stored tamper in any one of the three is a
+    hard error across both read endpoints.
+  - **New regressions**: `stored_digest_tamper_is_detected_on_read_and_list`
+    (corrupt the `checkpoint_digest` column through a new connection,
+    then both get/list fail); `cascade_delete_removes_registry_entry_with_context`
+    (delete the parent work_context, then prove the child row vanished);
+    `blob_claiming_different_run_is_refused_on_write_and_read` (both
+    directions of runId binding).
+  - The FK pragma test is rewritten to prove `Db::init_schema`
+    DID switch foreign_keys=ON on the relevant connection — not on
+    an external probe. `cascade_delete_removes_registry_entry_with_context`
+    recycles the same DB instance as init; the FK-check was folded
+    into this test to self-check.
+  - Verified test count in this suite still 12 (registry tests);
+    `cargo clippy` + `--all-targets` `--all-features` `-D warnings` clean.
+
 - #221 (E6/I03 prerequisite, repair round) — review-requested upgrades on
   the graph checkpoint registry. New guarantees:
   (1) digest is recomputed on READ and must equal the stored one or the
