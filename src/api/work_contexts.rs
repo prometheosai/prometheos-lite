@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json},
 };
+use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -389,8 +390,38 @@ pub async fn decide_graph_run(
 ) -> Result<Json<DecideGraphRunResponse>, ApiError> {
     let user_id = required_user_id(&identity)?;
 
-    // 1. Ownership + cancellation gate.
-    let context = get_context_for_user_or_404(&state, &id, user_id).await?;
+    // The decide mutation happens as a single SQL transaction:
+    // read checkpoint row, revalidate structure/key/digest, apply the
+    // record-route-decision semantics, then write back the new checkpoint
+    // AND the graph_decision event — commit or roll back together, with a
+    // concurrent-write guard on the stored digest.
+    let __payload = execute_decide_transaction(&state, &id, &run_id, user_id, req).await?;
+    Ok(Json(DecideGraphRunResponse {
+        run_id,
+        recorded: true,
+        new_digest: __payload,
+    }))
+}
+
+/// Real workhorse: single DB transaction. Semantics (fail closed):
+/// 1. The checkpoint row must exist.
+/// 2. Blob structure must validate (same rules as read).
+/// 3. Blob's runId must match the path key.
+/// 4. Calling manifest must recompute to the checkpoint's graphManifestDigest.
+/// 5. Portable state digest must match the checkpoint's portableStateDigest.
+/// 6. Run must not be terminated.
+/// 7. Route decision must have a journaled basis, target a manifest edge.
+/// 8. CAS write: failure = concurrent writer moved the digest underfoot.
+/// 9. Event journal entry written with the same cxcommit.
+async fn execute_decide_transaction(
+    state: &Arc<AppState>,
+    work_context_id: &str,
+    graph_run_id: &str,
+    user_id: &str,
+    req: DecideGraphRunRequest,
+) -> Result<String, ApiError> {
+    // Ownership: shared with all other routes.
+    let context = get_context_for_user_or_404(state, work_context_id, user_id).await?;
     if context.is_cancelled() {
         return Err(ApiError::Conflict(
             "cannot decide on a cancelled work context".to_string(),
@@ -400,132 +431,128 @@ pub async fn decide_graph_run(
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
+    let db = work_context_service.get_db().clone();
+    let conn = db.conn();
 
-    // 2. Resolve the registered checkpoint; runId must match the path arg.
-    let registry = crate::db::repository::graph_checkpoints::get_checkpoint(
-        work_context_service.get_db().as_ref(),
-        user_id,
-        &id,
-        &run_id,
-    )
-    .map_err(|e| ApiError::Internal(format!("registry read failed: {e}")))?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| ApiError::Internal(format!("failed to start transaction: {e}")))?;
 
-    let (checkpoint_json, _enabled_digest) = match &registry {
-        Some((json, d)) => (json.clone(), d.clone()),
-        None => {
-            return Err(ApiError::NotFound(format!(
-                "no checkpoint registered for run '{}' of context '{}'",
-                run_id, id
-            )));
+    let (new_digest,) = (|| -> anyhow::Result<(String,)> {
+        // 1. Read checkpoint
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT checkpoint_json, checkpoint_digest FROM graph_checkpoints
+                 WHERE work_context_id = ?1 AND graph_run_id = ?2",
+                rusqlite::params![work_context_id, graph_run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        let (checkpoint_json, stored_digest) = row.ok_or_else(|| {
+            anyhow::anyhow!("no checkpoint registered for run '{}'", graph_run_id)
+        })?;
+
+        // 2+3+4+5: structure + key binding + digest recompute.
+        crate::db::repository::graph_checkpoints::validate_checkpoint_json(&checkpoint_json)
+            .map_err(|e| anyhow::anyhow!("stored checkpoint invalid: {e}"))?;
+        crate::db::repository::graph_checkpoints::assert_blob_run_id_matches(
+            &checkpoint_json,
+            graph_run_id,
+        )
+        .map_err(|e| anyhow::anyhow!("stored checkpoint runId mismatch: {e}"))?;
+        let recomputed = crate::db::repository::graph_checkpoints::digest_of(&checkpoint_json);
+        if recomputed != stored_digest {
+            anyhow::bail!("checkpoint digest mismatch: {stored_digest} vs {recomputed}");
         }
-    };
 
-    // 3. Import and verify — imports fail on version/digest/manifest drift.
-    let manifest: crate::workflow::graph_state::GraphManifestV1 = match serde_json::from_value::<
-        crate::workflow::graph_state::GraphManifestV1,
-    >(req.manifest.clone())
-    {
-        Ok(m) => {
-            m.validate()
-                .map_err(|e| ApiError::BadRequest(format!("invalid manifest: {e}")))?;
-            m
+        let manifest: crate::workflow::graph_state::GraphManifestV1 =
+            serde_json::from_value(req.manifest.clone())
+                .map_err(|e| anyhow::anyhow!("manifest failed: {e}"))?;
+        manifest.validate()?;
+
+        let mut state = crate::workflow::graph_state::GraphRunStateV1::import_checkpoint(
+            &checkpoint_json,
+            &manifest,
+            &req.portable_state_digest,
+        )
+        .map_err(|e| anyhow::anyhow!("checkpoint import failed: {e}"))?;
+
+        if state.termination.is_some() {
+            anyhow::bail!("graph run is already terminated");
         }
-        Err(e) => {
-            return Err(ApiError::BadRequest(format!(
-                "manifest is not parseable GraphManifestV1: {e}"
-            )));
+
+        let decision: crate::workflow::graph_state::RouteDecisionV1 =
+            serde_json::from_value(req.decision)
+                .map_err(|e| anyhow::anyhow!("decision is not RouteDecisionV1-shaped: {e}"))?;
+
+        state
+            .record_route_decision(decision, &manifest)
+            .map_err(|e| anyhow::anyhow!("decision rejected: {e}"))?;
+
+        let new_checkpoint = state
+            .export_checkpoint()
+            .map_err(|e| anyhow::anyhow!("export failed: {e}"))?;
+        let new_digest = crate::workflow::soma::canonical::sha256_hex(new_checkpoint.as_bytes());
+
+        // 6. CAS persisted write — refuse if a concurrent writer changed
+        // the row after our save-read.
+        let rows = tx.execute(
+            "UPDATE graph_checkpoints SET checkpoint_json = ?1, checkpoint_digest = ?2
+             WHERE work_context_id = ?3 AND graph_run_id = ?4 AND checkpoint_digest = ?5",
+            rusqlite::params![
+                new_checkpoint,
+                new_digest,
+                work_context_id,
+                graph_run_id,
+                stored_digest
+            ],
+        )?;
+        if rows != 1 {
+            anyhow::bail!("checkpoint digest raced: concurrent writer changed the row");
         }
-    };
+        // graph_decision event still lands in the same transaction.
+        tx.execute(
+            "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                work_context_id,
+                "graph_decision",
+                serde_json::to_string(&serde_json::json!({
+                    "runId": graph_run_id,
+                    "newDigest": new_digest,
+                }))?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
 
-    // The manifest's digest must match what the checkpoint was sealed with.
-    let sealed_manifest_digest = manifest.compute_digest();
-
-    let graph_state = match crate::workflow::graph_state::GraphRunStateV1::import_checkpoint(
-        &checkpoint_json,
-        &manifest,
-        &req.portable_state_digest,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(ApiError::Conflict(format!(
-                "checkpoint failed authority/import gates: {e}"
-            )));
+        tx.commit()?;
+        Ok((new_digest,))
+    })()
+    .map_err(|e| {
+        let msg = format!("{e:#}");
+        if msg.contains("no checkpoint registered") {
+            ApiError::NotFound(msg)
+        } else if msg.contains("cancelled")
+            || msg.contains("terminated")
+            || msg.contains("rejected")
+            || msg.contains("tampered")
+            || msg.contains("raced")
+        {
+            ApiError::Conflict(msg)
+        } else if msg.contains("manifest")
+            || msg.contains("RouteDecisionV1")
+            || msg.contains("portableStateDigest")
+        {
+            ApiError::BadRequest(msg)
+        } else {
+            ApiError::Internal(msg)
         }
-    };
+    })?;
 
-    if graph_state.graph_manifest_digest != sealed_manifest_digest {
-        return Err(ApiError::Conflict(
-            "manifest digest mismatch vs checkpoint".to_string(),
-        ));
-    }
-
-    // Already-finalized runs refuse further mutations.
-    if graph_state.termination.is_some() {
-        return Err(ApiError::Conflict(
-            "graph run is already terminated".to_string(),
-        ));
-    }
-
-    // 4. Decision attempt.
-    let decision: crate::workflow::graph_state::RouteDecisionV1 =
-        match serde_json::from_value(req.decision) {
-            Ok(d) => d,
-            Err(e) => {
-                return Err(ApiError::BadRequest(format!(
-                    "decision is not RouteDecisionV1-shaped: {e}"
-                )));
-            }
-        };
-    let decision_json = serde_json::to_value(&decision)
-        .map_err(|e| ApiError::Internal(format!("decision serialization failed: {e}")))?;
-
-    let mut mutable_state = graph_state;
-    if let Err(e) = mutable_state.record_route_decision(decision, &manifest) {
-        return Err(ApiError::Conflict(format!("decision rejected: {e}")));
-    }
-
-    // 5. Verify the new checkpoint's exported digest is stable and
-    // re-register into the durable registry.
-    let new_ckpt = mutable_state
-        .export_checkpoint()
-        .map_err(|e| ApiError::Internal(format!("failed to export checkpoint: {e}")))?;
-
-    let new_digest = crate::workflow::soma::canonical::sha256_hex(new_ckpt.as_bytes());
-    crate::db::repository::graph_checkpoints::upsert_checkpoint(
-        work_context_service.get_db().as_ref(),
-        user_id,
-        &id,
-        &run_id,
-        &new_ckpt,
-    )
-    .map_err(|e| ApiError::Internal(format!("registry write failed: {e}")))?;
-
-    // Durable audit event so the decide action shows up in the work
-    // context's event stream on every client path.
-    let _ = crate::db::repository::work_context_events::WorkContextEventOperations::create_event(
-        work_context_service.get_db().as_ref(),
-        &crate::work::event::WorkContextEvent::new(
-            uuid::Uuid::new_v4().to_string(),
-            id.clone(),
-            "graph_decision".to_string(),
-            serde_json::json!({
-                "runId": run_id,
-                "newDigest": new_digest,
-                "decisionFromNode": decision_json
-                    .get("fromNode").cloned().unwrap_or(serde_json::Value::Null),
-                "decisionToNode": decision_json
-                    .get("toNode").cloned().unwrap_or(serde_json::Value::Null),
-            }),
-        ),
-    );
-
-    Ok(Json(DecideGraphRunResponse {
-        run_id,
-        recorded: true,
-        new_digest,
-    }))
+    Ok(new_digest)
 }
-
 /// Cancel a WorkContext (#132 Slice C). Terminal transition recorded in
 /// the durable event stream (`context_cancelled` with reason). Idempotent:
 /// re-cancelling returns success without duplicating the event.

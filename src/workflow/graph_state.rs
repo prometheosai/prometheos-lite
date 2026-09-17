@@ -502,6 +502,16 @@ impl GraphRunStateV1 {
     /// TRANSACTION LAW 2: record a route decision whose basis MUST be a
     /// journaled completion of `from_node` (auditable provenance). Moves the
     /// target onto the frontier unless it is a terminal exit.
+    ///
+    /// Additional guards added for PR #224:
+    /// - The route must follow a manifest edge: `from -> to` must appear in
+    ///   `manifest.edges`, or `to` must be an entry in `terminal_exits`.
+    ///   Routing against a node not in an existing edge fails.
+    /// - Replay rule: an identical decision (from_node, to_node, basis digest)
+    ///   already journaled as `decisions[i]` is idempotent: the same decision
+    ///   does not re-record and no new frontier entry appears. A replay where
+    ///   `basis_result_digest` differs but (from,to) is identical is treated
+    ///   as a conflict (returns an error).
     pub fn record_route_decision(
         &mut self,
         decision: RouteDecisionV1,
@@ -528,6 +538,40 @@ impl GraphRunStateV1 {
         if !journaled {
             return Err(GraphRunError::UnjournaledDecisionBasis.into());
         }
+
+        // Edge validity: to_node must be directly reachable from from_node
+        // via a manifest edge or be a terminal exit.
+        let edge_valid = manifest
+            .edges
+            .iter()
+            .any(|e| e.from == decision.from_node && e.to == decision.to_node)
+            || manifest.terminal_exits.contains(&decision.to_node);
+        if !edge_valid {
+            anyhow::bail!(
+                "no manifest edge from '{}' to '{}' (or terminal exit)",
+                decision.from_node,
+                decision.to_node
+            );
+        }
+
+        // Idempotent replay: only an exact duplicate (same
+        // from/to/basis/recorded_at/condition_label) whose target is
+        // already on the frontier collapses to no-op. A fresh retry of the
+        // same edge (e.g. a controlled loop such as "a -> a" after each
+        // re-complete) legitimately re-pushes the target onto the frontier
+        // and must not be swallowed as a duplicate.
+        let dup = self.decisions.iter().any(|existing| {
+            existing.from_node == decision.from_node
+                && existing.to_node == decision.to_node
+                && existing.basis_result_digest == decision.basis_result_digest
+                && existing.recorded_at == decision.recorded_at
+                && existing.condition_label == decision.condition_label
+                && self.frontier.iter().any(|n| n == &decision.to_node)
+        });
+        if dup {
+            return Ok(());
+        }
+
         let is_terminal = manifest.terminal_exits.contains(&decision.to_node);
         if !is_terminal {
             // Only non-terminal targets enter the frontier; reaching a

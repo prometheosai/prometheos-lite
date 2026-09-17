@@ -296,6 +296,225 @@ async fn happy_path_decision_updates_checkpoint() {
 }
 
 #[tokio::test]
+async fn unknown_node_in_decision_is_rejected() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let ctx = create_context(&app, "owner", "t6").await;
+    let (manifest, _blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
+
+    // from_node is correct but to_node is not reachable/known from manifest.
+    let (status, _) = decide(
+        &app,
+        "owner",
+        &ctx,
+        "run-1",
+        &manifest,
+        decision_payload("a", "MISSING", &"d".repeat(64)),
+    )
+    .await;
+
+    // No edge/a->MISSING: falls into "record_route_decision" — the manifest
+    // has no such edge; record now rejects as a conflict (not a 500).
+    assert_eq!(status, 409);
+}
+
+#[tokio::test]
+async fn exact_replay_is_idempotent_no_duplicate_row() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let ctx = create_context(&app, "owner", "t7").await;
+
+    let (manifest, blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
+    let before = prometheos_lite::workflow::soma::canonical::sha256_hex(blob.as_bytes());
+
+    let decision = decision_payload("a", "b", &"d".repeat(64));
+    let (s1, b1) = decide(&app, "owner", &ctx, "run-1", &manifest, decision.clone()).await;
+    assert_eq!(s1, 200);
+    let digest_after_first = b1["newDigest"].as_str().unwrap().to_string();
+
+    // Replay the exact same decision — identical snapshot twice.
+    let (s2, b2) = decide(&app, "owner", &ctx, "run-1", &manifest, decision).await;
+    assert_eq!(s2, 200, "replay is idempotent (no-op)");
+    assert_eq!(b2["newDigest"].as_str(), Some(digest_after_first.as_str()));
+
+    // The checkpoint digest transitions exactly once.
+    assert_ne!(digest_after_first, before);
+}
+
+#[tokio::test]
+async fn conflicting_replay_is_conflict() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let ctx = create_context(&app, "owner", "t7c").await;
+
+    let (manifest, _blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
+    let (s1, _) = decide(
+        &app,
+        "owner",
+        &ctx,
+        "run-1",
+        &manifest,
+        decision_payload("a", "b", &"d".repeat(64)),
+    )
+    .await;
+    assert_eq!(s1, 200);
+
+    // Second decision: same from/to but a DIFFERENT basis digest. Must be
+    // Conflict — same routing intent under different provenance is never
+    // quietly accepted.
+    let (s2, body) = decide(
+        &app,
+        "owner",
+        &ctx,
+        "run-1",
+        &manifest,
+        decision_payload("a", "b", "0".repeat(64).as_str()),
+    )
+    .await;
+    assert_eq!(
+        s2, 409,
+        "conflicting replay status: {:?}, body: {:?}",
+        s2, body
+    );
+}
+
+#[tokio::test]
+async fn failed_event_write_rolls_back_checkpoint() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let ctx = create_context(&app, "owner", "t8").await;
+    let (manifest, blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
+
+    // A trigger aborts the graph_decision insert. The decide handler's
+    // transaction must roll back the checkpoint write along with it.
+    let conn = rusqlite::Connection::open(&db_path).expect("db");
+    conn.execute_batch(
+        "CREATE TRIGGER veto_decision_event
+         BEFORE INSERT ON work_context_events
+         WHEN NEW.event_type = 'graph_decision'
+         BEGIN SELECT RAISE(ABORT, 'aborted-by-trigger'); END;",
+    )
+    .expect("create trigger");
+
+    let (status, _) = decide(
+        &app,
+        "owner",
+        &ctx,
+        "run-1",
+        &manifest,
+        decision_payload("a", "b", &"d".repeat(64)),
+    )
+    .await;
+    assert_eq!(status, 500, "event insert aborted -> handler fails");
+
+    // The checkpoint row must remain pinned to its original digest — prove the
+    // write-back rolled back together with the failed event insert.
+    let status_now: String = conn
+        .query_row(
+            "SELECT status FROM work_contexts WHERE id = ?1",
+            rusqlite::params![ctx],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status_now, "\"Draft\"");
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM graph_checkpoints WHERE work_context_id = ?1 AND graph_run_id = 'run-1'",
+            rusqlite::params![ctx],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "old checkpoint still present (rollback proof)");
+    let old_digest: String = conn
+        .query_row(
+            "SELECT checkpoint_digest FROM graph_checkpoints WHERE work_context_id = ?1 AND graph_run_id = 'run-1'",
+            rusqlite::params![ctx],
+            |r| r.get(0),
+        )
+        .expect("row");
+    assert_eq!(
+        old_digest,
+        prometheos_lite::workflow::soma::canonical::sha256_hex(blob.as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn concurrent_decide_and_cancel_races_end_cleanly() {
+    // Two writers race: one decides, the other cancels the context. Either:
+    // the decide runs first -> the cancel then conflicts ; or the cancel
+    // first -> the decide conflicts (cancel gate). It must NOT leave the
+    // registry in a poisoned intermediate state.
+    let (state, db_path, _dir) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let ctx = create_context(&app, "owner", "t9").await;
+    let (manifest, blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
+
+    let app2 = app.clone();
+    let ctx_for_cancel = ctx.clone();
+    let cancel_task = tokio::spawn(async move {
+        cancel_context_http(&app2, "owner", &ctx_for_cancel).await;
+    });
+
+    let ctx_for_decide = ctx.clone();
+    let decide_task = tokio::spawn({
+        let app = app.clone();
+        let m = manifest.clone();
+        async move {
+            decide(
+                &app,
+                "owner",
+                &ctx_for_decide,
+                "run-1",
+                &m,
+                decision_payload("a", "b", &"d".repeat(64)),
+            )
+            .await
+        }
+    });
+
+    let (cancel_res, decide_res) = tokio::join!(cancel_task, decide_task);
+    cancel_res.unwrap();
+    let decide_res = decide_res.unwrap();
+
+    // In the end the cancel must have happened, and the decide must have
+    // either succeeded before cancel or failed due to cancellation.
+    let status_match: Vec<bool> = vec![
+        decide_res.0 == axum::http::StatusCode::OK,
+        decide_res.0 == axum::http::StatusCode::CONFLICT,
+        decide_res.0 == axum::http::StatusCode::NOT_FOUND,
+    ];
+    assert!(
+        status_match.into_iter().any(|x| x),
+        "decide must produce a legal outcome: {:?}",
+        decide_res.0
+    );
+
+    let post_checkpoints: i64 = {
+        let conn = rusqlite::Connection::open(&db_path).expect("db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM graph_checkpoints WHERE work_context_id = ?1 AND graph_run_id = 'run-1'",
+            rusqlite::params![ctx],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(post_checkpoints, 1, "registry row intact even after races");
+
+    // Final sanity: cancel must always have happened (the outcome is atomic).
+    let final_status: String = {
+        let conn = rusqlite::Connection::open(&db_path).expect("db");
+        conn.query_row(
+            "SELECT status FROM work_contexts WHERE id = ?1",
+            rusqlite::params![ctx],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(final_status, "\"Cancelled\"");
+}
+
+#[tokio::test]
 async fn unknown_run_is_404_and_wrong_user_is_403() {
     let (state, db_path, _dir) = test_app_state();
     let app = prometheos_lite::api::router::create_router(state);
