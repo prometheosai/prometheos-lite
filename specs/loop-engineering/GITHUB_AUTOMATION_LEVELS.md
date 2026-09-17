@@ -1,14 +1,16 @@
-# GitHub Automation Levels
+# Automation Levels
+
+Hosted GitHub automation is retired and is not a verification or merge dependency. The levels below describe agent authority; execution and evidence remain repository-native.
 
 This spec defines the automation ladder for PrometheOS Lite. Each level increases the degree of automation while maintaining safety gates and human oversight.
 
 | Level | Name              | Description                                      |
 |-------|-------------------|--------------------------------------------------|
 | 0     | Manual Queue      | Human invokes the coding agent manually           |
-| 1     | ReviewOnly        | Read-only PR diff review with structured comments |
+| 1     | ReviewOnly        | Local read-only diff review with structured evidence |
 | 2     | Assisted Draft PR | Agent creates draft PRs from approved issues      |
 | 3     | Epic Completion   | Agent executes approved queues with progress tracking |
-| 4     | Self-hosted Runner| PrometheOS runs via self-hosted runner           |
+| 4     | Owned Runner      | PrometheOS runs on operator-owned infrastructure |
 | 5     | Autonomous Patch  | Blocked — requires graduated autonomy approval   |
 
 ## Level 0 — Manual Queue
@@ -21,7 +23,7 @@ This is the current state after PR #64.
 
 ## Level 1 — ReviewOnly
 
-GitHub PR automation reviews diffs and posts comments.
+An operator or agent invokes the deterministic reviewer locally and may post its result to the PR.
 
 - No commits.
 - No branch writes.
@@ -45,9 +47,9 @@ Agent can execute an approved queue, updating progress and handoff files.
 - Still no merge.
 - Stops at safety gates.
 
-## Level 4 — Self-hosted Runner
+## Level 4 — Owned Runner
 
-PrometheOS can run from a self-hosted GitHub runner or local machine.
+PrometheOS can run from an operator-owned local machine or runner without GitHub Actions orchestration.
 
 - Must still obey all protocol gates.
 - Must use path filters and budgets.

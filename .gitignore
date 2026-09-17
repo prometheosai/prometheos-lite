@@ -23,6 +23,9 @@ logs/
 *.temp
 *.swp
 *.swo
+.local-ci/
+__pycache__/
+*.pyc
 
 # Editor and IDE files
 .vscode/

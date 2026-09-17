@@ -60,7 +60,7 @@ prometheos work memory show <work_id>
 | Approval only | `work approve` records decisions, applies nothing |
 | Reviewable artifacts | All generated artifacts are human-readable |
 | Provenance tracked | Every artifact records model/provider info |
-| CI-verified | Golden path CI verifies fixture files unchanged |
+| Locally verified | Repository-native golden path verifies fixture files unchanged |
 
 ## 🔮 Not included (yet)
 

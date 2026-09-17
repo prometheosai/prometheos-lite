@@ -2,7 +2,7 @@
 
 A repository-native operating protocol for PrometheOS Lite that defines how coding agents execute bounded work, continue through approved queues, preserve evidence, stop at safety gates, and hand off cleanly.
 
-This protocol is **documentation-only**. It does not add runtime agent-loop behavior, GitHub Actions automation, or tool-specific scripts.
+This protocol does not add runtime agent-loop behavior. Its verification lifecycle is implemented by the repository-owned `scripts/local_ci.py`; it does not require hosted automation.
 
 ## Purpose
 
@@ -108,7 +108,7 @@ One tool may perform multiple roles, but the worker must not approve its own wor
    - `docs/research/model-layer-positioning.md`
    - `docs/research/autonomous-loop-graduation-criteria.md`
 5. current PR body
-6. CI output
+6. exact-commit repository-native verification evidence
 7. handoff/progress file
 
 When sources disagree, stop and report the conflict.
@@ -116,6 +116,8 @@ When sources disagree, stop and report the conflict.
 Do not invent intent from chat memory.
 
 ## Verification bundles
+
+The authoritative entry point is `scripts/local_ci.py`; hosted CI status is never required. See [Repository-Native Verification](guides/repository-native-verification.md).
 
 ### Rust/core/docs touching Rust behavior
 

@@ -20,23 +20,25 @@ cargo test
 - Link the issue in the PR body (`Closes #<issue>`).
 - Keep PRs small and reviewable.
 
-## Required Checks (Local and CI)
+## Required Repository-Native Verification
 
-Run these before opening/updating a PR:
+Hosted CI is not a merge authority. After committing the candidate revision, run:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+python3 scripts/local_ci.py run --suite core
+python3 scripts/local_ci.py run --suite platform
+python3 scripts/local_ci.py run --suite smoke
 ```
 
-PRs should not be merged unless CI is green.
+Windows uses `py -3`. Platform evidence is collected on owned Linux, macOS, and Windows machines. Frontend changes also run `--suite frontend`. See [Repository-Native Verification](docs/guides/repository-native-verification.md).
+
+PRs should not be merged unless exact-commit evidence is complete and independently reviewed.
 
 ## Review Standards
 
 - At least 1 approving review from a code owner.
 - No unresolved review comments.
-- No skipped required checks.
+- No missing or invalid required evidence.
 - Changes must be testable locally.
 
 ## Coding Guidelines

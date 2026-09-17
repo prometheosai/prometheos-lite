@@ -6,11 +6,12 @@
 - [ ] `cargo check`
 - [ ] `cargo test`
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] Repo Workbench golden-path CI passes
+- [ ] Exact-commit Linux core/platform/smoke evidence verifies
+- [ ] Exact-commit macOS and Windows platform evidence verifies
 - [ ] `cargo install --path . --force`
 - [ ] `prometheos --version`
 - [ ] First-value workflow runs from installed binary against `fixtures/repo-workbench/rust-risky`
-- [ ] Linux install smoke CI passes
+- [ ] Linux install smoke passes in repository-native evidence
 - [ ] Optional manual local endpoint smoke test run (see [Ornith manual validation guide](../guides/ornith-manual-validation.md))
 
 ## Documentation
@@ -27,7 +28,7 @@
 
 ## Safety
 
-- [ ] `work run` does not modify source files (verified by CI golden-path)
+- [ ] `work run` does not modify source files (verified by the golden-path gate)
 - [ ] `work approve` records approval only
 - [ ] Local workbench state (`.prometheos-lite/`) is ignored by `.gitignore`
 
@@ -35,7 +36,7 @@
 
 - [ ] Confirm `Cargo.toml` version
 - [ ] Update version if needed
-- [ ] Tag release only after CI passes
+- [ ] Tag release only after repository-native evidence passes
 
 ## Known non-goals for first alpha
 
@@ -51,12 +52,12 @@
 
 - [ ] Push git tag
 - [ ] Write release notes summarizing changes
-- [ ] Verify CI workflow runs against the tag
+- [ ] Verify repository-native evidence against the tagged commit
 
 ## v1.6.1-alpha.1 manual release checklist
 
-- [ ] `main` is green
-- [ ] CI passes
+- [ ] `main` has complete exact-commit evidence
+- [ ] repository-native verification passes
 - [ ] Linux Install Smoke passes
 - [ ] Repo Workbench Golden Path passes
 - [ ] `cargo install --path . --force` verified

@@ -41,7 +41,7 @@ Future / not alpha:
 ## Rules
 
 - No unattended merges.
-- No CI weakening.
+- No repository-native verification weakening.
 - No dependency changes without explicit approval.
 - No benchmark claims without completed validation evidence.
 - No automatic Ornith/local model support claims unless validated.
@@ -68,7 +68,15 @@ These are defaults, not hard limits. Some docs/planning PRs may exceed them with
 
 ## Verification expectations
 
-Rust baseline:
+Use the repository-owned evidence runner. Hosted status checks are not authoritative:
+
+```bash
+python3 scripts/local_ci.py run --suite core
+python3 scripts/local_ci.py run --suite platform
+python3 scripts/local_ci.py run --suite smoke
+```
+
+The underlying Rust baseline remains:
 ```bash
 cargo fmt --check
 cargo check
