@@ -99,7 +99,7 @@ pub fn digest_of(blob: &str) -> String {
     crate::workflow::soma::canonical::sha256_hex(blob.as_bytes())
 }
 
-fn validate_checkpoint_json(blob: &str) -> anyhow::Result<()> {
+pub fn validate_checkpoint_json(blob: &str) -> anyhow::Result<()> {
     let v: serde_json::Value =
         serde_json::from_str(blob).context("checkpoint blob is not valid JSON")?;
     if !v.is_object() {
@@ -121,7 +121,7 @@ fn validate_checkpoint_json(blob: &str) -> anyhow::Result<()> {
 /// `runId` must agree. A checkpoint registered under the wrong run id makes
 /// reads later answer "run for X" with a blob that says it is run Y —
 /// treat that as tampering and refuse. Called on both write and read.
-fn assert_blob_run_id_matches(blob: &str, graph_run_id: &str) -> anyhow::Result<()> {
+pub fn assert_blob_run_id_matches(blob: &str, graph_run_id: &str) -> anyhow::Result<()> {
     let v: serde_json::Value =
         serde_json::from_str(blob).context("checkpoint blob is not valid JSON")?;
     match v.get("runId") {
@@ -133,7 +133,108 @@ fn assert_blob_run_id_matches(blob: &str, graph_run_id: &str) -> anyhow::Result<
     }
 }
 
-/// Register a checkpoint under (context, run), conditioned on ownership.
+pub fn upsert_on_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    work_context_id: &str,
+    graph_run_id: &str,
+    checkpoint_json: &str,
+) -> anyhow::Result<String> {
+    upsert_checkpoint_conn(
+        conn,
+        user_id,
+        work_context_id,
+        graph_run_id,
+        checkpoint_json,
+    )
+}
+
+/// Register a checkpoint under (context, run) on an arbitrary Connection —
+/// the tx-supporting primitive. Callers doing transactional batches should
+/// prefer this over the Db-level variant.
+pub fn upsert_checkpoint_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    work_context_id: &str,
+    graph_run_id: &str,
+    checkpoint_json: &str,
+) -> anyhow::Result<String> {
+    let work_context_id = normalize_id(work_context_id, "work_context_id")?;
+    let graph_run_id = normalize_id(graph_run_id, "graph_run_id")?;
+    ensure_owned_by_conn(conn, &work_context_id, user_id)?;
+    validate_checkpoint_json(checkpoint_json)?;
+    assert_blob_run_id_matches(checkpoint_json, &graph_run_id)?;
+
+    let digest = digest_of(checkpoint_json);
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO graph_checkpoints (work_context_id, graph_run_id, checkpoint_json, checkpoint_digest, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(work_context_id, graph_run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json, checkpoint_digest = excluded.checkpoint_digest",
+        params![work_context_id, graph_run_id, checkpoint_json, digest, now],
+    )
+    .context("failed to upsert graph checkpoint")?;
+
+    Ok(digest)
+}
+
+/// Conditional compare-and-job swap on the registry: overwrites only when
+/// the stored digest matches `expected_digest`. Returns false when the current
+/// digest differs (i.e. a concurrent writer got in first). Callers inside a
+/// transaction may hold the lock for the read+write pair.
+pub fn cas_checkpoint_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    work_context_id: &str,
+    graph_run_id: &str,
+    expected_digest: &str,
+    checkpoint_json: &str,
+) -> anyhow::Result<bool> {
+    let work_context_id = normalize_id(work_context_id, "work_context_id")?;
+    let graph_run_id = normalize_id(graph_run_id, "graph_run_id")?;
+    ensure_owned_by_conn(conn, &work_context_id, user_id)?;
+    validate_checkpoint_json(checkpoint_json)?;
+    assert_blob_run_id_matches(checkpoint_json, &graph_run_id)?;
+
+    let digest = digest_of(checkpoint_json);
+    let affected = conn.execute(
+        "UPDATE graph_checkpoints SET checkpoint_json = ?4, checkpoint_digest = ?5
+         WHERE work_context_id = ?1 AND graph_run_id = ?2 AND checkpoint_digest = ?3",
+        params![
+            work_context_id,
+            graph_run_id,
+            expected_digest,
+            checkpoint_json,
+            digest
+        ],
+    )?;
+    Ok(affected > 0)
+}
+
+fn ensure_owned_by_conn(
+    conn: &rusqlite::Connection,
+    work_context_id: &str,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT user_id FROM work_contexts WHERE id = ?1",
+            params![work_context_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("failed to look up work context owner")?
+        .filter(|s: &String| !s.is_empty());
+
+    match stored {
+        Some(owner) if owner == user_id => Ok(()),
+        Some(owner) => {
+            anyhow::bail!("work context '{work_context_id}' is owned by '{owner}', not '{user_id}'")
+        }
+        None => anyhow::bail!("work context not found: '{work_context_id}'"),
+    }
+}
 /// Replaces the existing row if it exists. `created_at` reflects the first
 /// registration for the (context, run) pair and does NOT change on replace.
 /// Returns the freshly computed digest.
@@ -144,26 +245,13 @@ pub fn upsert_checkpoint<T: AsDb>(
     graph_run_id: &str,
     checkpoint_json: &str,
 ) -> anyhow::Result<String> {
-    let work_context_id = normalize_id(work_context_id, "work_context_id")?;
-    let graph_run_id = normalize_id(graph_run_id, "graph_run_id")?;
-    ensure_owned_by(db, &work_context_id, user_id)?;
-    validate_checkpoint_json(checkpoint_json)?;
-    assert_blob_run_id_matches(checkpoint_json, &graph_run_id)?;
-
-    let digest = digest_of(checkpoint_json);
-    let now = Utc::now().to_rfc3339();
-
-    db.as_db().conn().execute(
-        "INSERT INTO graph_checkpoints (work_context_id, graph_run_id, checkpoint_json, checkpoint_digest, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(work_context_id, graph_run_id) DO UPDATE SET
-            checkpoint_json = excluded.checkpoint_json,
-            checkpoint_digest = excluded.checkpoint_digest",
-        params![work_context_id, graph_run_id, checkpoint_json, digest, now],
+    upsert_checkpoint_conn(
+        db.as_db().conn(),
+        user_id,
+        work_context_id,
+        graph_run_id,
+        checkpoint_json,
     )
-    .context("failed to upsert graph checkpoint")?;
-
-    Ok(digest)
 }
 
 /// Read the checkpoint blob + digest back; ownership is enforced same as

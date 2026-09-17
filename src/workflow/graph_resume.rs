@@ -269,6 +269,14 @@ mod tests {
                     kind: EdgeKind::Sequence,
                     condition_label: None,
                 },
+                // Cycle edge: a completed node re-entering the frontier for
+                // replay/authorization tests.
+                GraphEdgeV1 {
+                    from: "b".into(),
+                    to: "a".into(),
+                    kind: EdgeKind::Sequence,
+                    condition_label: None,
+                },
             ],
             entry_points: vec!["a".into()],
             terminal_exits: vec!["done".into()],
