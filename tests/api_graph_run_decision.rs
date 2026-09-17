@@ -448,7 +448,7 @@ async fn concurrent_decide_and_cancel_races_end_cleanly() {
     let (state, db_path, _dir) = test_app_state();
     let app = prometheos_lite::api::router::create_router(state);
     let ctx = create_context(&app, "owner", "t9").await;
-    let (manifest, blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
+    let (manifest, _blob) = setup_seeded_run(&db_path, "owner", &ctx, "run-1").await;
 
     let app2 = app.clone();
     let ctx_for_cancel = ctx.clone();
