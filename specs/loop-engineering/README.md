@@ -41,6 +41,6 @@ Current queues:
 
 - Spec-driven delivery: the repository is the source of truth.
 - Visible evidence: every task produces artifacts and verification results.
-- Hard safety boundaries: stop rules prevent scope creep and CI weakening.
+- Hard safety boundaries: stop rules prevent scope creep and verification weakening.
 - Human final approval: no unattended merges.
 - Tool-agnostic: no requirement for a specific coding agent or platform.

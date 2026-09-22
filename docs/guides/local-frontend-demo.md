@@ -106,7 +106,7 @@ npm ci
 npm run build
 ```
 
-The same build path is checked in CI by `.github/workflows/frontend-ci.yml`.
+The same build path is checked by `python3 scripts/local_ci.py run --suite frontend`.
 
 ## Current limitations
 
@@ -119,7 +119,7 @@ Known limitations:
 * frontend/API route compatibility is not fully covered
 * no visual regression coverage
 * no production deployment guarantee
-* lint is not enforced in CI yet
+* lint is enforced locally, but broader E2E coverage is not yet required
 * routes and UI flows may change
 
 ## Relationship to stable alpha

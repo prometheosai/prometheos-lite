@@ -16,7 +16,7 @@ Defines how agents execute work under the PrometheOS Lite Loop Engineering Proto
    - `docs/research/model-layer-positioning.md`
    - `docs/research/autonomous-loop-graduation-criteria.md`
 5. current PR body
-6. CI output
+6. exact-commit repository-native verification evidence
 7. handoff/progress file
 
 When sources disagree, stop and report the conflict. Do not invent intent from chat memory.
@@ -64,7 +64,7 @@ INTAKE
 CONTEXT_SYNC
 → Read all source-of-truth documents.
 → Read current progress file if continuing.
-→ Check CI status on current branch.
+→ Check repository-native evidence for the current exact commit.
 → Resolve any source-of-truth conflicts or stop.
 
 PLAN
@@ -83,7 +83,7 @@ EXECUTE_TASK
 → Do not change stable alpha behavior.
 
 VERIFY
-→ Run the relevant verification bundle from docs/LOOP_ENGINEERING.md.
+→ Run the relevant repository-native verification suite from docs/LOOP_ENGINEERING.md.
 → Record exact verification output.
 → Do not claim checks that were not run.
 → Do not skip or narrow tests only to pass.

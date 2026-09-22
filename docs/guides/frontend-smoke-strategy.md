@@ -78,17 +78,15 @@ Create a small Node.js script (`frontend/scripts/smoke.mjs`) that:
 
 The script uses only Node.js built-in modules (`child_process`, `http`). No new dependencies.
 
-### Step 2 — CI integration
+### Step 2 — repository-native integration
 
-Add a smoke step to `.github/workflows/frontend-ci.yml`:
+Run the checked-in frontend suite:
 
-```yaml
-- name: Smoke test
-  run: node scripts/smoke.mjs
-  working-directory: frontend
+```bash
+python3 scripts/local_ci.py run --suite frontend
 ```
 
-The smoke step runs after build and lint.
+The suite runs install, build, lint, and smoke locally and records exact-commit evidence.
 
 ### Step 3 — API connectivity smoke (future)
 
@@ -110,7 +108,7 @@ The smoke test passes when:
 
 - Adding Playwright without explicit approval.
 - Adding npm test dependencies.
-- Adding E2E to CI without explicit approval.
+- Adding E2E to the required gate without explicit approval.
 - Changing frontend source code.
 - Changing API behavior.
 - Promoting frontend or API server to stable alpha.

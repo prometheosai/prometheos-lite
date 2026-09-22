@@ -6,7 +6,7 @@ Hard blockers and soft warnings for the PrometheOS Lite Loop Engineering Protoco
 
 Stop immediately and hand off if any of these appear:
 
-- **CI weakened** — CI is weakened, tests are removed, skipped, or narrowed only to pass.
+- **Verification weakened** — repository-native gates are weakened, or tests are removed, skipped, or narrowed only to pass.
 - **Stable alpha scope change** — Stable alpha scope changes without explicit approval.
 - **`prometheos work` behavior change** — `prometheos work` behavior changes outside approved scope.
 - **Source modification in stable alpha** — Source-modifying behavior is added to the stable alpha path.
@@ -48,8 +48,8 @@ Soft warnings must be visible in the PR body or handoff report. They do not stop
 - LLM client (OpenAI-compatible)
 - provider configuration
 - mock provider integration tests
-- Linux install smoke CI
-- golden path CI
+- repository-native Linux install smoke
+- repository-native golden-path gate
 
 ### Experimental
 

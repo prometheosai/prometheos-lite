@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Repository-native verification replaces GitHub Actions as merge and release
+  authority. `scripts/local_ci.py` runs the Rust, platform, smoke, install, and
+  frontend gates on operator-owned machines and emits exact-commit JSON evidence
+  with a SHA-256 integrity digest. Hosted workflow files were removed; releases
+  remain explicit, human-approved local operations with no automatic deployment
+  or publication.
 - #132 graph-decide slice — `POST /work-contexts/:id/graph-runs/:run_id/decisions` on
   top of the #221 registry. The endpoint gates on ownership (same user_id
   everywhere), work-context not cancelled, the graph checkpoint must exist
@@ -1736,5 +1742,4 @@ The following critical issues were identified during code audit:
 ---
 
 ## Unfinished / Deferred / Deprecated Tasks
-
 

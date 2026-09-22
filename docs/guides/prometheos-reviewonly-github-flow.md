@@ -1,12 +1,14 @@
-# PrometheOS ReviewOnly — Planned GitHub Automation Flow
+# PrometheOS ReviewOnly — Retired GitHub Automation Flow
 
-This document describes the ReviewOnly GitHub automation flow.
+> Historical guide. The hosted ReviewOnly workflow was retired when verification authority moved to `scripts/local_ci.py`. The deterministic reviewer may still run locally, but GitHub Actions is not required and no hosted status is a merge gate. See [Repository-Native Verification](repository-native-verification.md).
+
+This document describes the former ReviewOnly GitHub automation flow. It is retained only as implementation history.
 
 ReviewOnly is the PrometheOS-native equivalent of Claude Code's automatic PR review mode. It provides read-only diff review via a GitHub Action that posts structured review comments.
 
 ## Implementation status
 
-- **v0 (implemented):** deterministic, read-only reviewer. No external models are invoked. It runs as `.github/workflows/prometheos-reviewonly.yml` and uses `scripts/reviewonly/reviewonly.mjs` to inspect the PR metadata/diff and post one structured ReviewOnly report comment.
+- **v0 (retained locally):** deterministic, read-only reviewer. No external models are invoked. `scripts/reviewonly/reviewonly.mjs` remains available for explicit local use; the hosted workflow has been removed.
 - No LLM-powered review yet. The deterministic v0 is the first automation step so the governance layer can be proven before any model or provider dependency is introduced.
 
 ## Level 1: ReviewOnly
