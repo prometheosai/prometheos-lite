@@ -51,3 +51,6 @@ prometheos-output/
 
 # Database files
 *.db
+
+# Repo Workbench local state (demo fixtures create their own)
+.prometheos-lite/
