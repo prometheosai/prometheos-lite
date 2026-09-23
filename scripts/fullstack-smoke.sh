@@ -37,30 +37,25 @@ echo "Building prometheos binary..."
 ( cd "$REPO_ROOT" && cargo build --bin prometheos ) || fail "cargo build failed"
 
 # Resolve the target dir the way cargo itself does: CARGO_TARGET_DIR env,
-# else the configured target dir via cargo metadata, else the conventional
-# fallbacks. The binary can legitimately live outside the repo when the
-# build is routed to another volume. A relative CARGO_TARGET_DIR is
-# anchored to the repository root.
+# else the configured target dir via cargo metadata. The binary can
+# legitimately live outside the repo when the build is routed to another
+# volume. Shared resolution (normalize-before-classify, relative anchored
+# to the repo root) lives in scripts/lib/target_dir.sh, covered by
+# scripts/test_target_dir.sh in the smoke chain.
+source "$REPO_ROOT/scripts/lib/target_dir.sh"
 TARGET_DIR="${CARGO_TARGET_DIR:-}"
 if [ -z "$TARGET_DIR" ]; then
   TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 fi
-case "$TARGET_DIR" in
-  "" ) ;;
-  /* ) ;;
-  [A-Za-z]:* ) ;;
-  //* ) ;;
-  *  ) TARGET_DIR="$REPO_ROOT/$TARGET_DIR" ;;
-esac
-# Normalize Windows separators so `[ -x ]` works regardless of whether
-# MSYS performed its env-var path conversion (see demo script note).
-TARGET_DIR="${TARGET_DIR//\\//}"
+TARGET_DIR="$(resolve_target_dir "$TARGET_DIR" "$REPO_ROOT")"
 BIN=""
+# .exe candidates are explicit: MSYS bash transparently appends .exe for
+# some operations, but WSL bash does not — the loop must not depend on it.
 for cand in \
-  "$TARGET_DIR/debug/prometheos" \
-  "$TARGET_DIR/release/prometheos" \
-  "$REPO_ROOT/target/debug/prometheos" \
-  "$REPO_ROOT/.cargo-target/debug/prometheos"; do
+  "$TARGET_DIR/debug/prometheos" "$TARGET_DIR/debug/prometheos.exe" \
+  "$TARGET_DIR/release/prometheos" "$TARGET_DIR/release/prometheos.exe" \
+  "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe" \
+  "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe"; do
   if [ -n "$cand" ] && [ -x "$cand" ]; then BIN="$cand"; break; fi
 done
 [ -n "$BIN" ] || fail "prometheos binary not found after build"
