@@ -2,10 +2,14 @@
 """Repository-owned verification runner with commit-bound JSON evidence.
 
 The SUITE_SPEC below is the single source of truth shared by the runner and
-the verifier: every emitted check must carry a command that matches its
-specification entry (program identity + required arguments), and the verifier
-rejects any evidence whose commands do not. Provenance fields (rustc, cargo,
-python, architecture) must be non-empty and truthful.
+the verifier. Every check is bound to an EXACT normalized command array:
+command[0] is normalized to its program-identity token (cargo / python /
+bash / npm / node / binary) and environment-dependent values (the install
+--root path) are normalized to placeholders, so evidence can be verified
+across operating systems — but any extra flag (e.g. --no-run, --skip) or
+missing flag breaks exact equality and is rejected. Durations must be
+finite, non-negative, non-boolean numbers. Provenance fields must be
+non-empty and truthful.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -28,74 +33,78 @@ EVIDENCE_ROOT = ROOT / ".local-ci" / "evidence"
 SCHEMA_VERSION = "prometheos.local-verification.v1"
 REQUIRED_SUITES = ("core", "platform", "smoke")
 KNOWN_PLATFORMS = ("linux", "darwin", "windows")
+CHECK_KEYS = frozenset({"name", "command", "seconds", "status"})
 
 # ---------------------------------------------------------------------------
 # Shared suite/command specification
 #
 # Single source of truth for BOTH sides of the evidence contract:
-#   - the runner emits checks whose commands must satisfy their entry
-#     (enforced at generation time; evidence that violates the spec is
-#     refused before it is ever written), and
-#   - the verifier rejects any evidence whose commands do not match.
+#   - the runner emits checks whose commands must normalize to their
+#     entry's exact array (enforced at generation time; evidence that
+#     violates the spec is refused before it is ever written), and
+#   - the verifier rejects any evidence whose commands do not normalize to
+#     the exact array — extra flags (--no-run, --skip, ...) included.
 #
-# "program" is an environment-independent identity rule (see
-# program_matches); "args" are strings that must each appear in the
-# command's argument list. This is what stops fabricated evidence from
-# labeling every command as `["true"]` while claiming a full suite run.
+# Normalized form: command[0] becomes its identity token; the value after
+# "--root" becomes "<root>" (the install root is environment-dependent).
+# Everything else must match verbatim.
 # ---------------------------------------------------------------------------
 
 SUITE_SPEC: dict[str, list[dict[str, object]]] = {
     "core": [
-        {"name": "rustfmt", "program": "cargo", "args": ["fmt"]},
-        {"name": "clippy", "program": "cargo", "args": ["clippy"]},
-        {"name": "doc tests", "program": "cargo", "args": ["--doc"]},
-        {"name": "release build", "program": "cargo", "args": ["build", "--release"]},
-        {
-            "name": "all tests",
-            "program": "cargo",
-            "args": ["test", "--all-targets", "--all-features", "--test-threads"],
-        },
-        {
-            "name": "guardrails",
-            "program": "cargo",
-            "args": ["--test", "guardrail_tests", "guardrail_integration_tests"],
-        },
-        {"name": "runtime policy", "program": "cargo", "args": ["--test", "runtime_policy_enforcement"]},
-        {"name": "verification policy", "program": "cargo", "args": ["--test", "ci_enforcement_tests"]},
-        {"name": "patch diagnostics", "program": "cargo", "args": ["--test", "patch_provider_diagnostics_tests"]},
-        {"name": "verifier regressions", "program": "python", "args": ["scripts/test_local_ci_verify.py"]},
-        {"name": "repository policy", "program": "python", "args": ["scripts/local_ci_policy.py"]},
+        {"name": "rustfmt", "command": ["cargo", "fmt", "--all", "--", "--check"]},
+        {"name": "clippy", "command": ["cargo", "clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]},
+        {"name": "doc tests", "command": ["cargo", "test", "--doc", "--all-features"]},
+        {"name": "release build", "command": ["cargo", "build", "--release", "--all-features"]},
+        {"name": "all tests", "command": ["cargo", "test", "--all-targets", "--all-features", "--", "--test-threads", "4"]},
+        {"name": "guardrails", "command": ["cargo", "test", "--test", "guardrail_tests", "--test", "guardrail_integration_tests"]},
+        {"name": "runtime policy", "command": ["cargo", "test", "--test", "runtime_policy_enforcement", "--quiet"]},
+        {"name": "verification policy", "command": ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]},
+        {"name": "patch diagnostics", "command": ["cargo", "test", "--test", "patch_provider_diagnostics_tests", "--quiet"]},
+        {"name": "verifier regressions", "command": ["python", "scripts/test_local_ci_verify.py"]},
+        {"name": "repository policy", "command": ["python", "scripts/local_ci_policy.py"]},
     ],
     "platform": [
-        {"name": "registry leases", "program": "cargo", "args": ["--lib", "workflow::evaluate::registry"]},
-        {"name": "heartbeats", "program": "cargo", "args": ["--lib", "workflow::evaluate::heartbeat"]},
-        {"name": "recovery", "program": "cargo", "args": ["--lib", "workflow::evaluate::recovery"]},
-        {"name": "cross-process locking", "program": "cargo", "args": ["--test", "locking_tests"]},
-        {"name": "interruption recovery", "program": "cargo", "args": ["--test", "interruption_recovery_tests"]},
-        {"name": "cancellation", "program": "cargo", "args": ["--test", "cancellation_tests"]},
-        {"name": "single-winner concurrency", "program": "cargo", "args": ["--test", "concurrency_tests"]},
-        {"name": "resource enforcement", "program": "cargo", "args": ["--lib", "workflow::evaluate::validation"]},
+        {"name": "registry leases", "command": ["cargo", "test", "--lib", "workflow::evaluate::registry", "--quiet"]},
+        {"name": "heartbeats", "command": ["cargo", "test", "--lib", "workflow::evaluate::heartbeat", "--quiet"]},
+        {"name": "recovery", "command": ["cargo", "test", "--lib", "workflow::evaluate::recovery", "--quiet"]},
+        {"name": "cross-process locking", "command": ["cargo", "test", "--test", "locking_tests", "--quiet"]},
+        {"name": "interruption recovery", "command": ["cargo", "test", "--test", "interruption_recovery_tests", "--quiet"]},
+        {"name": "cancellation", "command": ["cargo", "test", "--test", "cancellation_tests", "--quiet"]},
+        {"name": "single-winner concurrency", "command": ["cargo", "test", "--test", "concurrency_tests", "--quiet"]},
+        {"name": "resource enforcement", "command": ["cargo", "test", "--lib", "workflow::evaluate::validation", "--quiet", "--", "--nocapture"]},
     ],
     "smoke": [
-        {"name": "full-stack smoke", "program": "bash", "args": ["scripts/fullstack-smoke.sh"]},
-        {"name": "approval-controlled patch smoke", "program": "bash", "args": ["scripts/approval-controlled-patch-smoke.sh"]},
-        {"name": "governed provider smoke", "program": "bash", "args": ["scripts/provider-governed-proposal-smoke.sh"]},
-        {"name": "provider governance", "program": "cargo", "args": ["--test", "provider_governed_proposal_tests"]},
-        {"name": "golden path", "program": "bash", "args": ["scripts/demo/repo-workbench-first-value.sh"]},
-        {"name": "isolated install", "program": "cargo", "args": ["install", "--path"]},
-        {"name": "installed version", "program": "binary", "args": ["--version"]},
-        {"name": "installed help", "program": "binary", "args": ["--help"]},
+        {"name": "full-stack smoke", "command": ["bash", "scripts/fullstack-smoke.sh"]},
+        {"name": "approval-controlled patch smoke", "command": ["bash", "scripts/approval-controlled-patch-smoke.sh"]},
+        {"name": "governed provider smoke", "command": ["bash", "scripts/provider-governed-proposal-smoke.sh"]},
+        {"name": "provider governance", "command": ["cargo", "test", "--test", "provider_governed_proposal_tests", "--quiet"]},
+        {"name": "golden path", "command": ["bash", "scripts/demo/repo-workbench-first-value.sh"]},
+        {"name": "isolated install", "command": ["cargo", "install", "--path", ".", "--force", "--root", "<root>"]},
+        {"name": "installed version", "command": ["binary", "--version"]},
+        {"name": "installed help", "command": ["binary", "--help"]},
     ],
     "frontend": [
-        {"name": "frontend install", "program": "npm", "args": ["ci"]},
-        {"name": "frontend build", "program": "npm", "args": ["build"]},
-        {"name": "frontend lint", "program": "npm", "args": ["lint"]},
-        {"name": "frontend smoke", "program": "node", "args": ["scripts/smoke.mjs"]},
+        {"name": "frontend install", "command": ["npm", "ci"]},
+        {"name": "frontend build", "command": ["npm", "run", "build"]},
+        {"name": "frontend lint", "command": ["npm", "run", "lint"]},
+        {"name": "frontend smoke", "command": ["node", "scripts/smoke.mjs"]},
     ],
 }
 
 SPEC_BY_NAME: dict[str, dict[str, object]] = {
     entry["name"]: entry for entries in SUITE_SPEC.values() for entry in entries
+}
+
+# Concrete program used to denormalize an identity token in synthetic
+# commands (used by the regression suite; the runner uses real paths).
+TOKEN_PROGRAMS = {
+    "cargo": "cargo",
+    "python": "python",
+    "bash": "bash",
+    "npm": "npm",
+    "node": "node",
+    "binary": ".local-ci/install/bin/prometheos",
 }
 
 
@@ -104,39 +113,75 @@ def _split_path(program: str) -> list[str]:
     return [part for part in program.replace("\\", "/").split("/") if part]
 
 
-def program_matches(rule: str, program: str) -> bool:
-    """Environment-independent program-identity rule for a command[0]."""
+def _program_token(program: str) -> str | None:
+    """Environment-independent identity token for a command[0], or None."""
     parts = _split_path(program)
     base = parts[-1].lower() if parts else ""
-    if rule == "cargo":
-        return base in {"cargo", "cargo.exe"}
-    if rule == "python":
-        return base in {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"} or base.startswith("python")
-    if rule == "bash":
-        return base in {"bash", "bash.exe"}
-    if rule == "npm":
-        return base in {"npm", "npm.cmd", "npm.exe"}
-    if rule == "node":
-        return base in {"node", "node.exe"}
-    if rule == "binary":
-        # The installed prometheos binary under the evidence-local install root.
+    if base in {"cargo", "cargo.exe"}:
+        return "cargo"
+    if base in {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"} or base.startswith("python"):
+        return "python"
+    if base in {"bash", "bash.exe"}:
+        return "bash"
+    if base in {"npm", "npm.cmd", "npm.exe"}:
+        return "npm"
+    if base in {"node", "node.exe"}:
+        return "node"
+    if base in {"prometheos", "prometheos.exe"}:
         lowered = {part.lower() for part in parts}
-        return (
-            base in {"prometheos", "prometheos.exe"}
-            and ".local-ci" in lowered
-            and "install" in lowered
-        )
-    return False
+        if ".local-ci" in lowered and "install" in lowered:
+            return "binary"
+    return None
+
+
+def normalize_command(command: list[str]) -> list[str] | None:
+    """Normalize a command to its spec-comparable form, or None when the
+    program identity is unrecognized.
+
+    command[0] becomes its identity token; the value following "--root"
+    becomes "<root>" (the isolated-install target is environment-dependent).
+    Every other element must match the specification verbatim, so extra
+    flags (e.g. --no-run, --skip) break equality.
+    """
+    if not command:
+        return None
+    token = _program_token(command[0])
+    if token is None:
+        return None
+    args = list(command[1:])
+    if "--root" in args:
+        index = args.index("--root")
+        if index + 1 >= len(args):
+            return None
+        args[index + 1] = "<root>"
+    return [token] + args
 
 
 def command_matches_spec(command: list[str], entry: dict[str, object]) -> bool:
-    """True when `command` satisfies its specification entry: the program
-    identity matches the rule and every required argument is present."""
-    if not command or not program_matches(str(entry["program"]), command[0]):
+    """True only when the command normalizes to the entry's EXACT array."""
+    normalized = normalize_command(command)
+    expected = [str(item) for item in entry["command"]]
+    return normalized == expected
+
+
+def valid_duration(value: object) -> bool:
+    """Durations must be finite, non-negative, non-boolean numbers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    args = command[1:]
-    required = [str(item) for item in entry["args"]]
-    return all(item in args for item in required)
+    return math.isfinite(value) and value >= 0
+
+
+def duration_problem(value: object) -> str | None:
+    """Human-readable reason a duration is invalid, or None."""
+    if isinstance(value, bool):
+        return "seconds must not be a boolean"
+    if not isinstance(value, (int, float)):
+        return "seconds is not a number"
+    if not math.isfinite(value):
+        return "seconds must be finite"
+    if value < 0:
+        return "seconds must be non-negative"
+    return None
 
 
 def capture(*command: str) -> str:
@@ -275,10 +320,11 @@ def canonical_bytes(value: dict[str, object]) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def write_evidence(suite: str, checks: list[dict[str, object]], dirty: bool) -> Path:
-    # Generation-time self-check: the runner and the verifier share SUITE_SPEC;
-    # evidence that does not satisfy the specification is refused before it
-    # is ever written, so the two sides can never drift apart silently.
+def validate_checks_against_spec(suite: str, checks: list[dict[str, object]]) -> None:
+    """Full generation-time self-check: the runner and the verifier share
+    SUITE_SPEC, and evidence that does not satisfy it is refused BEFORE any
+    bytes are written. Validates names in order, exact normalized commands,
+    check shape, duration sanity, and pass status."""
     spec = SUITE_SPEC.get(suite)
     if spec is None:
         raise RuntimeError(f"unknown suite {suite!r}; refusing to write evidence")
@@ -287,14 +333,32 @@ def write_evidence(suite: str, checks: list[dict[str, object]], dirty: bool) -> 
             f"generated {len(checks)} checks but the {suite} specification requires {len(spec)}"
         )
     for check, entry in zip(checks, spec):
+        if frozenset(check) != CHECK_KEYS:
+            raise RuntimeError(
+                f"check keys must be exactly {sorted(CHECK_KEYS)}; refusing to write evidence"
+            )
         if check["name"] != entry["name"]:
             raise RuntimeError(
                 f"generated check {check['name']!r} does not match specification entry {entry['name']!r}"
             )
         if not command_matches_spec(list(check["command"]), entry):
             raise RuntimeError(
-                f"generated command for {check['name']!r} does not match the suite specification"
+                f"generated command for {check['name']!r} does not match the exact normalized "
+                f"command {entry['command']!r}"
             )
+        problem = duration_problem(check["seconds"])
+        if problem:
+            raise RuntimeError(f"check {check['name']!r} {problem}; refusing to write evidence")
+        if check["status"] != "passed":
+            raise RuntimeError(
+                f"check {check['name']!r} did not pass; refusing to write evidence"
+            )
+
+
+def write_evidence(suite: str, checks: list[dict[str, object]], dirty: bool) -> Path:
+    # Generation-time self-check: nothing is written until every check
+    # satisfies the shared specification exactly.
+    validate_checks_against_spec(suite, checks)
 
     commit = capture("git", "rev-parse", "HEAD")
     record: dict[str, object] = {
@@ -338,7 +402,6 @@ def verify_evidence(
         "completedAt",
         "checks",
     )
-    CHECK_KEYS = frozenset({"name", "command", "seconds", "status"})
 
     def reject(path: Path, reason: str) -> None:
         raise RuntimeError(f"evidence rejected ({reason}): {path}")
@@ -403,8 +466,9 @@ def verify_evidence(
         if platform_name not in KNOWN_PLATFORMS:
             reject(path, f"unknown platform {platform_name!r}")
 
-        # Checks: non-empty, well-formed, all passed, and every command
-        # must satisfy the shared specification for its check.
+        # Checks: non-empty, well-formed, all passed, and every command must
+        # normalize to the EXACT specification array — execution-suppressing
+        # or behavior-changing extra flags break equality and are rejected.
         checks = record["checks"]
         if not isinstance(checks, list):
             reject(path, "checks is not a list")
@@ -436,11 +500,12 @@ def verify_evidence(
             if not command_matches_spec(command, entry):
                 reject(
                     path,
-                    f"check {check['name']!r} command does not match the suite specification "
-                    f"(expected {entry['program']} with required args {entry['args']})",
+                    f"check {check['name']!r} command does not normalize to the exact "
+                    f"specification command {entry['command']!r}",
                 )
-            if not isinstance(check["seconds"], (int, float)):
-                reject(path, f"check {check['name']!r} seconds is not a number")
+            problem = duration_problem(check["seconds"])
+            if problem:
+                reject(path, f"check {check['name']!r} {problem}")
             if check["status"] != "passed":
                 reject(path, f"check {check['name']!r} did not pass (status {check['status']!r})")
             names.append(check["name"])

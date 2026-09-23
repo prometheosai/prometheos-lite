@@ -2,10 +2,13 @@
 """Regression tests for the repository-owned verifier (`local_ci.py verify`).
 
 The verifier must FAIL CLOSED: fabricated evidence files — wrong schema,
-empty/missing/duplicate/unknown/malformed checks, commands that do not match
-the shared suite specification, empty or foreign toolchain provenance, wrong
-commit, dirty tree, tampered digest — must all be rejected, never vacuously
-accepted. The frontend suite must be verifiable (with --require-frontend).
+empty/missing/duplicate/unknown/malformed checks, commands that do not
+normalize to the EXACT specification array (extra flags like --no-run
+included), invalid durations (negative, boolean, NaN, infinity), empty or
+foreign toolchain provenance, wrong commit, dirty tree, tampered digest —
+must all be rejected, never vacuously accepted. The generation-time
+self-check must refuse to write evidence with the same defects. The
+frontend suite must be verifiable (with --require-frontend).
 
 Run: python scripts/test_local_ci_verify.py
 Exit: 0 if all cases behave, 1 otherwise. Dependency-free (stdlib only).
@@ -34,27 +37,23 @@ PLATFORM = [entry["name"] for entry in local_ci.SUITE_SPEC["platform"]]
 SMOKE = [entry["name"] for entry in local_ci.SUITE_SPEC["smoke"]]
 FRONTEND = [entry["name"] for entry in local_ci.SUITE_SPEC["frontend"]]
 
-# Spec-compliant synthetic program per identity rule.
-PROGRAM_TOKENS = {
-    "cargo": ["cargo"],
-    "python": ["python"],
-    "bash": ["bash"],
-    "npm": ["npm"],
-    "node": ["node"],
-    "binary": [".local-ci/install/bin/prometheos"],
-}
-
 
 def spec_command(name: str) -> list[str]:
-    """Synthesize a command that satisfies the shared specification.
-    Unknown check names get a placeholder; the verifier rejects them on
-    count/order before command validation ever runs."""
+    """Denormalize a spec entry into a concrete spec-compliant command:
+    the identity token becomes a concrete program; placeholders stay
+    (normalize_command maps them back). Unknown names get a placeholder
+    command; the verifier rejects them on count/order first."""
     entry = local_ci.SPEC_BY_NAME.get(name)
     if entry is None:
         return ["true"]
-    program = str(entry["program"])
-    token = PROGRAM_TOKENS[program]
-    return token + [str(arg) for arg in entry["args"]]
+    normalized = [str(item) for item in entry["command"]]
+    token, args = normalized[0], normalized[1:]
+    program = local_ci.TOKEN_PROGRAMS[token]
+    return [program] + args
+
+
+def spec_index(suite: str, name: str) -> int:
+    return [entry["name"] for entry in local_ci.SUITE_SPEC[suite]].index(name)
 
 
 def make_check(name: str, command: list[str] | None = None) -> dict[str, object]:
@@ -75,7 +74,13 @@ def write(tmp: Path, payload: object, name: str) -> str:
     return str(target)
 
 
-def expect_reject(label: str, paths: list[str], commit: str = COMMIT, platforms: list[str] | None = None, frontend: bool = False) -> None:
+def expect_reject(
+    label: str,
+    paths: list[str],
+    commit: str = COMMIT,
+    platforms: list[str] | None = None,
+    frontend: bool = False,
+) -> None:
     try:
         local_ci.verify_evidence(paths, commit, platforms or [], frontend)
     except RuntimeError as error:
@@ -88,13 +93,38 @@ def expect_reject(label: str, paths: list[str], commit: str = COMMIT, platforms:
     sys.exit(1)
 
 
-def expect_accept(label: str, paths: list[str], commit: str = COMMIT, platforms: list[str] | None = None, frontend: bool = False) -> None:
+def expect_accept(
+    label: str,
+    paths: list[str],
+    commit: str = COMMIT,
+    platforms: list[str] | None = None,
+    frontend: bool = False,
+) -> None:
     try:
         local_ci.verify_evidence(paths, commit, platforms or [], frontend)
     except RuntimeError as error:
         print(f"FAIL: {label} was rejected: {error}")
         sys.exit(1)
     print(f"PASS accept: {label}")
+
+
+def expect_generation_refusal(label: str, suite: str, checks: list[dict[str, object]]) -> None:
+    """Generation-time regressions: the runner must refuse to WRITE evidence
+    whose checks violate the shared specification. validate_checks_against_spec
+    raises before any bytes are written."""
+    try:
+        local_ci.validate_checks_against_spec(suite, checks)
+    except RuntimeError as error:
+        print(f"PASS generation refusal: {label} ({error})")
+        return
+    print(f"FAIL: {label} was ACCEPTED by the generation self-check (fails open)")
+    sys.exit(1)
+
+
+def core_checks_with(index: int, **mutations: object) -> list[dict[str, object]]:
+    checks = [make_check(name) for name in CORE]
+    checks[index].update(mutations)
+    return checks
 
 
 def main() -> int:
@@ -260,8 +290,10 @@ def main() -> int:
         expect_reject("command not a list", [bad_command_path])
 
         # ------------------------------------------------------------------
-        # Command-specification failures: fabricated `["true"]` commands
+        # Command-specification failures: exact normalized command binding
         # ------------------------------------------------------------------
+        all_tests = spec_index("core", "all tests")
+
         all_true = make_record_core()
         for check in all_true["checks"]:
             check["command"] = ["true"]
@@ -271,8 +303,33 @@ def main() -> int:
         all_true_path = write(tmp, all_true, "all_true.json")
         expect_reject("all-true commands", [all_true_path])
 
+        no_run = make_record_core()
+        no_run["checks"][all_tests]["command"] = spec_command("all tests") + ["--no-run"]
+        no_run["evidenceDigest"] = hashlib.sha256(
+            local_ci.canonical_bytes(no_run)
+        ).hexdigest()
+        no_run_path = write(tmp, no_run, "no_run.json")
+        expect_reject("--no-run appended to all tests", [no_run_path])
+
+        skip_flag = make_record_core()
+        skip_flag["checks"][all_tests]["command"] = spec_command("all tests") + ["--skip", "locking_tests"]
+        skip_flag["evidenceDigest"] = hashlib.sha256(
+            local_ci.canonical_bytes(skip_flag)
+        ).hexdigest()
+        skip_path = write(tmp, skip_flag, "skip_flag.json")
+        expect_reject("--skip appended to all tests", [skip_path])
+
+        clippy_index = spec_index("core", "clippy")
+        extra_flag = make_record_core()
+        extra_flag["checks"][clippy_index]["command"] = spec_command("clippy") + ["--no-deps"]
+        extra_flag["evidenceDigest"] = hashlib.sha256(
+            local_ci.canonical_bytes(extra_flag)
+        ).hexdigest()
+        extra_flag_path = write(tmp, extra_flag, "extra_flag.json")
+        expect_reject("extra clippy flag", [extra_flag_path])
+
         wrong_program = make_record_core()
-        wrong_program["checks"][0]["command"] = ["make", "fmt"]
+        wrong_program["checks"][0]["command"] = ["make", "fmt", "--all", "--", "--check"]
         wrong_program["evidenceDigest"] = hashlib.sha256(
             local_ci.canonical_bytes(wrong_program)
         ).hexdigest()
@@ -296,7 +353,11 @@ def main() -> int:
         expect_reject("python check run by cargo", [python_cargo_path])
 
         impostor = make_record_suite("smoke")
-        impostor["checks"][6]["command"] = ["C:/x/.local-ci/install/bin/impostor.exe", "--version"]
+        installed_version = spec_index("smoke", "installed version")
+        impostor["checks"][installed_version]["command"] = [
+            "C:/x/.local-ci/install/bin/impostor.exe",
+            "--version",
+        ]
         impostor["evidenceDigest"] = hashlib.sha256(
             local_ci.canonical_bytes(impostor)
         ).hexdigest()
@@ -309,7 +370,7 @@ def main() -> int:
         )
 
         outside_root = make_record_suite("smoke")
-        outside_root["checks"][6]["command"] = ["prometheos", "--version"]
+        outside_root["checks"][installed_version]["command"] = ["prometheos", "--version"]
         outside_root["evidenceDigest"] = hashlib.sha256(
             local_ci.canonical_bytes(outside_root)
         ).hexdigest()
@@ -318,6 +379,63 @@ def main() -> int:
             "binary outside install root",
             [core_ok, platform_ok, outside_root_path],
         )
+
+        # ------------------------------------------------------------------
+        # Duration validation: finite, non-negative, non-boolean
+        # ------------------------------------------------------------------
+        for label, value in (
+            ("negative duration", -1.0),
+            ("boolean duration", True),
+            ("NaN duration", float("nan")),
+            ("infinite duration", float("inf")),
+        ):
+            record = make_record_core()
+            record["checks"][0]["seconds"] = value
+            record["evidenceDigest"] = hashlib.sha256(
+                local_ci.canonical_bytes(record)
+            ).hexdigest()
+            path = write(tmp, record, f"duration_{label.split()[0]}.json")
+            expect_reject(label, [path])
+
+        # ------------------------------------------------------------------
+        # Generation-time regressions: the runner refuses to WRITE bad evidence
+        # ------------------------------------------------------------------
+        expect_generation_refusal(
+            "--no-run in generated all tests",
+            "core",
+            core_checks_with(all_tests, command=spec_command("all tests") + ["--no-run"]),
+        )
+        expect_generation_refusal(
+            "negative duration in generated checks",
+            "core",
+            core_checks_with(0, seconds=-5.0),
+        )
+        expect_generation_refusal(
+            "boolean duration in generated checks",
+            "core",
+            core_checks_with(0, seconds=True),
+        )
+        expect_generation_refusal(
+            "all-true commands in generated checks",
+            "core",
+            [make_check(name, ["true"]) for name in CORE],
+        )
+        expect_generation_refusal(
+            "failed status in generated checks",
+            "core",
+            core_checks_with(0, status="failed"),
+        )
+        expect_generation_refusal(
+            "unknown check key in generated checks",
+            "core",
+            [dict(make_check(name), notes="x") for name in CORE],
+        )
+        try:
+            local_ci.validate_checks_against_spec("core", [make_check(name) for name in CORE])
+        except RuntimeError as error:
+            print(f"FAIL: generation self-check rejected VALID checks: {error}")
+            sys.exit(1)
+        print("PASS generation acceptance: valid spec-shaped checks pass the self-check")
 
         # ------------------------------------------------------------------
         # Cross-file failures
