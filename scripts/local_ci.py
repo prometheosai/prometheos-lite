@@ -50,6 +50,7 @@ def rust_core() -> list[dict[str, object]]:
         ("runtime policy", ["cargo", "test", "--test", "runtime_policy_enforcement", "--quiet"]),
         ("verification policy", ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]),
         ("patch diagnostics", ["cargo", "test", "--test", "patch_provider_diagnostics_tests", "--quiet"]),
+        ("verifier regressions", [sys.executable, "scripts/test_local_ci_verify.py"]),
         ("repository policy", [sys.executable, "scripts/local_ci_policy.py"]),
     ]
     return [run(name, command) for name, command in commands]
@@ -170,21 +171,160 @@ def write_evidence(suite: str, checks: list[dict[str, object]], dirty: bool) -> 
 
 
 def verify_evidence(paths: list[str], commit: str, required_platforms: list[str]) -> None:
+    SCHEMA_VERSION = "prometheos.local-verification.v1"
+    REQUIRED_SUITES = ("core", "platform", "smoke")
+    KNOWN_PLATFORMS = ("linux", "darwin", "windows")
+    # Every suite must present EXACTLY this check sequence: complete, no
+    # missing, no unknown, no duplicates. Fabricated or truncated evidence
+    # is rejected rather than accepted vacuously.
+    EXPECTED_CHECKS = {
+        "core": [
+            "rustfmt",
+            "clippy",
+            "doc tests",
+            "release build",
+            "all tests",
+            "guardrails",
+            "runtime policy",
+            "verification policy",
+            "patch diagnostics",
+            "verifier regressions",
+            "repository policy",
+        ],
+        "platform": [
+            "registry leases",
+            "heartbeats",
+            "recovery",
+            "cross-process locking",
+            "interruption recovery",
+            "cancellation",
+            "single-winner concurrency",
+            "resource enforcement",
+        ],
+        "smoke": [
+            "full-stack smoke",
+            "approval-controlled patch smoke",
+            "governed provider smoke",
+            "provider governance",
+            "golden path",
+            "isolated install",
+            "installed version",
+            "installed help",
+        ],
+    }
+    REQUIRED_KEYS = (
+        "schemaVersion",
+        "commit",
+        "suite",
+        "platform",
+        "architecture",
+        "python",
+        "rustc",
+        "cargo",
+        "workingTreeClean",
+        "completedAt",
+        "checks",
+    )
+    CHECK_KEYS = frozenset({"name", "command", "seconds", "status"})
+
+    def reject(path: Path, reason: str) -> None:
+        raise RuntimeError(f"evidence rejected ({reason}): {path}")
+
     seen: set[tuple[str, str]] = set()
     for raw in paths:
         path = Path(raw)
-        record = json.loads(path.read_text(encoding="utf-8"))
+        if not path.is_file():
+            reject(path, "file not found")
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            reject(path, f"unreadable or malformed JSON: {error}")
+        if not isinstance(record, dict):
+            reject(path, "top level is not a JSON object")
+
+        # Integrity: digest over the canonical record minus the digest field.
         claimed = record.pop("evidenceDigest", None)
+        if not isinstance(claimed, str) or len(claimed) != 64:
+            reject(path, "missing or malformed evidenceDigest")
         actual = hashlib.sha256(canonical_bytes(record)).hexdigest()
         if claimed != actual:
-            raise RuntimeError(f"evidence digest mismatch: {path}")
-        if record.get("commit") != commit or not record.get("workingTreeClean"):
-            raise RuntimeError(f"evidence is not clean and bound to {commit}: {path}")
-        if any(check.get("status") != "passed" for check in record.get("checks", [])):
-            raise RuntimeError(f"evidence contains a failed check: {path}")
-        seen.add((str(record.get("platform")), str(record.get("suite"))))
+            reject(path, "evidence digest mismatch (record tampered or hand-written)")
+
+        # Schema: exact version, exact top-level key set, every key present.
+        if record.get("schemaVersion") != SCHEMA_VERSION:
+            reject(path, f"unsupported schemaVersion {record.get('schemaVersion')!r}")
+        missing_keys = [key for key in REQUIRED_KEYS if key not in record]
+        if missing_keys:
+            reject(path, f"missing required keys {missing_keys}")
+        extra_keys = sorted(set(record) - set(REQUIRED_KEYS))
+        if extra_keys:
+            reject(path, f"unknown top-level keys {extra_keys}")
+
+        # Provenance: bound to the exact commit, clean tree, ISO timestamp.
+        if record["commit"] != commit:
+            reject(path, f"commit {record['commit']!r} does not match --commit {commit!r}")
+        if record["workingTreeClean"] is not True:
+            reject(path, "workingTreeClean is not true (dirty-tree evidence is non-mergeable)")
+        if not isinstance(record["completedAt"], str):
+            reject(path, "completedAt is not a string")
+        try:
+            datetime.fromisoformat(record["completedAt"])
+        except ValueError:
+            reject(path, "completedAt is not an ISO-8601 timestamp")
+
+        suite = record["suite"]
+        platform_name = record["platform"]
+        if suite not in EXPECTED_CHECKS:
+            reject(path, f"unknown suite {suite!r}")
+        if platform_name not in KNOWN_PLATFORMS:
+            reject(path, f"unknown platform {platform_name!r}")
+
+        # Checks: non-empty, well-formed, all passed, exact expected set.
+        checks = record["checks"]
+        if not isinstance(checks, list):
+            reject(path, "checks is not a list")
+        if not checks:
+            reject(path, "empty checks list")
+        names: list[str] = []
+        for check in checks:
+            if not isinstance(check, dict):
+                reject(path, "check entry is not an object")
+            if frozenset(check) != CHECK_KEYS:
+                reject(path, f"check keys must be exactly {sorted(CHECK_KEYS)}")
+            if not isinstance(check["name"], str) or not check["name"]:
+                reject(path, "check name is not a non-empty string")
+            command = check["command"]
+            if (
+                not isinstance(command, list)
+                or not command
+                or not all(isinstance(part, str) for part in command)
+            ):
+                reject(path, f"check {check['name']!r} command is not a non-empty string list")
+            if not isinstance(check["seconds"], (int, float)):
+                reject(path, f"check {check['name']!r} seconds is not a number")
+            if check["status"] != "passed":
+                reject(path, f"check {check['name']!r} did not pass (status {check['status']!r})")
+            names.append(check["name"])
+        expected = EXPECTED_CHECKS[suite]
+        if len(names) != len(set(names)):
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            reject(path, f"duplicate checks {duplicates}")
+        missing = [name for name in expected if name not in names]
+        if missing:
+            reject(path, f"missing required checks {missing}")
+        unknown = [name for name in names if name not in expected]
+        if unknown:
+            reject(path, f"unknown checks {unknown}")
+        if names != expected:
+            reject(path, f"check order mismatch: expected {expected}, found {names}")
+
+        key = (platform_name, suite)
+        if key in seen:
+            reject(path, f"duplicate evidence for platform {platform_name!r} suite {suite!r}")
+        seen.add(key)
+
     seen_suites = {suite for _, suite in seen}
-    missing_suites = sorted({"core", "platform", "smoke"} - seen_suites)
+    missing_suites = sorted(set(REQUIRED_SUITES) - seen_suites)
     if missing_suites:
         raise RuntimeError(f"missing required suites: {missing_suites}")
     missing_platforms = sorted(
