@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Repository-owned verification runner with commit-bound JSON evidence."""
+"""Repository-owned verification runner with commit-bound JSON evidence.
+
+The SUITE_SPEC below is the single source of truth shared by the runner and
+the verifier: every emitted check must carry a command that matches its
+specification entry (program identity + required arguments), and the verifier
+rejects any evidence whose commands do not. Provenance fields (rustc, cargo,
+python, architecture) must be non-empty and truthful.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +24,115 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_ROOT = ROOT / ".local-ci" / "evidence"
+
+SCHEMA_VERSION = "prometheos.local-verification.v1"
+REQUIRED_SUITES = ("core", "platform", "smoke")
+KNOWN_PLATFORMS = ("linux", "darwin", "windows")
+
+# ---------------------------------------------------------------------------
+# Shared suite/command specification
+#
+# Single source of truth for BOTH sides of the evidence contract:
+#   - the runner emits checks whose commands must satisfy their entry
+#     (enforced at generation time; evidence that violates the spec is
+#     refused before it is ever written), and
+#   - the verifier rejects any evidence whose commands do not match.
+#
+# "program" is an environment-independent identity rule (see
+# program_matches); "args" are strings that must each appear in the
+# command's argument list. This is what stops fabricated evidence from
+# labeling every command as `["true"]` while claiming a full suite run.
+# ---------------------------------------------------------------------------
+
+SUITE_SPEC: dict[str, list[dict[str, object]]] = {
+    "core": [
+        {"name": "rustfmt", "program": "cargo", "args": ["fmt"]},
+        {"name": "clippy", "program": "cargo", "args": ["clippy"]},
+        {"name": "doc tests", "program": "cargo", "args": ["--doc"]},
+        {"name": "release build", "program": "cargo", "args": ["build", "--release"]},
+        {"name": "all tests", "program": "cargo", "args": ["test", "--all-targets"]},
+        {
+            "name": "guardrails",
+            "program": "cargo",
+            "args": ["--test", "guardrail_tests", "guardrail_integration_tests"],
+        },
+        {"name": "runtime policy", "program": "cargo", "args": ["--test", "runtime_policy_enforcement"]},
+        {"name": "verification policy", "program": "cargo", "args": ["--test", "ci_enforcement_tests"]},
+        {"name": "patch diagnostics", "program": "cargo", "args": ["--test", "patch_provider_diagnostics_tests"]},
+        {"name": "verifier regressions", "program": "python", "args": ["scripts/test_local_ci_verify.py"]},
+        {"name": "repository policy", "program": "python", "args": ["scripts/local_ci_policy.py"]},
+    ],
+    "platform": [
+        {"name": "registry leases", "program": "cargo", "args": ["--lib", "workflow::evaluate::registry"]},
+        {"name": "heartbeats", "program": "cargo", "args": ["--lib", "workflow::evaluate::heartbeat"]},
+        {"name": "recovery", "program": "cargo", "args": ["--lib", "workflow::evaluate::recovery"]},
+        {"name": "cross-process locking", "program": "cargo", "args": ["--test", "locking_tests"]},
+        {"name": "interruption recovery", "program": "cargo", "args": ["--test", "interruption_recovery_tests"]},
+        {"name": "cancellation", "program": "cargo", "args": ["--test", "cancellation_tests"]},
+        {"name": "single-winner concurrency", "program": "cargo", "args": ["--test", "concurrency_tests"]},
+        {"name": "resource enforcement", "program": "cargo", "args": ["--lib", "workflow::evaluate::validation"]},
+    ],
+    "smoke": [
+        {"name": "full-stack smoke", "program": "bash", "args": ["scripts/fullstack-smoke.sh"]},
+        {"name": "approval-controlled patch smoke", "program": "bash", "args": ["scripts/approval-controlled-patch-smoke.sh"]},
+        {"name": "governed provider smoke", "program": "bash", "args": ["scripts/provider-governed-proposal-smoke.sh"]},
+        {"name": "provider governance", "program": "cargo", "args": ["--test", "provider_governed_proposal_tests"]},
+        {"name": "golden path", "program": "bash", "args": ["scripts/demo/repo-workbench-first-value.sh"]},
+        {"name": "isolated install", "program": "cargo", "args": ["install", "--path"]},
+        {"name": "installed version", "program": "binary", "args": ["--version"]},
+        {"name": "installed help", "program": "binary", "args": ["--help"]},
+    ],
+    "frontend": [
+        {"name": "frontend install", "program": "npm", "args": ["ci"]},
+        {"name": "frontend build", "program": "npm", "args": ["build"]},
+        {"name": "frontend lint", "program": "npm", "args": ["lint"]},
+        {"name": "frontend smoke", "program": "node", "args": ["scripts/smoke.mjs"]},
+    ],
+}
+
+SPEC_BY_NAME: dict[str, dict[str, object]] = {
+    entry["name"]: entry for entries in SUITE_SPEC.values() for entry in entries
+}
+
+
+def _split_path(program: str) -> list[str]:
+    """Split a possibly Windows-style program path, host-independently."""
+    return [part for part in program.replace("\\", "/").split("/") if part]
+
+
+def program_matches(rule: str, program: str) -> bool:
+    """Environment-independent program-identity rule for a command[0]."""
+    parts = _split_path(program)
+    base = parts[-1].lower() if parts else ""
+    if rule == "cargo":
+        return base in {"cargo", "cargo.exe"}
+    if rule == "python":
+        return base in {"python", "python3", "python.exe", "python3.exe", "py", "py.exe"} or base.startswith("python")
+    if rule == "bash":
+        return base in {"bash", "bash.exe"}
+    if rule == "npm":
+        return base in {"npm", "npm.cmd", "npm.exe"}
+    if rule == "node":
+        return base in {"node", "node.exe"}
+    if rule == "binary":
+        # The installed prometheos binary under the evidence-local install root.
+        lowered = {part.lower() for part in parts}
+        return (
+            base in {"prometheos", "prometheos.exe"}
+            and ".local-ci" in lowered
+            and "install" in lowered
+        )
+    return False
+
+
+def command_matches_spec(command: list[str], entry: dict[str, object]) -> bool:
+    """True when `command` satisfies its specification entry: the program
+    identity matches the rule and every required argument is present."""
+    if not command or not program_matches(str(entry["program"]), command[0]):
+        return False
+    args = command[1:]
+    required = [str(item) for item in entry["args"]]
+    return all(item in args for item in required)
 
 
 def capture(*command: str) -> str:
@@ -147,9 +263,29 @@ def canonical_bytes(value: dict[str, object]) -> bytes:
 
 
 def write_evidence(suite: str, checks: list[dict[str, object]], dirty: bool) -> Path:
+    # Generation-time self-check: the runner and the verifier share SUITE_SPEC;
+    # evidence that does not satisfy the specification is refused before it
+    # is ever written, so the two sides can never drift apart silently.
+    spec = SUITE_SPEC.get(suite)
+    if spec is None:
+        raise RuntimeError(f"unknown suite {suite!r}; refusing to write evidence")
+    if len(checks) != len(spec):
+        raise RuntimeError(
+            f"generated {len(checks)} checks but the {suite} specification requires {len(spec)}"
+        )
+    for check, entry in zip(checks, spec):
+        if check["name"] != entry["name"]:
+            raise RuntimeError(
+                f"generated check {check['name']!r} does not match specification entry {entry['name']!r}"
+            )
+        if not command_matches_spec(list(check["command"]), entry):
+            raise RuntimeError(
+                f"generated command for {check['name']!r} does not match the suite specification"
+            )
+
     commit = capture("git", "rev-parse", "HEAD")
     record: dict[str, object] = {
-        "schemaVersion": "prometheos.local-verification.v1",
+        "schemaVersion": SCHEMA_VERSION,
         "commit": commit,
         "suite": suite,
         "platform": platform.system().lower(),
@@ -170,48 +306,12 @@ def write_evidence(suite: str, checks: list[dict[str, object]], dirty: bool) -> 
     return target
 
 
-def verify_evidence(paths: list[str], commit: str, required_platforms: list[str]) -> None:
-    SCHEMA_VERSION = "prometheos.local-verification.v1"
-    REQUIRED_SUITES = ("core", "platform", "smoke")
-    KNOWN_PLATFORMS = ("linux", "darwin", "windows")
-    # Every suite must present EXACTLY this check sequence: complete, no
-    # missing, no unknown, no duplicates. Fabricated or truncated evidence
-    # is rejected rather than accepted vacuously.
-    EXPECTED_CHECKS = {
-        "core": [
-            "rustfmt",
-            "clippy",
-            "doc tests",
-            "release build",
-            "all tests",
-            "guardrails",
-            "runtime policy",
-            "verification policy",
-            "patch diagnostics",
-            "verifier regressions",
-            "repository policy",
-        ],
-        "platform": [
-            "registry leases",
-            "heartbeats",
-            "recovery",
-            "cross-process locking",
-            "interruption recovery",
-            "cancellation",
-            "single-winner concurrency",
-            "resource enforcement",
-        ],
-        "smoke": [
-            "full-stack smoke",
-            "approval-controlled patch smoke",
-            "governed provider smoke",
-            "provider governance",
-            "golden path",
-            "isolated install",
-            "installed version",
-            "installed help",
-        ],
-    }
+def verify_evidence(
+    paths: list[str],
+    commit: str,
+    required_platforms: list[str],
+    require_frontend: bool = False,
+) -> None:
     REQUIRED_KEYS = (
         "schemaVersion",
         "commit",
@@ -260,7 +360,8 @@ def verify_evidence(paths: list[str], commit: str, required_platforms: list[str]
         if extra_keys:
             reject(path, f"unknown top-level keys {extra_keys}")
 
-        # Provenance: bound to the exact commit, clean tree, ISO timestamp.
+        # Provenance: bound to the exact commit, clean tree, ISO timestamp,
+        # and a REAL toolchain — empty or foreign provenance is fabricated.
         if record["commit"] != commit:
             reject(path, f"commit {record['commit']!r} does not match --commit {commit!r}")
         if record["workingTreeClean"] is not True:
@@ -271,28 +372,47 @@ def verify_evidence(paths: list[str], commit: str, required_platforms: list[str]
             datetime.fromisoformat(record["completedAt"])
         except ValueError:
             reject(path, "completedAt is not an ISO-8601 timestamp")
+        for key in ("python", "architecture"):
+            value = record[key]
+            if not isinstance(value, str) or not value.strip():
+                reject(path, f"{key} provenance is empty")
+        for key, prefix in (("rustc", "rustc"), ("cargo", "cargo")):
+            value = record[key]
+            if not isinstance(value, str) or not value.strip():
+                reject(path, f"{key} provenance is empty")
+            if not value.lstrip().lower().startswith(prefix):
+                reject(path, f"{key} provenance {value!r} does not describe a {prefix} toolchain")
 
         suite = record["suite"]
         platform_name = record["platform"]
-        if suite not in EXPECTED_CHECKS:
+        if suite not in SUITE_SPEC:
             reject(path, f"unknown suite {suite!r}")
         if platform_name not in KNOWN_PLATFORMS:
             reject(path, f"unknown platform {platform_name!r}")
 
-        # Checks: non-empty, well-formed, all passed, exact expected set.
+        # Checks: non-empty, well-formed, all passed, and every command
+        # must satisfy the shared specification for its check.
         checks = record["checks"]
         if not isinstance(checks, list):
             reject(path, "checks is not a list")
         if not checks:
             reject(path, "empty checks list")
+        spec = SUITE_SPEC[suite]
+        if len(checks) != len(spec):
+            reject(path, f"expected {len(spec)} checks for suite {suite!r}, found {len(checks)}")
         names: list[str] = []
-        for check in checks:
+        for check, entry in zip(checks, spec):
             if not isinstance(check, dict):
                 reject(path, "check entry is not an object")
             if frozenset(check) != CHECK_KEYS:
                 reject(path, f"check keys must be exactly {sorted(CHECK_KEYS)}")
             if not isinstance(check["name"], str) or not check["name"]:
                 reject(path, "check name is not a non-empty string")
+            if check["name"] != entry["name"]:
+                reject(
+                    path,
+                    f"check order mismatch: expected {entry['name']!r}, found {check['name']!r}",
+                )
             command = check["command"]
             if (
                 not isinstance(command, list)
@@ -300,23 +420,20 @@ def verify_evidence(paths: list[str], commit: str, required_platforms: list[str]
                 or not all(isinstance(part, str) for part in command)
             ):
                 reject(path, f"check {check['name']!r} command is not a non-empty string list")
+            if not command_matches_spec(command, entry):
+                reject(
+                    path,
+                    f"check {check['name']!r} command does not match the suite specification "
+                    f"(expected {entry['program']} with required args {entry['args']})",
+                )
             if not isinstance(check["seconds"], (int, float)):
                 reject(path, f"check {check['name']!r} seconds is not a number")
             if check["status"] != "passed":
                 reject(path, f"check {check['name']!r} did not pass (status {check['status']!r})")
             names.append(check["name"])
-        expected = EXPECTED_CHECKS[suite]
         if len(names) != len(set(names)):
             duplicates = sorted({name for name in names if names.count(name) > 1})
             reject(path, f"duplicate checks {duplicates}")
-        missing = [name for name in expected if name not in names]
-        if missing:
-            reject(path, f"missing required checks {missing}")
-        unknown = [name for name in names if name not in expected]
-        if unknown:
-            reject(path, f"unknown checks {unknown}")
-        if names != expected:
-            reject(path, f"check order mismatch: expected {expected}, found {names}")
 
         key = (platform_name, suite)
         if key in seen:
@@ -327,6 +444,8 @@ def verify_evidence(paths: list[str], commit: str, required_platforms: list[str]
     missing_suites = sorted(set(REQUIRED_SUITES) - seen_suites)
     if missing_suites:
         raise RuntimeError(f"missing required suites: {missing_suites}")
+    if require_frontend and "frontend" not in seen_suites:
+        raise RuntimeError("missing frontend evidence (--require-frontend)")
     missing_platforms = sorted(
         os_name for os_name in required_platforms if (os_name, "platform") not in seen
     )
@@ -350,11 +469,16 @@ def main() -> int:
         default=[],
         help="require platform-suite evidence for this OS; repeat for a platform matrix",
     )
+    verify_parser.add_argument(
+        "--require-frontend",
+        action="store_true",
+        help="require frontend-suite evidence (use when frontend paths changed)",
+    )
     verify_parser.add_argument("evidence", nargs="+")
     args = parser.parse_args()
 
     if args.command == "verify":
-        verify_evidence(args.evidence, args.commit, args.require_platform)
+        verify_evidence(args.evidence, args.commit, args.require_platform, args.require_frontend)
         return 0
     if not shutil.which("cargo"):
         raise RuntimeError("cargo is required")
