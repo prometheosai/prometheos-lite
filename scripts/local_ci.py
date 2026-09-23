@@ -69,15 +69,48 @@ def platform_suite() -> list[dict[str, object]]:
     return [run(name, command) for name, command in commands]
 
 
+def find_bash() -> str:
+    """Locate a functional Bash. WSL bash.exe can be present but unusable
+    (broken WSL installs fail with HCS mount errors); Git Bash is preferred on
+    Windows. We probe each candidate with a trivial invocation."""
+    on_windows = platform.system() == "Windows"
+    candidates: list[str] = []
+    if on_windows:
+        # Prefer Git Bash over WSL `bash` because a broken WSL install causes
+        # HCS/CreateInstance failures rather than working shell emulation.
+        for p in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+            rf"{os.environ.get('LOCALAPPDATA', '')}\Programs\Git\bin\bash.exe",
+        ]:
+            if Path(p).is_file():
+                candidates.append(p)
+    if shutil.which("bash"):
+        candidates.append(shutil.which("bash") or "bash")
+
+    for candidate in candidates:
+        try:
+            out = subprocess.run(
+                [candidate, "-c", "true"],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+            if out.returncode == 0:
+                return candidate
+        except (OSError, subprocess.SubprocessError):
+            continue
+    raise RuntimeError("smoke suite needs workable Bash parsing (Git Bash or WSL)")
+
+
 def smoke_suite() -> list[dict[str, object]]:
-    if not shutil.which("bash"):
-        raise RuntimeError("smoke suite requires Bash (Git Bash is supported on Windows)")
+    bash = find_bash()
     commands = [
-        ("full-stack smoke", ["bash", "scripts/fullstack-smoke.sh"]),
-        ("approval-controlled patch smoke", ["bash", "scripts/approval-controlled-patch-smoke.sh"]),
-        ("governed provider smoke", ["bash", "scripts/provider-governed-proposal-smoke.sh"]),
+        ("full-stack smoke", [bash, "scripts/fullstack-smoke.sh"]),
+        ("approval-controlled patch smoke", [bash, "scripts/approval-controlled-patch-smoke.sh"]),
+        ("governed provider smoke", [bash, "scripts/provider-governed-proposal-smoke.sh"]),
         ("provider governance", ["cargo", "test", "--test", "provider_governed_proposal_tests", "--quiet"]),
-        ("golden path", ["bash", "scripts/demo/repo-workbench-first-value.sh"]),
+        ("golden path", [bash, "scripts/demo/repo-workbench-first-value.sh"]),
     ]
     checks = [run(name, command) for name, command in commands]
     install_root = ROOT / ".local-ci" / "install"

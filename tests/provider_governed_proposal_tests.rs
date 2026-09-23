@@ -550,15 +550,18 @@ fn sanitize_provider_route_strips_secrets() {
 async fn report_exposes_lifecycle_evidence() {
     let (_d, repo) = temp_repo();
     let res = generate_safe(&repo).await;
-    workflow::dry_run(&repo, &res.id, Some("true")).expect("dry-run should pass");
+    // `exit 0` is portable across the platform shells the workflow module
+    // dispatches to (cmd /C on Windows, sh -c elsewhere). The Unix-only
+    // `true` binary is not resolvable under cmd.
+    workflow::dry_run(&repo, &res.id, Some("exit 0")).expect("dry-run should pass");
     workflow::approve(&repo, &res.id, &res.patch_hash, "op").expect("approve should pass");
-    workflow::apply(&repo, &res.id, &res.patch_hash, Some("true"), true)
+    workflow::apply(&repo, &res.id, &res.patch_hash, Some("exit 0"), true)
         .expect("apply should pass");
 
     let report = workflow::report(&repo, &res.id).expect("report should succeed");
     let value: serde_json::Value = serde_json::from_str(&report).expect("valid json");
-    assert_eq!(value["dry_run_validation"], "true");
-    assert_eq!(value["apply_validation"], "true");
+    assert_eq!(value["dry_run_validation"], "exit 0");
+    assert_eq!(value["apply_validation"], "exit 0");
     assert!(
         value["checkpoint_ref"]
             .as_str()
@@ -578,7 +581,8 @@ async fn rollback_outcome_recorded() {
     workflow::approve(&repo, &res.id, &res.patch_hash, "op").expect("approve should pass");
 
     // Apply with a validation command that fails -> must roll back and record status.
-    let applied = workflow::apply(&repo, &res.id, &res.patch_hash, Some("false"), true);
+    // `exit 1` is the portable failing command (Unix `false` is not on Windows).
+    let applied = workflow::apply(&repo, &res.id, &res.patch_hash, Some("exit 1"), true);
     assert!(applied.is_err(), "apply must fail validation and roll back");
 
     let report = workflow::report(&repo, &res.id).expect("report should succeed");
