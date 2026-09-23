@@ -75,6 +75,7 @@ SUITE_SPEC: dict[str, list[dict[str, object]]] = {
         {"name": "resource enforcement", "command": ["cargo", "test", "--lib", "workflow::evaluate::validation", "--quiet", "--", "--nocapture"]},
     ],
     "smoke": [
+        {"name": "path resolution", "command": ["bash", "scripts/test_target_dir.sh"]},
         {"name": "full-stack smoke", "command": ["bash", "scripts/fullstack-smoke.sh"]},
         {"name": "approval-controlled patch smoke", "command": ["bash", "scripts/approval-controlled-patch-smoke.sh"]},
         {"name": "governed provider smoke", "command": ["bash", "scripts/provider-governed-proposal-smoke.sh"]},
@@ -281,6 +282,7 @@ def find_bash() -> str:
 def smoke_suite() -> list[dict[str, object]]:
     bash = find_bash()
     commands = [
+        ("path resolution", [bash, "scripts/test_target_dir.sh"]),
         ("full-stack smoke", [bash, "scripts/fullstack-smoke.sh"]),
         ("approval-controlled patch smoke", [bash, "scripts/approval-controlled-patch-smoke.sh"]),
         ("governed provider smoke", [bash, "scripts/provider-governed-proposal-smoke.sh"]),
