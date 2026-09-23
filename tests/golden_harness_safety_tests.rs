@@ -73,6 +73,11 @@ fn add(a: i32, b: i32) -> i32 {
         .output()?;
 
     Command::new("git")
+        .args(&["config", "core.autocrlf", "false"])
+        .current_dir(&repo_path)
+        .output()?;
+
+    Command::new("git")
         .args(&["add", "."])
         .current_dir(&repo_path)
         .output()?;

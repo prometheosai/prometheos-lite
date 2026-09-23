@@ -28,6 +28,7 @@ fn init_repo(tag: &str) -> tempfile::TempDir {
     g(&["init", "-q"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "T"]);
+    g(&["config", "core.autocrlf", "false"]);
     std::fs::write(
         repo.join("src/lib.rs"),
         "pub mod util;\nuse crate::util::helper;\npub fn top() -> u32 { helper() }\n",

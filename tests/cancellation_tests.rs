@@ -44,6 +44,7 @@ fn temp_repo() -> (TempDir, PathBuf) {
     git(&repo, &["init"]);
     git(&repo, &["config", "user.email", "t@t"]);
     git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(
         repo.join("src/calc.rs"),

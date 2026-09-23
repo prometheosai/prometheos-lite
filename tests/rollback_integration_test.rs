@@ -43,6 +43,12 @@ async fn setup_temp_repo() -> TempDir {
         .output()
         .expect("Failed to set git name");
 
+    Command::new("git")
+        .args(["config", "core.autocrlf", "false"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to set core.autocrlf");
+
     temp_dir
 }
 

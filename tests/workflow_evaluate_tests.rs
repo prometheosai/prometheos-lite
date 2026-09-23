@@ -29,6 +29,7 @@ fn temp_repo() -> (TempDir, PathBuf) {
     git(&repo, &["init"]);
     git(&repo, &["config", "user.email", "t@t"]);
     git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(
         repo.join("src/calc.rs"),
@@ -2339,13 +2340,15 @@ async fn heartbeat_loss_during_generation_prevents_publication() {
     }
 }
 
-// Validation command that blocks for ~2s so the test can steal ownership
-// while evaluation is definitely in the Validating state.
+// Validation command that blocks long enough for the test to steal
+// ownership while evaluation is definitely in the Validating state, even
+// when the heartbeat renewal task is starved by parallel-suite CPU/disk
+// contention (~5s gives the 100ms heartbeat ~50 schedule opportunities).
 #[cfg(windows)]
 const BLOCKING_VALIDATION: &str =
-    "ping -n 3 127.0.0.1 >nul & findstr /L generated src\\generated_patch.rs";
+    "ping -n 6 127.0.0.1 >nul & findstr /L generated src\\generated_patch.rs";
 #[cfg(not(windows))]
-const BLOCKING_VALIDATION: &str = "sleep 2 && grep -qF 'generated' src/generated_patch.rs";
+const BLOCKING_VALIDATION: &str = "sleep 5 && grep -qF 'generated' src/generated_patch.rs";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn heartbeat_loss_during_validation_prevents_publication() {
@@ -2398,7 +2401,19 @@ async fn heartbeat_loss_during_validation_prevents_publication() {
 
     // Entry is definitely Validating (blocking validation command is running).
     // Steal ownership — the heartbeat will detect it within ~100ms.
+    //
+    // The theft read-modify-write MUST hold the same workflow file lock the
+    // heartbeat renewal uses. Without the lock, an in-flight renewal (load →
+    // update → save) can interleave with the raw theft write: the renewal's
+    // save then restores the original owner on top of the theft, silently
+    // undoing it and letting evaluate complete successfully — a race that
+    // only shows under parallel-suite load.
     let evidence_base = repo.join(".prometheos").join("evidence");
+    let registry_lock = prometheos_lite::workflow::evaluate::WorkflowFileLock::acquire(
+        &repo,
+        "proposal_registry.lock",
+    )
+    .expect("failed to acquire registry lock for theft");
     let mut registry: prometheos_lite::workflow::evaluate::ProposalRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();
     for entry in registry.entries.values_mut() {
@@ -2410,10 +2425,14 @@ async fn heartbeat_loss_during_validation_prevents_publication() {
         serde_json::to_string_pretty(&registry).unwrap(),
     )
     .unwrap();
+    drop(registry_lock);
 
     // Wait for the heartbeat to have a chance to detect the theft before the
-    // blocking validation command completes.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // blocking validation command completes. The blocking validation runs
+    // ~2s; 1200ms is 12 heartbeat intervals yet stays inside that window,
+    // so a starved renewal task (parallel-suite CPU contention) still gets
+    // scheduled before validation finishes.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
 
     let result = handle.await.unwrap();
     assert!(

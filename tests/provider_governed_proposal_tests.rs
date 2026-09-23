@@ -35,6 +35,7 @@ fn temp_repo() -> (TempDir, std::path::PathBuf) {
     git(&repo, &["init"]);
     git(&repo, &["config", "user.email", "t@t"]);
     git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src/main.rs"), "pub fn main() {}\n").unwrap();
     git(&repo, &["add", "-A"]);
