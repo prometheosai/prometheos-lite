@@ -32,13 +32,25 @@ fail() {
   exit 1
 }
 
-# Build the binary (uses the repo's configured target dir).
+# Build the binary (honors CARGO_TARGET_DIR like every cargo invocation).
 echo "Building prometheos binary..."
 ( cd "$REPO_ROOT" && cargo build --bin prometheos ) || fail "cargo build failed"
 
+# Resolve the target dir the way cargo itself does: CARGO_TARGET_DIR env,
+# else the configured target dir via cargo metadata, else the conventional
+# fallbacks. The binary can legitimately live outside the repo when the
+# build is routed to another volume.
 BIN=""
-for cand in target/debug/prometheos .cargo-target/debug/prometheos target/release/prometheos .cargo-target/release/prometheos; do
-  if [ -x "$REPO_ROOT/$cand" ]; then BIN="$REPO_ROOT/$cand"; break; fi
+TARGET_DIR="${CARGO_TARGET_DIR:-}"
+if [ -z "$TARGET_DIR" ]; then
+  TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+for cand in \
+  "$TARGET_DIR/debug/prometheos" \
+  "$TARGET_DIR/release/prometheos" \
+  "$REPO_ROOT/target/debug/prometheos" \
+  "$REPO_ROOT/.cargo-target/debug/prometheos"; do
+  if [ -n "$cand" ] && [ -x "$cand" ]; then BIN="$cand"; break; fi
 done
 [ -n "$BIN" ] || fail "prometheos binary not found after build"
 

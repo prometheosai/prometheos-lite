@@ -12,19 +12,26 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
-# Binary: prefer a prebuilt one, fall back to cargo run from the repo root.
-BIN=""
-for cand in "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe" \
-            "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe"; do
-  if [ -x "$cand" ]; then BIN="$cand"; break; fi
-done
+# Binary: prefer a prebuilt one, fall back to a build. Resolution honors
+# CARGO_TARGET_DIR / cargo metadata like cargo itself, so the build can be
+# legitimately routed to another volume.
+TARGET_DIR="${CARGO_TARGET_DIR:-}"
+if [ -z "$TARGET_DIR" ]; then
+  TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+find_bin() {
+  for cand in "$TARGET_DIR/debug/prometheos" "$TARGET_DIR/debug/prometheos.exe" \
+              "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe" \
+              "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then echo "$cand"; return 0; fi
+  done
+  return 1
+}
+BIN="$(find_bin)"
 if [ -z "$BIN" ]; then
   echo "Building prometheos..."
   ( cd "$REPO_ROOT" && cargo build --bin prometheos ) >/dev/null
-  for cand in "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe" \
-              "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe"; do
-    if [ -x "$cand" ]; then BIN="$cand"; break; fi
-  done
+  BIN="$(find_bin)"
 fi
 [ -n "$BIN" ] || { echo "FAIL: prometheos binary not found"; exit 1; }
 
