@@ -1666,6 +1666,7 @@ mod tests {
         run_git_cmd(&dir, &["init"]).unwrap();
         run_git_cmd(&dir, &["config", "user.email", "t@example.com"]).unwrap();
         run_git_cmd(&dir, &["config", "user.name", "t"]).unwrap();
+        run_git_cmd(&dir, &["config", "core.autocrlf", "false"]).unwrap();
         std::fs::write(dir.join("seed.txt"), "x").unwrap();
         run_git_cmd(&dir, &["add", "."]).unwrap();
         run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
@@ -1838,6 +1839,7 @@ mod tests {
         run_git_cmd(&dir, &["init"]).unwrap();
         run_git_cmd(&dir, &["config", "user.email", "t@example.com"]).unwrap();
         run_git_cmd(&dir, &["config", "user.name", "t"]).unwrap();
+        run_git_cmd(&dir, &["config", "core.autocrlf", "false"]).unwrap();
         std::fs::write(dir.join("seed.txt"), "x").unwrap();
         run_git_cmd(&dir, &["add", "."]).unwrap();
         run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
@@ -1943,6 +1945,7 @@ mod tests {
         run_git_cmd(&dir, &["init"]).unwrap();
         run_git_cmd(&dir, &["config", "user.email", "t@example.com"]).unwrap();
         run_git_cmd(&dir, &["config", "user.name", "t"]).unwrap();
+        run_git_cmd(&dir, &["config", "core.autocrlf", "false"]).unwrap();
         std::fs::write(dir.join("seed.txt"), "x").unwrap();
         run_git_cmd(&dir, &["add", "."]).unwrap();
         run_git_cmd(&dir, &["commit", "-m", "init"]).unwrap();
