@@ -21,6 +21,7 @@ fn local_repo_port_end_to_end_through_planner() {
     g(&["init", "-q"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "T"]);
+    g(&["config", "core.autocrlf", "false"]);
     std::fs::write(
         repo.join("src/lib.rs"),
         "pub fn compute(x: u32) -> u32 { x * 2 }\n",

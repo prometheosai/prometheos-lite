@@ -267,6 +267,11 @@ async fn test_patch_file_to_git_diff_workflow() {
         .current_dir(repo_path)
         .output()
         .expect("Failed to configure git user name");
+    Command::new("git")
+        .args(["config", "core.autocrlf", "false"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to pin core.autocrlf");
 
     // Create a test file
     let test_file = repo_path.join("test.txt");
@@ -438,6 +443,11 @@ async fn test_software_dev_flow_end_to_end() {
         .current_dir(repo_path)
         .output()
         .expect("Failed to configure git user name");
+    Command::new("git")
+        .args(["config", "core.autocrlf", "false"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to pin core.autocrlf");
 
     // Create a test file
     let test_file = repo_path.join("test.txt");

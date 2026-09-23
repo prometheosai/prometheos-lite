@@ -109,6 +109,7 @@ fn fixture_repo() -> tempfile::TempDir {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.email", "ci@example.com"]);
     git(root, &["config", "user.name", "ci"]);
+    git(root, &["config", "core.autocrlf", "false"]);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("src/main.rs"),
@@ -374,6 +375,7 @@ fn fixture_repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.email", "ci@example.com"]);
     git(root, &["config", "user.name", "ci"]);
+    git(root, &["config", "core.autocrlf", "false"]);
     for (path, contents) in files {
         let full = root.join(path);
         if let Some(parent) = full.parent() {

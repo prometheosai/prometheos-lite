@@ -53,7 +53,7 @@ prometheos work continue <work_id>
 - `work approve` records approval only.
 - No automatic patch application.
 - No source file mutation during analysis.
-- The golden-path CI verifies fixture source files are not modified.
+- The repository-native golden-path gate verifies fixture source files are not modified.
 
 ## What is not included yet
 

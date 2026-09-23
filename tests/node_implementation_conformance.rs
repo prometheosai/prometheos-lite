@@ -95,6 +95,7 @@ fn init_repo(root: &Path) {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.email", "ci@ci"]);
     git(root, &["config", "user.name", "ci"]);
+    git(root, &["config", "core.autocrlf", "false"]);
 }
 
 fn git_output(root: &Path, args: &[&str]) -> String {
@@ -140,6 +141,7 @@ fn fixture_repo() -> tempfile::TempDir {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.email", "ci@example.com"]);
     git(root, &["config", "user.name", "ci"]);
+    git(root, &["config", "core.autocrlf", "false"]);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("src/main.rs"),

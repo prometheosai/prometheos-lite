@@ -1600,6 +1600,7 @@ mod tests {
         git_run(root, &["init", "-q"]);
         git_run(root, &["config", "user.email", "ci@example.com"]);
         git_run(root, &["config", "user.name", "ci"]);
+        git_run(root, &["config", "core.autocrlf", "false"]);
         for (path, contents) in files {
             let full = root.join(path);
             if let Some(parent) = full.parent() {

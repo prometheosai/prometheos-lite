@@ -18,8 +18,8 @@ Decision: present, documented, not stable alpha.
 
 ## Why it is not stable alpha yet
 
-- Frontend CI (build & typecheck) is now gated on PRs via `.github/workflows/frontend-ci.yml`.
-- Playwright/E2E coverage is not enforced in CI yet.
+- Frontend build, lint, and smoke checks run through the repository-native `frontend` suite.
+- Playwright/E2E coverage is not enforced in the repository-native gate yet.
 - Frontend/API integration is not part of the stable alpha golden path.
 - The stable alpha release can be used entirely through the CLI.
 - Routes and UI flows may change.
@@ -84,7 +84,7 @@ Safe to rely on for alpha:
 - Provenance
 - Local file-backed workbench state
 - Documented provider configuration
-- Frontend build & typecheck (enforced in CI via `.github/workflows/frontend-ci.yml`)
+- Frontend build, lint, and smoke verification (`scripts/local_ci.py run --suite frontend`)
 
 Not safe to rely on yet:
 
@@ -101,8 +101,8 @@ It should not be removed.
 
 It should not be promoted to stable alpha until at least:
 
-- [x] Frontend build is verified in CI (PR #60).
-- [x] Lint/typecheck pass in CI (PR #64).
+- [x] Frontend build is verified by the repository-owned gate.
+- [x] Lint/typecheck pass through the repository-owned gate.
 - [ ] At least one smoke or E2E test is enforced.
 - [ ] API server compatibility is covered by smoke tests.
 - [ ] README and alpha docs are updated accordingly.
@@ -111,6 +111,6 @@ Operational agent workflow is governed by the [Loop Engineering Protocol](../LOO
 
 ## Next recommended PRs
 
-- Add frontend lint/typecheck CI.
+- Keep frontend lint/typecheck in the repository-native gate.
 - Add minimal frontend smoke/E2E test.
 - Add frontend/API compatibility smoke once route coverage is stronger.

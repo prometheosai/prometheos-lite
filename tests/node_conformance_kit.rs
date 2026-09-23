@@ -449,6 +449,7 @@ fn defective_variants_fail_per_category_with_specific_diagnostics() {
     g(&["init", "-q"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "T"]);
+    g(&["config", "core.autocrlf", "false"]);
     std::fs::write(repo.join("f.txt"), "x\n").unwrap();
     g(&["add", "."]);
     g(&["commit", "-qm", "c1"]);

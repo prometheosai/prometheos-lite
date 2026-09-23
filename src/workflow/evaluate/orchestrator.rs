@@ -2309,6 +2309,7 @@ mod tests {
         git(&repo, &["init", "-q"]);
         git(&repo, &["config", "user.email", "test@example.com"]);
         git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("README.md"), "base\n").expect("write base file");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "base"]);

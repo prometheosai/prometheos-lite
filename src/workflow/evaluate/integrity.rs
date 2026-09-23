@@ -96,6 +96,7 @@ mod tests {
         run(&["init", "-q"]);
         run(&["config", "user.email", "t@t"]);
         run(&["config", "user.name", "t"]);
+        run(&["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("file.txt"), "hello").unwrap();
         run(&["add", "-A"]);
         run(&["commit", "-qm", "init"]);

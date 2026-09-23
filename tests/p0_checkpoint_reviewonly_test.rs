@@ -51,6 +51,11 @@ fn create_test_repo() -> tempfile::TempDir {
         .current_dir(repo_root)
         .output()
         .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "core.autocrlf", "false"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap();
 
     // Create initial file and commit
     let src_dir = repo_root.join("src");

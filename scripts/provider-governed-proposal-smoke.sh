@@ -36,6 +36,10 @@ cd "$REPO"
 git init -q
 git config user.email "smoke@prometheos.local"
 git config user.name "smoke"
+# Pin line-ending handling: fixture determinism must not depend on host
+# git config. Some Windows installs set core.autocrlf=true system-wide,
+# whose per-file filter process races AV scanners on fresh object writes.
+git config core.autocrlf false
 
 cat > src/main.rs <<'EOF'
 pub fn main() {}

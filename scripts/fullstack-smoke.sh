@@ -32,13 +32,31 @@ fail() {
   exit 1
 }
 
-# Build the binary (uses the repo's configured target dir).
+# Build the binary (honors CARGO_TARGET_DIR like every cargo invocation).
 echo "Building prometheos binary..."
 ( cd "$REPO_ROOT" && cargo build --bin prometheos ) || fail "cargo build failed"
 
+# Resolve the target dir the way cargo itself does: CARGO_TARGET_DIR env,
+# else the configured target dir via cargo metadata. The binary can
+# legitimately live outside the repo when the build is routed to another
+# volume. Shared resolution (normalize-before-classify, relative anchored
+# to the repo root) lives in scripts/lib/target_dir.sh, covered by
+# scripts/test_target_dir.sh in the smoke chain.
+source "$REPO_ROOT/scripts/lib/target_dir.sh"
+TARGET_DIR="${CARGO_TARGET_DIR:-}"
+if [ -z "$TARGET_DIR" ]; then
+  TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+TARGET_DIR="$(resolve_target_dir "$TARGET_DIR" "$REPO_ROOT")"
 BIN=""
-for cand in target/debug/prometheos .cargo-target/debug/prometheos target/release/prometheos .cargo-target/release/prometheos; do
-  if [ -x "$REPO_ROOT/$cand" ]; then BIN="$REPO_ROOT/$cand"; break; fi
+# .exe candidates are explicit: MSYS bash transparently appends .exe for
+# some operations, but WSL bash does not — the loop must not depend on it.
+for cand in \
+  "$TARGET_DIR/debug/prometheos" "$TARGET_DIR/debug/prometheos.exe" \
+  "$TARGET_DIR/release/prometheos" "$TARGET_DIR/release/prometheos.exe" \
+  "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe" \
+  "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe"; do
+  if [ -n "$cand" ] && [ -x "$cand" ]; then BIN="$cand"; break; fi
 done
 [ -n "$BIN" ] || fail "prometheos binary not found after build"
 

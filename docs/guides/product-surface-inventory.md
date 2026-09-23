@@ -119,13 +119,13 @@ Every identifiable surface in PrometheOS Lite, classified by maturity.
 | OpenTelemetry integration | internal | Trace export |
 | Flow budget guards | internal | Execution budget enforcement |
 
-## CI
+## Repository-native verification
 
 | Surface | Status | Notes |
 |---|---|---|
-| Rust Checks (fmt, clippy, test, build) | stable alpha | Runs on every PR/push to main |
-| Repo Workbench golden path | stable alpha | Verifies fixture files unchanged |
-| Linux install smoke | stable alpha | Verifies `cargo install` + version |
+| Rust Checks (fmt, clippy, test, build) | stable alpha | Runs through `scripts/local_ci.py` and emits exact-commit evidence |
+| Repo Workbench golden path | stable alpha | Runs locally and verifies fixture files unchanged |
+| Linux install smoke | stable alpha | Verifies `cargo install` + version through local evidence |
 | Guardrail tests | stable alpha | Policy enforcement tests |
 | Anti-placeholder check | stable alpha | Prevents TODO/mock/stub in production code |
 | Patch provider diagnostics | stable alpha | Verifies patch provider error handling |

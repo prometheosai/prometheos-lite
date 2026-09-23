@@ -992,6 +992,7 @@ mod tests {
             g(&["init", "-q"]);
             g(&["config", "user.email", "t@t"]);
             g(&["config", "user.name", "T"]);
+            g(&["config", "core.autocrlf", "false"]);
             std::fs::write(dir.join("a.txt"), "one\n").unwrap();
             g(&["add", "."]);
             g(&["commit", "-q", "-m", "c1"]);

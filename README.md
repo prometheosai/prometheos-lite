@@ -33,8 +33,8 @@ Development sequencing is tracked in the [governed execution roadmap](https://gi
 - Provider configuration docs and tests
 - Mock OpenAI-compatible provider integration tests
 - Optional ignored/manual local endpoint smoke test
-- Linux install smoke CI
-- Golden path CI
+- repository-native Linux install smoke evidence
+- repository-native golden-path evidence
 
 ## Quick start
 
@@ -82,7 +82,7 @@ PrometheOS Lite is intentionally conservative.
 - `work approve` records approval only.
 - It does not modify repository source files during analysis.
 - It does not apply patches automatically.
-- The golden path CI verifies that fixture source files are not modified.
+- The repository-native golden-path gate verifies that fixture source files are not modified.
 
 ## Architecture at a glance
 

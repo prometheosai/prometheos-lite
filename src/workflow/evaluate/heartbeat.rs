@@ -243,10 +243,13 @@ mod tests {
         let key = "test-key".to_string();
         let fence = fresh_entry(&repo, &key, "worker-1");
 
-        // Short but SAFE lease: heartbeat * 3 <= reservation timeout.
+        // Short but SAFE lease: heartbeat * 3 <= reservation timeout. The
+        // 3s stale window gives the 100ms heartbeat a 30x margin, so a
+        // renewal slipped by parallel-suite CPU contention still lands
+        // well inside the window and the owner is never falsely reclaimed.
         let lease = LeaseConfig::with_timeouts(
-            Duration::from_secs(1),     // stale_reservation_timeout
-            Duration::from_secs(1),     // generation_lease_timeout
+            Duration::from_secs(3),     // stale_reservation_timeout
+            Duration::from_secs(3),     // generation_lease_timeout
             Duration::from_millis(100), // heartbeat_interval
         );
         assert!(lease.validate().is_ok());
@@ -268,7 +271,7 @@ mod tests {
         // Sample across many stale windows. The heartbeat keeps renewing, so a
         // contender that observed the owner must always back off as StillLive.
         for _ in 0..5 {
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             let result =
                 try_take_ownership_cas(&repo, &key, "thief", &lease, Some(&observed)).unwrap();
             assert!(

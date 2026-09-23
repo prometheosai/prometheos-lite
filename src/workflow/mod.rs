@@ -1434,6 +1434,11 @@ mod tests {
         git(&repo, &["init"]);
         git(&repo, &["config", "user.email", "t@t"]);
         git(&repo, &["config", "user.name", "t"]);
+        // Host-independent line endings: fixture determinism must not
+        // depend on system-level core.autocrlf (Git-for-Windows defaults
+        // to `true`, whose CRLF filter races AV scanners on fresh
+        // .git/objects writes under parallel test load).
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(
             repo.join("src/calc.rs"),

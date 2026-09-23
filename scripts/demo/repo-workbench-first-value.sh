@@ -1,8 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FIXTURE="fixtures/repo-workbench/rust-risky"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FIXTURE="$REPO_ROOT/fixtures/repo-workbench/rust-risky"
 GOAL="Find risky code and suggest safe improvements"
+
+# Run from an isolated workdir so the demo never depends on (or mutates)
+# untracked state in the repo root (e.g. a stale prometheos.db created by
+# an older schema would make `work run` fail with a missing column).
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+cd "$WORK"
+
+# Binary: prefer a prebuilt one, fall back to a build. Resolution honors
+# CARGO_TARGET_DIR / cargo metadata like cargo itself, so the build can be
+# legitimately routed to another volume. Shared normalize-before-classify
+# resolution lives in scripts/lib/target_dir.sh (covered by
+# scripts/test_target_dir.sh in the smoke chain).
+source "$REPO_ROOT/scripts/lib/target_dir.sh"
+TARGET_DIR="${CARGO_TARGET_DIR:-}"
+if [ -z "$TARGET_DIR" ]; then
+  TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+TARGET_DIR="$(resolve_target_dir "$TARGET_DIR" "$REPO_ROOT")"
+# find_bin always exits 0: under `set -e` a failing command substitution
+# would terminate the script and make the cargo-build fallback below
+# unreachable from a clean start. Absence is signalled by empty output.
+find_bin() {
+  for cand in "$TARGET_DIR/debug/prometheos" "$TARGET_DIR/debug/prometheos.exe" \
+              "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe" \
+              "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then echo "$cand"; return 0; fi
+  done
+  return 0
+}
+BIN="$(find_bin)"
+if [ -z "$BIN" ]; then
+  echo "Building prometheos..."
+  ( cd "$REPO_ROOT" && cargo build --bin prometheos ) >/dev/null
+  BIN="$(find_bin)"
+fi
+[ -n "$BIN" ] || { echo "FAIL: prometheos binary not found"; exit 1; }
 
 echo "================================================"
 echo " PrometheOS Lite — Zero-to-First-Value Demo"
@@ -14,14 +52,14 @@ echo ""
 
 # Step 1: Create
 echo "--- Step 1: create work context ---"
-OUTPUT=$(cargo run -- work create \
+OUTPUT=$("$BIN" work create \
   --repo "$FIXTURE" \
   --goal "$GOAL" \
   --mode review \
   --json 2>&1)
 echo "$OUTPUT"
 
-WORK_ID=$(echo "$OUTPUT" | grep '"work_id"' | sed 's/.*"work_id": "\(.*\)",/\1/')
+WORK_ID=$(echo "$OUTPUT" | grep -o '"work_id": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 if [ -z "$WORK_ID" ]; then
   echo ""
   echo "ERROR: could not extract work_id from JSON output."
@@ -37,28 +75,28 @@ echo ""
 
 # Step 2: Run
 echo "--- Step 2: run analysis ---"
-cargo run -- work run "$WORK_ID" 2>&1
+"$BIN" work run "$WORK_ID" 2>&1
 echo ""
 echo "Next: prometheos work artifacts $WORK_ID"
 echo ""
 
 # Step 3: Artifacts
 echo "--- Step 3: list artifacts ---"
-cargo run -- work artifacts "$WORK_ID" 2>&1
+"$BIN" work artifacts "$WORK_ID" 2>&1
 echo ""
 echo "Next: prometheos work memory show $WORK_ID"
 echo ""
 
 # Step 4: Memory
 echo "--- Step 4: inspect memory ---"
-cargo run -- work memory show "$WORK_ID" 2>&1
+"$BIN" work memory show "$WORK_ID" 2>&1
 echo ""
 echo "Next: prometheos work continue $WORK_ID"
 echo ""
 
 # Step 5: Continue
 echo "--- Step 5: continue context ---"
-cargo run -- work continue "$WORK_ID" 2>&1
+"$BIN" work continue "$WORK_ID" 2>&1
 echo ""
 
 echo "================================================"
