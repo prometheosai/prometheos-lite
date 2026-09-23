@@ -50,7 +50,11 @@ SUITE_SPEC: dict[str, list[dict[str, object]]] = {
         {"name": "clippy", "program": "cargo", "args": ["clippy"]},
         {"name": "doc tests", "program": "cargo", "args": ["--doc"]},
         {"name": "release build", "program": "cargo", "args": ["build", "--release"]},
-        {"name": "all tests", "program": "cargo", "args": ["test", "--all-targets"]},
+        {
+            "name": "all tests",
+            "program": "cargo",
+            "args": ["test", "--all-targets", "--all-features", "--test-threads"],
+        },
         {
             "name": "guardrails",
             "program": "cargo",
@@ -161,7 +165,16 @@ def rust_core() -> list[dict[str, object]]:
         ("clippy", ["cargo", "clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]),
         ("doc tests", ["cargo", "test", "--doc", "--all-features"]),
         ("release build", ["cargo", "build", "--release", "--all-features"]),
-        ("all tests", ["cargo", "test", "--all-targets", "--all-features"]),
+        # Bounded test-thread count: every test still runs; the cap only
+        # limits how many git-fixture tests perform .git/objects writes at
+        # the same instant. Under full default parallelism (~host cores),
+        # real-time AV scanning of fresh object files produces transient
+        # "unable to write file .git/objects/...: Permission denied" races
+        # that are environmental, not code defects (each affected test
+        # passes standalone). The repo protocol already uses serialized
+        # baselines; 4 preserves genuine concurrency (locking, heartbeat,
+        # cancellation races) while staying under the contention threshold.
+        ("all tests", ["cargo", "test", "--all-targets", "--all-features", "--", "--test-threads", "4"]),
         ("guardrails", ["cargo", "test", "--test", "guardrail_tests", "--test", "guardrail_integration_tests"]),
         ("runtime policy", ["cargo", "test", "--test", "runtime_policy_enforcement", "--quiet"]),
         ("verification policy", ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]),
