@@ -39,12 +39,23 @@ echo "Building prometheos binary..."
 # Resolve the target dir the way cargo itself does: CARGO_TARGET_DIR env,
 # else the configured target dir via cargo metadata, else the conventional
 # fallbacks. The binary can legitimately live outside the repo when the
-# build is routed to another volume.
-BIN=""
+# build is routed to another volume. A relative CARGO_TARGET_DIR is
+# anchored to the repository root.
 TARGET_DIR="${CARGO_TARGET_DIR:-}"
 if [ -z "$TARGET_DIR" ]; then
   TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 fi
+case "$TARGET_DIR" in
+  "" ) ;;
+  /* ) ;;
+  [A-Za-z]:* ) ;;
+  //* ) ;;
+  *  ) TARGET_DIR="$REPO_ROOT/$TARGET_DIR" ;;
+esac
+# Normalize Windows separators so `[ -x ]` works regardless of whether
+# MSYS performed its env-var path conversion (see demo script note).
+TARGET_DIR="${TARGET_DIR//\\//}"
+BIN=""
 for cand in \
   "$TARGET_DIR/debug/prometheos" \
   "$TARGET_DIR/release/prometheos" \

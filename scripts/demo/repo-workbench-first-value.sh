@@ -19,13 +19,32 @@ TARGET_DIR="${CARGO_TARGET_DIR:-}"
 if [ -z "$TARGET_DIR" ]; then
   TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 fi
+# A relative CARGO_TARGET_DIR is resolved against the repository root —
+# cargo treats it as relative to its working directory, and after
+# `cd "$WORK"` below that would be the temp dir, not the repo. Absolute
+# POSIX paths, Windows drive paths (D:\...), and UNC paths pass through.
+case "$TARGET_DIR" in
+  "" ) ;;
+  /* ) ;;
+  [A-Za-z]:* ) ;;
+  //* ) ;;
+  *  ) TARGET_DIR="$REPO_ROOT/$TARGET_DIR" ;;
+esac
+# Normalize Windows separators: MSYS bash auto-converts path-like env
+# vars at startup, but a value set through other paths (or inherited from
+# native Windows without conversion) breaks `[ -x ]` on backslash paths.
+# Forward-slash Windows paths test fine in Git Bash and WSL alike.
+TARGET_DIR="${TARGET_DIR//\\//}"
+# find_bin always exits 0: under `set -e` a failing command substitution
+# would terminate the script and make the cargo-build fallback below
+# unreachable from a clean start. Absence is signalled by empty output.
 find_bin() {
   for cand in "$TARGET_DIR/debug/prometheos" "$TARGET_DIR/debug/prometheos.exe" \
               "$REPO_ROOT/.cargo-target/debug/prometheos" "$REPO_ROOT/.cargo-target/debug/prometheos.exe" \
               "$REPO_ROOT/target/debug/prometheos" "$REPO_ROOT/target/debug/prometheos.exe"; do
     if [ -n "$cand" ] && [ -x "$cand" ]; then echo "$cand"; return 0; fi
   done
-  return 1
+  return 0
 }
 BIN="$(find_bin)"
 if [ -z "$BIN" ]; then
