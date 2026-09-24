@@ -784,3 +784,36 @@ fn two_connection_cancel_race_under_sqlite_busy() {
         .unwrap();
     assert_eq!(status, "\"Cancelled\"");
 }
+
+/// #222: the cancel endpoint fires every token registered for the context
+/// after the durable flip commits (the run endpoint registers one token per
+/// in-flight run). Deterministic without an actual run: a manually
+/// registered listener token must be signalled by the cancel request. Also
+/// proves the guard's RAII cleanup (drop removes the token; a later fire is
+/// a no-op) and that the idempotent re-cancel fires nothing new.
+#[tokio::test]
+async fn cancel_endpoint_fires_registered_run_tokens() {
+    let (state, _db_path, _tmp) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state.clone());
+
+    let id = create_context(&app, "user-fire", "registry fire").await;
+    let guard = state.run_cancels.register(&id);
+    let listener = guard.token();
+
+    let (status, body) = cancel(&app, "user-fire", &id, "stop the in-flight run").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("Cancelled"));
+
+    assert!(
+        listener.is_cancelled(),
+        "cancel must fire the registered run token after the durable flip"
+    );
+
+    // RAII cleanup: once the run guard drops, no token remains.
+    drop(guard);
+    assert_eq!(state.run_cancels.fire(&id), 0);
+
+    // Idempotent re-cancel succeeds and fires nothing new.
+    let (status, _body) = cancel(&app, "user-fire", &id, "cancel again").await;
+    assert_eq!(status, StatusCode::OK);
+}

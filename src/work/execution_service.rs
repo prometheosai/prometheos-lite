@@ -20,6 +20,7 @@ use crate::work::{
         WorkPhase, WorkStatus,
     },
 };
+use crate::workflow::evaluate::CancellationToken;
 
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
@@ -130,11 +131,28 @@ impl WorkExecutionService {
 
     /// Execute a flow within a WorkContext using direct flow file loading
     /// This bypasses intent classification and loads the flow directly from flow_ref
+    ///
+    /// Returns `Ok(None)` when cancellation was observed at the post-flow
+    /// checkpoint: the flow ran to completion, but every durable write for
+    /// this iteration (artifacts, phase, status, context snapshot) was
+    /// skipped, so a cancelled context accumulates no post-cancel progress
+    /// and no orphan rows.
+    ///
+    /// Cancellation-safety of the selected checkpoint (#222): this is the
+    /// ONLY safe observation point inside an iteration. At this point
+    /// `flow.run()` has returned, so every awaitable the flow owned —
+    /// provider HTTP requests, and critically tool-node child processes
+    /// (`tokio::process::Command` without `kill_on_drop`) — has completed.
+    /// Dropping the iteration future at an arbitrary earlier suspension
+    /// point would orphan a live tool process mid-mutation; that is why
+    /// this method checks cancellation here instead of the caller
+    /// select-dropping the in-flight future.
     pub async fn execute_flow_in_context(
         &self,
         context: &mut WorkContext,
         flow_ref: &str,
-    ) -> Result<super::Artifact> {
+        token: &CancellationToken,
+    ) -> Result<Option<super::Artifact>> {
         // Check autonomy level - Chat mode requires human confirmation for all actions
         if context.autonomy_level == AutonomyLevel::Chat {
             self.work_context_service
@@ -169,6 +187,30 @@ impl WorkExecutionService {
             .flow_execution_service
             .execute_flow_file(&flow_file, &context.goal, options)
             .await?;
+
+        // Post-flow cancellation checkpoint (#222): the selected, proven
+        // cancellation-safe boundary. `flow.run()` has completed, so no
+        // child process or in-flight request is owned by this future; and
+        // no durable write for this iteration has started yet, so skipping
+        // the write sequence below leaves zero orphan rows. The park is a
+        // no-op in production; tests use it to make this checkpoint
+        // deterministic. The token covers the same-process signal (the
+        // /cancel handler fires it after the durable flip); the stored
+        // status re-read covers every other process uniformly.
+        token.park_at_safe_point().await;
+        let observed_cancelled = token.is_cancelled()
+            || self
+                .work_context_service
+                .get_context(&context.id)?
+                .is_some_and(|stored| stored.is_cancelled());
+        if observed_cancelled {
+            tracing::info!(
+                context_id = %context.id,
+                flow = %flow_ref,
+                "cancellation observed at post-flow checkpoint; skipping all iteration writes"
+            );
+            return Ok(None);
+        }
 
         if !final_output.success {
             let error_message = final_output
@@ -258,11 +300,27 @@ impl WorkExecutionService {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("Flow produced no artifacts"))?;
-        Ok(primary_artifact)
+        Ok(Some(primary_artifact))
     }
 
-    /// Continue a WorkContext
+    /// Continue a WorkContext (no external cancellation signal; the loop in
+    /// `WorkOrchestrator::run_until_blocked_or_complete_with_token` and the
+    /// API run endpoint use the `_with_token` variant).
     pub async fn continue_context(&self, context_id: &str) -> Result<WorkContext> {
+        let token = CancellationToken::new();
+        self.continue_context_with_token(context_id, &token).await
+    }
+
+    /// Continue a WorkContext, observing `token` at the post-flow
+    /// cancellation checkpoint. When cancellation is observed there, all
+    /// durable writes for the iteration are skipped and the freshly stored
+    /// context is returned (its status will be `Cancelled` when the durable
+    /// cancel has landed), so the caller can exit gracefully.
+    pub async fn continue_context_with_token(
+        &self,
+        context_id: &str,
+        token: &CancellationToken,
+    ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
             .get_context(context_id)?
@@ -320,9 +378,22 @@ impl WorkExecutionService {
 
         // Execute flow
         let start_time = std::time::Instant::now();
-        self.execute_flow_in_context(&mut context, &next_flow)
+        let primary_artifact = self
+            .execute_flow_in_context(&mut context, &next_flow, token)
             .await?;
         let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        // Cancellation observed at the post-flow checkpoint: the flow ran,
+        // but every write for this iteration (performance record, status,
+        // context snapshot) is skipped and the durable state is returned
+        // untouched by this loop.
+        let Some(_primary_artifact) = primary_artifact else {
+            let fresh = self
+                .work_context_service
+                .get_context(context_id)?
+                .ok_or_else(|| anyhow::anyhow!("Context not found"))?;
+            return Ok(fresh);
+        };
 
         // Create and store FlowPerformanceRecord
         let performance_record = FlowPerformanceRecord {
@@ -395,8 +466,19 @@ impl WorkExecutionService {
         context.autonomy_level = AutonomyLevel::Review;
 
         // Execute initial planning flow
-        self.execute_flow_in_context(&mut context, "planning.flow.yaml")
+        let planned = self
+            .execute_flow_in_context(
+                &mut context,
+                "planning.flow.yaml",
+                &CancellationToken::new(),
+            )
             .await?;
+        let Some(_planned_artifact) = planned else {
+            anyhow::bail!(
+                "planning for work context {} was cancelled before any progress was persisted",
+                context.id
+            );
+        };
 
         // Update phase to AwaitingApproval after planning
         self.work_context_service
@@ -415,9 +497,185 @@ impl WorkExecutionService {
 mod tests {
     use super::*;
     use crate::db::Db;
+    use crate::db::repository::WorkContextEventOperations;
     use crate::flow::RuntimeContext;
+    use crate::flow::intelligence::{LlmProvider, ModelRouter, StreamCallback};
     use crate::harness::completion::CompletionDecision;
     use crate::work::types::{HarnessMetadata, WorkDomain, WorkPhase, WorkStatus};
+
+    /// Deterministic LLM provider (same contract as the e2e test provider)
+    /// so planning.flow.yaml runs to completion without network access.
+    struct DeterministicTestProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DeterministicTestProvider {
+        async fn generate(&self, prompt: &str) -> anyhow::Result<String> {
+            if prompt.to_lowercase().contains("plan") {
+                return Ok(
+                    "1. Analyze requirements\n2. Implement changes\n3. Validate with tests"
+                        .to_string(),
+                );
+            }
+            Ok(format!("Generated output for: {}", prompt))
+        }
+
+        async fn generate_stream(
+            &self,
+            prompt: &str,
+            callback: StreamCallback,
+        ) -> anyhow::Result<String> {
+            let output = self.generate(prompt).await?;
+            callback(&output);
+            Ok(output)
+        }
+
+        fn name(&self) -> &str {
+            "deterministic-test-provider"
+        }
+
+        fn model(&self) -> &str {
+            "deterministic-v1"
+        }
+    }
+
+    fn setup_execution_service() -> (Arc<WorkContextService>, Arc<WorkExecutionService>, Arc<Db>) {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+        let model_router = Arc::new(ModelRouter::new(vec![Box::new(DeterministicTestProvider)]));
+        let runtime = Arc::new(RuntimeContext::default().with_model_router(model_router));
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime).unwrap());
+        let execution_service = Arc::new(WorkExecutionService::new(
+            work_context_service.clone(),
+            flow_execution_service,
+        ));
+        (work_context_service, execution_service, db)
+    }
+
+    fn general_review_context(work_context_service: &WorkContextService) -> WorkContext {
+        let mut context = work_context_service
+            .create_context(
+                "user-1".to_string(),
+                "Plan the work".to_string(),
+                WorkDomain::General,
+                "Create a plan".to_string(),
+            )
+            .unwrap();
+        context.autonomy_level = AutonomyLevel::Review;
+        work_context_service.update_context(&context).unwrap();
+        context
+    }
+
+    fn count(db: &Db, table: &str) -> i64 {
+        db.conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// #222 mid-iteration checkpoint: cancellation observed after the flow
+    /// completed (the proven cancellation-safe boundary) skips EVERY
+    /// durable write for the iteration — no artifact rows, no flow
+    /// performance record, and no context-row rewrite after the durable
+    /// cancel flip. Deterministic: the flip+fire happen while the iteration
+    /// is in flight; the park barrier rendezvous guarantees the test's
+    /// release is observed at the checkpoint, never racing it.
+    #[tokio::test]
+    async fn post_flow_checkpoint_skips_all_writes_on_cancellation() {
+        let (wcs, execution_service, db) = setup_execution_service();
+        let context = general_review_context(&wcs);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+
+        let artifacts_before = count(&db, "work_artifacts");
+        let performance_before = count(&db, "flow_performance_records");
+
+        let svc = execution_service.clone();
+        let wcs_task = wcs.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            let mut ctx = wcs_task.get_context(&ctx_id).unwrap().unwrap();
+            svc.execute_flow_in_context(&mut ctx, "planning.flow.yaml", &task_token)
+                .await
+        });
+
+        // Cancel lands mid-iteration (the flow is running concurrently):
+        // durable flip first, then the token fire — production ordering.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        let updated_at_after_flip: String = db
+            .conn()
+            .query_row(
+                "SELECT updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        token.cancel();
+
+        // Rendezvous with the parked checkpoint and release it.
+        barrier.wait().await;
+
+        let result = handle.await.unwrap().unwrap();
+        assert!(
+            result.is_none(),
+            "checkpoint must skip the iteration's writes on cancellation"
+        );
+
+        // No orphan artifact rows, no post-cancel progress rows.
+        assert_eq!(count(&db, "work_artifacts"), artifacts_before);
+        assert_eq!(count(&db, "flow_performance_records"), performance_before);
+
+        // The context row was never rewritten after the flip: terminal
+        // Cancelled state untouched (no resurrection attempt even tried).
+        let (status, updated_at): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT status, updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(status.contains("Cancelled"));
+        assert_eq!(updated_at, updated_at_after_flip);
+
+        // Event stream: the flip's audit event, nothing from this
+        // iteration (the execution_interrupted evidence is the loop's
+        // responsibility, not the step's).
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"context_created"));
+        assert!(types.contains(&"context_cancelled"));
+        assert!(!types.contains(&"artifact_added"));
+        assert!(!types.contains(&"status_changed"));
+        assert!(!types.contains(&"execution_interrupted"));
+    }
+
+    /// Negative control: without cancellation the same flow persists its
+    /// artifacts — the checkpoint must not skip normal persistence.
+    #[tokio::test]
+    async fn post_flow_checkpoint_does_not_skip_normal_persistence() {
+        let (wcs, execution_service, db) = setup_execution_service();
+        let mut context = general_review_context(&wcs);
+
+        let artifacts_before = count(&db, "work_artifacts");
+        let token = CancellationToken::new();
+        let result = execution_service
+            .execute_flow_in_context(&mut context, "planning.flow.yaml", &token)
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_some(),
+            "uncancelled flow must return its artifact"
+        );
+        assert_eq!(
+            count(&db, "work_artifacts"),
+            artifacts_before + 1,
+            "uncancelled flow must persist its artifact"
+        );
+    }
 
     #[tokio::test]
     async fn test_work_execution_service_creation() {

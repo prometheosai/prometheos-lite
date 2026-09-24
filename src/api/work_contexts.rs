@@ -585,6 +585,15 @@ pub async fn cancel_work_context(
             }
         })?;
 
+    // #222: the durable flip has committed — wake any in-flight run
+    // registered for this context so it stops at its next cancellation
+    // checkpoint. No registered run (or an already-fired token) is a
+    // no-op; this never retroactively changes the durable outcome.
+    let fired = state.run_cancels.fire(&id);
+    if fired > 0 {
+        tracing::debug!("cancelled work context {id}: signalled {fired} in-flight run(s)");
+    }
+
     Ok(Json(WorkContextResponse::from(context)))
 }
 
@@ -689,10 +698,18 @@ pub async fn run_until_complete(
         max_cost: req.max_cost.unwrap_or(1.0),
         ..Default::default()
     };
+    // #222: register a cancellation token for the duration of this run so
+    // /cancel can wake the loop at its next checkpoint. The guard removes
+    // exactly this token when the request completes. A run that observes
+    // cancellation returns the cancelled context as a normal 200 — the
+    // durable `context_cancelled` + `execution_interrupted` events are the
+    // audit record.
+    let run_guard = state.run_cancels.register(&id);
     let context = orchestrator
-        .run_until_blocked_or_complete(id, limits)
+        .run_until_blocked_or_complete_with_token(id, limits, run_guard.token())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    drop(run_guard);
     Ok(Json(WorkContextResponse::from(context)))
 }
 

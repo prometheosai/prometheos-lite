@@ -10,10 +10,13 @@ use super::evolution_engine::EvolutionEngine;
 use super::execution_service::WorkExecutionService;
 use super::service::WorkContextService;
 use super::types::{
-    AutonomyLevel, HarnessMetadata, TestExecutionResult, WorkContext, WorkDomain, WorkStatus,
+    AutonomyLevel, HarnessMetadata, TestExecutionResult, WorkContext, WorkDomain, WorkPhase,
+    WorkStatus,
 };
+use crate::db::repository::WorkContextEventOperations;
 use crate::harness::completion::CompletionDecision;
 use crate::intent::{Intent, IntentClassifier};
+use crate::workflow::evaluate::CancellationToken;
 
 /// EvolutionTrigger - when to trigger playbook evolution
 #[derive(Debug, Clone, Copy)]
@@ -316,11 +319,53 @@ impl WorkOrchestrator {
         Ok(context)
     }
 
-    /// Run context until blocked or complete, respecting limits
+    /// Run context until blocked or complete, respecting limits. No external
+    /// cancellation signal: the loop still stops gracefully on a durable
+    /// `Cancelled` status (observed at the iteration entry guard), which is
+    /// how cross-process cancels reach a run.
     pub async fn run_until_blocked_or_complete(
         &self,
         context_id: String,
         limits: ExecutionLimits,
+    ) -> Result<WorkContext> {
+        self.run_until_blocked_or_complete_with_token(context_id, limits, CancellationToken::new())
+            .await
+    }
+
+    /// Run context until blocked or complete, observing `token` at every
+    /// cancellation checkpoint (#222).
+    ///
+    /// Cancellation semantics — deliberately cooperative, never an abrupt
+    /// kill:
+    /// - The in-flight iteration is **never select-dropped**: a tool node
+    ///   owns its child process (`tokio::process::Command` without
+    ///   `kill_on_drop`), so severing the future at an arbitrary suspension
+    ///   point would orphan a live, workspace-mutating process. The
+    ///   iteration completes, but `WorkExecutionService` observes
+    ///   cancellation at its post-flow pre-persist checkpoint and skips
+    ///   every durable write, so a cancelled context gains no post-cancel
+    ///   progress and no orphan rows.
+    /// - Same-process cancels (`/cancel` fires the registered token) are
+    ///   observed at the next checkpoint: the loop top or the iteration's
+    ///   post-flow checkpoint.
+    /// - Cross-process cancels (another process or server instance flips
+    ///   the durable status) are observed by the same checkpoints through
+    ///   the status re-reads — graceful polling after control returns to
+    ///   the loop, never an immediate mid-step wake. Honest limitation: the
+    ///   in-flight step finishes its work (provider calls, tools) before
+    ///   the checkpoint discards its results.
+    /// - Every graceful stop persists a mandatory `execution_interrupted`
+    ///   event (with `checkpoint_ref: null` — the legacy run path has no
+    ///   graph checkpoints; the graph-run execution slice owns real
+    ///   checkpoint refs). If that evidence insert fails, the run returns
+    ///   `Err` — the durable `Cancelled` status and its `context_cancelled`
+    ///   event are unaffected, but the missing interruption evidence is
+    ///   surfaced, never swallowed.
+    pub async fn run_until_blocked_or_complete_with_token(
+        &self,
+        context_id: String,
+        limits: ExecutionLimits,
+        token: CancellationToken,
     ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
@@ -341,6 +386,11 @@ impl WorkOrchestrator {
         let start = std::time::Instant::now();
 
         loop {
+            // Test-deterministic safe point (no-op in production): parks
+            // the loop between iterations so tests can flip the durable
+            // status and fire the token before the next iteration starts.
+            token.park_at_safe_point().await;
+
             // Check limits
             if iterations >= limits.max_iterations {
                 self.work_context_service
@@ -370,16 +420,80 @@ impl WorkOrchestrator {
                 break;
             }
 
-            // Execute next step using WorkExecutionService
-            context = self
+            // Execute next step using WorkExecutionService, observing the
+            // token at the iteration's post-flow cancellation checkpoint.
+            match self
                 .work_execution_service
-                .continue_context(&context.id)
-                .await?;
-
-            iterations += 1;
+                .continue_context_with_token(&context.id, &token)
+                .await
+            {
+                Ok(next) => {
+                    context = next;
+                    iterations += 1;
+                    // Cancellation observed by this iteration (post-flow
+                    // checkpoint or a completed write sequence racing the
+                    // durable flip): graceful stop with mandatory evidence.
+                    if context.is_cancelled() {
+                        let phase = context.current_phase;
+                        self.record_execution_interrupted(&context.id, iterations, &phase)?;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // A cancelled context refuses to advance: that is a
+                    // graceful stop, not a failure. Covers cancels that
+                    // land between the loop's checks and the iteration's
+                    // entry guard — including from other processes.
+                    if let Some(stored) = self.work_context_service.get_context(&context.id)?
+                        && stored.is_cancelled()
+                    {
+                        let phase = stored.current_phase;
+                        self.record_execution_interrupted(&context.id, iterations, &phase)?;
+                        context = stored;
+                        break;
+                    }
+                    return Err(e);
+                }
+            }
         }
 
         Ok(context)
+    }
+
+    /// Persist the mandatory `execution_interrupted` durable event for a
+    /// run that stopped because its context was cancelled (#222). This is
+    /// evidence, not telemetry: an insertion failure propagates as `Err` so
+    /// missing interruption evidence is always surfaced, never swallowed.
+    ///
+    /// `checkpoint_ref` is `null` by contract: the legacy WorkContext run
+    /// path produces no graph checkpoints. The graph-run execution slice
+    /// (#132 remaining work) owns real checkpoint refs; this slice must
+    /// not fabricate one.
+    fn record_execution_interrupted(
+        &self,
+        context_id: &str,
+        iterations: u32,
+        phase: &WorkPhase,
+    ) -> Result<()> {
+        let event = super::WorkContextEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            context_id.to_string(),
+            "execution_interrupted".to_string(),
+            serde_json::json!({
+                "reason": "cancelled",
+                "iterations": iterations,
+                "phase": format!("{:?}", phase),
+                "checkpoint_ref": Option::<String>::None,
+            }),
+        );
+        let db = self.work_context_service.get_db();
+        WorkContextEventOperations::create_event(&**db, &event)
+            .map(|_| ())
+            .with_context(|| {
+                format!(
+                    "failed to persist execution_interrupted evidence for work context {context_id}"
+                )
+            })
     }
 
     /// V1.4 Verification Loop - run plan → patch → test → failure → re-plan loop
@@ -810,6 +924,14 @@ impl WorkOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
+    use crate::db::repository::WorkContextEventOperations;
+    use crate::flow::RuntimeContext;
+    use crate::flow::execution_service::FlowExecutionService;
+    use crate::work::execution_service::WorkExecutionService;
+    use crate::work::playbook_resolver::PlaybookResolver;
+    use crate::work::service::WorkContextService;
+    use crate::work::types::WorkDomain;
 
     #[test]
     fn test_execution_limits_default() {
@@ -829,5 +951,371 @@ mod tests {
 
         assert_eq!(limits.max_iterations, 20);
         assert_eq!(limits.max_runtime_ms, 600_000);
+    }
+
+    /// Gated test provider: the flow blocks inside `generate()` until the
+    /// test fires `release`, and cancels `arrived` once it is inside
+    /// `generate()`. This gives cancellation tests a deterministic
+    /// mid-iteration state: the iteration is provably past both entry
+    /// checks and in flight, and the test controls exactly when the flow
+    /// is allowed to finish.
+    #[derive(Clone)]
+    struct Gate {
+        arrived: CancellationToken,
+        release: CancellationToken,
+    }
+
+    struct GatedProvider {
+        gate: Gate,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::flow::intelligence::LlmProvider for GatedProvider {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            self.gate.arrived.cancel();
+            self.gate.release.cancelled().await;
+            Ok("1. Analyze requirements\n2. Implement changes\n3. Validate with tests".to_string())
+        }
+
+        async fn generate_stream(
+            &self,
+            prompt: &str,
+            callback: crate::flow::intelligence::StreamCallback,
+        ) -> anyhow::Result<String> {
+            let output = self.generate(prompt).await?;
+            callback(&output);
+            Ok(output)
+        }
+
+        fn name(&self) -> &str {
+            "gated-test-provider"
+        }
+
+        fn model(&self) -> &str {
+            "gated-v1"
+        }
+    }
+
+    fn orchestrator_over(
+        db: Arc<Db>,
+        work_context_service: Arc<WorkContextService>,
+        gate: Gate,
+    ) -> Arc<WorkOrchestrator> {
+        let model_router = Arc::new(crate::flow::intelligence::ModelRouter::new(vec![Box::new(
+            GatedProvider { gate },
+        )]));
+        let runtime = Arc::new(RuntimeContext::default().with_model_router(model_router));
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime).unwrap());
+        let work_execution_service = Arc::new(WorkExecutionService::new(
+            work_context_service.clone(),
+            flow_execution_service,
+        ));
+        let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
+        let intent_classifier = Arc::new(crate::intent::IntentClassifier::new().unwrap());
+        let evolution_engine = Arc::new(crate::work::evolution_engine::EvolutionEngine::new(
+            db.clone(),
+        ));
+        Arc::new(WorkOrchestrator::new(
+            work_context_service,
+            playbook_resolver,
+            work_execution_service,
+            intent_classifier,
+            evolution_engine,
+        ))
+    }
+
+    fn setup_orchestrator_gated(
+        gate: Gate,
+    ) -> (Arc<WorkContextService>, Arc<WorkOrchestrator>, Arc<Db>) {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+        let orchestrator = orchestrator_over(db.clone(), work_context_service.clone(), gate);
+        (work_context_service, orchestrator, db)
+    }
+
+    fn create_context(wcs: &WorkContextService) -> WorkContext {
+        let mut context = wcs
+            .create_context(
+                "user-1".to_string(),
+                "Cancellation test".to_string(),
+                WorkDomain::General,
+                "Goal that will be cancelled".to_string(),
+            )
+            .unwrap();
+        // Review autonomy lets the flow execute (Chat mode would refuse).
+        context.autonomy_level = AutonomyLevel::Review;
+        wcs.update_context(&context).unwrap();
+        context
+    }
+
+    fn interrupted_events(db: &Db, context_id: &str) -> Vec<serde_json::Value> {
+        WorkContextEventOperations::get_events_for_context(db, context_id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event_type == "execution_interrupted")
+            .map(|e| e.data)
+            .collect()
+    }
+
+    fn count_rows(db: &Db, table: &str) -> i64 {
+        db.conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// #222 deterministic mid-iteration proof: the cancel lands while the
+    /// iteration is provably in flight (the flow is blocked inside the
+    /// gated provider, past both entry checks). The run must exit
+    /// gracefully with the cancelled context, skip every durable write of
+    /// the interrupted iteration (no artifact rows, no flow performance
+    /// record, no context rewrite after the flip), and persist the
+    /// mandatory execution_interrupted evidence with `checkpoint_ref: null`.
+    #[tokio::test]
+    async fn run_stops_gracefully_when_cancelled_mid_iteration() {
+        let gate = Gate {
+            arrived: CancellationToken::new(),
+            release: CancellationToken::new(),
+        };
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let token = CancellationToken::new();
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let artifacts_before = count_rows(&db, "work_artifacts");
+        let performance_before = count_rows(&db, "flow_performance_records");
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        // Wait until the iteration is provably in flight (blocked inside
+        // the provider) — past the orchestrator and service entry checks.
+        gate.arrived.cancelled().await;
+
+        // Production ordering: durable flip first, then the token fire —
+        // while the iteration is mid-flight.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        let updated_at_after_flip: String = db
+            .conn()
+            .query_row(
+                "SELECT updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        token.cancel();
+        // Let the flow finish: the post-flow checkpoint observes the
+        // cancellation and skips every write for this iteration.
+        gate.release.cancel();
+
+        let result = handle.await.unwrap().unwrap();
+        assert!(result.is_cancelled(), "run must exit gracefully, not error");
+
+        // Mandatory durable evidence: exactly one event for this run.
+        let events = interrupted_events(&db, &context.id);
+        assert_eq!(events.len(), 1, "exactly one execution_interrupted event");
+        assert_eq!(events[0]["reason"], "cancelled");
+        assert_eq!(
+            events[0]["iterations"], 1,
+            "the interrupted iteration is counted"
+        );
+        assert!(
+            events[0]["checkpoint_ref"].is_null(),
+            "checkpoint_ref must be null — the legacy run path has no graph checkpoints"
+        );
+
+        // No orphan rows and no post-cancel progress.
+        assert_eq!(count_rows(&db, "work_artifacts"), artifacts_before);
+        assert_eq!(
+            count_rows(&db, "flow_performance_records"),
+            performance_before
+        );
+        let (status, updated_at): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT status, updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(status.contains("Cancelled"));
+        assert_eq!(
+            updated_at, updated_at_after_flip,
+            "no context rewrite after the durable flip"
+        );
+
+        // No iteration events leaked: only the flip's audit event exists
+        // besides the interruption evidence.
+        let all = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        let types: Vec<&str> = all.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"context_cancelled"));
+        assert!(!types.contains(&"artifact_added"));
+        assert!(!types.contains(&"status_changed"));
+    }
+
+    /// #222 fail-closed evidence: if the execution_interrupted insert
+    /// fails, the graceful exit is refused — the run surfaces Err. The
+    /// durable Cancelled state (status + context_cancelled event) is
+    /// unaffected by the missing evidence.
+    #[tokio::test]
+    async fn interrupted_evidence_failure_fails_the_run_loudly() {
+        let gate = Gate {
+            arrived: CancellationToken::new(),
+            release: CancellationToken::new(),
+        };
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let token = CancellationToken::new();
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        gate.arrived.cancelled().await;
+
+        // Durable flip first (needs the events table intact for its own
+        // context_cancelled event), THEN destroy the evidence sink, then
+        // wake the run: the interruption evidence cannot be persisted.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        db.conn()
+            .execute("DROP TABLE work_context_events", [])
+            .unwrap();
+        token.cancel();
+        gate.release.cancel();
+
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("execution_interrupted"),
+            "missing interruption evidence must surface in the error, got: {err}"
+        );
+
+        // The durable cancel itself is intact.
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert!(stored.is_cancelled());
+    }
+
+    /// #222 retry: after a graceful cancellation exit the context is
+    /// terminal — a new run attempt is refused, adds no evidence, and
+    /// never resurrects the context.
+    #[tokio::test]
+    async fn cancelled_context_refuses_subsequent_runs_after_graceful_exit() {
+        let gate = Gate {
+            arrived: CancellationToken::new(),
+            release: CancellationToken::new(),
+        };
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let token = CancellationToken::new();
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let task_limits = limits.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, task_limits, task_token)
+                .await
+        });
+
+        gate.arrived.cancelled().await;
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        token.cancel();
+        gate.release.cancel();
+        handle.await.unwrap().unwrap();
+
+        // Retry: terminal refusal with the cancelled-context error.
+        let retry = orchestrator
+            .run_until_blocked_or_complete(context.id.clone(), limits)
+            .await;
+        assert!(retry.is_err());
+        assert!(retry.unwrap_err().to_string().contains("cannot be run"));
+
+        // No new evidence was written for the refused retry.
+        assert_eq!(interrupted_events(&db, &context.id).len(), 1);
+    }
+
+    /// #222 concurrent runs: two loops on the same context each hold their
+    /// own token; one durable flip + both fires stop BOTH runs gracefully,
+    /// each persisting its own execution_interrupted evidence, with no
+    /// orphan rows from either.
+    #[tokio::test]
+    async fn concurrent_runs_each_stop_gracefully_with_their_own_evidence() {
+        let gate1 = Gate {
+            arrived: CancellationToken::new(),
+            release: CancellationToken::new(),
+        };
+        let gate2 = Gate {
+            arrived: CancellationToken::new(),
+            release: CancellationToken::new(),
+        };
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate1.clone());
+        let context = create_context(&wcs);
+        let orchestrator2 = orchestrator_over(db.clone(), wcs.clone(), gate2.clone());
+
+        let token1 = CancellationToken::new();
+        let token2 = CancellationToken::new();
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let orch1 = orchestrator.clone();
+        let ctx1 = context.id.clone();
+        let task_token1 = token1.clone();
+        let limits1 = limits.clone();
+        let handle1 = tokio::spawn(async move {
+            orch1
+                .run_until_blocked_or_complete_with_token(ctx1, limits1, task_token1)
+                .await
+        });
+        let orch2 = orchestrator2.clone();
+        let ctx2 = context.id.clone();
+        let task_token2 = token2.clone();
+        let handle2 = tokio::spawn(async move {
+            orch2
+                .run_until_blocked_or_complete_with_token(ctx2, limits, task_token2)
+                .await
+        });
+
+        // Both iterations provably in flight (each past its entry checks).
+        gate1.arrived.cancelled().await;
+        gate2.arrived.cancelled().await;
+
+        // One durable flip; both tokens fired (what registry.fire does).
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        token1.cancel();
+        token2.cancel();
+        gate1.release.cancel();
+        gate2.release.cancel();
+
+        let result1 = handle1.await.unwrap().unwrap();
+        let result2 = handle2.await.unwrap().unwrap();
+        assert!(result1.is_cancelled());
+        assert!(result2.is_cancelled());
+
+        // Each run persisted exactly its own evidence.
+        let events = interrupted_events(&db, &context.id);
+        assert_eq!(events.len(), 2, "one execution_interrupted event per run");
+
+        // No orphan rows: neither iteration wrote anything.
+        assert_eq!(count_rows(&db, "work_artifacts"), 0);
+        assert_eq!(count_rows(&db, "flow_performance_records"), 0);
     }
 }
