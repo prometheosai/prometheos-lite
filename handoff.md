@@ -39,7 +39,7 @@ Authoritative remote record:
 - `git diff --stat b7e321b 68d54b6` → empty: the merged tree is identical to the reviewed head, so the `b7e321b` evidence covers the merged content exactly. The three-suite evidence was **not** regenerated at `68d54b6` (squash commit is only the merge vehicle; evidence binds to the reviewed head by design).
 - `cargo test --lib` on `68d54b6` → 1015 passed, 0 failed, 1 ignored.
 - `python scripts/test_local_ci_verify.py` → PASS (58 regressions).
-- fmt/check/clippy are proven clean by the `b7e321b` core evidence (rustfmt, cargo check, clippy checks), which transfers to the merged tree via the tree-equality diff above; they were not re-run standalone on `68d54b6`.
+- fmt and clippy are proven clean by the `b7e321b` core evidence (`rustfmt` = `cargo fmt --all -- --check`; `clippy` = `cargo clippy --all-targets --all-features -- -D warnings`), which transfers to the merged tree via the tree-equality diff above; they were not re-run standalone on `68d54b6`. The core suite has **no standalone `cargo check` check** — compilation is covered by its `release build` (`cargo build --release --all-features`) and `clippy` checks, which supersede it.
 
 ## Verification contract (now authoritative)
 
@@ -73,6 +73,6 @@ Authoritative remote record:
 
 ## Verification baseline
 
-- fmt / check / clippy `-D warnings`: clean at reviewed head `b7e321b` (recorded in the core evidence above; covers merged `68d54b6` by tree equality).
+- fmt and clippy `-D warnings`: clean at reviewed head `b7e321b` (recorded in the core evidence above; covers merged `68d54b6` by tree equality). No standalone `cargo check` in the core suite — compilation is proven by its release-build and clippy checks.
 - `cargo test --lib`: 1015/1015 (1 ignored).
 - Any new PR: run the three local suites at the exact head, record digests, and request an independent fresh-context review before merge authorization.
