@@ -1,86 +1,45 @@
 # Handoff
 
-_Last updated: 2026-09-11 (post-#214 merge). Previous handoff documented a
-stale OpenRouter/identity session and has been replaced with the current
-ground truth._
+_Last updated: 2026-09-24, after PR #225 (repository-native verification) merged as `68d54b6`._
 
 ## Authority state
 
-- `main` = `311f7c8` — squash-merge of PR #214 (E6/I03 Slice B), landed on
-  top of `5ddbe01` (#216, SOMA canonical fail-closed number policy).
-- Tally: **23 issues closed · 43 total merges · 40 independently approved
-  merges.**
-- Exact reviewed head of #214 was `d4f07b7`; all 13 CI jobs green.
-- Local merged branches pruned: `feat/e6i03-event-cursor-api`,
-  `feat/soma-canonical-fail-closed-numbers` (both verified content-equal to
-  `main` before deletion; squash merges defeat ancestry checks, so `-D` was
-  used after verification).
+- `main` = `68d54b6` — repository-native verification replaces hosted GitHub Actions as the merge/release authority. Squash-merged at reviewed head `b7e321b` with exact-head evidence: core 11/11, platform 8/8, smoke 9/9.
+- Tally: **27 issues closed · 49 total merges · 46 independently approved**.
+- Local branches pruned after each merge. Working tree clean; 1015/1015 lib tests green on merged main; 58 verifier regressions green.
 
-## Recently merged (slice train)
+## Verification contract (now authoritative)
 
-| PR | Slice | Head of land |
-|----|-------|--------------|
-| #209 | E6/I01 Slice B — AppConfig versioning | merged |
-| #210 | E6/I01 Slice C — six workflow templates | merged |
-| #211 | E6/I01 Slice A — CLI contract tests | merged |
-| #212 | E6/I02 Slice A — read-only run inspector | merged |
-| #213 | E6/I03 Slice A — API read-model rebuild tests | merged |
-| #216 | SOMA canonical fail-closed number policy | merged |
-| #214 | E6/I03 Slice B — durable cursorable event stream | `311f7c8` |
+- `scripts/local_ci.py` — runner + verifier bound to the shared `SUITE_SPEC`:
+  - exact normalized command arrays (identity tokens, `<root>` placeholder; any extra flag like `--no-run` rejected);
+  - fail-closed schema/provenance (rustc/cargo prefix + non-empty python/architecture; clean tree; exact commit; ISO timestamp);
+  - complete, exact, ordered per-suite check sets (core 11, platform 8, smoke 9, frontend 4);
+  - durations finite, non-negative, non-boolean;
+  - generation-time self-check refuses to write non-conforming evidence;
+  - frontend verifiable; `--require-frontend` gates it when frontend paths change;
+  - `scripts/test_local_ci_verify.py` — 58 regressions run inside core's own evidence chain;
+  - `scripts/test_target_dir.sh` — 9 path-resolution regressions run as smoke's first check; shared logic in `scripts/lib/target_dir.sh`.
+- Evidence files land under `.local-ci/evidence/<commit>/`, SHA-256-pinned, verified via `python scripts/local_ci.py verify --commit <sha> <core> <platform> <smoke>`.
+- Host note: the evidence host's C: volume runs critically full; builds/temp are routed via `CARGO_TARGET_DIR`/`TMP`/`TEMP`/`TMPDIR` to the D: volume. The smoke scripts resolve the target dir accordingly (normalize-before-classify; explicit `.exe` candidates).
 
-## Open work items
+## Merged slice history for #132 (E6/I03)
 
-### #132 (E6/I03) — remains OPEN after #214
+| Slice | PR | Commit |
+|---|---|---|
+| A: read-model rebuild tests | #213 | merged earlier |
+| B: cursorable durable event stream | #214 | `311f7c8` |
+| C: governed cancellation | #220 | `bd8a8a6` |
+| Prerequisite: checkpoint registry (#221, closed) | #223 | `09836f1` |
+| Decide endpoint | #224 | `c23597e` |
+| Repository-native verification | #225 | `68d54b6` |
 
-GitHub auto-closed it on the #214 mention; operator reopened it and
-documented the correction. Remaining acceptance items:
+## Open follow-ups
 
-- Headless **cancel/decide** operations through the runtime control
-  boundary (next slice candidate — resume after #215 resolves).
-- Versioned, fail-closed `WorkEvent` mapping to SOMA++ SPEC 006.
-- Multi-client observation semantics (multiple authorized clients
-  observing the same run without becoming state authorities).
-- Capability/compatibility projections mapped to SOMA #83.
+- **#132** remains open: remaining acceptance items (versioned fail-closed `WorkEvent` mapping to SOMA++ SPEC 006, multi-client observation semantics, SOMA #83 capability/compatibility projections).
+- **#222**: cooperative in-flight execution interruption (`CancellationToken` through `WorkExecutionService`/`WorkOrchestrator`). Not started.
 
-### #215 — portable_state canonical-number parity (ACTIVE)
+## Verification baseline
 
-Investigation/decision phase. `src/workflow/portable_state.rs` implements
-a second canonical-number path (`to_canonical_json` / `state_digest` via
-`serde_json::to_string`) not checked against `src/workflow/soma/canonical.rs`.
-Deliverable for the current phase: an investigation/decision report — not
-code changes. Hard constraints:
-
-- Do not silently change persisted digest compatibility.
-- `serde_json/arbitrary_precision` stays gated until product need and
-  compatibility consequences are documented.
-
-### #217 — Dependabot `postcss-selector-parser` bump
-
-Untouched. Per AGENTS.md, dependency changes require explicit operator
-approval. No action until the operator explicitly authorizes.
-
-## Known environment caveat
-
-Full-parallel `cargo test --lib` on the Windows host intermittently fails
-git temp-worktree tests (`failed to insert into database` on `git add`)
-with a varying failure set; every affected test passes in isolation and
-serialized (`--test-threads=1`) runs are fully green (1003/1003). Host
-filesystem/AV contention, predates #214; cross-platform CI is the
-authoritative gate. See PR #214 body for the documented note.
-
-## Failed attempts (command hygiene)
-
-- Do not use `cd /d`, `&&`, `head`, `tail`, `xargs`, `cat << 'EOF'` —
-  Windows PowerShell 5.1. Use `Set-Location -LiteralPath`,
-  `; if ($?) {}` chains, `Select-Object -First/-Last`, and the Write tool
-  for files.
-- Always use `git <...>` with `; echo "EXIT:$?"` to detect native-command
-  exit failures (PowerShell native-command stderr surfaces as
-  RemoteException noise; `$?` on the pipeline, not `$LASTEXITCODE` of the
-  pipeline, is unreliable here — check the tool's stderr text instead).
-
-## Next actions (operator-approved)
-
-1. This PR (handoff refresh).
-2. #215 investigation → decision report as issue comment.
-3. After #215 resolves: resume #132 with the cancel/decide slice.
+- fmt / check / clippy `-D warnings`: clean on merged main.
+- `cargo test --lib`: 1015/1015.
+- Any new PR: run the three local suites at the exact head, record digests, and request an independent fresh-context review before merge authorization.
