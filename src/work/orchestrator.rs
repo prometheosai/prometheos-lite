@@ -361,6 +361,15 @@ impl WorkOrchestrator {
     ///   `Err` — the durable `Cancelled` status and its `context_cancelled`
     ///   event are unaffected, but the missing interruption evidence is
     ///   surfaced, never swallowed.
+    /// - Graceful conversion is strictly typed: ONLY the iteration entry
+    ///   refusal (`CancelledRefusal`, raised before any write) converts
+    ///   into a graceful stop. A persistence error that races a
+    ///   concurrent cancel mid-write-sequence — with partial rows already
+    ///   written — propagates as a genuine error, never a masked
+    ///   cancellation. Likewise, a durable flip that wins the race
+    ///   against the loop's own entry converts to a graceful evidenced
+    ///   stop ONLY when this run's token fired (the cancel targeted this
+    ///   registered run); otherwise the terminal refusal stands.
     pub async fn run_until_blocked_or_complete_with_token(
         &self,
         context_id: String,
@@ -373,6 +382,18 @@ impl WorkOrchestrator {
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
 
         if context.is_cancelled() {
+            // #222 race repair: if THIS run's token fired, the durable
+            // flip targeted this registered run and simply won the race
+            // against the loop's entry — the run never started an
+            // iteration. That is a graceful stop with mandatory evidence,
+            // never a 500 with missing evidence. If the token never fired
+            // (plain CLI path, or a cancel from another process before
+            // this run registered), the terminal refusal stands.
+            if token.is_cancelled() {
+                let phase = context.current_phase;
+                self.record_execution_interrupted(&context_id, 0, &phase)?;
+                return Ok(context);
+            }
             anyhow::bail!("cancelled WorkContext cannot be run: {context_id}");
         }
 
@@ -440,16 +461,23 @@ impl WorkOrchestrator {
                     }
                 }
                 Err(e) => {
-                    // A cancelled context refuses to advance: that is a
-                    // graceful stop, not a failure. Covers cancels that
-                    // land between the loop's checks and the iteration's
-                    // entry guard — including from other processes.
-                    if let Some(stored) = self.work_context_service.get_context(&context.id)?
-                        && stored.is_cancelled()
-                    {
-                        let phase = stored.current_phase;
-                        self.record_execution_interrupted(&context.id, iterations, &phase)?;
-                        context = stored;
+                    // #222 race repair: ONLY the typed pre-write entry
+                    // refusal converts to a graceful cancellation - by
+                    // construction it is raised before any write of the
+                    // iteration, so nothing partial can exist. Any other
+                    // error - including a persistence failure racing a
+                    // concurrent cancel after partial rows were written -
+                    // propagates as a genuine error; the durable Cancelled
+                    // status and the last-guard make the state consistent,
+                    // and the error is surfaced, never masked.
+                    if e.downcast_ref::<super::CancelledRefusal>().is_some() {
+                        let fresh = self
+                            .work_context_service
+                            .get_context(&context_id)?
+                            .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
+                        let phase = fresh.current_phase;
+                        self.record_execution_interrupted(&context_id, iterations, &phase)?;
+                        context = fresh;
                         break;
                     }
                     return Err(e);
@@ -958,11 +986,14 @@ mod tests {
     /// `generate()`. This gives cancellation tests a deterministic
     /// mid-iteration state: the iteration is provably past both entry
     /// checks and in flight, and the test controls exactly when the flow
-    /// is allowed to finish.
+    /// is allowed to finish. When `fail` is set, the released provider
+    /// returns a genuine error instead of a plan — for proving that
+    /// genuine errors are never converted into graceful cancellations.
     #[derive(Clone)]
     struct Gate {
         arrived: CancellationToken,
         release: CancellationToken,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     struct GatedProvider {
@@ -974,6 +1005,9 @@ mod tests {
         async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
             self.gate.arrived.cancel();
             self.gate.release.cancelled().await;
+            if self.gate.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("gated provider failure (injected for race testing)");
+            }
             Ok("1. Analyze requirements\n2. Implement changes\n3. Validate with tests".to_string())
         }
 
@@ -993,6 +1027,16 @@ mod tests {
 
         fn model(&self) -> &str {
             "gated-v1"
+        }
+    }
+
+    impl Gate {
+        fn new() -> Self {
+            Self {
+                arrived: CancellationToken::new(),
+                release: CancellationToken::new(),
+                fail: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
         }
     }
 
@@ -1072,10 +1116,7 @@ mod tests {
     /// mandatory execution_interrupted evidence with `checkpoint_ref: null`.
     #[tokio::test]
     async fn run_stops_gracefully_when_cancelled_mid_iteration() {
-        let gate = Gate {
-            arrived: CancellationToken::new(),
-            release: CancellationToken::new(),
-        };
+        let gate = Gate::new();
         let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
         let context = create_context(&wcs);
 
@@ -1166,10 +1207,7 @@ mod tests {
     /// unaffected by the missing evidence.
     #[tokio::test]
     async fn interrupted_evidence_failure_fails_the_run_loudly() {
-        let gate = Gate {
-            arrived: CancellationToken::new(),
-            release: CancellationToken::new(),
-        };
+        let gate = Gate::new();
         let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
         let context = create_context(&wcs);
 
@@ -1214,10 +1252,7 @@ mod tests {
     /// never resurrects the context.
     #[tokio::test]
     async fn cancelled_context_refuses_subsequent_runs_after_graceful_exit() {
-        let gate = Gate {
-            arrived: CancellationToken::new(),
-            release: CancellationToken::new(),
-        };
+        let gate = Gate::new();
         let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
         let context = create_context(&wcs);
 
@@ -1258,14 +1293,8 @@ mod tests {
     /// orphan rows from either.
     #[tokio::test]
     async fn concurrent_runs_each_stop_gracefully_with_their_own_evidence() {
-        let gate1 = Gate {
-            arrived: CancellationToken::new(),
-            release: CancellationToken::new(),
-        };
-        let gate2 = Gate {
-            arrived: CancellationToken::new(),
-            release: CancellationToken::new(),
-        };
+        let gate1 = Gate::new();
+        let gate2 = Gate::new();
         let (wcs, orchestrator, db) = setup_orchestrator_gated(gate1.clone());
         let context = create_context(&wcs);
         let orchestrator2 = orchestrator_over(db.clone(), wcs.clone(), gate2.clone());
@@ -1317,5 +1346,107 @@ mod tests {
         // No orphan rows: neither iteration wrote anything.
         assert_eq!(count_rows(&db, "work_artifacts"), 0);
         assert_eq!(count_rows(&db, "flow_performance_records"), 0);
+    }
+
+    /// #222 race repair (binding review): a GENUINE error racing a cancel
+    /// must NOT be converted into a graceful cancellation. The iteration
+    /// is provably in flight; the durable flip lands mid-iteration; then
+    /// the flow itself fails (injected provider failure). The run must
+    /// surface the genuine error — not Ok(cancelled) — and must persist NO
+    /// execution_interrupted evidence, because nothing was gracefully
+    /// interrupted: an error occurred. This is the discrimination that
+    /// prevents persistence failures racing a cancel (with partial rows
+    /// already written) from being masked as graceful stops.
+    #[tokio::test]
+    async fn genuine_error_racing_cancel_is_not_converted_to_graceful() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let token = CancellationToken::new();
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        // Iteration provably in flight; the durable cancel flips
+        // mid-iteration (production ordering: flip, then fire).
+        gate.arrived.cancelled().await;
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        token.cancel();
+
+        // The flow then fails with a genuine error before any write.
+        gate.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        gate.release.cancel();
+
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            !err.to_string().contains("cannot continue"),
+            "genuine errors must not surface as the cancellation refusal, got: {err}"
+        );
+
+        // No graceful-conversion evidence: the error was real.
+        assert_eq!(
+            interrupted_events(&db, &context.id).len(),
+            0,
+            "a genuine error must not be recorded as a graceful cancellation"
+        );
+
+        // The durable cancel is intact and nothing was written.
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert!(stored.is_cancelled());
+        assert_eq!(count_rows(&db, "work_artifacts"), 0);
+        assert_eq!(count_rows(&db, "flow_performance_records"), 0);
+    }
+
+    /// #222 race repair (binding review): a cancel that lands AFTER the
+    /// run endpoint registered its token but BEFORE the orchestrator's
+    /// entry check must exit gracefully WITH mandatory evidence — never a
+    /// 500 with missing evidence. Deterministic construction: the flip
+    /// and the token fire both happen before the run call enters, which
+    /// is exactly the state the race window produces.
+    #[tokio::test]
+    async fn cancel_between_registration_and_entry_exits_gracefully_with_evidence() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        // The API run endpoint registers the token BEFORE calling the
+        // orchestrator; the cancel then flips + fires before the loop's
+        // entry read. Reproduce that exact state:
+        let token = CancellationToken::new();
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        token.cancel();
+
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+        let result = orchestrator
+            .run_until_blocked_or_complete_with_token(context.id.clone(), limits, token)
+            .await
+            .unwrap();
+
+        assert!(result.is_cancelled(), "must be a graceful evidenced stop");
+
+        // Mandatory evidence for the registered run that never started.
+        let events = interrupted_events(&db, &context.id);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["reason"], "cancelled");
+        assert_eq!(events[0]["iterations"], 0, "no iteration was started");
+        assert!(events[0]["checkpoint_ref"].is_null());
+
+        // No work was performed.
+        assert_eq!(count_rows(&db, "work_artifacts"), 0);
+        assert_eq!(count_rows(&db, "flow_performance_records"), 0);
+
+        // The gate was never reached: the loop refused before the flow.
+        assert!(!gate.arrived.is_cancelled());
     }
 }

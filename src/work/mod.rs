@@ -35,7 +35,7 @@ pub use event::WorkContextEvent;
 pub use evolution_engine::{
     AbTest, EvolutionEngine, EvolutionStatus, MutationStrategy, PlaybookEvolution,
 };
-pub use execution_service::WorkExecutionService;
+pub use execution_service::{CancelledRefusal, WorkExecutionService};
 pub use orchestrator::{ExecutionLimits, WorkOrchestrator};
 pub use phase_controller::PhaseController;
 pub use plan::{ExecutionPlan, PlanStep, StepStatus};

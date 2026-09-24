@@ -22,6 +22,24 @@ use crate::work::{
 };
 use crate::workflow::evaluate::CancellationToken;
 
+/// Typed refusal from the shared execution boundary: the stored context is
+/// cancelled, observed at the iteration entry guard — BEFORE any write of
+/// the iteration. Only this refusal may be converted into a graceful
+/// cancellation by the run loop (`WorkOrchestrator`). A persistence error
+/// raised during an iteration's write sequence — even when it races a
+/// concurrent cancel and even when partial rows were already written — is
+/// never this type and therefore always surfaces as a genuine error.
+#[derive(Debug)]
+pub struct CancelledRefusal(pub String);
+
+impl std::fmt::Display for CancelledRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cancelled WorkContext cannot continue: {}", self.0)
+    }
+}
+
+impl std::error::Error for CancelledRefusal {}
+
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
 pub struct WorkExecutionService {
@@ -188,6 +206,25 @@ impl WorkExecutionService {
             .execute_flow_file(&flow_file, &context.goal, options)
             .await?;
 
+        // A failed flow is a GENUINE error even when a cancel raced it
+        // (#222 race repair): the flow error surfaces before any
+        // cancellation observation, so a real failure can never be masked
+        // as a graceful cancellation. (execute_flow_file reports flow
+        // failures as Ok(FinalOutput{success:false}), not Err — so this
+        // check must run BEFORE the cancellation checkpoint below.)
+        if !final_output.success {
+            let error_message = final_output
+                .error
+                .clone()
+                .unwrap_or_else(|| "Unknown flow execution failure".to_string());
+            anyhow::bail!(
+                "Flow '{}' failed for work context '{}': {}",
+                flow_ref,
+                context.id,
+                error_message
+            );
+        }
+
         // Post-flow cancellation checkpoint (#222): the selected, proven
         // cancellation-safe boundary. `flow.run()` has completed, so no
         // child process or in-flight request is owned by this future; and
@@ -210,19 +247,6 @@ impl WorkExecutionService {
                 "cancellation observed at post-flow checkpoint; skipping all iteration writes"
             );
             return Ok(None);
-        }
-
-        if !final_output.success {
-            let error_message = final_output
-                .error
-                .clone()
-                .unwrap_or_else(|| "Unknown flow execution failure".to_string());
-            anyhow::bail!(
-                "Flow '{}' failed for work context '{}': {}",
-                flow_ref,
-                context.id,
-                error_message
-            );
         }
 
         // Convert execution metadata to ExecutionRecords and add to WorkContext
@@ -328,9 +352,12 @@ impl WorkExecutionService {
 
         // Cancellation is terminal and checked at the shared execution
         // boundary, not only at the HTTP handler: service-layer callers
-        // (CLI, orchestrator paths) must not advance cancelled work either.
+        // (CLI, orchestrator paths) must not advance cancelled work
+        // either. The refusal is TYPED so the run loop can convert
+        // exactly this pre-write refusal into a graceful cancellation —
+        // and nothing else (see CancelledRefusal).
         if context.is_cancelled() {
-            anyhow::bail!("cancelled WorkContext cannot continue: {context_id}");
+            return Err(CancelledRefusal(context_id.to_string()).into());
         }
 
         // Check if context is blocked
