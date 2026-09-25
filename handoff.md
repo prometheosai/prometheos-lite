@@ -1,6 +1,6 @@
 # Handoff
 
-_Last updated: 2026-09-24, after PR #227 (cooperative in-flight cancellation, #222) merged as `c16d820`._
+_Last updated: September 25, 2026, after PR #227 (cooperative in-flight cancellation, #222) merged as `c16d820`, plus the #228 cross-process exit-race repair._
 
 ## Authority state
 
@@ -22,7 +22,9 @@ Verifier invocation and result (re-run against the retained artifacts on 2026-09
 
 ```
 python scripts/local_ci.py verify --commit d056a93efac5d8afd6304b7926d72f1c0eb8a098 \
-  <windows-core.json> <windows-platform.json> <windows-smoke.json>
+  .local-ci\evidence\d056a93efac5d8afd6304b7926d72f1c0eb8a098\windows-core.json \
+  .local-ci\evidence\d056a93efac5d8afd6304b7926d72f1c0eb8a098\windows-platform.json \
+  .local-ci\evidence\d056a93efac5d8afd6304b7926d72f1c0eb8a098\windows-smoke.json
 PASS: 3 evidence files verify for d056a93efac5d8afd6304b7926d72f1c0eb8a098
 ```
 
@@ -45,6 +47,10 @@ Cooperative in-flight cancellation for WorkContext runs, landed through three re
 4. Registry: `RunCancelRegistry` in `AppState` (RAII guard, fire-all, identity-safe). Cross-process honesty: same-process wake at the next checkpoint; cross-process cancels observed at the same checkpoints via the durable status — graceful polling, never an immediate mid-step wake.
 
 Host flake disclosure: the documented Norton-AV-vs-`.git/objects` race (rotating git-fixture victims, each green in isolation) blocked several suite attempts across the rounds; all published evidence is single-pass green at the exact heads.
+
+### #228 repair: cross-process cancel before loop-limit/completion exits
+
+A durable cancel issued from another process (no token fire) could land between iterations while the run loop's in-memory snapshot was stale; the loop then exited through the limits/completion path whose writes hit the last-guard, surfacing a bare error with no evidence. Repair (`src/work/orchestrator.rs`): every loop top now takes a fresh cancellation observation (`graceful_if_cancelled`) BEFORE the limit/completion/blocked exit checks — a durable Cancelled converts to the same graceful evidenced stop as the sentinel path; exit-write failures inside the read-to-write window (`exit_failure_to_graceful_cancellation`) convert the same way when the stored row is Cancelled, and propagate unmasked otherwise. Deterministic regression: `cross_process_cancel_observed_before_limit_exit` — flip (no token fire) while the loop is parked at the next loop top after a committed iteration; asserts graceful stop, mandatory evidence (`iterations: 1`), and that the limit exit never ran (no `context_blocked` event).
 
 ## Merged slice history for #132 (E6/I03)
 

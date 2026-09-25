@@ -412,16 +412,40 @@ impl WorkOrchestrator {
             // status and fire the token before the next iteration starts.
             token.park_at_safe_point().await;
 
+            // #228 repair: observe a durable cancellation BEFORE the
+            // loop-limit / completion / blocked exits. A cross-process
+            // cancel (durable flip, no token fire) that landed while the
+            // previous iteration was running would otherwise race these
+            // exits: the stale in-memory context passes the checks, the
+            // exit write (blocked reason, completion) hits the last-guard,
+            // and the run surfaces a bare error with no evidence. The
+            // fresh read catches the cancellation first and converts it
+            // to the same graceful evidenced stop as the sentinel path.
+            if let Some(fresh) = self.graceful_if_cancelled(&context_id, iterations)? {
+                return Ok(fresh);
+            }
+
             // Check limits
             if iterations >= limits.max_iterations {
-                self.work_context_service
-                    .set_blocked_reason(&mut context, "Max iterations reached".to_string())?;
+                if let Err(e) = self
+                    .work_context_service
+                    .set_blocked_reason(&mut context, "Max iterations reached".to_string())
+                {
+                    // The read-to-write window: a cancel may have won in
+                    // between. If so, this is the same graceful evidenced
+                    // stop; otherwise the genuine error propagates.
+                    return self.exit_failure_to_graceful_cancellation(&context_id, iterations, e);
+                }
                 break;
             }
 
             if start.elapsed().as_millis() as u64 >= limits.max_runtime_ms {
-                self.work_context_service
-                    .set_blocked_reason(&mut context, "Max runtime exceeded".to_string())?;
+                if let Err(e) = self
+                    .work_context_service
+                    .set_blocked_reason(&mut context, "Max runtime exceeded".to_string())
+                {
+                    return self.exit_failure_to_graceful_cancellation(&context_id, iterations, e);
+                }
                 break;
             }
 
@@ -430,10 +454,23 @@ impl WorkOrchestrator {
                 || (!context.completion_criteria.is_empty() && context.is_completion_satisfied())
             {
                 // Use complete_context() to trigger evaluation and evolution
-                context = self
+                match self
                     .complete_context(context.id.clone(), EvolutionTrigger::Completion)
-                    .await?;
-                break;
+                    .await
+                {
+                    Ok(done) => {
+                        context = done;
+                        break;
+                    }
+                    Err(e) => {
+                        // Same read-to-write window as the limit exits.
+                        return self.exit_failure_to_graceful_cancellation(
+                            &context_id,
+                            iterations,
+                            e,
+                        );
+                    }
+                }
             }
 
             // Check blocked
@@ -522,6 +559,45 @@ impl WorkOrchestrator {
                     "failed to persist execution_interrupted evidence for work context {context_id}"
                 )
             })
+    }
+
+    /// #228 repair: fresh-read cancellation observation. If the stored
+    /// context is durably Cancelled, record the mandatory interruption
+    /// evidence and return the fresh cancelled context for the graceful
+    /// stop. `Ok(None)` means "not cancelled, proceed". This is the
+    /// cross-process observation path: no token fire is involved, only
+    /// the durable status — graceful polling at the loop's checkpoints.
+    fn graceful_if_cancelled(
+        &self,
+        context_id: &str,
+        iterations: u32,
+    ) -> Result<Option<WorkContext>> {
+        if let Some(fresh) = self.work_context_service.get_context(context_id)?
+            && fresh.is_cancelled()
+        {
+            let phase = fresh.current_phase;
+            self.record_execution_interrupted(context_id, iterations, &phase)?;
+            Ok(Some(fresh))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// #228 repair: a loop-exit write (blocked reason, completion) failed
+    /// inside the read-to-write window — a durable cancellation may have
+    /// won in between (the last-guard refused the exit write). If so, the
+    /// failure converts to the same graceful evidenced stop; otherwise
+    /// the genuine error propagates unmasked.
+    fn exit_failure_to_graceful_cancellation(
+        &self,
+        context_id: &str,
+        iterations: u32,
+        error: anyhow::Error,
+    ) -> Result<WorkContext> {
+        if let Some(fresh) = self.graceful_if_cancelled(context_id, iterations)? {
+            return Ok(fresh);
+        }
+        Err(error)
     }
 
     /// V1.4 Verification Loop - run plan → patch → test → failure → re-plan loop
@@ -1709,5 +1785,96 @@ mod tests {
 
         // Genuine error: no graceful-conversion evidence was recorded.
         assert_eq!(interrupted_events(&db, &context.id).len(), 0);
+    }
+
+    /// #228 repair regression: a CROSS-PROCESS cancel (durable flip, NO
+    /// token fire) that lands while the loop is between iterations is
+    /// observed BEFORE the loop-limit exit. Without the fresh loop-top
+    /// read, the limit exit writes Blocked over the stale in-memory
+    /// snapshot, hits the last-guard on the terminal Cancelled row, and
+    /// the run surfaces a bare error with no evidence. With the repair:
+    /// the loop-top read observes the cancellation first and the run
+    /// exits gracefully with mandatory evidence; the blocked-reason write
+    /// never runs.
+    ///
+    /// Deterministic: iteration 1 commits (gate released, nothing
+    /// cancelled); the flip lands while the loop is parked at the next
+    /// loop top — no token fire, exactly cross-process semantics.
+    #[tokio::test]
+    async fn cross_process_cancel_observed_before_limit_exit() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+        // One iteration, then the loop-limit exit would fire.
+        let limits = ExecutionLimits::default().with_max_iterations(1);
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        // Safe point 1 (loop top): iteration 1 starts.
+        barrier.wait().await;
+        gate.arrived.cancelled().await;
+        gate.release.cancel();
+        // Safe point 2 (checkpoint): passes — nothing is cancelled yet.
+        barrier.wait().await;
+        // Safe point 3 (pre-transaction): iteration 1 commits fully.
+        barrier.wait().await;
+
+        // Prove the commit happened before flipping (yielding poll; the
+        // task's transaction runs between the releases). Without this the
+        // flip would race the transaction: winning that race is ordering-1
+        // semantics (guard refusal) and the loop would exit via its
+        // post-iteration check without ever parking at the next loop top.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while count_rows(&db, "work_artifacts") == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "iteration transaction did not commit in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // The cross-process cancel lands while the loop is parked at the
+        // next loop top. NO token fire: only the durable status can be
+        // observed — exactly the cross-process semantics under repair.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "cross-process cancel")
+            .unwrap();
+
+        // Safe point 4 (loop top before the limit exit): the fresh read
+        // observes Cancelled and converts to the graceful evidenced stop.
+        barrier.wait().await;
+
+        let result = handle.await.unwrap().unwrap();
+        assert!(result.is_cancelled(), "graceful stop, not an error");
+
+        // The limit exit never ran: no blocked-reason write, no
+        // context_blocked event, and the terminal row was never rewritten.
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(
+            !types.contains(&"context_blocked"),
+            "the limit exit never ran"
+        );
+        assert!(types.contains(&"context_cancelled"));
+
+        // Mandatory evidence: exactly one interruption record for the run.
+        let interrupted = interrupted_events(&db, &context.id);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0]["iterations"], 1);
+        assert!(interrupted[0]["checkpoint_ref"].is_null());
+
+        // The committed iteration is intact and the cancel is terminal.
+        assert_eq!(count_rows(&db, "work_artifacts"), 1);
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert!(stored.is_cancelled());
     }
 }
