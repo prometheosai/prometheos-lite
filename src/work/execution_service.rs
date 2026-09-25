@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use tracing;
 
-use crate::db::repository::{
-    DomainProfileOperations, FlowPerformanceOperations, PlaybookOperations,
-};
+use crate::db::repository::{DomainProfileOperations, PlaybookOperations};
 use crate::flow::StrictModeEnforcer;
 use crate::flow::execution_service::{ExecutionOptions, FlowExecutionService};
 use crate::flow::loader::{FlowFile, FlowLoader, JsonLoader, YamlLoader};
@@ -20,6 +18,25 @@ use crate::work::{
         WorkPhase, WorkStatus,
     },
 };
+use crate::workflow::evaluate::CancellationToken;
+
+/// Typed refusal from the shared execution boundary: the stored context is
+/// cancelled, observed at the iteration entry guard — BEFORE any write of
+/// the iteration. Only this refusal may be converted into a graceful
+/// cancellation by the run loop (`WorkOrchestrator`). A persistence error
+/// raised during an iteration's write sequence — even when it races a
+/// concurrent cancel and even when partial rows were already written — is
+/// never this type and therefore always surfaces as a genuine error.
+#[derive(Debug)]
+pub struct CancelledRefusal(pub String);
+
+impl std::fmt::Display for CancelledRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cancelled WorkContext cannot continue: {}", self.0)
+    }
+}
+
+impl std::error::Error for CancelledRefusal {}
 
 /// WorkExecutionService - orchestrates flow execution with WorkContext
 /// This prevents WorkContextService from becoming a god object
@@ -130,11 +147,67 @@ impl WorkExecutionService {
 
     /// Execute a flow within a WorkContext using direct flow file loading
     /// This bypasses intent classification and loads the flow directly from flow_ref
+    ///
+    /// Returns `Ok(None)` when cancellation was observed — either at the
+    /// post-flow checkpoint or at the atomic persistence transaction: in
+    /// both cases the flow ran to completion, but every durable write for
+    /// this iteration (artifacts, phase, status, context snapshot) was
+    /// skipped or rolled back, so a cancelled context accumulates no
+    /// post-cancel progress and no orphan rows.
+    ///
+    /// Persistence is ATOMIC (#222 binding review): the entire iteration
+    /// write set commits in one cancellation-conditional transaction
+    /// (`crate::db::repository::iteration_persist::persist_iteration_conn`)
+    /// — all rows or none, never partial.
+    ///
+    /// Cancellation-safety of the selected checkpoint (#222): the
+    /// post-flow pre-persist point is the ONLY safe observation point
+    /// inside an iteration. At this point `flow.run()` has returned, so
+    /// every awaitable the flow owned — provider HTTP requests, and
+    /// critically tool-node child processes (`tokio::process::Command`
+    /// without `kill_on_drop`) — has completed. Dropping the iteration
+    /// future at an arbitrary earlier suspension point would orphan a
+    /// live tool process mid-mutation; that is why this method checks
+    /// cancellation here instead of the caller select-dropping the
+    /// in-flight future.
     pub async fn execute_flow_in_context(
         &self,
         context: &mut WorkContext,
         flow_ref: &str,
-    ) -> Result<super::Artifact> {
+        token: &CancellationToken,
+    ) -> Result<Option<super::Artifact>> {
+        let Some(draft) = self.execute_flow_draft(context, flow_ref, token).await? else {
+            return Ok(None);
+        };
+
+        // Standalone entry point (create_and_execute, direct callers):
+        // persist the iteration atomically with the historical write set
+        // of this path — no performance record, no final status
+        // transition (the run loop adds both through its own call).
+        token.park_at_safe_point().await;
+        let conn = self.work_context_service.get_db().conn();
+        let committed = crate::db::repository::iteration_persist::persist_iteration_conn(
+            conn, context, &draft, None,
+        )?;
+        if !committed {
+            // The durable cancel won before the transaction: everything
+            // rolled back; surface the skip exactly like the checkpoint.
+            return Ok(None);
+        }
+        Ok(Some(draft.primary_artifact))
+    }
+
+    /// Run the flow and build the iteration's durable write set IN MEMORY
+    /// (#222 atomic iteration persistence). No database writes happen past
+    /// the post-flow cancellation checkpoint; the caller commits the
+    /// draft atomically. Returns `Ok(None)` when cancellation was
+    /// observed at the checkpoint.
+    async fn execute_flow_draft(
+        &self,
+        context: &mut WorkContext,
+        flow_ref: &str,
+        token: &CancellationToken,
+    ) -> Result<Option<crate::db::repository::iteration_persist::IterationDraft>> {
         // Check autonomy level - Chat mode requires human confirmation for all actions
         if context.autonomy_level == AutonomyLevel::Chat {
             self.work_context_service
@@ -170,6 +243,12 @@ impl WorkExecutionService {
             .execute_flow_file(&flow_file, &context.goal, options)
             .await?;
 
+        // A failed flow is a GENUINE error even when a cancel raced it
+        // (#222 race repair): the flow error surfaces before any
+        // cancellation observation, so a real failure can never be masked
+        // as a graceful cancellation. (execute_flow_file reports flow
+        // failures as Ok(FinalOutput{success:false}), not Err — so this
+        // check must run BEFORE the cancellation checkpoint below.)
         if !final_output.success {
             let error_message = final_output
                 .error
@@ -183,7 +262,32 @@ impl WorkExecutionService {
             );
         }
 
-        // Convert execution metadata to ExecutionRecords and add to WorkContext
+        // Post-flow cancellation checkpoint (#222): the selected, proven
+        // cancellation-safe boundary. `flow.run()` has completed, so no
+        // child process or in-flight request is owned by this future; and
+        // no durable write for this iteration has started yet, so skipping
+        // the write sequence below leaves zero orphan rows. The park is a
+        // no-op in production; tests use it to make this checkpoint
+        // deterministic. The token covers the same-process signal (the
+        // /cancel handler fires it after the durable flip); the stored
+        // status re-read covers every other process uniformly.
+        token.park_at_safe_point().await;
+        let observed_cancelled = token.is_cancelled()
+            || self
+                .work_context_service
+                .get_context(&context.id)?
+                .is_some_and(|stored| stored.is_cancelled());
+        if observed_cancelled {
+            tracing::info!(
+                context_id = %context.id,
+                flow = %flow_ref,
+                "cancellation observed at post-flow checkpoint; skipping all iteration writes"
+            );
+            return Ok(None);
+        }
+
+        // Convert execution metadata to ExecutionRecords (in memory; the
+        // draft commits atomically below).
         for (node_id, metadata_json) in &final_output.execution_metadata {
             if let Ok(generate_result) = serde_json::from_value::<
                 crate::flow::intelligence::GenerateResult,
@@ -197,21 +301,22 @@ impl WorkExecutionService {
             }
         }
 
-        // Map outputs to artifacts
+        // Map outputs to artifacts and attach them to the context IN MEMORY
+        // (rows are committed by the atomic iteration persist).
         let artifacts = ArtifactMapper::map_flow_output(
             context.id.clone(),
             flow_ref.to_string(),
             final_output.primary,
             final_output.additional,
         );
-
-        // Add all artifacts to context
-        for artifact in artifacts.clone() {
-            self.work_context_service.add_artifact(context, artifact)?;
+        for artifact in &artifacts {
+            context.artifacts.push(artifact.clone());
+            context.touch();
         }
 
         // Update phase based on flow type using PhaseController
         // Derive phase from current context state and flow metadata
+        let mut phase_transition = None;
         let next_phase = PhaseController::next_phase(context);
         if let Some(phase) = next_phase {
             // V1.6.1 strict transition bridge:
@@ -244,25 +349,59 @@ impl WorkExecutionService {
                     }
                 }
             }
-            self.work_context_service.update_phase(context, phase)?;
+            // Same validation as WorkContextService::update_phase, without
+            // the write: the draft applies the transition in memory and
+            // the atomic persist commits it.
+            super::service::validate_phase_transition(context, phase)?;
+            phase_transition = Some((context.current_phase, phase));
+            context.current_phase = phase;
+            context.touch();
         }
 
-        // Review mode requires approval after execution
+        // Review mode requires approval after execution (in memory; the
+        // status_changed event is part of the atomic persist).
+        let mut intermediate_status = None;
         if context.autonomy_level == AutonomyLevel::Review {
-            self.work_context_service
-                .update_status(context, WorkStatus::AwaitingApproval)?;
+            let from = context.status;
+            super::service::validate_status_transition(context, WorkStatus::AwaitingApproval)?;
+            intermediate_status = Some((from, WorkStatus::AwaitingApproval));
+            context.status = WorkStatus::AwaitingApproval;
+            context.touch();
         }
 
         // Return the primary artifact
         let primary_artifact = artifacts
-            .into_iter()
-            .next()
+            .first()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Flow produced no artifacts"))?;
-        Ok(primary_artifact)
+        let draft = crate::db::repository::iteration_persist::IterationDraft {
+            primary_artifact,
+            new_artifacts: artifacts,
+            phase_transition,
+            intermediate_status,
+            final_status: None,
+        };
+        Ok(Some(draft))
     }
 
-    /// Continue a WorkContext
+    /// Continue a WorkContext (no external cancellation signal; the loop in
+    /// `WorkOrchestrator::run_until_blocked_or_complete_with_token` and the
+    /// API run endpoint use the `_with_token` variant).
     pub async fn continue_context(&self, context_id: &str) -> Result<WorkContext> {
+        let token = CancellationToken::new();
+        self.continue_context_with_token(context_id, &token).await
+    }
+
+    /// Continue a WorkContext, observing `token` at the post-flow
+    /// cancellation checkpoint. When cancellation is observed there, all
+    /// durable writes for the iteration are skipped and the freshly stored
+    /// context is returned (its status will be `Cancelled` when the durable
+    /// cancel has landed), so the caller can exit gracefully.
+    pub async fn continue_context_with_token(
+        &self,
+        context_id: &str,
+        token: &CancellationToken,
+    ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
             .get_context(context_id)?
@@ -270,9 +409,12 @@ impl WorkExecutionService {
 
         // Cancellation is terminal and checked at the shared execution
         // boundary, not only at the HTTP handler: service-layer callers
-        // (CLI, orchestrator paths) must not advance cancelled work either.
+        // (CLI, orchestrator paths) must not advance cancelled work
+        // either. The refusal is TYPED so the run loop can convert
+        // exactly this pre-write refusal into a graceful cancellation —
+        // and nothing else (see CancelledRefusal).
         if context.is_cancelled() {
-            anyhow::bail!("cancelled WorkContext cannot continue: {context_id}");
+            return Err(CancelledRefusal(context_id.to_string()).into());
         }
 
         // Check if context is blocked
@@ -318,18 +460,51 @@ impl WorkExecutionService {
             return Ok(context);
         }
 
-        // Execute flow
+        // Execute flow and build the iteration's write set in memory.
         let start_time = std::time::Instant::now();
-        self.execute_flow_in_context(&mut context, &next_flow)
+        let draft = self
+            .execute_flow_draft(&mut context, &next_flow, token)
             .await?;
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
-        // Create and store FlowPerformanceRecord
+        // Cancellation observed at the post-flow checkpoint: the flow
+        // ran, but NOTHING was written (the draft stage does not touch
+        // the database) and the durable state is returned untouched.
+        let Some(mut draft) = draft else {
+            let fresh = self
+                .work_context_service
+                .get_context(context_id)?
+                .ok_or_else(|| anyhow::anyhow!("Context not found"))?;
+            return Ok(fresh);
+        };
+
+        // Final status transition (same decision as before, applied in
+        // memory; the atomic persist commits it with the event).
+        let status_to = if context.current_phase == WorkPhase::Finalization {
+            if context.domain == WorkDomain::Software {
+                context.set_harness_metadata(HarnessMetadata {
+                    completion_decision: Some(CompletionDecision::Complete),
+                    ..Default::default()
+                });
+            }
+            WorkStatus::Completed
+        } else {
+            WorkStatus::InProgress
+        };
+        let status_from = context.status;
+        super::service::validate_status_transition(&context, status_to)?;
+        draft.final_status = Some((status_from, status_to));
+        context.status = status_to;
+        context.touch();
+
+        // Create the FlowPerformanceRecord for this iteration. The
+        // success score keeps its historical evaluation point (before
+        // the final transition is applied).
         let performance_record = FlowPerformanceRecord {
             id: uuid::Uuid::new_v4().to_string(),
             flow_id: next_flow.clone(),
             work_context_id: context.id.clone(),
-            success_score: if context.status == WorkStatus::Completed {
+            success_score: if status_from == WorkStatus::Completed {
                 1.0
             } else {
                 0.5
@@ -344,36 +519,39 @@ impl WorkExecutionService {
             executed_at: chrono::Utc::now(),
         };
 
-        // Store performance record in database using FlowPerformanceOperations
-        // V1.5.2: Using dedicated database table instead of metadata storage
-        let db = self.work_context_service.get_db();
-        if let Err(e) = db.as_ref().create_flow_performance(&performance_record) {
-            tracing::error!("Failed to store flow performance record: {}", e);
-            // Fallback: store in metadata for debugging if DB fails
-            let performance_key = format!("flow_perf_{}", next_flow);
-            context.metadata[performance_key] =
-                serde_json::to_value(&performance_record).unwrap_or(serde_json::Value::Null);
-        } else {
-            tracing::debug!("Stored flow performance record: {}", performance_record.id);
+        // ONE cancellation-conditional transaction for every durable
+        // write of this iteration (#222 binding review): context row,
+        // artifact rows, artifact/phase/status events, and the
+        // performance record commit together or not at all. A durable
+        // cancel that wins before the transaction rolls everything
+        // back (Ok(false)); any persistence failure rolls everything
+        // back and propagates as a genuine error. The park is the
+        // test-deterministic safe point immediately BEFORE the
+        // transaction opens — no lock is held across it.
+        token.park_at_safe_point().await;
+        let conn = self.work_context_service.get_db().conn();
+        let committed = crate::db::repository::iteration_persist::persist_iteration_conn(
+            conn,
+            &context,
+            &draft,
+            Some(&performance_record),
+        )?;
+        if !committed {
+            tracing::info!(
+                context_id = %context.id,
+                flow = %next_flow,
+                "cancellation observed at the iteration transaction; nothing committed"
+            );
+            let fresh = self
+                .work_context_service
+                .get_context(context_id)?
+                .ok_or_else(|| anyhow::anyhow!("Context not found"))?;
+            return Ok(fresh);
         }
-
-        // Update status
-        if context.current_phase == WorkPhase::Finalization {
-            if context.domain == WorkDomain::Software {
-                context.set_harness_metadata(HarnessMetadata {
-                    completion_decision: Some(CompletionDecision::Complete),
-                    ..Default::default()
-                });
-            }
-            self.work_context_service
-                .update_status(&mut context, WorkStatus::Completed)?;
-        } else {
-            self.work_context_service
-                .update_status(&mut context, WorkStatus::InProgress)?;
-        }
-
-        // Save updated context with execution metadata
-        self.work_context_service.update_context(&context)?;
+        tracing::debug!(
+            "stored flow performance record atomically: {}",
+            performance_record.id
+        );
 
         Ok(context)
     }
@@ -395,8 +573,19 @@ impl WorkExecutionService {
         context.autonomy_level = AutonomyLevel::Review;
 
         // Execute initial planning flow
-        self.execute_flow_in_context(&mut context, "planning.flow.yaml")
+        let planned = self
+            .execute_flow_in_context(
+                &mut context,
+                "planning.flow.yaml",
+                &CancellationToken::new(),
+            )
             .await?;
+        let Some(_planned_artifact) = planned else {
+            anyhow::bail!(
+                "planning for work context {} was cancelled before any progress was persisted",
+                context.id
+            );
+        };
 
         // Update phase to AwaitingApproval after planning
         self.work_context_service
@@ -415,9 +604,185 @@ impl WorkExecutionService {
 mod tests {
     use super::*;
     use crate::db::Db;
+    use crate::db::repository::WorkContextEventOperations;
     use crate::flow::RuntimeContext;
+    use crate::flow::intelligence::{LlmProvider, ModelRouter, StreamCallback};
     use crate::harness::completion::CompletionDecision;
     use crate::work::types::{HarnessMetadata, WorkDomain, WorkPhase, WorkStatus};
+
+    /// Deterministic LLM provider (same contract as the e2e test provider)
+    /// so planning.flow.yaml runs to completion without network access.
+    struct DeterministicTestProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DeterministicTestProvider {
+        async fn generate(&self, prompt: &str) -> anyhow::Result<String> {
+            if prompt.to_lowercase().contains("plan") {
+                return Ok(
+                    "1. Analyze requirements\n2. Implement changes\n3. Validate with tests"
+                        .to_string(),
+                );
+            }
+            Ok(format!("Generated output for: {}", prompt))
+        }
+
+        async fn generate_stream(
+            &self,
+            prompt: &str,
+            callback: StreamCallback,
+        ) -> anyhow::Result<String> {
+            let output = self.generate(prompt).await?;
+            callback(&output);
+            Ok(output)
+        }
+
+        fn name(&self) -> &str {
+            "deterministic-test-provider"
+        }
+
+        fn model(&self) -> &str {
+            "deterministic-v1"
+        }
+    }
+
+    fn setup_execution_service() -> (Arc<WorkContextService>, Arc<WorkExecutionService>, Arc<Db>) {
+        let db = Arc::new(Db::in_memory().unwrap());
+        let work_context_service = Arc::new(WorkContextService::new(db.clone()));
+        let model_router = Arc::new(ModelRouter::new(vec![Box::new(DeterministicTestProvider)]));
+        let runtime = Arc::new(RuntimeContext::default().with_model_router(model_router));
+        let flow_execution_service = Arc::new(FlowExecutionService::new(runtime).unwrap());
+        let execution_service = Arc::new(WorkExecutionService::new(
+            work_context_service.clone(),
+            flow_execution_service,
+        ));
+        (work_context_service, execution_service, db)
+    }
+
+    fn general_review_context(work_context_service: &WorkContextService) -> WorkContext {
+        let mut context = work_context_service
+            .create_context(
+                "user-1".to_string(),
+                "Plan the work".to_string(),
+                WorkDomain::General,
+                "Create a plan".to_string(),
+            )
+            .unwrap();
+        context.autonomy_level = AutonomyLevel::Review;
+        work_context_service.update_context(&context).unwrap();
+        context
+    }
+
+    fn count(db: &Db, table: &str) -> i64 {
+        db.conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// #222 mid-iteration checkpoint: cancellation observed after the flow
+    /// completed (the proven cancellation-safe boundary) skips EVERY
+    /// durable write for the iteration — no artifact rows, no flow
+    /// performance record, and no context-row rewrite after the durable
+    /// cancel flip. Deterministic: the flip+fire happen while the iteration
+    /// is in flight; the park barrier rendezvous guarantees the test's
+    /// release is observed at the checkpoint, never racing it.
+    #[tokio::test]
+    async fn post_flow_checkpoint_skips_all_writes_on_cancellation() {
+        let (wcs, execution_service, db) = setup_execution_service();
+        let context = general_review_context(&wcs);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+
+        let artifacts_before = count(&db, "work_artifacts");
+        let performance_before = count(&db, "flow_performance_records");
+
+        let svc = execution_service.clone();
+        let wcs_task = wcs.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            let mut ctx = wcs_task.get_context(&ctx_id).unwrap().unwrap();
+            svc.execute_flow_in_context(&mut ctx, "planning.flow.yaml", &task_token)
+                .await
+        });
+
+        // Cancel lands mid-iteration (the flow is running concurrently):
+        // durable flip first, then the token fire — production ordering.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        let updated_at_after_flip: String = db
+            .conn()
+            .query_row(
+                "SELECT updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        token.cancel();
+
+        // Rendezvous with the parked checkpoint and release it.
+        barrier.wait().await;
+
+        let result = handle.await.unwrap().unwrap();
+        assert!(
+            result.is_none(),
+            "checkpoint must skip the iteration's writes on cancellation"
+        );
+
+        // No orphan artifact rows, no post-cancel progress rows.
+        assert_eq!(count(&db, "work_artifacts"), artifacts_before);
+        assert_eq!(count(&db, "flow_performance_records"), performance_before);
+
+        // The context row was never rewritten after the flip: terminal
+        // Cancelled state untouched (no resurrection attempt even tried).
+        let (status, updated_at): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT status, updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(status.contains("Cancelled"));
+        assert_eq!(updated_at, updated_at_after_flip);
+
+        // Event stream: the flip's audit event, nothing from this
+        // iteration (the execution_interrupted evidence is the loop's
+        // responsibility, not the step's).
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"context_created"));
+        assert!(types.contains(&"context_cancelled"));
+        assert!(!types.contains(&"artifact_added"));
+        assert!(!types.contains(&"status_changed"));
+        assert!(!types.contains(&"execution_interrupted"));
+    }
+
+    /// Negative control: without cancellation the same flow persists its
+    /// artifacts — the checkpoint must not skip normal persistence.
+    #[tokio::test]
+    async fn post_flow_checkpoint_does_not_skip_normal_persistence() {
+        let (wcs, execution_service, db) = setup_execution_service();
+        let mut context = general_review_context(&wcs);
+
+        let artifacts_before = count(&db, "work_artifacts");
+        let token = CancellationToken::new();
+        let result = execution_service
+            .execute_flow_in_context(&mut context, "planning.flow.yaml", &token)
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_some(),
+            "uncancelled flow must return its artifact"
+        );
+        assert_eq!(
+            count(&db, "work_artifacts"),
+            artifacts_before + 1,
+            "uncancelled flow must persist its artifact"
+        );
+    }
 
     #[tokio::test]
     async fn test_work_execution_service_creation() {

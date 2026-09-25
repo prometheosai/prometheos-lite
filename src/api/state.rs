@@ -12,7 +12,9 @@ use crate::flow::MemoryService;
 use crate::flow::RuntimeContext;
 use crate::flow::execution_service::FlowExecutionService;
 use crate::intent::IntentClassifier;
-use crate::work::{PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator};
+use crate::work::{
+    PlaybookResolver, RunCancelRegistry, WorkContextService, WorkExecutionService, WorkOrchestrator,
+};
 
 /// Global application state shared across all API routes
 ///
@@ -36,6 +38,13 @@ pub struct AppState {
     pub intent_classifier: Arc<IntentClassifier>,
     /// Monotonic request counter for server metrics
     pub request_count: Arc<AtomicU64>,
+    /// Per-context run cancellation tokens (#222): the run endpoint
+    /// registers a token for the duration of each run; the cancel endpoint
+    /// fires every token registered for the context after the durable
+    /// status flip commits. Same-process wake only — cross-process cancels
+    /// are observed through the durable status at the run loop's
+    /// cancellation checkpoints.
+    pub run_cancels: Arc<RunCancelRegistry>,
 }
 
 impl AppState {
@@ -59,6 +68,7 @@ impl AppState {
             flow_execution_service,
             intent_classifier,
             request_count: Arc::new(AtomicU64::new(0)),
+            run_cancels: Arc::new(RunCancelRegistry::default()),
         })
     }
 

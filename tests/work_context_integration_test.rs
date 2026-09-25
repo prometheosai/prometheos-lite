@@ -408,7 +408,11 @@ async fn test_golden_integration_with_flow_execution() {
     // Step 2: Attempt actual flow execution
     // This validates the integration path: flow file resolution, loading, and execution wiring
     let execution_result = work_execution_service
-        .execute_flow_in_context(&mut context, "planning.flow.yaml")
+        .execute_flow_in_context(
+            &mut context,
+            "planning.flow.yaml",
+            &prometheos_lite::workflow::evaluate::CancellationToken::new(),
+        )
         .await;
 
     if execution_result.is_ok() {
