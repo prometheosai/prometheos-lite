@@ -18,6 +18,92 @@ use crate::db::repository::work_run_metrics::WorkRunMetricsOperations;
 use crate::harness::evidence::EvidenceLog;
 use crate::work::types::HarnessRunMetricsRecord;
 
+/// Validation-only halves of the lifecycle transitions (#222 atomic
+/// iteration persistence): pure checks over the in-memory context so the
+/// run loop's draft stage enforces exactly the same rules as the writing
+/// methods, without touching the database. The writing methods delegate
+/// to these before mutating.
+pub fn validate_status_transition(context: &WorkContext, status: WorkStatus) -> Result<()> {
+    if context.status == WorkStatus::Cancelled {
+        anyhow::bail!("cancelled WorkContext accepts no further status transitions");
+    }
+    if context.domain == WorkDomain::Software && status == WorkStatus::Completed {
+        let completion_ok = context
+            .harness_metadata()
+            .and_then(|m| m.completion_decision)
+            .map(|d| matches!(d, crate::harness::completion::CompletionDecision::Complete))
+            .unwrap_or(false);
+        if !completion_ok {
+            anyhow::bail!(
+                "Software WorkContext cannot be Completed without CompletionDecision::Complete evidence"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Phase-transition validation (pure; no DB access). Mirrors the checks
+/// `WorkContextService::update_phase` applies before writing.
+pub fn validate_phase_transition(context: &WorkContext, phase: WorkPhase) -> Result<()> {
+    if !crate::work::PhaseController::can_transition(context.current_phase, phase)
+        && context.current_phase != phase
+    {
+        anyhow::bail!(
+            "Invalid phase transition: {:?} -> {:?}",
+            context.current_phase,
+            phase
+        );
+    }
+
+    if context.domain == WorkDomain::Software {
+        let meta = context.harness_metadata().unwrap_or_default();
+        match (context.current_phase, phase) {
+            (WorkPhase::Execution, WorkPhase::Review) => {
+                let has_patch = !context.artifacts.is_empty()
+                    || context
+                        .metadata
+                        .get("harness")
+                        .and_then(|h| h.get("patch_result"))
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                let validation_ok = context
+                    .metadata
+                    .get("harness")
+                    .and_then(|h| h.get("validation_result"))
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                if !has_patch || !validation_ok {
+                    anyhow::bail!(
+                        "Software Execution -> Review requires patch evidence and validation evidence"
+                    );
+                }
+            }
+            (WorkPhase::Review, WorkPhase::Finalization) => {
+                let review_present = context
+                    .metadata
+                    .get("harness")
+                    .and_then(|h| h.get("review_issues"))
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                let risk_present = meta.risk_level.is_some()
+                    || context
+                        .metadata
+                        .get("harness")
+                        .and_then(|h| h.get("risk_assessment"))
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                if !review_present || !risk_present {
+                    anyhow::bail!(
+                        "Software Review -> Finalization requires review and risk evidence"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// WorkContextService - handles WorkContext CRUD and lifecycle operations
 pub struct WorkContextService {
     db: Arc<Db>,
@@ -143,21 +229,7 @@ impl WorkContextService {
 
     /// Update the status of a WorkContext
     pub fn update_status(&self, context: &mut WorkContext, status: WorkStatus) -> Result<()> {
-        if context.status == WorkStatus::Cancelled {
-            anyhow::bail!("cancelled WorkContext accepts no further status transitions");
-        }
-        if context.domain == WorkDomain::Software && status == WorkStatus::Completed {
-            let completion_ok = context
-                .harness_metadata()
-                .and_then(|m| m.completion_decision)
-                .map(|d| matches!(d, crate::harness::completion::CompletionDecision::Complete))
-                .unwrap_or(false);
-            if !completion_ok {
-                anyhow::bail!(
-                    "Software WorkContext cannot be Completed without CompletionDecision::Complete evidence"
-                );
-            }
-        }
+        validate_status_transition(context, status)?;
 
         let old_status = context.status;
         context.status = status;
@@ -304,62 +376,7 @@ impl WorkContextService {
 
     /// Update the phase of a WorkContext
     pub fn update_phase(&self, context: &mut WorkContext, phase: WorkPhase) -> Result<()> {
-        if !crate::work::PhaseController::can_transition(context.current_phase, phase)
-            && context.current_phase != phase
-        {
-            anyhow::bail!(
-                "Invalid phase transition: {:?} -> {:?}",
-                context.current_phase,
-                phase
-            );
-        }
-
-        if context.domain == WorkDomain::Software {
-            let meta = context.harness_metadata().unwrap_or_default();
-            match (context.current_phase, phase) {
-                (WorkPhase::Execution, WorkPhase::Review) => {
-                    let has_patch = !context.artifacts.is_empty()
-                        || context
-                            .metadata
-                            .get("harness")
-                            .and_then(|h| h.get("patch_result"))
-                            .map(|v| !v.is_null())
-                            .unwrap_or(false);
-                    let validation_ok = context
-                        .metadata
-                        .get("harness")
-                        .and_then(|h| h.get("validation_result"))
-                        .map(|v| !v.is_null())
-                        .unwrap_or(false);
-                    if !has_patch || !validation_ok {
-                        anyhow::bail!(
-                            "Software Execution -> Review requires patch evidence and validation evidence"
-                        );
-                    }
-                }
-                (WorkPhase::Review, WorkPhase::Finalization) => {
-                    let review_present = context
-                        .metadata
-                        .get("harness")
-                        .and_then(|h| h.get("review_issues"))
-                        .map(|v| v.is_array())
-                        .unwrap_or(false);
-                    let risk_present = meta.risk_level.is_some()
-                        || context
-                            .metadata
-                            .get("harness")
-                            .and_then(|h| h.get("risk_assessment"))
-                            .map(|v| !v.is_null())
-                            .unwrap_or(false);
-                    if !review_present || !risk_present {
-                        anyhow::bail!(
-                            "Software Review -> Finalization requires review and risk evidence"
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
+        validate_phase_transition(context, phase)?;
 
         let old_phase = context.current_phase;
         context.current_phase = phase;

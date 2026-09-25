@@ -11,6 +11,7 @@ mod flow_performance;
 mod flow_runs;
 pub mod graph_checkpoints;
 mod interrupts;
+pub mod iteration_persist;
 mod messages;
 mod outbox;
 mod playbooks;

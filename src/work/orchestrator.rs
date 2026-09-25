@@ -1449,4 +1449,265 @@ mod tests {
         // The gate was never reached: the loop refused before the flow.
         assert!(!gate.arrived.is_cancelled());
     }
+
+    /// #222 atomic iteration persistence — writer ordering 1: the durable
+    /// cancel commits in the window between the post-flow checkpoint read
+    /// and the iteration transaction. Everything the iteration drafted
+    /// must roll back or never be written: no artifact rows, no
+    /// performance record, no iteration events, no context rewrite; the
+    /// run exits gracefully with mandatory evidence.
+    ///
+    /// Deterministic: the token parks at three safe points per iteration
+    /// (loop top, post-flow checkpoint, pre-transaction). The flip+fire
+    /// happen after the checkpoint's release (its read has passed) and
+    /// before the pre-transaction park's release — the transaction cannot
+    /// open without that release, so the cancel is guaranteed committed
+    /// before the guarded UPDATE reads.
+    #[tokio::test]
+    async fn cancel_in_checkpoint_to_transaction_window_writes_nothing() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        // Safe point 1 (loop top): release so the iteration starts.
+        barrier.wait().await;
+        // Flow provably in flight, then completed.
+        gate.arrived.cancelled().await;
+        gate.release.cancel();
+        // Safe point 2 (post-flow checkpoint): release — the checkpoint's
+        // read happens now and passes (nothing has been cancelled yet).
+        barrier.wait().await;
+
+        // The cancel lands in the checkpoint-to-transaction window
+        // (production ordering: durable flip, then token fire). The task
+        // cannot open the transaction until safe point 3 is released
+        // below, so the cancel is guaranteed to have committed first.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        let updated_at_after_flip: String = db
+            .conn()
+            .query_row(
+                "SELECT updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        token.cancel();
+
+        // Safe point 3 (pre-transaction): release — the guarded UPDATE
+        // reads Cancelled, the transaction writes nothing and rolls back.
+        barrier.wait().await;
+
+        let result = handle.await.unwrap().unwrap();
+        assert!(result.is_cancelled());
+
+        // Nothing from the iteration exists.
+        assert_eq!(count_rows(&db, "work_artifacts"), 0);
+        assert_eq!(count_rows(&db, "flow_performance_records"), 0);
+        let (status, updated_at): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT status, updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(status.contains("Cancelled"));
+        assert_eq!(
+            updated_at, updated_at_after_flip,
+            "the cancelled row was never rewritten"
+        );
+
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(!types.contains(&"artifact_added"));
+        assert!(!types.contains(&"phase_transition"));
+        assert!(!types.contains(&"status_changed"));
+        assert!(types.contains(&"context_cancelled"));
+
+        // Mandatory evidence for the interrupted run.
+        let interrupted = interrupted_events(&db, &context.id);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0]["iterations"], 1);
+        assert!(interrupted[0]["checkpoint_ref"].is_null());
+    }
+
+    /// #222 atomic iteration persistence — writer ordering 2: the
+    /// iteration transaction commits FIRST, then the durable cancel lands
+    /// on top. The iteration's rows must be FULLY present (all-or-nothing
+    /// means complete rows, never partial): artifact rows, performance
+    /// record, phase/status events. The cancel then flips the (non-
+    /// terminal) status through its own conditional transaction, and the
+    /// next iteration refuses gracefully with evidence.
+    #[tokio::test]
+    async fn committed_iteration_survives_cancel_that_lands_on_top() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        // Safe point 1 (loop top): iteration 1 starts.
+        barrier.wait().await;
+        gate.arrived.cancelled().await;
+        gate.release.cancel();
+        // Safe point 2 (checkpoint): passes — nothing is cancelled.
+        barrier.wait().await;
+        // Safe point 3 (pre-transaction): release — the transaction
+        // commits the FULL iteration write set.
+        barrier.wait().await;
+
+        // Prove the commit happened (bounded poll for the artifact row).
+        // tokio::time::sleep, NOT std::thread::sleep: the poll must yield
+        // to the runtime so the spawned task can run its transaction —
+        // blocking the current-thread runtime would starve it forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while count_rows(&db, "work_artifacts") == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "iteration transaction did not commit in time (handle finished: {}, events: {:?})",
+                handle.is_finished(),
+                WorkContextEventOperations::get_events_for_context(&*db, &context.id)
+                    .map(|evs| evs.iter().map(|e| e.event_type.clone()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // The cancel lands on top. Iteration 2 cannot start: the loop-top
+        // park (safe point 4) holds it until released below, and the
+        // flip is guaranteed committed before that release.
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "test cancellation")
+            .unwrap();
+        token.cancel();
+
+        // Safe point 4 (loop top before iteration 2): the entry guard
+        // reads Cancelled and refuses with the typed sentinel.
+        barrier.wait().await;
+
+        let result = handle.await.unwrap().unwrap();
+        assert!(result.is_cancelled());
+
+        // The committed iteration is FULLY present — never partial.
+        assert_eq!(count_rows(&db, "work_artifacts"), 1);
+        assert_eq!(count_rows(&db, "flow_performance_records"), 1);
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"artifact_added"));
+        assert!(types.contains(&"phase_transition"));
+        assert_eq!(types.iter().filter(|t| **t == "status_changed").count(), 2);
+
+        // The cancel landed on top through its own transaction.
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert!(stored.is_cancelled());
+
+        // Graceful refusal of iteration 2 with mandatory evidence.
+        let interrupted = interrupted_events(&db, &context.id);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0]["iterations"], 1);
+    }
+
+    /// #222 atomic iteration persistence — mid-transaction failure rolls
+    /// back EVERYTHING and surfaces a genuine error. The performance
+    /// insert (late in the transaction) is made to fail; the earlier
+    /// writes of the same transaction (guarded context update, artifact
+    /// rows, events) must not survive. The run surfaces the genuine
+    /// persistence error — never a graceful cancellation, no evidence
+    /// event.
+    #[tokio::test]
+    async fn mid_transaction_failure_rolls_back_everything_and_errors_loudly() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let token = CancellationToken::with_park_barrier(barrier.clone());
+        let limits = ExecutionLimits::default().with_max_iterations(5);
+
+        let updated_at_before: String = db
+            .conn()
+            .query_row(
+                "SELECT updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let orch = orchestrator.clone();
+        let ctx_id = context.id.clone();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
+                .await
+        });
+
+        // Safe point 1 (loop top): the iteration starts.
+        barrier.wait().await;
+        // While the flow is provably gated (before any write), destroy
+        // the performance sink so the late insert fails inside the
+        // transaction.
+        gate.arrived.cancelled().await;
+        db.conn()
+            .execute("DROP TABLE flow_performance_records", [])
+            .unwrap();
+        gate.release.cancel();
+        // Safe point 2 (checkpoint): passes — no cancel in this test.
+        barrier.wait().await;
+        // Safe point 3 (pre-transaction): release — the transaction runs,
+        // its late insert fails, everything rolls back.
+        barrier.wait().await;
+
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            !err.to_string().contains("cannot continue"),
+            "a persistence failure must not surface as the cancellation refusal, got: {err}"
+        );
+
+        // Full rollback: the guarded context update and the artifact rows
+        // that preceded the failure inside the transaction are gone.
+        assert_eq!(count_rows(&db, "work_artifacts"), 0);
+        let (status, updated_at): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT status, updated_at FROM work_contexts WHERE id = ?1",
+                rusqlite::params![context.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            !status.contains("Cancelled"),
+            "no cancel happened in this test; the row must be untouched"
+        );
+        assert_eq!(
+            updated_at, updated_at_before,
+            "context row untouched by rollback"
+        );
+
+        // Genuine error: no graceful-conversion evidence was recorded.
+        assert_eq!(interrupted_events(&db, &context.id).len(), 0);
+    }
 }
