@@ -231,6 +231,71 @@ fn insert_event(
     Ok(())
 }
 
+/// Atomic completion persistence (#228 repair): every durable effect of
+/// `WorkOrchestrator::complete_context`'s Completion trigger commits in
+/// ONE cancellation-conditional transaction — the full-row context update
+/// (terminal status, evaluation result, harness metadata), the evolved
+/// playbook row, and the `status_changed` event — or nothing at all. A
+/// genuine persistence failure mid-transaction rolls back every prior
+/// effect (the playbook update included), so completion can never leave
+/// partial effects behind.
+///
+/// Same writer-ordering contract as `persist_iteration_conn`: the
+/// guarded full-row UPDATE is the first statement (cancellation
+/// condition + write lock), and `Ok(false)` means a durable cancel won
+/// before the transaction, so nothing was written.
+pub fn persist_completion_conn(
+    conn: &rusqlite::Connection,
+    context: &crate::work::types::WorkContext,
+    playbook: Option<&crate::work::playbook::WorkContextPlaybook>,
+    status_from: WorkStatus,
+    status_to: WorkStatus,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+
+    let affected = update_work_context_on_conn(&tx, context)?;
+    if affected == 0 {
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM work_contexts WHERE id = ?1",
+                params![context.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match status.as_deref() {
+            Some(stored) if stored.contains("Cancelled") => {
+                tx.rollback()?;
+                return Ok(false);
+            }
+            Some(stored) => {
+                anyhow::bail!(
+                    "completion persist guard refused a non-cancelled status for {}: {}",
+                    context.id,
+                    stored
+                );
+            }
+            None => anyhow::bail!("work context not found: {}", context.id),
+        }
+    }
+
+    if let Some(playbook) = playbook {
+        let playbook_affected = super::update_playbook_on_conn(&tx, playbook)?;
+        if playbook_affected == 0 {
+            anyhow::bail!("playbook not found: {}", playbook.id);
+        }
+    }
+
+    insert_event(
+        &tx,
+        &context.id,
+        "status_changed",
+        serde_json::json!({ "from": status_from, "to": status_to }),
+    )?;
+
+    tx.commit()?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

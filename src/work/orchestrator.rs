@@ -224,6 +224,23 @@ impl WorkOrchestrator {
 
     /// Complete a context and trigger evolution if applicable
     /// Triggers: completion, partial failure, user correction, retry
+    ///
+    /// #228 repair (binding review round 2) — no masking, no partial
+    /// effects:
+    /// - A durable cancellation observed at the entry read (BEFORE any
+    ///   write) surfaces as the TYPED `CancelledRefusal`; the run loop
+    ///   converts exactly that typed refusal into the graceful evidenced
+    ///   stop. Every other error — including any persistence failure —
+    ///   propagates unmasked.
+    /// - The Completion trigger's durable effects (the full-row context
+    ///   update with terminal status/evaluation, the evolved playbook
+    ///   row, and the status_changed event) commit in ONE
+    ///   cancellation-conditional transaction
+    ///   (`persist_completion_conn`): all-or-nothing, so a genuine
+    ///   failure mid-sequence rolls back every prior effect — completion
+    ///   can never leave partial effects. The other triggers have no
+    ///   production callers and keep their historical per-write sequence
+    ///   after the same typed entry refusal.
     pub async fn complete_context(
         &self,
         context_id: String,
@@ -234,23 +251,17 @@ impl WorkOrchestrator {
             .get_context(&context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
 
+        // Typed pre-write refusal: a durable cancel observed before any
+        // completion write. The loop converts exactly this type; nothing
+        // else may be converted into a graceful cancellation.
+        if context.is_cancelled() {
+            return Err(super::CancelledRefusal(context_id.clone()).into());
+        }
+
         // Evaluate context and store result
         let evaluation_result = EvolutionEngine::evaluate_context(&context);
         let evaluation_json = serde_json::to_value(&evaluation_result)
             .context("Failed to serialize evaluation result")?;
-
-        // Only trigger evolution if playbook is associated
-        if let Some(ref playbook_id) = context.playbook_id {
-            // Extract patterns from completed context
-            let (success_patterns, failure_patterns) = EvolutionEngine::extract_patterns(&context);
-
-            // Evolve playbook based on patterns
-            self.evolution_engine.evolve_playbook(
-                playbook_id,
-                success_patterns,
-                failure_patterns,
-            )?;
-        }
 
         // Update context status based on trigger
         let mut context = context;
@@ -264,27 +275,63 @@ impl WorkOrchestrator {
                         ..Default::default()
                     });
                 }
-                self.work_context_service
-                    .update_status(&mut context, WorkStatus::Completed)?;
+                let status_from = context.status;
+                super::service::validate_status_transition(&context, WorkStatus::Completed)?;
+                context.status = WorkStatus::Completed;
+                context.touch();
+
+                // Evolve the playbook IN MEMORY (#228 repair); the atomic
+                // completion transaction commits it together with every
+                // other completion effect — or rolls it back with them.
+                let evolved = match &context.playbook_id {
+                    Some(playbook_id) => {
+                        let (success_patterns, failure_patterns) =
+                            EvolutionEngine::extract_patterns(&context);
+                        Some(self.evolution_engine.compute_evolved_playbook(
+                            playbook_id,
+                            success_patterns,
+                            failure_patterns,
+                        )?)
+                    }
+                    None => None,
+                };
+
+                // ONE cancellation-conditional transaction for every
+                // durable effect of the completion.
+                let conn = self.work_context_service.get_db().conn();
+                let committed = crate::db::repository::iteration_persist::persist_completion_conn(
+                    conn,
+                    &context,
+                    evolved.as_ref(),
+                    status_from,
+                    WorkStatus::Completed,
+                )?;
+                if !committed {
+                    // The durable cancel won at the transaction guard:
+                    // nothing was written. Typed, so the loop converts it
+                    // — never a bare persistence error.
+                    return Err(super::CancelledRefusal(context_id).into());
+                }
+                Ok(context)
             }
             EvolutionTrigger::PartialFailure => {
                 self.work_context_service
                     .update_status(&mut context, WorkStatus::Blocked)?;
+                Ok(context)
             }
             EvolutionTrigger::UserCorrection => {
                 // User corrected the context, continue execution
                 self.work_context_service
                     .clear_blocked_reason(&mut context)?;
+                Ok(context)
             }
             EvolutionTrigger::Retry => {
                 // Retry triggered, reset to InProgress
                 self.work_context_service
                     .update_status(&mut context, WorkStatus::InProgress)?;
+                Ok(context)
             }
         }
-
-        self.work_context_service.update_context(&context)?;
-        Ok(context)
     }
 
     /// Continue a blocked context
@@ -427,25 +474,34 @@ impl WorkOrchestrator {
 
             // Check limits
             if iterations >= limits.max_iterations {
-                if let Err(e) = self
-                    .work_context_service
-                    .set_blocked_reason(&mut context, "Max iterations reached".to_string())
-                {
-                    // The read-to-write window: a cancel may have won in
-                    // between. If so, this is the same graceful evidenced
-                    // stop; otherwise the genuine error propagates.
-                    return self.exit_failure_to_graceful_cancellation(&context_id, iterations, e);
+                // #228 repair (binding review round 2): the exit takes a
+                // TYPED pre-write refusal when a durable cancellation
+                // landed in the read-to-write window; ONLY that typed
+                // refusal converts to the graceful evidenced stop. The
+                // blocked-reason write's own errors are genuine and
+                // propagate unmasked.
+                match self.exit_cancellation_check(&context_id) {
+                    Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
+                        return self.graceful_cancelled_result(&context_id, iterations);
+                    }
+                    Err(e) => return Err(e),
+                    Ok(()) => {}
                 }
+                self.work_context_service
+                    .set_blocked_reason(&mut context, "Max iterations reached".to_string())?;
                 break;
             }
 
             if start.elapsed().as_millis() as u64 >= limits.max_runtime_ms {
-                if let Err(e) = self
-                    .work_context_service
-                    .set_blocked_reason(&mut context, "Max runtime exceeded".to_string())
-                {
-                    return self.exit_failure_to_graceful_cancellation(&context_id, iterations, e);
+                match self.exit_cancellation_check(&context_id) {
+                    Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
+                        return self.graceful_cancelled_result(&context_id, iterations);
+                    }
+                    Err(e) => return Err(e),
+                    Ok(()) => {}
                 }
+                self.work_context_service
+                    .set_blocked_reason(&mut context, "Max runtime exceeded".to_string())?;
                 break;
             }
 
@@ -453,7 +509,12 @@ impl WorkOrchestrator {
             if context.is_complete()
                 || (!context.completion_criteria.is_empty() && context.is_completion_satisfied())
             {
-                // Use complete_context() to trigger evaluation and evolution
+                // Use complete_context() to trigger evaluation and evolution.
+                // #228 repair (binding review round 2): ONLY the typed
+                // cancellation refusal converts to the graceful evidenced
+                // stop; a genuine completion error — including a
+                // persistence failure inside the atomic completion
+                // transaction — propagates unmasked.
                 match self
                     .complete_context(context.id.clone(), EvolutionTrigger::Completion)
                     .await
@@ -462,14 +523,10 @@ impl WorkOrchestrator {
                         context = done;
                         break;
                     }
-                    Err(e) => {
-                        // Same read-to-write window as the limit exits.
-                        return self.exit_failure_to_graceful_cancellation(
-                            &context_id,
-                            iterations,
-                            e,
-                        );
+                    Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
+                        return self.graceful_cancelled_result(&context_id, iterations);
                     }
+                    Err(e) => return Err(e),
                 }
             }
 
@@ -575,29 +632,49 @@ impl WorkOrchestrator {
         if let Some(fresh) = self.work_context_service.get_context(context_id)?
             && fresh.is_cancelled()
         {
-            let phase = fresh.current_phase;
-            self.record_execution_interrupted(context_id, iterations, &phase)?;
-            Ok(Some(fresh))
+            Ok(Some(
+                self.graceful_cancelled_result_inner(fresh, iterations)?,
+            ))
         } else {
             Ok(None)
         }
     }
 
-    /// #228 repair: a loop-exit write (blocked reason, completion) failed
-    /// inside the read-to-write window — a durable cancellation may have
-    /// won in between (the last-guard refused the exit write). If so, the
-    /// failure converts to the same graceful evidenced stop; otherwise
-    /// the genuine error propagates unmasked.
-    fn exit_failure_to_graceful_cancellation(
+    /// The graceful evidenced stop: fresh cancelled context + mandatory
+    /// `execution_interrupted` evidence. Shared by every cancellation
+    /// observation point in the run loop.
+    fn graceful_cancelled_result(&self, context_id: &str, iterations: u32) -> Result<WorkContext> {
+        let fresh = self
+            .work_context_service
+            .get_context(context_id)?
+            .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
+        self.graceful_cancelled_result_inner(fresh, iterations)
+    }
+
+    fn graceful_cancelled_result_inner(
         &self,
-        context_id: &str,
+        fresh: WorkContext,
         iterations: u32,
-        error: anyhow::Error,
     ) -> Result<WorkContext> {
-        if let Some(fresh) = self.graceful_if_cancelled(context_id, iterations)? {
-            return Ok(fresh);
+        let phase = fresh.current_phase;
+        self.record_execution_interrupted(&fresh.id, iterations, &phase)?;
+        Ok(fresh)
+    }
+
+    /// #228 repair (binding review round 2): a loop-exit write (blocked
+    /// reason, completion) is about to run — take a TYPED pre-write
+    /// refusal if a durable cancellation landed in the read-to-write
+    /// window. The loop converts EXACTLY this typed refusal into the
+    /// graceful evidenced stop; every genuine error — including any
+    /// persistence failure of the exit write itself — propagates
+    /// unmasked and is never converted into a cancellation.
+    fn exit_cancellation_check(&self, context_id: &str) -> Result<()> {
+        if let Some(fresh) = self.work_context_service.get_context(context_id)?
+            && fresh.is_cancelled()
+        {
+            return Err(super::CancelledRefusal(context_id.to_string()).into());
         }
-        Err(error)
+        Ok(())
     }
 
     /// V1.4 Verification Loop - run plan → patch → test → failure → re-plan loop
@@ -1035,7 +1112,7 @@ mod tests {
     use crate::work::execution_service::WorkExecutionService;
     use crate::work::playbook_resolver::PlaybookResolver;
     use crate::work::service::WorkContextService;
-    use crate::work::types::WorkDomain;
+    use crate::work::types::{CompletionCriterion, WorkDomain, WorkStatus};
 
     #[test]
     fn test_execution_limits_default() {
@@ -1876,5 +1953,151 @@ mod tests {
         assert_eq!(count_rows(&db, "work_artifacts"), 1);
         let stored = wcs.get_context(&context.id).unwrap().unwrap();
         assert!(stored.is_cancelled());
+    }
+
+    /// Shared setup for the completion-atomicity tests: a completable
+    /// context with a playbook attached (the evolution effect).
+    fn completable_context_with_playbook(
+        wcs: &WorkContextService,
+        db: &Arc<Db>,
+    ) -> (WorkContext, &'static str) {
+        let mut context = create_context(wcs);
+
+        let playbook_id = "test-playbook-completion-atomicity";
+        let mut playbook = crate::work::playbook::WorkContextPlaybook::new(
+            playbook_id.to_string(),
+            "user-1".to_string(),
+            "general".to_string(),
+            "Completion Test Playbook".to_string(),
+            "Completion atomicity fixture".to_string(),
+        );
+        playbook.preferred_flows = vec![crate::work::playbook::FlowPreference {
+            flow_id: "planning.flow.yaml".to_string(),
+            weight: 0.5,
+            confidence: 0.5,
+        }];
+        crate::db::repository::PlaybookOperations::create_playbook(&**db, &playbook).unwrap();
+
+        context.playbook_id = Some(playbook_id.to_string());
+        context.completion_criteria = vec![CompletionCriterion::new(
+            "c1".to_string(),
+            "done".to_string(),
+        )];
+        context.completion_criteria[0].satisfied = true;
+        context.status = WorkStatus::InProgress;
+        wcs.update_context(&context).unwrap();
+        (context, playbook_id)
+    }
+
+    /// #228 repair (binding review round 2): complete_context refuses a
+    /// durably cancelled context with the TYPED refusal, raised at the
+    /// entry read BEFORE any write — so the loop can convert exactly that
+    /// type into the graceful evidenced stop, and nothing else.
+    #[tokio::test]
+    async fn complete_context_refuses_cancelled_with_typed_error_and_no_writes() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let context = create_context(&wcs);
+
+        let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+        wcs.cancel_context(&mut snapshot, "before completion")
+            .unwrap();
+
+        let err = orchestrator
+            .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::work::CancelledRefusal>()
+                .is_some(),
+            "the refusal must be the typed CancelledRefusal, got: {err}"
+        );
+
+        // Zero completion writes: the terminal row untouched, no
+        // status_changed, no evaluation stored — and the refusal itself
+        // persisted no evidence.
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert!(stored.is_cancelled());
+        assert!(stored.evaluation_result.is_none());
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        assert!(!events.iter().any(|e| e.event_type == "status_changed"));
+        assert_eq!(interrupted_events(&db, &context.id).len(), 0);
+    }
+
+    /// #228 repair (binding review round 2): a genuine completion
+    /// persistence failure mid-transaction rolls back EVERY prior effect
+    /// of the same transaction — the terminal context-row update AND the
+    /// evolved playbook row — and surfaces as a genuine error that is
+    /// never masked as a cancellation. The late failure is injected at
+    /// the status_changed event insert, after both earlier effects.
+    #[tokio::test]
+    async fn completion_persistence_failure_rolls_back_all_effects_unmasked() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let (context, playbook_id) = completable_context_with_playbook(&wcs, &db);
+
+        // Fail the completion transaction LATE: the status_changed event
+        // insert comes after the context-row and playbook updates.
+        db.conn()
+            .execute("DROP TABLE work_context_events", [])
+            .unwrap();
+
+        let err = orchestrator
+            .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::work::CancelledRefusal>()
+                .is_none(),
+            "a genuine persistence failure must never surface as the typed cancellation refusal, got: {err}"
+        );
+
+        // Full rollback: neither the terminal status nor the evolved
+        // playbook survived the failed transaction.
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            WorkStatus::InProgress,
+            "the terminal status update rolled back"
+        );
+        assert!(stored.evaluation_result.is_none());
+        let stored_playbook =
+            crate::db::repository::PlaybookOperations::get_playbook(&*db, playbook_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            stored_playbook.preferred_flows[0].weight, 0.5,
+            "the playbook evolution rolled back"
+        );
+        assert_eq!(stored_playbook.preferred_flows[0].confidence, 0.5);
+    }
+
+    /// Positive control: the atomic completion commits the terminal
+    /// status, the evaluation result, the evolved playbook, and the
+    /// status_changed event together.
+    #[tokio::test]
+    async fn completion_commits_status_playbook_and_event_atomically() {
+        let gate = Gate::new();
+        let (wcs, orchestrator, db) = setup_orchestrator_gated(gate.clone());
+        let (context, playbook_id) = completable_context_with_playbook(&wcs, &db);
+
+        let completed = orchestrator
+            .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+            .await
+            .unwrap();
+        assert_eq!(completed.status, WorkStatus::Completed);
+
+        let stored = wcs.get_context(&context.id).unwrap().unwrap();
+        assert_eq!(stored.status, WorkStatus::Completed);
+        assert!(stored.evaluation_result.is_some());
+
+        let events = WorkContextEventOperations::get_events_for_context(&*db, &context.id).unwrap();
+        assert!(events.iter().any(|e| e.event_type == "status_changed"));
+
+        let stored_playbook =
+            crate::db::repository::PlaybookOperations::get_playbook(&*db, playbook_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(stored_playbook.preferred_flows[0].weight, 0.5);
     }
 }
