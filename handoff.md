@@ -18,7 +18,7 @@ Reviewed head `d056a93` (full: `d056a93efac5d8afd6304b7926d72f1c0eb8a098`). Exac
 | platform | 8/8 | `5736a6533f48a267040c365a17a38d58ad4433a9ba5b389edac454f5d928abe0` |
 | smoke | 9/9 | `c2bdb40353ffee839698a9efe453cc1eaa2af5dde0690507e6629e0932dfde96` |
 
-Verifier invocation and result (re-run against the retained artifacts on 2026-09-24; PASS, exit 0):
+Verifier invocation and result (re-run against the retained artifacts on September 25, 2026; PASS, exit 0):
 
 ```
 python scripts/local_ci.py verify --commit d056a93efac5d8afd6304b7926d72f1c0eb8a098 \
