@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::db::Db;
 use crate::db::repository::PlaybookOperations;
-use crate::work::playbook::{PatternRecord, PatternType};
+use crate::work::playbook::{PatternRecord, PatternType, WorkContextPlaybook};
 use crate::work::types::{FlowPerformanceRecord, WorkContext};
 
 /// EvaluationResult - result of evaluating a WorkContext
@@ -399,6 +399,26 @@ impl EvolutionEngine {
         success_patterns: Vec<PatternRecord>,
         failure_patterns: Vec<PatternRecord>,
     ) -> Result<()> {
+        let playbook =
+            self.compute_evolved_playbook(playbook_id, success_patterns, failure_patterns)?;
+        PlaybookOperations::update_playbook(&*self.db, &playbook)?;
+        Ok(())
+    }
+
+    /// Pure half of playbook evolution (#228 repair): read the playbook
+    /// and apply every pattern-driven adjustment IN MEMORY, without
+    /// writing. The completion path commits the computed playbook inside
+    /// its atomic completion transaction
+    /// ([`crate::db::repository::persist_completion_conn`]), so a
+    /// completion persistence failure can never leave a half-evolved
+    /// playbook behind. Errors when the playbook id is dangling (same
+    /// contract as `evolve_playbook`).
+    pub fn compute_evolved_playbook(
+        &self,
+        playbook_id: &str,
+        success_patterns: Vec<PatternRecord>,
+        failure_patterns: Vec<PatternRecord>,
+    ) -> Result<WorkContextPlaybook> {
         let mut playbook = PlaybookOperations::get_playbook(&*self.db, playbook_id)?
             .ok_or_else(|| anyhow::anyhow!("Playbook not found: {}", playbook_id))?;
 
@@ -561,9 +581,7 @@ impl EvolutionEngine {
 
         playbook.updated_at = chrono::Utc::now();
 
-        PlaybookOperations::update_playbook(&*self.db, &playbook)?;
-
-        Ok(())
+        Ok(playbook)
     }
 
     /// Initialize evolution tables

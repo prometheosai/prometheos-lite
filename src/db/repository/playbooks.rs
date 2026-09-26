@@ -6,6 +6,38 @@ use rusqlite::params;
 use super::trait_def::Repository;
 use crate::work::playbook::{FlowPreference, NodePreference, PatternRecord, WorkContextPlaybook};
 
+/// Full playbook-row UPDATE on an arbitrary Connection — the tx-capable
+/// primitive (single source of truth for the statement), so atomic
+/// persistence units (e.g. completion persistence) can write the evolved
+/// playbook in the same transaction as the rest of their effects.
+pub fn update_playbook_on_conn(
+    conn: &rusqlite::Connection,
+    playbook: &WorkContextPlaybook,
+) -> anyhow::Result<usize> {
+    conn.execute(
+        "UPDATE work_context_playbooks
+         SET name = ?1, description = ?2, preferred_flows = ?3, preferred_nodes = ?4, default_approval_policy = ?5, default_research_depth = ?6, default_creativity_level = ?7, evaluation_rules = ?8, success_patterns = ?9, failure_patterns = ?10, confidence = ?11, usage_count = ?12, updated_at = ?13
+         WHERE id = ?14",
+        params![
+            &playbook.name,
+            &playbook.description,
+            serde_json::to_string(&playbook.preferred_flows)?,
+            serde_json::to_string(&playbook.preferred_nodes)?,
+            serde_json::to_string(&playbook.default_approval_policy)?,
+            serde_json::to_string(&playbook.default_research_depth)?,
+            serde_json::to_string(&playbook.default_creativity_level)?,
+            serde_json::to_string(&playbook.evaluation_rules)?,
+            serde_json::to_string(&playbook.success_patterns)?,
+            serde_json::to_string(&playbook.failure_patterns)?,
+            playbook.confidence,
+            playbook.usage_count,
+            &playbook.updated_at.to_rfc3339(),
+            &playbook.id,
+        ],
+    )
+    .context("Failed to update playbook")
+}
+
 /// PlaybookOperations trait for playbook repository operations
 pub trait PlaybookOperations: Repository {
     fn create_playbook(
@@ -324,30 +356,7 @@ impl PlaybookOperations for crate::db::Db {
         &self,
         playbook: &WorkContextPlaybook,
     ) -> anyhow::Result<WorkContextPlaybook> {
-        let conn = self.conn();
-
-        conn.execute(
-            "UPDATE work_context_playbooks
-             SET name = ?1, description = ?2, preferred_flows = ?3, preferred_nodes = ?4, default_approval_policy = ?5, default_research_depth = ?6, default_creativity_level = ?7, evaluation_rules = ?8, success_patterns = ?9, failure_patterns = ?10, confidence = ?11, usage_count = ?12, updated_at = ?13
-             WHERE id = ?14",
-            params![
-                &playbook.name,
-                &playbook.description,
-                serde_json::to_string(&playbook.preferred_flows)?,
-                serde_json::to_string(&playbook.preferred_nodes)?,
-                serde_json::to_string(&playbook.default_approval_policy)?,
-                serde_json::to_string(&playbook.default_research_depth)?,
-                serde_json::to_string(&playbook.default_creativity_level)?,
-                serde_json::to_string(&playbook.evaluation_rules)?,
-                serde_json::to_string(&playbook.success_patterns)?,
-                serde_json::to_string(&playbook.failure_patterns)?,
-                playbook.confidence,
-                playbook.usage_count,
-                &playbook.updated_at.to_rfc3339(),
-                &playbook.id,
-            ],
-        )
-        .context("Failed to update playbook")?;
+        update_playbook_on_conn(self.conn(), playbook)?;
 
         Ok(playbook.clone())
     }
