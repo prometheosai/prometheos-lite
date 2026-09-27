@@ -161,6 +161,7 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
         Err(reason) => {
             return Err(vec![enrich_one(
                 input_refusal(reason),
+                "",
                 workflow_id_of(text).as_deref(),
             )]);
         }
@@ -324,31 +325,52 @@ pub fn validate_execution_plan_text(text: &str) -> Result<Value, Diagnostic> {
             ),
         )
     };
-    let (Ok(schema_major), Ok(plan_major), Ok(_)) = (
-        SemVer::parse(&plan.schema_version),
-        SemVer::parse(&plan.plan_version),
-        SemVer::parse(&plan.canonicalization.version),
-    ) else {
-        return Err(version_error());
-    };
-    if schema_major.major != 1
-        || plan_major.major != 1
-        || plan.canonicalization.version != plan.schema_version
-    {
-        return Err(version_error());
+    let schema_parsed = SemVer::parse(&plan.schema_version);
+    let plan_parsed = SemVer::parse(&plan.plan_version);
+    let canon_parsed = SemVer::parse(&plan.canonicalization.version);
+    if schema_parsed.is_err() || plan_parsed.is_err() || canon_parsed.is_err() {
+        // First failing member, in schema order, names the pointer.
+        let pointer = if schema_parsed.is_err() {
+            "/schemaVersion"
+        } else if plan_parsed.is_err() {
+            "/planVersion"
+        } else {
+            "/canonicalization/version"
+        };
+        return Err(version_error().with_source(pointer, None));
+    }
+    let schema_major = schema_parsed.expect("schema version parsed");
+    let plan_major = plan_parsed.expect("plan version parsed");
+    if schema_major.major != 1 {
+        return Err(version_error().with_source("/schemaVersion", None));
+    }
+    if plan_major.major != 1 {
+        return Err(version_error().with_source("/planVersion", None));
+    }
+    if plan.canonicalization.version != plan.schema_version {
+        return Err(version_error().with_source("/canonicalization/version", None));
     }
     if let Err(e) = Hex64::parse(&plan.workflow_digest) {
-        return Err(Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")));
+        return Err(
+            Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}"))
+                .with_source("/workflowDigest", None),
+        );
     }
     if let Err(e) = Hex64::parse(&plan.canonicalization.sha256) {
-        return Err(Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")));
+        return Err(
+            Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}"))
+                .with_source("/canonicalization/sha256", None),
+        );
     }
     let mut step_keys = std::collections::HashSet::new();
-    if !plan.steps.iter().all(|s| step_keys.insert(s.key.as_str())) {
-        return Err(Diagnostic::new(
-            "SOMA-CMP-0003",
-            "schema violation: duplicate step key",
-        ));
+    for (i, step) in plan.steps.iter().enumerate() {
+        if !step_keys.insert(step.key.as_str()) {
+            return Err(Diagnostic::new(
+                "SOMA-CMP-0003",
+                "schema violation: duplicate step key",
+            )
+            .with_source(format!("/steps/{i}"), None));
+        }
     }
     Ok(raw)
 }
@@ -374,13 +396,14 @@ pub fn verify_reviewed_plan(
 ) -> Result<(), Vec<Diagnostic>> {
     let plan: CompiledGovernancePlanV1 = match validate_execution_plan_text(plan_text) {
         Err(d) => {
-            return Err(vec![enrich_one(d, plan_digest_hint(plan_text).as_deref())]);
+            return Err(vec![enrich_one(d, "", plan_digest_hint(plan_text).as_deref())]);
         }
         Ok(value) => match serde_json::from_value(value) {
             Ok(plan) => plan,
             Err(e) => {
                 return Err(vec![enrich_one(
                     Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")),
+                    "",
                     plan_digest_hint(plan_text).as_deref(),
                 )]);
             }
@@ -423,6 +446,7 @@ pub fn verify_reviewed_plan(
                 "SOMA-CMP-0004",
                 "plan canonicalization does not verify against the reviewed plan digest",
             ),
+            "/canonicalization/sha256",
             ctx,
         )]);
     }
@@ -439,7 +463,7 @@ pub fn verify_reviewed_plan(
                  plan or send the new plan through review."
                 .to_string(),
         });
-        return Err(vec![enrich_one(d, ctx)]);
+        return Err(vec![enrich_one(d, "/canonicalization/sha256", ctx)]);
     }
 
     Ok(())
@@ -465,18 +489,35 @@ fn enrich_all(diagnostics: Vec<Diagnostic>, text: &str) -> Vec<Diagnostic> {
     let id = workflow_id_of(text);
     diagnostics
         .into_iter()
-        .map(|d| enrich_one(d, id.as_deref()))
+        .map(|d| enrich_one(d, "", id.as_deref()))
         .collect()
 }
 
 /// Contract req3: attach source and remediation to one diagnostic.
-fn enrich_one(mut d: Diagnostic, workflow_id: Option<&str>) -> Diagnostic {
-    if let Some(id) = workflow_id {
-        let subject = d.related.first().cloned();
-        d.source = Some(DiagnosticSource {
-            path: id.to_string(),
-            subject,
-        });
+///
+/// `path` is an RFC 6901 JSON pointer into the offending document
+/// (`""` = the whole document); `subject_hint` names the artifact the
+/// document belongs to (workflow id / workflowDigest) when no stable
+/// element id is known. A precise source already attached at the
+/// refusal site is preserved — only a missing subject is filled in.
+fn enrich_one(mut d: Diagnostic, path: &str, subject_hint: Option<&str>) -> Diagnostic {
+    let subject = d
+        .related
+        .first()
+        .cloned()
+        .or_else(|| subject_hint.map(str::to_string));
+    match d.source.as_mut() {
+        Some(existing) => {
+            if existing.subject.is_none() {
+                existing.subject = subject;
+            }
+        }
+        None => {
+            d.source = Some(DiagnosticSource {
+                path: path.to_string(),
+                subject,
+            });
+        }
     }
     if d.remediation.is_none() {
         d.remediation = Some(remediation_for(&d.code));

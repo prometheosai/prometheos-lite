@@ -32,10 +32,10 @@ fn expected_workflow_digest(text: &str) -> String {
 #[test]
 fn diagnostic_enrichment_serializes_and_round_trips() {
     let d = Diagnostic::new("SOMA-AUTH-0001", "authority denied")
-        .with_source("wf-1", Some("related[0]".to_string()))
+        .with_source("/body/0", Some("related[0]".to_string()))
         .with_remediation("restrict-authority", "tighten the authority profile");
     let json = serde_json::to_value(&d).expect("serializes");
-    assert_eq!(json["source"]["path"], "wf-1");
+    assert_eq!(json["source"]["path"], "/body/0");
     assert_eq!(json["source"]["subject"], "related[0]");
     assert_eq!(json["remediation"]["action"], "restrict-authority");
     assert_eq!(
@@ -252,10 +252,12 @@ fn malformed_input_refuses_with_cmp_0003_and_no_plan() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, "SOMA-CMP-0003");
     assert_eq!(diags[0].severity, "error");
-    assert!(
-        diags[0].source.is_none(),
-        "workflow id is unextractable from malformed input"
+    let source = diags[0].source.as_ref().expect("source attached");
+    assert_eq!(
+        source.path, "",
+        "whole-document root pointer: workflow id is unextractable from malformed input"
     );
+    assert!(source.subject.is_none(), "no subject to extract");
     assert!(
         diags[0].remediation.is_some(),
         "remediation always attached"
@@ -310,10 +312,6 @@ fn mutated_valid_workflow_fails_to_compile() {
 fn failed_compiles_carry_full_diagnostics() {
     let rel = "fixtures/invalid/wf-auth-0001.json";
     let text = fixture(rel);
-    let workflow_id = serde_json::from_str::<Value>(&text).expect("fixture parses")["id"]
-        .as_str()
-        .expect("id")
-        .to_string();
     let diags = match compile_workflow_text(&text) {
         Ok(plan) => panic!("must NOT compile; got plan {plan:?}"),
         Err(diags) => diags,
@@ -324,7 +322,11 @@ fn failed_compiles_carry_full_diagnostics() {
         assert_eq!(d.severity, "error");
         assert!(!d.message.is_empty(), "explanation present");
         let source = d.source.as_ref().expect("source attached");
-        assert_eq!(source.path, workflow_id, "source path = workflow id");
+        assert!(
+            source.path.starts_with("/body/"),
+            "RFC 6901 pointer into the offending body unit, got {:?}",
+            source.path
+        );
         // Operation-level subject mirrors the diagnostic's related entry.
         assert_eq!(
             source.subject,

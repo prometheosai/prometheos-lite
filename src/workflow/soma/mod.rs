@@ -22,6 +22,9 @@ pub mod event;
 pub mod profile;
 pub mod types;
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use types::SemVer;
 
 pub type SupportedVersion = SemVer;
@@ -96,8 +99,17 @@ impl Diagnostic {
         d
     }
 
-    /// Attach a source path (usually the workflow id) and optional
-    /// subject (usually the first `related` entry).
+    /// Attach a source location and optional subject.
+    ///
+    /// `path` is an RFC 6901 JSON pointer into the offending document
+    /// (`""` = the whole document); e.g. `/body/0` for the first body
+    /// unit or `/canonicalization/sha256` for a plan seal member. Per
+    /// the published Diagnostic schema both members are plain strings —
+    /// no runtime shape is enforced.
+    ///
+    /// `subject` carries a stable identifier of the offending element
+    /// (operation id, workflow id, workflowDigest), usually the first
+    /// `related` entry.
     pub fn with_source(mut self, path: impl Into<String>, subject: Option<String>) -> Self {
         self.source = Some(DiagnosticSource {
             path: path.into(),
@@ -120,28 +132,46 @@ impl Diagnostic {
     }
 }
 
+/// Borrowed view of the vendored catalogue — deserialized straight from
+/// the static `include_str!` text so every entry is a `&'static str`.
+#[derive(serde::Deserialize)]
+struct CatalogueFile<'a> {
+    #[serde(borrow)]
+    codes: Vec<CatalogueEntry<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogueEntry<'a> {
+    code: &'a str,
+    category: &'a str,
+}
+
+/// The published per-code category table — vendored
+/// `vendored/soma/v1.1/diagnostics.json`, the normative source of truth
+/// (same rule as the oracle's exact-match `category_for`). Every stable
+/// diagnostic code resolves to its exact pinned category, never a
+/// family-generic stand-in derived from substring matching.
+///
+/// Fail-safe: codes absent from the catalogue fall back to `"general"`;
+/// `tests/emitted_diagnostics_conformance.rs` proves every code Lite
+/// emits is catalogue-registered, so production diagnostics never take
+/// the fallback.
 fn category_for(code: &str) -> &'static str {
-    if code.contains("AUTH") {
-        "authority_expansion"
-    } else if code.contains("GOV") {
-        "governance"
-    } else if code.contains("EXP") {
-        "expansion"
-    } else if code.contains("OUT") {
-        "outcome"
-    } else if code.contains("CMP") {
-        "canonical_integrity"
-    } else if code.contains("RES") {
-        "resume"
-    } else if code.contains("EVT") {
-        "event"
-    } else if code.contains("PROF") {
-        "profile"
-    } else if code.contains("ADAPT") {
-        "adapter"
-    } else {
-        "general"
-    }
+    static CATALOGUE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    CATALOGUE
+        .get_or_init(|| {
+            let file: CatalogueFile<'static> = serde_json::from_str(include_str!(
+                "../../../vendored/soma/v1.1/diagnostics.json"
+            ))
+            .expect("vendored diagnostics.json parses");
+            file.codes
+                .into_iter()
+                .map(|entry| (entry.code, entry.category))
+                .collect()
+        })
+        .get(code)
+        .copied()
+        .unwrap_or("general")
 }
 
 /// Canonical digest of a parsed JSON value (normative decimal-v2 policy).
