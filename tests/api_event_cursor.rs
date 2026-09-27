@@ -836,6 +836,10 @@ fn legacy_event_table_migrates_to_durable_seq_in_insertion_order() {
         .iter()
         .enumerate()
         {
+            // Slice 1A: these rows are written BEFORE the provenance
+            // columns exist (the raw legacy schema above), so they
+            // legitimately carry no provenance — the read must surface
+            // them as LegacyUnverified, which the migration preserves.
             conn.execute(
                 "INSERT INTO work_context_events
                     (id, work_context_id, event_type, data, created_at)
