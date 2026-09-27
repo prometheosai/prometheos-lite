@@ -34,10 +34,6 @@ pub const MAPPING_VERSION: &str = "lite-to-soma-v1";
 /// [`compile_workflow_text`].
 pub const GOV_PLAN_VERSION: &str = "1.0.0";
 
-/// Canonicalization spec version pinned by the vendored bundle
-/// (`vendored/soma/v1.1/canonicalization`).
-pub const CANONICALIZATION_VERSION: &str = "1.0.0";
-
 /// Lite-enforced runtime restrictions that the vendored SOMA authority
 /// vocabulary cannot express. They are disclosed on every mapping —
 /// never silently dropped. See the change doc for why each one is
@@ -208,7 +204,10 @@ fn workflow_digest_of(model: &WorkflowDefinition) -> Result<String, Vec<Diagnost
 }
 
 /// Build the plan and seal it: `canonicalization.sha256` is the
-/// canonical digest of the plan without its `canonicalization` member.
+/// canonical digest of the plan with only `canonicalization.sha256`
+/// removed — `canonicalization.version` stays inside the digest input
+/// (the published v1.1 sealing rule; version equals the artifact's
+/// `schemaVersion`).
 fn seal_plan(
     workflow_digest: String,
     steps: Vec<PlanStep>,
@@ -225,15 +224,24 @@ fn seal_plan(
     })?;
     map.insert("steps".into(), steps_value);
 
+    // Digest input: the full plan including canonicalization.version but
+    // without the sha256 member (self-reference).
+    let mut canonicalization = serde_json::Map::new();
+    canonicalization.insert("version".into(), json!(SUPPORTED_SCHEMA_VERSION));
+    map.insert(
+        "canonicalization".into(),
+        Value::Object(canonicalization.clone()),
+    );
     let seal = try_canonical_digest(&Value::Object(map.clone())).map_err(|e| {
         vec![Diagnostic::new(
             "SOMA-CMP-0004",
             format!("plan digest cannot be recomputed ({e})"),
         )]
     })?;
+    canonicalization.insert("sha256".into(), json!(seal));
     map.insert(
         "canonicalization".into(),
-        json!({"version": CANONICALIZATION_VERSION, "sha256": seal}),
+        Value::Object(canonicalization),
     );
 
     serde_json::from_value(Value::Object(map)).map_err(|e| {
@@ -257,9 +265,11 @@ fn input_refusal(reason: String) -> Diagnostic {
 /// Checks, in order (fail-closed, first failure wins):
 /// 1. The plan parses against the compiled-plan schema (else
 ///    SOMA-CMP-0003).
-/// 2. Supported versions: schema/plan major version 1 and the pinned
-///    canonicalization spec version (else SOMA-CMP-0001).
-/// 3. The plan's self-seal verifies (else SOMA-CMP-0004, integrity).
+/// 2. Supported versions: schema/plan major version 1 and
+///    `canonicalization.version` equal to the plan's `schemaVersion`
+///    (else SOMA-CMP-0001).
+/// 3. The plan's self-seal verifies — digest input removes only
+///    `canonicalization.sha256` (else SOMA-CMP-0004, integrity).
 /// 4. The plan's canonical digest equals `reviewed_identity` — the
 ///    identity recorded by review — so execution can never run a plan
 ///    other than the one reviewed (else SOMA-CMP-0004, binding).
@@ -284,7 +294,7 @@ pub fn verify_reviewed_plan(
     // 2. Version gate.
     if !major_version_is_one(&plan.schema_version)
         || !major_version_is_one(&plan.plan_version)
-        || plan.canonicalization.version != CANONICALIZATION_VERSION
+        || plan.canonicalization.version != plan.schema_version
     {
         return Err(vec![enrich_one(
             Diagnostic::new(
@@ -306,7 +316,9 @@ pub fn verify_reviewed_plan(
         )]
     })?;
     let seal_input = value.as_object().cloned().map(|mut obj| {
-        obj.remove("canonicalization");
+        if let Some(Value::Object(canonicalization)) = obj.get_mut("canonicalization") {
+            canonicalization.remove("sha256");
+        }
         Value::Object(obj)
     });
     let computed = seal_input

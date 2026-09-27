@@ -81,7 +81,7 @@ fn valid_workflow_fixtures_compile_to_sealed_plans() {
         assert_eq!(plan.schema_version, "1.1.0", "{rel} schemaVersion");
         assert_eq!(plan.plan_version, "1.0.0", "{rel} planVersion");
         assert_eq!(
-            plan.canonicalization.version, "1.0.0",
+            plan.canonicalization.version, "1.1.0",
             "{rel} canonicalization.version"
         );
 
@@ -106,15 +106,46 @@ fn valid_workflow_fixtures_compile_to_sealed_plans() {
         );
 
         // Self-seal: canonicalization.sha256 is the digest of the plan
-        // without its canonicalization member.
+        // with only canonicalization.sha256 removed — .version stays in.
         let mut plan_value = serde_json::to_value(&plan).expect("plan serializes");
-        plan_value
+        plan_value["canonicalization"]
             .as_object_mut()
-            .expect("plan is an object")
-            .remove("canonicalization");
+            .expect("canonicalization is an object")
+            .remove("sha256");
         let seal = try_canonical_digest(&plan_value).expect("plan satisfies the number policy");
         assert_eq!(plan.canonicalization.sha256, seal, "{rel} self-seal");
     }
+}
+
+// ---------------------------------------------------------------------------
+// T1 (review correction 2): the seal rule commits canonicalization.version —
+// digest input removes ONLY canonicalization.sha256.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn seal_canonicalization_version_matches_schema_version() {
+    let text = fixture("fixtures/valid/wf-valid-base.json");
+    let plan = compile_workflow_text(&text).expect("compiles");
+    assert_eq!(
+        plan.canonicalization.version, plan.schema_version,
+        "canonicalization.version must commit to the artifact schema version (v1.1 oracle rule)"
+    );
+}
+
+#[test]
+fn seal_digest_keeps_canonicalization_version() {
+    let text = fixture("fixtures/valid/wf-valid-base.json");
+    let plan = compile_workflow_text(&text).expect("compiles");
+    let mut plan_value = serde_json::to_value(&plan).expect("plan serializes");
+    plan_value["canonicalization"]
+        .as_object_mut()
+        .expect("canonicalization is an object")
+        .remove("sha256");
+    let expected = try_canonical_digest(&plan_value).expect("plan satisfies the number policy");
+    assert_eq!(
+        plan.canonicalization.sha256, expected,
+        "seal input must contain canonicalization.version and remove only sha256"
+    );
 }
 
 #[test]
@@ -537,13 +568,14 @@ fn assert_code(diags: &[Diagnostic], expected: &str) {
 }
 
 /// Recompute and overwrite `canonicalization.sha256` on a plan object
-/// (mirrors the compiler's sealing rule).
+/// (mirrors the compiler's sealing rule: only the sha256 member is
+/// removed from the digest input).
 fn reseal(plan: &mut Value) {
     let mut for_digest = plan.clone();
-    for_digest
+    for_digest["canonicalization"]
         .as_object_mut()
-        .expect("plan is an object")
-        .remove("canonicalization");
+        .expect("canonicalization is an object")
+        .remove("sha256");
     let seal = try_canonical_digest(&for_digest).expect("number policy holds");
     plan["canonicalization"]["sha256"] = json!(seal);
 }
@@ -598,6 +630,29 @@ fn tampered_and_resealed_plan_is_still_refused() {
             .is_some_and(|r| r.summary.contains("reviewed"))),
         "remediation points at the reviewed identity; got {diags:?}"
     );
+}
+
+#[test]
+fn seal_that_omits_canonicalization_version_fails_integrity() {
+    let plan_text = compiled_plan_text("fixtures/valid/wf-valid-base.json");
+    let mut plan: Value = serde_json::from_str(&plan_text).expect("parses");
+    let identity = plan["canonicalization"]["sha256"]
+        .as_str()
+        .expect("sha256")
+        .to_string();
+    // Recompute the seal with the broken rule (whole canonicalization member
+    // absent from the digest input) and install it. Verification must refuse
+    // it as an integrity failure because .version is committed by the seal.
+    let mut for_digest = plan.clone();
+    for_digest
+        .as_object_mut()
+        .expect("plan is an object")
+        .remove("canonicalization");
+    let stale_rule_seal = try_canonical_digest(&for_digest).expect("number policy holds");
+    plan["canonicalization"]["sha256"] = json!(stale_rule_seal);
+    let tampered = serde_json::to_string(&plan).expect("serializes");
+    let diags = verify_err(&tampered, &identity);
+    assert_code(&diags, "SOMA-CMP-0004");
 }
 
 #[test]
