@@ -43,6 +43,34 @@ pub struct Diagnostic {
     pub message: String,
     #[serde(default)]
     pub related: Vec<String>,
+    /// Optional source location (contract req3): where the offending
+    /// input came from. Omitted from the wire when unset so previously
+    /// serialized diagnostics remain byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DiagnosticSource>,
+    /// Optional remediation (contract req3): how to fix the issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<DiagnosticRemediation>,
+}
+
+/// Source location attached to a [`Diagnostic`]. All members are optional
+/// per the published Diagnostic schema (`source.path`/`source.subject`
+/// are the only members Lite populates).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticSource {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// Remediation hint attached to a [`Diagnostic`]. `summary` is required
+/// by the published Diagnostic schema; `action` is an optional stable
+/// identifier for tooling.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticRemediation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    pub summary: String,
 }
 
 impl Diagnostic {
@@ -53,6 +81,8 @@ impl Diagnostic {
             category: category_for(code).to_string(),
             message: message.into(),
             related: Vec::new(),
+            source: None,
+            remediation: None,
         }
     }
 
@@ -64,6 +94,29 @@ impl Diagnostic {
         let mut d = Self::new(code, message);
         d.related.push(related.into());
         d
+    }
+
+    /// Attach a source path (usually the workflow id) and optional
+    /// subject (usually the first `related` entry).
+    pub fn with_source(mut self, path: impl Into<String>, subject: Option<String>) -> Self {
+        self.source = Some(DiagnosticSource {
+            path: path.into(),
+            subject,
+        });
+        self
+    }
+
+    /// Attach a remediation action id and human-readable summary.
+    pub fn with_remediation(
+        mut self,
+        action: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        self.remediation = Some(DiagnosticRemediation {
+            action: Some(action.into()),
+            summary: summary.into(),
+        });
+        self
     }
 }
 

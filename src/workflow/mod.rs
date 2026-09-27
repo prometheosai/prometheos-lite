@@ -19,6 +19,7 @@ pub mod context_planner;
 pub mod durable;
 pub mod evaluate;
 pub mod governance;
+pub mod governance_compiler;
 pub mod graph_exec;
 pub mod graph_gates;
 pub mod graph_parallel;

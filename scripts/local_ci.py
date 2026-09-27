@@ -61,6 +61,7 @@ SUITE_SPEC: dict[str, list[dict[str, object]]] = {
         {"name": "runtime policy", "command": ["cargo", "test", "--test", "runtime_policy_enforcement", "--quiet"]},
         {"name": "verification policy", "command": ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]},
         {"name": "patch diagnostics", "command": ["cargo", "test", "--test", "patch_provider_diagnostics_tests", "--quiet"]},
+        {"name": "governance compiler", "command": ["cargo", "test", "--test", "governance_compiler_conformance", "--quiet"]},
         {"name": "verifier regressions", "command": ["python", "scripts/test_local_ci_verify.py"]},
         {"name": "repository policy", "command": ["python", "scripts/local_ci_policy.py"]},
     ],
@@ -225,6 +226,7 @@ def rust_core() -> list[dict[str, object]]:
         ("runtime policy", ["cargo", "test", "--test", "runtime_policy_enforcement", "--quiet"]),
         ("verification policy", ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]),
         ("patch diagnostics", ["cargo", "test", "--test", "patch_provider_diagnostics_tests", "--quiet"]),
+        ("governance compiler", ["cargo", "test", "--test", "governance_compiler_conformance", "--quiet"]),
         ("verifier regressions", [sys.executable, "scripts/test_local_ci_verify.py"]),
         ("repository policy", [sys.executable, "scripts/local_ci_policy.py"]),
     ]
