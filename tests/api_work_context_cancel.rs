@@ -4,7 +4,7 @@
 //! checks, idempotent re-cancellation, terminal-state fail-closed behavior,
 //! durable event recording, restart survivability, and the terminal-state
 //! refusal of run/continue/harness endpoints. The decision half of the
-//! slice is intentionally deferred — see the slice-prerequisite notes in
+//! slice is intentionally deferred Ã¢â‚¬â€ see the slice-prerequisite notes in
 //! the PR body.
 
 use axum::body::Body;
@@ -13,6 +13,15 @@ use prometheos_lite::api::AppState;
 use prometheos_lite::work::WorkContextService;
 use prometheos_lite::work::types::WorkStatus;
 use tower::ServiceExt;
+fn test_journal() -> prometheos_lite::work::JournalContext {
+    prometheos_lite::work::JournalContext::internal_system(
+        format!("test-{}", uuid::Uuid::new_v4()),
+        prometheos_lite::work::JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
 
 fn test_app_state() -> (std::sync::Arc<AppState>, String, tempfile::TempDir) {
     let db_dir = tempfile::tempdir().expect("temp db dir");
@@ -227,15 +236,15 @@ async fn cancel_requires_auth_and_reason() {
     let owner = "owner";
     let id = create_context(&app, owner, "cancel-auth").await;
 
-    // Wrong user → 403.
+    // Wrong user Ã¢â€ â€™ 403.
     let (st, _) = cancel(&app, "intruder", &id, "nope").await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 
-    // Unknown context → 404.
+    // Unknown context Ã¢â€ â€™ 404.
     let (st, _) = cancel(&app, owner, "no-such-context", "nope").await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
-    // Missing user_id → 400.
+    // Missing user_id Ã¢â€ â€™ 400.
     let resp = app
         .clone()
         .oneshot(
@@ -250,7 +259,7 @@ async fn cancel_requires_auth_and_reason() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Empty reason → 400.
+    // Empty reason Ã¢â€ â€™ 400.
     let resp = app
         .clone()
         .oneshot(
@@ -307,7 +316,7 @@ async fn cancelled_context_refuses_run_endpoints() {
     let (st, _) = cancel(&app, owner, &id, "stop").await;
     assert_eq!(st, StatusCode::OK);
 
-    // continue → refused.
+    // continue Ã¢â€ â€™ refused.
     let resp = app
         .clone()
         .oneshot(
@@ -321,7 +330,7 @@ async fn cancelled_context_refuses_run_endpoints() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 
-    // run-until-complete → refused.
+    // run-until-complete Ã¢â€ â€™ refused.
     let resp = app
         .clone()
         .oneshot(
@@ -338,7 +347,7 @@ async fn cancelled_context_refuses_run_endpoints() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 
-    // harness run → refused.
+    // harness run Ã¢â€ â€™ refused.
     let resp = app
         .clone()
         .oneshot(
@@ -421,14 +430,17 @@ async fn cancel_works_at_service_layer_as_well() {
             "service-level cancel".to_string(),
             prometheos_lite::work::types::WorkDomain::Operations,
             "g".to_string(),
+            &test_journal(),
         )
         .unwrap();
 
-    svc.cancel_context(&mut ctx, "cli cancel").expect("cancel");
+    svc.cancel_context(&mut ctx, "cli cancel", &test_journal())
+        .expect("cancel");
     assert_eq!(ctx.status, WorkStatus::Cancelled);
 
     // Idempotent on the service tier as well.
-    svc.cancel_context(&mut ctx, "again").expect("re-cancel");
+    svc.cancel_context(&mut ctx, "again", &test_journal())
+        .expect("re-cancel");
 
     // Events: exactly one context_cancelled row.
     let events = svc.list_events_after(&ctx.id, None, 500).unwrap();
@@ -581,7 +593,7 @@ async fn service_layer_cancel_gate_bypassing_http_also_refuses_terminal_states()
         ),
     );
     let err = execution
-        .continue_context(&id)
+        .continue_context(&id, &test_journal())
         .await
         .expect_err("cancelled context must refuse continuation at the service boundary");
     assert!(
@@ -630,7 +642,7 @@ async fn refused_states_report_full_set() {
 #[tokio::test]
 async fn paused_execution_cannot_overwrite_cancellation() {
     // Deterministic reconciliation-race regression (#220):
-    //   [snapshot taken while Draft] → [cancel commits] →
+    //   [snapshot taken while Draft] Ã¢â€ â€™ [cancel commits] Ã¢â€ â€™
     //   [execution resumes with stale snapshot and tries to persist].
     //
     // Execution holds a stale WorkContext read BEFORE the cancel, then
@@ -654,7 +666,7 @@ async fn paused_execution_cannot_overwrite_cancellation() {
     let db2 = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db2"));
     let svc2 = WorkContextService::new(db2);
     let mut canceller = svc2.get_context(&id).expect("load").expect("exists");
-    svc2.cancel_context(&mut canceller, "operator killed")
+    svc2.cancel_context(&mut canceller, "operator killed", &test_journal())
         .unwrap();
 
     // Sender side returns; receiver-side cancel of app occurs
@@ -666,6 +678,7 @@ async fn paused_execution_cannot_overwrite_cancellation() {
         .update_status(
             &mut stale_ctx,
             prometheos_lite::work::types::WorkStatus::InProgress,
+            &test_journal(),
         )
         .expect_err("stale snapshot must not overwrite Cancelled");
     let msg = err.to_string();
@@ -709,6 +722,7 @@ fn two_connection_cancel_race_under_sqlite_busy() {
             "busy-race".into(),
             prometheos_lite::work::types::WorkDomain::Operations,
             "goal".into(),
+            &test_journal(),
         )
         .expect("create");
 
@@ -716,12 +730,20 @@ fn two_connection_cancel_race_under_sqlite_busy() {
     let conn_a = rusqlite::Connection::open(&db_path).expect("conn A");
     let a_tx = conn_a.unchecked_transaction().expect("a tx");
     a_tx.execute(
-        "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
-             VALUES (?1, ?2, 'lock_probe', '\"probe\"', ?3)",
+        "INSERT INTO work_context_events
+             (id, work_context_id, event_type, data, created_at,
+              provenance_json, source_digest, run_id, correlation_id)
+         VALUES (?1, ?2, 'lock_probe', '\"probe\"', ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
             uuid::Uuid::new_v4().to_string(),
             ctx.id,
-            chrono::Utc::now().to_rfc3339()
+            chrono::Utc::now().to_rfc3339(),
+            // Slice 1A: raw journal inserts must satisfy the database's
+            // provenance enforcement, exactly as any writer would.
+            "{\"schemaVersion\":\"1.0.0\",\"producer\":{\"kind\":\"human\",\"identity\":\"probe\"},\"principal\":{\"human\":{\"identity\":\"probe\"}},\"causation\":{\"correlationId\":\"probe\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"probe\"}}",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "probe",
+            "probe",
         ],
     )
     .expect("hold the write lock via real write");
@@ -736,7 +758,7 @@ fn two_connection_cancel_race_under_sqlite_busy() {
         .expect("exists");
 
     let busy_err = cancel_svc
-        .cancel_context(&mut canceller, "must block on write lock")
+        .cancel_context(&mut canceller, "must block on write lock", &test_journal())
         .expect_err("while A holds the writer, the cancel must fail");
     let msg = format!("{:?}", busy_err);
     assert!(
@@ -762,7 +784,11 @@ fn two_connection_cancel_race_under_sqlite_busy() {
 
     // Now the cancel succeeds and produces exactly one event row.
     cancel_svc
-        .cancel_context(&mut canceller, "must succeed after release")
+        .cancel_context(
+            &mut canceller,
+            "must succeed after release",
+            &test_journal(),
+        )
         .expect("cancel after release");
 
     let post: i64 = cancel_db

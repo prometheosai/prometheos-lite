@@ -1,4 +1,4 @@
-//! Integration tests for API → WorkOrchestrator → WorkExecutionService flow
+//! Integration tests for API â†’ WorkOrchestrator â†’ WorkExecutionService flow
 
 use prometheos_lite::db::Db;
 use prometheos_lite::flow::RuntimeContext;
@@ -9,6 +9,20 @@ use prometheos_lite::work::{
     EvolutionEngine, PlaybookResolver, WorkContextService, WorkExecutionService, WorkOrchestrator,
 };
 use std::sync::Arc;
+
+fn test_journal() -> prometheos_lite::work::JournalContext {
+    prometheos_lite::work::JournalContext::internal_system(
+        format!("test-{}", uuid::Uuid::new_v4()),
+        prometheos_lite::work::JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
+fn test_journal_arc() -> std::sync::Arc<prometheos_lite::work::JournalContext> {
+    std::sync::Arc::new(test_journal())
+}
 
 #[tokio::test]
 async fn test_api_continue_calls_orchestrator() {
@@ -43,17 +57,20 @@ async fn test_api_continue_calls_orchestrator() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .unwrap();
 
     // Set status to InProgress so it can be continued
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .unwrap();
 
     // Test continue_context
     let context_id = context.id.clone();
-    let result = orchestrator.continue_context(context_id).await;
+    let result = orchestrator
+        .continue_context(context_id, test_journal_arc())
+        .await;
 
     // The flow execution will fail without proper flow files, but we verify the call path
     // For now, we just verify it doesn't panic and returns a Result
@@ -93,12 +110,13 @@ async fn test_api_run_until_complete_calls_orchestrator() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .unwrap();
 
     // Set status to InProgress
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .unwrap();
 
     // Test run_until_blocked_or_complete
@@ -107,7 +125,7 @@ async fn test_api_run_until_complete_calls_orchestrator() {
         prometheos_lite::work::orchestrator::ExecutionLimits::default().with_max_iterations(1);
 
     let result = orchestrator
-        .run_until_blocked_or_complete(context_id, limits)
+        .run_until_blocked_or_complete(context_id, limits, test_journal_arc())
         .await;
 
     // The flow execution will fail without proper flow files, but we verify the call path
@@ -146,6 +164,7 @@ async fn test_submit_intent_creates_context() {
             "test-user".to_string(),
             "Implement a new feature".to_string(),
             None,
+            test_journal_arc(),
         )
         .await;
 

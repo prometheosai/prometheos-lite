@@ -6,6 +6,16 @@ use prometheos_lite::db::Db;
 use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
+fn test_journal() -> prometheos_lite::work::JournalContext {
+    prometheos_lite::work::JournalContext::internal_system(
+        format!("test-{}", uuid::Uuid::new_v4()),
+        prometheos_lite::work::JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
 use prometheos_lite::work::{
     EvolutionEngine, ExecutionLimits, PlaybookResolver, WorkContextService, WorkExecutionService,
     WorkOrchestrator,
@@ -97,6 +107,7 @@ fn test_work_context_service_create_and_get() {
             "Test Context".to_string(),
             prometheos_lite::work::WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .unwrap();
 
@@ -120,11 +131,16 @@ fn test_work_context_service_update_status() {
             "Test Context".to_string(),
             prometheos_lite::work::WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .unwrap();
 
     service
-        .update_status(&mut context, prometheos_lite::work::WorkStatus::InProgress)
+        .update_status(
+            &mut context,
+            prometheos_lite::work::WorkStatus::InProgress,
+            &test_journal(),
+        )
         .unwrap();
 
     assert_eq!(

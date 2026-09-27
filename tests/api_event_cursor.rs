@@ -19,6 +19,15 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
+fn test_journal() -> prometheos_lite::work::JournalContext {
+    prometheos_lite::work::JournalContext::internal_system(
+        format!("test-{}", uuid::Uuid::new_v4()),
+        prometheos_lite::work::JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
 
 fn test_app_state() -> (
     std::sync::Arc<prometheos_lite::api::AppState>,
@@ -199,7 +208,7 @@ async fn cursor_resume_has_no_gaps_and_no_duplication() {
     set_status(&app, "ev-user-2", &id, "blocked").await;
     set_status(&app, "ev-user-2", &id, "in_progress").await;
 
-    // Resume from the saved cursor — must see exactly the 3 new
+    // Resume from the saved cursor â€” must see exactly the 3 new
     // events, none repeated.
     let (_, second) = events_page(&app, "ev-user-2", &id, Some(cursor), None).await;
     let new = second["events"].as_array().unwrap();
@@ -371,8 +380,12 @@ async fn cursor_read_is_repeatable_and_events_from_cli_path_visible() {
         let db = std::sync::Arc::new(prometheos_lite::db::Db::new(&db_path).expect("db"));
         let svc = prometheos_lite::work::WorkContextService::new(db);
         let mut ctx = svc.get_context(&id).unwrap().expect("context");
-        svc.update_status(&mut ctx, prometheos_lite::work::types::WorkStatus::Blocked)
-            .expect("update status via service");
+        svc.update_status(
+            &mut ctx,
+            prometheos_lite::work::types::WorkStatus::Blocked,
+            &test_journal(),
+        )
+        .expect("update status via service");
     }
 
     // Repeatable read: the same query twice returns identical bytes.
@@ -503,11 +516,27 @@ async fn corrupt_event_data_fails_closed_without_fabrication() {
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("open db to corrupt");
+        // Slice 1A: journal rows are append-only at the database
+        // boundary, so tampering requires dropping the trigger first —
+        // exactly what a corrupted row means (a write path outside the
+        // enforcement). The read-time digest verification must still
+        // catch it.
+        conn.execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+            .expect("drop append-only trigger to simulate an out-of-band corruption");
         conn.execute(
             "UPDATE work_context_events SET data = 'not-json{{{' WHERE work_context_id = ?1",
             rusqlite::params![id],
         )
         .expect("corruption write must succeed");
+        conn.execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .expect("restore append-only trigger");
     }
 
     // Service-level read fails closed (no fabricated `null` payload).
@@ -546,11 +575,25 @@ async fn malformed_timestamp_fails_closed_without_panic() {
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("open db to corrupt");
+        // Slice 1A: journal rows are append-only at the database
+        // boundary — tampering requires dropping the trigger first (an
+        // out-of-band corruption); the read must still fail closed.
+        conn.execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+            .expect("drop append-only trigger to simulate an out-of-band corruption");
         conn.execute(
             "UPDATE work_context_events SET created_at = 'not-a-timestamp' WHERE work_context_id = ?1",
             rusqlite::params![id],
         )
         .expect("corruption write must succeed");
+        conn.execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .expect("restore append-only trigger");
     }
 
     {
@@ -572,7 +615,7 @@ async fn malformed_timestamp_fails_closed_without_panic() {
 
 #[test]
 fn failed_migration_preserves_original_table_and_retry_succeeds() {
-    // P1 regression (review round 2): the migration must be transactional —
+    // P1 regression (review round 2): the migration must be transactional â€”
     // a failed attempt leaves the original table fully intact (never an
     // empty table), restores the foreign_keys pragma, cleans up any
     // straggler `_new` table, and is safely retryable.
@@ -585,7 +628,7 @@ fn failed_migration_preserves_original_table_and_retry_succeeds() {
         .to_string();
 
     // Legacy shape WITHOUT the UNIQUE constraint on `id`, containing a
-    // duplicate id — the migration's INSERT into the UNIQUEd `_new` table
+    // duplicate id â€” the migration's INSERT into the UNIQUEd `_new` table
     // must fail deterministically. Also install a straggler `_new` table
     // with junk rows, simulating a prior aborted attempt.
     {
@@ -697,7 +740,7 @@ fn failed_migration_preserves_original_table_and_retry_succeeds() {
 #[test]
 fn migration_is_idempotent_and_leaves_no_artifacts() {
     // P1 regression (review round 2): re-opening an already-migrated
-    // database must be a no-op — no reworked backfill, no `_new` table,
+    // database must be a no-op â€” no reworked backfill, no `_new` table,
     // seqs unchanged, FK pragma on.
     let db_dir = tempfile::tempdir().expect("temp db dir");
     let db_path = db_dir
@@ -717,6 +760,7 @@ fn migration_is_idempotent_and_leaves_no_artifacts() {
                 "idem".to_string(),
                 prometheos_lite::work::types::WorkDomain::General,
                 "g".to_string(),
+                &test_journal(),
             )
             .expect("create context");
         ctx_id = ctx.id.clone();

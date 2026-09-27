@@ -13,7 +13,6 @@ use super::types::{
     AutonomyLevel, HarnessMetadata, TestExecutionResult, WorkContext, WorkDomain, WorkPhase,
     WorkStatus,
 };
-use crate::db::repository::WorkContextEventOperations;
 use crate::harness::completion::CompletionDecision;
 use crate::intent::{Intent, IntentClassifier};
 use crate::workflow::evaluate::CancellationToken;
@@ -122,6 +121,7 @@ impl WorkOrchestrator {
         user_id: String,
         message: String,
         conversation_id: Option<String>,
+        journal: std::sync::Arc<crate::work::provenance::JournalContext>,
     ) -> Result<WorkContext> {
         // 1. Classify intent
         let classification = self
@@ -144,6 +144,7 @@ impl WorkOrchestrator {
                     self.generate_title(&message),
                     domain,
                     message.clone(),
+                    &journal,
                 )?;
 
                 // Set autonomy level based on intent type
@@ -188,13 +189,16 @@ impl WorkOrchestrator {
         // Review mode: execute planning → Await approval
         // Autonomous mode: execute immediately
         if context.autonomy_level == AutonomyLevel::Chat {
-            self.work_context_service
-                .update_status(&mut context, WorkStatus::AwaitingApproval)?;
+            self.work_context_service.update_status(
+                &mut context,
+                WorkStatus::AwaitingApproval,
+                &journal,
+            )?;
             self.work_context_service.update_context(&context)?;
         } else if context.autonomy_level == AutonomyLevel::Review {
             // Review mode: execute planning flow
             self.work_execution_service
-                .continue_context(&context.id)
+                .continue_context(&context.id, &journal)
                 .await?;
 
             // Reload context to get updated state
@@ -207,7 +211,7 @@ impl WorkOrchestrator {
         } else {
             // Autonomous mode: execute immediately
             self.work_execution_service
-                .continue_context(&context.id)
+                .continue_context(&context.id, &journal)
                 .await?;
 
             // Reload context to get updated state
@@ -245,6 +249,7 @@ impl WorkOrchestrator {
         &self,
         context_id: String,
         trigger: EvolutionTrigger,
+        journal: std::sync::Arc<crate::work::provenance::JournalContext>,
     ) -> Result<WorkContext> {
         let context = self
             .work_context_service
@@ -299,12 +304,14 @@ impl WorkOrchestrator {
                 // ONE cancellation-conditional transaction for every
                 // durable effect of the completion.
                 let conn = self.work_context_service.get_db().conn();
+                let envelope = journal.event_envelope(None);
                 let committed = crate::db::repository::iteration_persist::persist_completion_conn(
                     conn,
                     &context,
                     evolved.as_ref(),
                     status_from,
                     WorkStatus::Completed,
+                    &envelope,
                 )?;
                 if !committed {
                     // The durable cancel won at the transaction guard:
@@ -315,27 +322,37 @@ impl WorkOrchestrator {
                 Ok(context)
             }
             EvolutionTrigger::PartialFailure => {
-                self.work_context_service
-                    .update_status(&mut context, WorkStatus::Blocked)?;
+                self.work_context_service.update_status(
+                    &mut context,
+                    WorkStatus::Blocked,
+                    &journal,
+                )?;
                 Ok(context)
             }
             EvolutionTrigger::UserCorrection => {
                 // User corrected the context, continue execution
                 self.work_context_service
-                    .clear_blocked_reason(&mut context)?;
+                    .clear_blocked_reason(&mut context, &journal)?;
                 Ok(context)
             }
             EvolutionTrigger::Retry => {
                 // Retry triggered, reset to InProgress
-                self.work_context_service
-                    .update_status(&mut context, WorkStatus::InProgress)?;
+                self.work_context_service.update_status(
+                    &mut context,
+                    WorkStatus::InProgress,
+                    &journal,
+                )?;
                 Ok(context)
             }
         }
     }
 
     /// Continue a blocked context
-    pub async fn continue_context(&self, context_id: String) -> Result<WorkContext> {
+    pub async fn continue_context(
+        &self,
+        context_id: String,
+        journal: std::sync::Arc<crate::work::provenance::JournalContext>,
+    ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
             .get_context(&context_id)?
@@ -348,7 +365,7 @@ impl WorkOrchestrator {
         // Clear blocked reason if set, then execute
         if context.is_blocked() {
             self.work_context_service
-                .clear_blocked_reason(&mut context)?;
+                .clear_blocked_reason(&mut context, &journal)?;
         }
 
         // Explicit user continuation acts as approval for chat-mode contexts.
@@ -360,7 +377,7 @@ impl WorkOrchestrator {
 
         let context = self
             .work_execution_service
-            .continue_context(&context_id)
+            .continue_context(&context_id, &journal)
             .await?;
 
         Ok(context)
@@ -374,9 +391,15 @@ impl WorkOrchestrator {
         &self,
         context_id: String,
         limits: ExecutionLimits,
+        journal: std::sync::Arc<crate::work::provenance::JournalContext>,
     ) -> Result<WorkContext> {
-        self.run_until_blocked_or_complete_with_token(context_id, limits, CancellationToken::new())
-            .await
+        self.run_until_blocked_or_complete_with_token(
+            context_id,
+            limits,
+            CancellationToken::new(),
+            journal,
+        )
+        .await
     }
 
     /// Run context until blocked or complete, observing `token` at every
@@ -422,6 +445,7 @@ impl WorkOrchestrator {
         context_id: String,
         limits: ExecutionLimits,
         token: CancellationToken,
+        journal: std::sync::Arc<crate::work::provenance::JournalContext>,
     ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
@@ -438,7 +462,7 @@ impl WorkOrchestrator {
             // this run registered), the terminal refusal stands.
             if token.is_cancelled() {
                 let phase = context.current_phase;
-                self.record_execution_interrupted(&context_id, 0, &phase)?;
+                self.record_execution_interrupted(&context_id, 0, &phase, &journal)?;
                 return Ok(context);
             }
             anyhow::bail!("cancelled WorkContext cannot be run: {context_id}");
@@ -468,7 +492,7 @@ impl WorkOrchestrator {
             // and the run surfaces a bare error with no evidence. The
             // fresh read catches the cancellation first and converts it
             // to the same graceful evidenced stop as the sentinel path.
-            if let Some(fresh) = self.graceful_if_cancelled(&context_id, iterations)? {
+            if let Some(fresh) = self.graceful_if_cancelled(&context_id, iterations, &journal)? {
                 return Ok(fresh);
             }
 
@@ -482,26 +506,32 @@ impl WorkOrchestrator {
                 // propagate unmasked.
                 match self.exit_cancellation_check(&context_id) {
                     Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
-                        return self.graceful_cancelled_result(&context_id, iterations);
+                        return self.graceful_cancelled_result(&context_id, iterations, &journal);
                     }
                     Err(e) => return Err(e),
                     Ok(()) => {}
                 }
-                self.work_context_service
-                    .set_blocked_reason(&mut context, "Max iterations reached".to_string())?;
+                self.work_context_service.set_blocked_reason(
+                    &mut context,
+                    "Max iterations reached".to_string(),
+                    &journal,
+                )?;
                 break;
             }
 
             if start.elapsed().as_millis() as u64 >= limits.max_runtime_ms {
                 match self.exit_cancellation_check(&context_id) {
                     Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
-                        return self.graceful_cancelled_result(&context_id, iterations);
+                        return self.graceful_cancelled_result(&context_id, iterations, &journal);
                     }
                     Err(e) => return Err(e),
                     Ok(()) => {}
                 }
-                self.work_context_service
-                    .set_blocked_reason(&mut context, "Max runtime exceeded".to_string())?;
+                self.work_context_service.set_blocked_reason(
+                    &mut context,
+                    "Max runtime exceeded".to_string(),
+                    &journal,
+                )?;
                 break;
             }
 
@@ -516,7 +546,11 @@ impl WorkOrchestrator {
                 // persistence failure inside the atomic completion
                 // transaction — propagates unmasked.
                 match self
-                    .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+                    .complete_context(
+                        context.id.clone(),
+                        EvolutionTrigger::Completion,
+                        journal.clone(),
+                    )
                     .await
                 {
                     Ok(done) => {
@@ -524,7 +558,7 @@ impl WorkOrchestrator {
                         break;
                     }
                     Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
-                        return self.graceful_cancelled_result(&context_id, iterations);
+                        return self.graceful_cancelled_result(&context_id, iterations, &journal);
                     }
                     Err(e) => return Err(e),
                 }
@@ -539,7 +573,7 @@ impl WorkOrchestrator {
             // token at the iteration's post-flow cancellation checkpoint.
             match self
                 .work_execution_service
-                .continue_context_with_token(&context.id, &token)
+                .continue_context_with_token(&context.id, &token, &journal)
                 .await
             {
                 Ok(next) => {
@@ -550,7 +584,12 @@ impl WorkOrchestrator {
                     // durable flip): graceful stop with mandatory evidence.
                     if context.is_cancelled() {
                         let phase = context.current_phase;
-                        self.record_execution_interrupted(&context.id, iterations, &phase)?;
+                        self.record_execution_interrupted(
+                            &context.id,
+                            iterations,
+                            &phase,
+                            &journal,
+                        )?;
                         break;
                     }
                 }
@@ -570,7 +609,12 @@ impl WorkOrchestrator {
                             .get_context(&context_id)?
                             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
                         let phase = fresh.current_phase;
-                        self.record_execution_interrupted(&context_id, iterations, &phase)?;
+                        self.record_execution_interrupted(
+                            &context_id,
+                            iterations,
+                            &phase,
+                            &journal,
+                        )?;
                         context = fresh;
                         break;
                     }
@@ -596,6 +640,7 @@ impl WorkOrchestrator {
         context_id: &str,
         iterations: u32,
         phase: &WorkPhase,
+        journal: &crate::work::provenance::JournalContext,
     ) -> Result<()> {
         let event = super::WorkContextEvent::new(
             uuid::Uuid::new_v4().to_string(),
@@ -608,9 +653,17 @@ impl WorkOrchestrator {
                 "checkpoint_ref": Option::<String>::None,
             }),
         );
+        // Slice 1A binding constraint: the interruption evidence must
+        // reference the durable cancellation event as its causal parent —
+        // a recorded real parent id, never a sequence-adjacent guess.
         let db = self.work_context_service.get_db();
-        WorkContextEventOperations::create_event(&**db, &event)
-            .map(|_| ())
+        let cancel_event_id =
+            crate::db::repository::work_context_events::latest_cancellation_event_id_conn(
+                db.conn(),
+                context_id,
+            )?;
+        let envelope = journal.event_envelope(cancel_event_id);
+        crate::db::repository::work_context_events::record_event_conn(db.conn(), &event, &envelope)
             .with_context(|| {
                 format!(
                     "failed to persist execution_interrupted evidence for work context {context_id}"
@@ -628,13 +681,14 @@ impl WorkOrchestrator {
         &self,
         context_id: &str,
         iterations: u32,
+        journal: &crate::work::provenance::JournalContext,
     ) -> Result<Option<WorkContext>> {
         if let Some(fresh) = self.work_context_service.get_context(context_id)?
             && fresh.is_cancelled()
         {
-            Ok(Some(
-                self.graceful_cancelled_result_inner(fresh, iterations)?,
-            ))
+            Ok(Some(self.graceful_cancelled_result_inner(
+                fresh, iterations, journal,
+            )?))
         } else {
             Ok(None)
         }
@@ -643,21 +697,27 @@ impl WorkOrchestrator {
     /// The graceful evidenced stop: fresh cancelled context + mandatory
     /// `execution_interrupted` evidence. Shared by every cancellation
     /// observation point in the run loop.
-    fn graceful_cancelled_result(&self, context_id: &str, iterations: u32) -> Result<WorkContext> {
+    fn graceful_cancelled_result(
+        &self,
+        context_id: &str,
+        iterations: u32,
+        journal: &crate::work::provenance::JournalContext,
+    ) -> Result<WorkContext> {
         let fresh = self
             .work_context_service
             .get_context(context_id)?
             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
-        self.graceful_cancelled_result_inner(fresh, iterations)
+        self.graceful_cancelled_result_inner(fresh, iterations, journal)
     }
 
     fn graceful_cancelled_result_inner(
         &self,
         fresh: WorkContext,
         iterations: u32,
+        journal: &crate::work::provenance::JournalContext,
     ) -> Result<WorkContext> {
         let phase = fresh.current_phase;
-        self.record_execution_interrupted(&fresh.id, iterations, &phase)?;
+        self.record_execution_interrupted(&fresh.id, iterations, &phase, journal)?;
         Ok(fresh)
     }
 
@@ -684,6 +744,7 @@ impl WorkOrchestrator {
         &self,
         context_id: String,
         limits: ExecutionLimits,
+        journal: std::sync::Arc<crate::work::provenance::JournalContext>,
     ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
@@ -702,6 +763,7 @@ impl WorkOrchestrator {
                         "Verification max iterations reached: {}",
                         limits.verification_max_iterations
                     ),
+                    &journal,
                 )?;
                 break;
             }
@@ -714,6 +776,7 @@ impl WorkOrchestrator {
                         "Verification max failures reached: {}",
                         limits.verification_max_failures
                     ),
+                    &journal,
                 )?;
                 break;
             }
@@ -721,7 +784,7 @@ impl WorkOrchestrator {
             // Execute one iteration of the verification loop
             context = self
                 .work_execution_service
-                .continue_context(&context.id)
+                .continue_context(&context.id, &journal)
                 .await?;
 
             // Check if tests passed (look for test results in artifacts or evaluation)
@@ -730,7 +793,11 @@ impl WorkOrchestrator {
             if tests_passed {
                 // Tests passed - complete the context
                 context = self
-                    .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+                    .complete_context(
+                        context.id.clone(),
+                        EvolutionTrigger::Completion,
+                        journal.clone(),
+                    )
                     .await?;
                 break;
             } else {
@@ -746,6 +813,7 @@ impl WorkOrchestrator {
                             "Tests failed {} times, exceeding max failures",
                             verification_failures
                         ),
+                        &journal,
                     )?;
                     break;
                 }
@@ -1105,6 +1173,16 @@ impl WorkOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn journal() -> crate::work::provenance::JournalContext {
+        crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        )
+    }
+
     use crate::db::Db;
     use crate::db::repository::WorkContextEventOperations;
     use crate::flow::RuntimeContext;
@@ -1230,13 +1308,31 @@ mod tests {
         (work_context_service, orchestrator, db)
     }
 
+    fn test_journal() -> std::sync::Arc<crate::work::provenance::JournalContext> {
+        std::sync::Arc::new(crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        ))
+    }
+
     fn create_context(wcs: &WorkContextService) -> WorkContext {
+        let journal = crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        );
         let mut context = wcs
             .create_context(
                 "user-1".to_string(),
                 "Cancellation test".to_string(),
                 WorkDomain::General,
                 "Goal that will be cancelled".to_string(),
+                &journal,
             )
             .unwrap();
         // Review autonomy lets the flow execute (Chat mode would refuse).
@@ -1283,8 +1379,13 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         // Wait until the iteration is provably in flight (blocked inside
@@ -1294,7 +1395,7 @@ mod tests {
         // Production ordering: durable flip first, then the token fire —
         // while the iteration is mid-flight.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         let updated_at_after_flip: String = db
             .conn()
@@ -1371,8 +1472,13 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         gate.arrived.cancelled().await;
@@ -1381,7 +1487,7 @@ mod tests {
         // context_cancelled event), THEN destroy the evidence sink, then
         // wake the run: the interruption evidence cannot be persisted.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         db.conn()
             .execute("DROP TABLE work_context_events", [])
@@ -1390,9 +1496,20 @@ mod tests {
         gate.release.cancel();
 
         let err = handle.await.unwrap().unwrap_err();
+        // The mandatory-evidence pipeline fails loudly: the cancellation
+        // lookup (or the evidence insert) surfaces as a genuine error.
+        // Slice 1A moved the parent-event lookup into the same pipeline,
+        // so a destroyed events table fails the lookup first — still a
+        // loud, genuine error, never a silent missing-evidence success.
         assert!(
-            err.to_string().contains("execution_interrupted"),
+            err.to_string().contains("execution_interrupted")
+                || err.to_string().contains("durable cancellation event"),
             "missing interruption evidence must surface in the error, got: {err}"
+        );
+        assert!(
+            err.downcast_ref::<crate::work::CancelledRefusal>()
+                .is_none(),
+            "the evidence failure must not be masked as the graceful cancellation"
         );
 
         // The durable cancel itself is intact.
@@ -1417,13 +1534,18 @@ mod tests {
         let task_token = token.clone();
         let task_limits = limits.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, task_limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                task_limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         gate.arrived.cancelled().await;
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         token.cancel();
         gate.release.cancel();
@@ -1431,7 +1553,7 @@ mod tests {
 
         // Retry: terminal refusal with the cancelled-context error.
         let retry = orchestrator
-            .run_until_blocked_or_complete(context.id.clone(), limits)
+            .run_until_blocked_or_complete(context.id.clone(), limits, test_journal())
             .await;
         assert!(retry.is_err());
         assert!(retry.unwrap_err().to_string().contains("cannot be run"));
@@ -1462,7 +1584,12 @@ mod tests {
         let limits1 = limits.clone();
         let handle1 = tokio::spawn(async move {
             orch1
-                .run_until_blocked_or_complete_with_token(ctx1, limits1, task_token1)
+                .run_until_blocked_or_complete_with_token(
+                    ctx1,
+                    limits1,
+                    task_token1,
+                    test_journal(),
+                )
                 .await
         });
         let orch2 = orchestrator2.clone();
@@ -1470,7 +1597,7 @@ mod tests {
         let task_token2 = token2.clone();
         let handle2 = tokio::spawn(async move {
             orch2
-                .run_until_blocked_or_complete_with_token(ctx2, limits, task_token2)
+                .run_until_blocked_or_complete_with_token(ctx2, limits, task_token2, test_journal())
                 .await
         });
 
@@ -1480,7 +1607,7 @@ mod tests {
 
         // One durable flip; both tokens fired (what registry.fire does).
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         token1.cancel();
         token2.cancel();
@@ -1523,15 +1650,20 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         // Iteration provably in flight; the durable cancel flips
         // mid-iteration (production ordering: flip, then fire).
         gate.arrived.cancelled().await;
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         token.cancel();
 
@@ -1576,13 +1708,18 @@ mod tests {
         // entry read. Reproduce that exact state:
         let token = CancellationToken::new();
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         token.cancel();
 
         let limits = ExecutionLimits::default().with_max_iterations(5);
         let result = orchestrator
-            .run_until_blocked_or_complete_with_token(context.id.clone(), limits, token)
+            .run_until_blocked_or_complete_with_token(
+                context.id.clone(),
+                limits,
+                token,
+                test_journal(),
+            )
             .await
             .unwrap();
 
@@ -1630,8 +1767,13 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         // Safe point 1 (loop top): release so the iteration starts.
@@ -1648,7 +1790,7 @@ mod tests {
         // cannot open the transaction until safe point 3 is released
         // below, so the cancel is guaranteed to have committed first.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         let updated_at_after_flip: String = db
             .conn()
@@ -1719,8 +1861,13 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         // Safe point 1 (loop top): iteration 1 starts.
@@ -1754,7 +1901,7 @@ mod tests {
         // park (safe point 4) holds it until released below, and the
         // flip is guaranteed committed before that release.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &test_journal())
             .unwrap();
         token.cancel();
 
@@ -1814,8 +1961,13 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         // Safe point 1 (loop top): the iteration starts.
@@ -1892,8 +2044,13 @@ mod tests {
         let ctx_id = context.id.clone();
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
-            orch.run_until_blocked_or_complete_with_token(ctx_id, limits, task_token)
-                .await
+            orch.run_until_blocked_or_complete_with_token(
+                ctx_id,
+                limits,
+                task_token,
+                test_journal(),
+            )
+            .await
         });
 
         // Safe point 1 (loop top): iteration 1 starts.
@@ -1923,7 +2080,7 @@ mod tests {
         // next loop top. NO token fire: only the durable status can be
         // observed — exactly the cross-process semantics under repair.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "cross-process cancel")
+        wcs.cancel_context(&mut snapshot, "cross-process cancel", &journal())
             .unwrap();
 
         // Safe point 4 (loop top before the limit exit): the fresh read
@@ -2000,11 +2157,15 @@ mod tests {
         let context = create_context(&wcs);
 
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "before completion")
+        wcs.cancel_context(&mut snapshot, "before completion", &journal())
             .unwrap();
 
         let err = orchestrator
-            .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+            .complete_context(
+                context.id.clone(),
+                EvolutionTrigger::Completion,
+                test_journal(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -2043,7 +2204,11 @@ mod tests {
             .unwrap();
 
         let err = orchestrator
-            .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+            .complete_context(
+                context.id.clone(),
+                EvolutionTrigger::Completion,
+                test_journal(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -2082,7 +2247,11 @@ mod tests {
         let (context, playbook_id) = completable_context_with_playbook(&wcs, &db);
 
         let completed = orchestrator
-            .complete_context(context.id.clone(), EvolutionTrigger::Completion)
+            .complete_context(
+                context.id.clone(),
+                EvolutionTrigger::Completion,
+                test_journal(),
+            )
             .await
             .unwrap();
         assert_eq!(completed.status, WorkStatus::Completed);

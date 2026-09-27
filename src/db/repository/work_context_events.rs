@@ -1,11 +1,25 @@
-//! WorkContext event repository operations
+//! WorkContext event repository operations — Slice 1A provenanced journal.
+//!
+//! ONE writer path ([`record_event_conn`]): every journal insert carries
+//! the complete typed provenance envelope, the canonical source-event
+//! digest (over the ENTIRE writer-controlled record, not the payload
+//! alone), and the flat identity columns derived from the envelope —
+//! they cannot drift from it. Database triggers additionally enforce
+//! complete provenance for new inserts and append-only journal rows.
+//!
+//! Reads re-verify the source digest against the stored record: any
+//! mismatch (tampering, corruption) surfaces as an error, never as a
+//! silently returned event. Legacy rows (pre-1A, honest NULL provenance)
+//! surface as the native-only [`ProvenanceState::LegacyUnverified`]
+//! state — never fabricated into an envelope.
 
 use anyhow::Context;
 use chrono::Utc;
-use rusqlite::{params, types::Type};
+use rusqlite::{Connection, OptionalExtension, params, types::Type};
 
 use super::AsDb;
 use crate::work::event::WorkContextEvent;
+use crate::work::provenance::{ProvenanceEnvelope, compute_event_source_digest};
 
 /// Parse the `data` JSON column fail-closed: corrupt durable rows are a
 /// typed conversion error, never a fabricated `null` event payload.
@@ -27,9 +41,191 @@ fn parse_event_created_at(
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// WorkContext event operations trait
+/// The provenance state of one journal row as read from the store.
+/// Legacy rows (written before Slice 1A) are surfaced as the native-only
+/// `LegacyUnverified` state — they are not mapped into, or fabricated
+/// as, envelope records.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProvenanceState {
+    Verified(Box<ProvenanceEnvelope>),
+    LegacyUnverified,
+}
+
+/// One journal row with its verified provenance state.
+#[derive(Debug, Clone)]
+pub struct JournalRecord {
+    pub seq: i64,
+    pub event: WorkContextEvent,
+    pub provenance: ProvenanceState,
+}
+
+/// The single journal writer (Slice 1A): records the event together with
+/// its complete provenance. The envelope is serialized to canonical,
+/// byte-validated JSON; the source digest covers the ENTIRE
+/// writer-controlled record (`id`, `work_context_id`, `event_type`,
+/// `data`, `created_at`, `provenance_json`); the flat identity columns
+/// (`run_id`, `principal_id`, `correlation_id`) are derived from the
+/// same envelope, so they always match it. Works on an arbitrary
+/// Connection so callers inside transactions (iteration and completion
+/// persistence) record provenance atomically with their effects.
+pub fn record_event_conn(
+    conn: &Connection,
+    event: &WorkContextEvent,
+    envelope: &ProvenanceEnvelope,
+) -> anyhow::Result<()> {
+    let provenance_json = envelope.to_canonical_json_string()?;
+    let source_digest = compute_event_source_digest(
+        &event.id,
+        &event.work_context_id,
+        &event.event_type,
+        &event.data,
+        &event.created_at.to_rfc3339(),
+        &provenance_json,
+    )?;
+
+    conn.execute(
+        "INSERT INTO work_context_events
+             (id, work_context_id, event_type, data, created_at,
+              provenance_json, source_digest, run_id, principal_id, correlation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            &event.id,
+            &event.work_context_id,
+            &event.event_type,
+            &serde_json::to_string(&event.data)?,
+            &event.created_at.to_rfc3339(),
+            &provenance_json,
+            &source_digest,
+            &envelope.run_query_key(),
+            &envelope.principal_query_key(),
+            &envelope.correlation_query_key(),
+        ],
+    )
+    .context("Failed to insert work context event")?;
+    Ok(())
+}
+
+/// Read one journal page with provenance verification. Rows written under
+/// Slice 1A are verified: the source digest is re-computed over the
+/// stored record and must match — a mismatch is tamper/corruption and
+/// surfaces as an error, never as a returned event. Legacy rows surface
+/// as [`ProvenanceState::LegacyUnverified`]. `after_seq = 0` reads from
+/// the beginning; rows are ordered by durable `seq` ASC with `seq` as
+/// the cursor.
+pub fn read_journal_records_conn(
+    conn: &Connection,
+    work_context_id: &str,
+    after_seq: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<JournalRecord>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, id, work_context_id, event_type, data, created_at,
+                    provenance_json, source_digest
+             FROM work_context_events
+             WHERE work_context_id = ?1 AND seq > ?2
+             ORDER BY seq ASC
+             LIMIT ?3",
+        )
+        .context("Failed to prepare journal records query")?;
+
+    struct RawRow {
+        seq: i64,
+        event: WorkContextEvent,
+        provenance_json: Option<String>,
+        source_digest: Option<String>,
+    }
+
+    let rows = stmt
+        .query_map(params![work_context_id, after_seq, limit], |row| {
+            Ok(RawRow {
+                seq: row.get(0)?,
+                event: WorkContextEvent {
+                    id: row.get(1)?,
+                    work_context_id: row.get(2)?,
+                    event_type: row.get(3)?,
+                    data: parse_event_data(row, 4)?,
+                    created_at: parse_event_created_at(row, 5)?,
+                },
+                provenance_json: row.get(6)?,
+                source_digest: row.get(7)?,
+            })
+        })
+        .context("Failed to query journal records")?;
+
+    let mut records = Vec::new();
+    for raw in rows {
+        let raw = raw.context("Failed to parse journal record")?;
+        let provenance = match (raw.provenance_json, raw.source_digest) {
+            (Some(envelope_json), Some(stored_digest)) => {
+                let envelope =
+                    ProvenanceEnvelope::parse_canonical(&envelope_json).with_context(|| {
+                        format!("corrupt provenance envelope for event {}", raw.event.id)
+                    })?;
+                let recomputed = compute_event_source_digest(
+                    &raw.event.id,
+                    &raw.event.work_context_id,
+                    &raw.event.event_type,
+                    &raw.event.data,
+                    &raw.event.created_at.to_rfc3339(),
+                    &envelope_json,
+                )
+                .context("stored source digest unavailable on read")?;
+                if recomputed != stored_digest {
+                    anyhow::bail!(
+                        "journal event {} failed source-digest verification: stored {} != recomputed {} (tamper or corruption)",
+                        raw.event.id,
+                        stored_digest,
+                        recomputed
+                    );
+                }
+                ProvenanceState::Verified(Box::new(envelope))
+            }
+            (None, None) => ProvenanceState::LegacyUnverified,
+            // A row with only one of the two provenance columns is
+            // neither a complete Slice 1A record nor an untouched legacy
+            // row — refuse it rather than guess.
+            (envelope_json, digest) => anyhow::bail!(
+                "journal event {} has a partial provenance record (envelope: {}, digest: {})",
+                raw.event.id,
+                envelope_json.is_some(),
+                digest.is_some()
+            ),
+        };
+        records.push(JournalRecord {
+            seq: raw.seq,
+            event: raw.event,
+            provenance,
+        });
+    }
+    Ok(records)
+}
+
+/// Look up the id of the most recent `context_cancelled` journal event
+/// for a context — the durable cancellation record that a later
+/// `execution_interrupted` event must reference as its causal parent.
+pub fn latest_cancellation_event_id_conn(
+    conn: &Connection,
+    work_context_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let event_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM work_context_events
+             WHERE work_context_id = ?1 AND event_type = 'context_cancelled'
+             ORDER BY seq DESC LIMIT 1",
+            params![work_context_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to look up the durable cancellation event")?;
+    Ok(event_id)
+}
+
+/// WorkContext event operations trait. All reads verify source digests
+/// (Slice 1A); the unprovenanced `create_event` is gone — the single
+/// writer is [`record_event_conn`], which requires the provenance
+/// envelope (and the database triggers refuse any insert without it).
 pub trait WorkContextEventOperations {
-    fn create_event(&self, event: &WorkContextEvent) -> anyhow::Result<WorkContextEvent>;
     fn get_events_for_context(
         &self,
         work_context_id: &str,
@@ -52,61 +248,22 @@ pub trait WorkContextEventOperations {
         after_seq: i64,
         limit: usize,
     ) -> anyhow::Result<Vec<(i64, WorkContextEvent)>>;
+    /// Provenanced read: journal records with their verified provenance
+    /// state (legacy rows surface as `LegacyUnverified`).
+    fn get_journal_records_for_context(
+        &self,
+        work_context_id: &str,
+    ) -> anyhow::Result<Vec<JournalRecord>>;
 }
 
 impl<T: AsDb> WorkContextEventOperations for T {
-    fn create_event(&self, event: &WorkContextEvent) -> anyhow::Result<WorkContextEvent> {
-        let conn = self.as_db().conn();
-
-        conn.execute(
-            "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                &event.id,
-                &event.work_context_id,
-                &event.event_type,
-                &serde_json::to_string(&event.data)?,
-                &event.created_at.to_rfc3339(),
-            ],
-        )
-        .context("Failed to insert work context event")?;
-
-        Ok(event.clone())
-    }
-
     fn get_events_for_context(
         &self,
         work_context_id: &str,
     ) -> anyhow::Result<Vec<WorkContextEvent>> {
         let conn = self.as_db().conn();
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, work_context_id, event_type, data, created_at
-             FROM work_context_events
-             WHERE work_context_id = ?1
-             ORDER BY created_at ASC",
-            )
-            .context("Failed to prepare events query")?;
-
-        let events = stmt
-            .query_map(params![work_context_id], |row| {
-                Ok(WorkContextEvent {
-                    id: row.get(0)?,
-                    work_context_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    data: parse_event_data(row, 3)?,
-                    created_at: parse_event_created_at(row, 4)?,
-                })
-            })
-            .context("Failed to query events")?;
-
-        let mut result = Vec::new();
-        for event in events {
-            result.push(event.context("Failed to parse event")?);
-        }
-
-        Ok(result)
+        let records = read_journal_records_conn(conn, work_context_id, 0, i64::MAX)?;
+        Ok(records.into_iter().map(|record| record.event).collect())
     }
 
     fn get_events_for_context_after(
@@ -116,36 +273,18 @@ impl<T: AsDb> WorkContextEventOperations for T {
         limit: usize,
     ) -> anyhow::Result<Vec<(i64, WorkContextEvent)>> {
         let conn = self.as_db().conn();
+        let records = read_journal_records_conn(conn, work_context_id, after_seq, limit as i64)?;
+        Ok(records
+            .into_iter()
+            .map(|record| (record.seq, record.event))
+            .collect())
+    }
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT seq, id, work_context_id, event_type, data, created_at
-             FROM work_context_events
-             WHERE work_context_id = ?1 AND seq > ?2
-             ORDER BY seq ASC
-             LIMIT ?3",
-            )
-            .context("Failed to prepare cursor events query")?;
-
-        let rows = stmt
-            .query_map(params![work_context_id, after_seq, limit as i64], |row| {
-                let seq: i64 = row.get(0)?;
-                let event = WorkContextEvent {
-                    id: row.get(1)?,
-                    work_context_id: row.get(2)?,
-                    event_type: row.get(3)?,
-                    data: parse_event_data(row, 4)?,
-                    created_at: parse_event_created_at(row, 5)?,
-                };
-                Ok((seq, event))
-            })
-            .context("Failed to query cursor events")?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.context("Failed to parse cursor event")?);
-        }
-
-        Ok(result)
+    fn get_journal_records_for_context(
+        &self,
+        work_context_id: &str,
+    ) -> anyhow::Result<Vec<JournalRecord>> {
+        let conn = self.as_db().conn();
+        read_journal_records_conn(conn, work_context_id, 0, i64::MAX)
     }
 }

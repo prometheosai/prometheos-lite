@@ -83,12 +83,23 @@ pub fn extract_task_hints(task: &str, requirements: &[String]) -> (Vec<PathBuf>,
 
 pub struct HarnessWorkContextService {
     work_context_service: Arc<WorkContextService>,
+    /// Slice 1A: the harness pipeline does not carry the requesting
+    /// user, so its journal events record the honest state — harness
+    /// producer, absent principal (typed absence, never fabricated).
+    journal: crate::work::provenance::JournalContext,
 }
 
 impl HarnessWorkContextService {
     pub fn new(work_context_service: Arc<WorkContextService>) -> Self {
         Self {
             work_context_service,
+            journal: crate::work::provenance::JournalContext::internal_system(
+                format!("harness-{}", uuid::Uuid::new_v4()),
+                crate::work::provenance::JournalContext::work_authority(
+                    crate::work::types::AutonomyLevel::Autonomous,
+                    crate::work::types::ApprovalPolicy::Auto,
+                ),
+            ),
         }
     }
 
@@ -152,8 +163,11 @@ impl HarnessWorkContextService {
             );
 
             // P0-FIX: Block early with clear error message
-            self.work_context_service
-                .set_blocked_reason(&mut ctx, "No patch provider configured. Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables.".into())?;
+            self.work_context_service.set_blocked_reason(
+                &mut ctx,
+                "No patch provider configured. Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables.".into(),
+                &self.journal,
+            )?;
             self.work_context_service.update_context(&ctx)?;
             return Err(anyhow::anyhow!(
                 "No patch provider configured and no edits supplied. Set PROMETHEOS_PROVIDER and PROMETHEOS_MODEL environment variables."
@@ -161,7 +175,7 @@ impl HarnessWorkContextService {
         }
 
         self.work_context_service
-            .update_phase(&mut ctx, WorkPhase::Execution)?;
+            .update_phase(&mut ctx, WorkPhase::Execution, &self.journal)?;
 
         let result = execute_harness_task(req).await?;
         let stats = result.trajectory.compute_stats();
@@ -302,20 +316,26 @@ impl HarnessWorkContextService {
                 serde_json::to_value(h)?,
                 "harness".into(),
             );
-            self.work_context_service.add_artifact(&mut ctx, artifact)?;
+            self.work_context_service
+                .add_artifact(&mut ctx, artifact, &self.journal)?;
         }
         match &result.completion_decision {
-            CompletionDecision::Complete => self
-                .work_context_service
-                .update_status(&mut ctx, WorkStatus::Completed)?,
+            CompletionDecision::Complete => self.work_context_service.update_status(
+                &mut ctx,
+                WorkStatus::Completed,
+                &self.journal,
+            )?,
             CompletionDecision::NeedsApproval(r) => {
                 ctx.blocked_reason = Some(r.clone());
-                self.work_context_service
-                    .update_status(&mut ctx, WorkStatus::AwaitingApproval)?
+                self.work_context_service.update_status(
+                    &mut ctx,
+                    WorkStatus::AwaitingApproval,
+                    &self.journal,
+                )?
             }
             CompletionDecision::NeedsRepair(r) | CompletionDecision::Blocked(r) => self
                 .work_context_service
-                .set_blocked_reason(&mut ctx, r.clone())?,
+                .set_blocked_reason(&mut ctx, r.clone(), &self.journal)?,
         };
         self.work_context_service.update_context(&ctx)?;
         Ok(result)

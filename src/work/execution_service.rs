@@ -175,8 +175,12 @@ impl WorkExecutionService {
         context: &mut WorkContext,
         flow_ref: &str,
         token: &CancellationToken,
+        journal: &super::provenance::JournalContext,
     ) -> Result<Option<super::Artifact>> {
-        let Some(draft) = self.execute_flow_draft(context, flow_ref, token).await? else {
+        let Some(draft) = self
+            .execute_flow_draft(context, flow_ref, token, journal)
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -187,7 +191,11 @@ impl WorkExecutionService {
         token.park_at_safe_point().await;
         let conn = self.work_context_service.get_db().conn();
         let committed = crate::db::repository::iteration_persist::persist_iteration_conn(
-            conn, context, &draft, None,
+            conn,
+            context,
+            &draft,
+            None,
+            &journal.event_envelope(None),
         )?;
         if !committed {
             // The durable cancel won before the transaction: everything
@@ -207,11 +215,15 @@ impl WorkExecutionService {
         context: &mut WorkContext,
         flow_ref: &str,
         token: &CancellationToken,
+        journal: &super::provenance::JournalContext,
     ) -> Result<Option<crate::db::repository::iteration_persist::IterationDraft>> {
         // Check autonomy level - Chat mode requires human confirmation for all actions
         if context.autonomy_level == AutonomyLevel::Chat {
-            self.work_context_service
-                .update_status(context, WorkStatus::AwaitingApproval)?;
+            self.work_context_service.update_status(
+                context,
+                WorkStatus::AwaitingApproval,
+                journal,
+            )?;
             anyhow::bail!("Chat mode requires human confirmation before execution");
         }
 
@@ -222,8 +234,11 @@ impl WorkExecutionService {
             && (context.approval_policy == ApprovalPolicy::ManualAll
                 || context.approval_policy == ApprovalPolicy::RequireForSideEffects)
         {
-            self.work_context_service
-                .update_status(context, WorkStatus::AwaitingApproval)?;
+            self.work_context_service.update_status(
+                context,
+                WorkStatus::AwaitingApproval,
+                journal,
+            )?;
             anyhow::bail!("Approval required before phase transition to {:?}", phase);
         }
 
@@ -387,9 +402,14 @@ impl WorkExecutionService {
     /// Continue a WorkContext (no external cancellation signal; the loop in
     /// `WorkOrchestrator::run_until_blocked_or_complete_with_token` and the
     /// API run endpoint use the `_with_token` variant).
-    pub async fn continue_context(&self, context_id: &str) -> Result<WorkContext> {
+    pub async fn continue_context(
+        &self,
+        context_id: &str,
+        journal: &super::provenance::JournalContext,
+    ) -> Result<WorkContext> {
         let token = CancellationToken::new();
-        self.continue_context_with_token(context_id, &token).await
+        self.continue_context_with_token(context_id, &token, journal)
+            .await
     }
 
     /// Continue a WorkContext, observing `token` at the post-flow
@@ -401,6 +421,7 @@ impl WorkExecutionService {
         &self,
         context_id: &str,
         token: &CancellationToken,
+        journal: &super::provenance::JournalContext,
     ) -> Result<WorkContext> {
         let mut context = self
             .work_context_service
@@ -463,7 +484,7 @@ impl WorkExecutionService {
         // Execute flow and build the iteration's write set in memory.
         let start_time = std::time::Instant::now();
         let draft = self
-            .execute_flow_draft(&mut context, &next_flow, token)
+            .execute_flow_draft(&mut context, &next_flow, token, journal)
             .await?;
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
@@ -535,6 +556,7 @@ impl WorkExecutionService {
             &context,
             &draft,
             Some(&performance_record),
+            &journal.event_envelope(None),
         )?;
         if !committed {
             tracing::info!(
@@ -563,11 +585,12 @@ impl WorkExecutionService {
         title: String,
         domain: super::WorkDomain,
         goal: String,
+        journal: &super::provenance::JournalContext,
     ) -> Result<WorkContext> {
         // Create context with Review mode to allow initial planning
         let mut context = self
             .work_context_service
-            .create_context(user_id, title, domain, goal)?;
+            .create_context(user_id, title, domain, goal, journal)?;
 
         // Override autonomy to Review for initial planning to avoid Chat mode block
         context.autonomy_level = AutonomyLevel::Review;
@@ -578,6 +601,7 @@ impl WorkExecutionService {
                 &mut context,
                 "planning.flow.yaml",
                 &CancellationToken::new(),
+                journal,
             )
             .await?;
         let Some(_planned_artifact) = planned else {
@@ -589,9 +613,12 @@ impl WorkExecutionService {
 
         // Update phase to AwaitingApproval after planning
         self.work_context_service
-            .update_phase(&mut context, WorkPhase::Planning)?;
-        self.work_context_service
-            .update_status(&mut context, WorkStatus::AwaitingApproval)?;
+            .update_phase(&mut context, WorkPhase::Planning, journal)?;
+        self.work_context_service.update_status(
+            &mut context,
+            WorkStatus::AwaitingApproval,
+            journal,
+        )?;
 
         // Save context with execution metadata
         self.work_context_service.update_context(&context)?;
@@ -603,6 +630,16 @@ impl WorkExecutionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn journal() -> crate::work::provenance::JournalContext {
+        crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        )
+    }
+
     use crate::db::Db;
     use crate::db::repository::WorkContextEventOperations;
     use crate::flow::RuntimeContext;
@@ -665,6 +702,7 @@ mod tests {
                 "Plan the work".to_string(),
                 WorkDomain::General,
                 "Create a plan".to_string(),
+                &journal(),
             )
             .unwrap();
         context.autonomy_level = AutonomyLevel::Review;
@@ -702,14 +740,14 @@ mod tests {
         let task_token = token.clone();
         let handle = tokio::spawn(async move {
             let mut ctx = wcs_task.get_context(&ctx_id).unwrap().unwrap();
-            svc.execute_flow_in_context(&mut ctx, "planning.flow.yaml", &task_token)
+            svc.execute_flow_in_context(&mut ctx, "planning.flow.yaml", &task_token, &journal())
                 .await
         });
 
         // Cancel lands mid-iteration (the flow is running concurrently):
         // durable flip first, then the token fire — production ordering.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "test cancellation")
+        wcs.cancel_context(&mut snapshot, "test cancellation", &journal())
             .unwrap();
         let updated_at_after_flip: String = db
             .conn()
@@ -769,7 +807,7 @@ mod tests {
         let artifacts_before = count(&db, "work_artifacts");
         let token = CancellationToken::new();
         let result = execution_service
-            .execute_flow_in_context(&mut context, "planning.flow.yaml", &token)
+            .execute_flow_in_context(&mut context, "planning.flow.yaml", &token, &journal())
             .await
             .unwrap();
 
@@ -815,14 +853,17 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
         work_context_service
-            .set_blocked_reason(&mut context, "Waiting for approval".to_string())
+            .set_blocked_reason(&mut context, "Waiting for approval".to_string(), &journal())
             .unwrap();
 
-        let result = execution_service.continue_context(&context.id).await;
+        let result = execution_service
+            .continue_context(&context.id, &journal())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("blocked"));
     }
@@ -842,6 +883,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
         context.set_harness_metadata(HarnessMetadata {
@@ -850,10 +892,12 @@ mod tests {
         });
 
         work_context_service
-            .update_status(&mut context, WorkStatus::Completed)
+            .update_status(&mut context, WorkStatus::Completed, &journal())
             .unwrap();
 
-        let result = execution_service.continue_context(&context.id).await;
+        let result = execution_service
+            .continue_context(&context.id, &journal())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("complete"));
     }
@@ -883,6 +927,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -892,13 +937,13 @@ mod tests {
 
         // Test phase transition
         work_context_service
-            .update_phase(&mut context, WorkPhase::Planning)
+            .update_phase(&mut context, WorkPhase::Planning, &journal())
             .unwrap();
         assert_eq!(context.current_phase, WorkPhase::Planning);
 
         // Test status transition
         work_context_service
-            .update_status(&mut context, WorkStatus::InProgress)
+            .update_status(&mut context, WorkStatus::InProgress, &journal())
             .unwrap();
         assert_eq!(context.status, WorkStatus::InProgress);
 
@@ -908,7 +953,7 @@ mod tests {
             ..Default::default()
         });
         work_context_service
-            .update_status(&mut context, WorkStatus::Completed)
+            .update_status(&mut context, WorkStatus::Completed, &journal())
             .unwrap();
         assert_eq!(context.status, WorkStatus::Completed);
     }

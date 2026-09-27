@@ -360,6 +360,16 @@ pub fn list_checkpoints<T: AsDb>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn journal() -> crate::work::provenance::JournalContext {
+        crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        )
+    }
+
     use std::sync::Arc;
 
     /// Create a Db whose backing file lives inside `dir`. The caller MUST
@@ -380,6 +390,7 @@ mod tests {
             "ctx".into(),
             crate::work::types::WorkDomain::General,
             "goal".into(),
+            &journal(),
         )
         .expect("create")
         .id

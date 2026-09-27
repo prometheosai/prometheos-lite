@@ -269,6 +269,39 @@ pub async fn get_work_context(
     Ok(Json(WorkContextResponse::from(context)))
 }
 
+/// Slice 1A: build the per-request journal context. The requesting user
+/// is the recorded principal (and, for direct human actions such as
+/// create/cancel/status, the producer); the per-request id keeps
+/// request-to-run correlation continuous.
+fn request_journal(user_id: &str) -> crate::work::provenance::JournalContext {
+    crate::work::provenance::JournalContext::for_request(
+        user_id,
+        format!("req-{}", uuid::Uuid::new_v4()),
+        crate::work::provenance::JournalContext::work_authority(
+            crate::work::types::AutonomyLevel::Review,
+            crate::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
+/// Slice 1A: build the per-run journal context for the run endpoint:
+/// the requesting user is the initiating principal, the runtime harness
+/// is the producer of the run's events, and the work-run identity rides
+/// along with the originating request id.
+fn work_run_journal(user_id: &str) -> crate::work::provenance::JournalContext {
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let work_run_id = format!("work-run-{}", uuid::Uuid::new_v4());
+    crate::work::provenance::JournalContext::for_work_run(
+        user_id,
+        request_id,
+        work_run_id,
+        crate::work::provenance::JournalContext::work_authority(
+            crate::work::types::AutonomyLevel::Review,
+            crate::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
 /// Create a new WorkContext
 pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
@@ -293,7 +326,13 @@ pub async fn create_work_context(
     };
 
     let context = work_context_service
-        .create_context(req.user_id, req.title, domain, req.goal)
+        .create_context(
+            req.user_id.clone(),
+            req.title,
+            domain,
+            req.goal,
+            &request_journal(&req.user_id),
+        )
         .map_err(|e| ApiError::Internal(format!("Failed to create context: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -335,7 +374,7 @@ pub async fn update_work_context_status(
     };
 
     work_context_service
-        .update_status(&mut context, new_status)
+        .update_status(&mut context, new_status, &request_journal(user_id))
         .map_err(|e| ApiError::Internal(format!("Failed to update status: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -573,7 +612,7 @@ pub async fn cancel_work_context(
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     work_context_service
-        .cancel_context(&mut context, &req.reason)
+        .cancel_context(&mut context, &req.reason, &request_journal(user_id))
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("cancelled WorkContext accepts no further status transitions")
@@ -649,8 +688,9 @@ pub async fn continue_work_context(
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let journal = std::sync::Arc::new(request_journal(user_id));
     let context = orchestrator
-        .continue_context(id)
+        .continue_context(id, journal)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
@@ -667,8 +707,9 @@ pub async fn submit_intent(
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let journal = std::sync::Arc::new(request_journal(&req.user_id));
     let context = orchestrator
-        .submit_user_intent(req.user_id, req.message, req.conversation_id)
+        .submit_user_intent(req.user_id, req.message, req.conversation_id, journal)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
@@ -705,8 +746,9 @@ pub async fn run_until_complete(
     // durable `context_cancelled` + `execution_interrupted` events are the
     // audit record.
     let run_guard = state.run_cancels.register(&id);
+    let journal = std::sync::Arc::new(work_run_journal(user_id));
     let context = orchestrator
-        .run_until_blocked_or_complete_with_token(id, limits, run_guard.token())
+        .run_until_blocked_or_complete_with_token(id, limits, run_guard.token(), journal)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     drop(run_guard);
@@ -981,8 +1023,8 @@ mod tests {
         get_harness_completion, get_harness_evidence, get_harness_patches, get_harness_review,
         get_harness_risk, get_harness_validation, get_trace_by_run, get_work_context,
         get_work_context_artifacts, get_work_cost, get_work_quality, list_work_contexts,
-        list_work_traces, required_harness_view, required_user_id, run_harness, run_until_complete,
-        update_work_context_status,
+        list_work_traces, request_journal, required_harness_view, required_user_id, run_harness,
+        run_until_complete, update_work_context_status,
     };
     use crate::api::state::AppState;
     use crate::flow::memory::db::MemoryDb;
@@ -1093,6 +1135,7 @@ mod tests {
                 "Owned Context".to_string(),
                 WorkDomain::Software,
                 "goal".to_string(),
+                &request_journal("user-1"),
             )
             .expect("create context");
         TestState {

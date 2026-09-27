@@ -8,12 +8,13 @@ use uuid::Uuid;
 use super::{
     CompletionCriterion,
     event::WorkContextEvent,
+    provenance::JournalContext,
     types::{WorkContext, WorkDomain, WorkPhase, WorkStatus},
 };
 use crate::db::Db;
 use crate::db::repository::work_artifacts::WorkArtifactOperations;
 use crate::db::repository::work_context::WorkContextOperations;
-use crate::db::repository::work_context_events::WorkContextEventOperations;
+use crate::db::repository::work_context_events::{WorkContextEventOperations, record_event_conn};
 use crate::db::repository::work_run_metrics::WorkRunMetricsOperations;
 use crate::harness::evidence::EvidenceLog;
 use crate::work::types::HarnessRunMetricsRecord;
@@ -127,6 +128,7 @@ impl WorkContextService {
         title: String,
         domain: super::types::WorkDomain,
         goal: String,
+        journal: &JournalContext,
     ) -> Result<WorkContext> {
         let id = Uuid::new_v4().to_string();
         let context = WorkContext::new(id, user_id, title, domain, goal);
@@ -141,7 +143,7 @@ impl WorkContextService {
             "context_created".to_string(),
             serde_json::json!({ "title": saved.title, "domain": saved.domain }),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(saved)
     }
@@ -157,7 +159,12 @@ impl WorkContextService {
     }
 
     /// Add an artifact to a WorkContext
-    pub fn add_artifact(&self, context: &mut WorkContext, artifact: super::Artifact) -> Result<()> {
+    pub fn add_artifact(
+        &self,
+        context: &mut WorkContext,
+        artifact: super::Artifact,
+        journal: &JournalContext,
+    ) -> Result<()> {
         // Persist artifact to database
         WorkArtifactOperations::create_artifact(&*self.db, &artifact)?;
 
@@ -173,7 +180,7 @@ impl WorkContextService {
             "artifact_added".to_string(),
             serde_json::json!({ "artifact_count": context.artifacts.len() }),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(())
     }
@@ -183,6 +190,7 @@ impl WorkContextService {
         &self,
         context: &mut WorkContext,
         decision: super::DecisionRecord,
+        journal: &JournalContext,
     ) -> Result<()> {
         context.decisions.push(decision);
         context.touch();
@@ -195,7 +203,7 @@ impl WorkContextService {
             "decision_added".to_string(),
             serde_json::json!({ "decision_count": context.decisions.len() }),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(())
     }
@@ -228,7 +236,12 @@ impl WorkContextService {
     }
 
     /// Update the status of a WorkContext
-    pub fn update_status(&self, context: &mut WorkContext, status: WorkStatus) -> Result<()> {
+    pub fn update_status(
+        &self,
+        context: &mut WorkContext,
+        status: WorkStatus,
+        journal: &JournalContext,
+    ) -> Result<()> {
         validate_status_transition(context, status)?;
 
         let old_status = context.status;
@@ -243,7 +256,7 @@ impl WorkContextService {
             "status_changed".to_string(),
             serde_json::json!({ "from": old_status, "to": status }),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(())
     }
@@ -256,7 +269,12 @@ impl WorkContextService {
     /// cancels collapse: exactly one writer transitions, the rest either
     /// (a) fail closed on terminal states, or (b) idempotently succeed on
     /// an already-cancelled context without writing a duplicate event.
-    pub fn cancel_context(&self, context: &mut WorkContext, reason: &str) -> Result<()> {
+    pub fn cancel_context(
+        &self,
+        context: &mut WorkContext,
+        reason: &str,
+        journal: &JournalContext,
+    ) -> Result<()> {
         if reason.trim().is_empty() {
             anyhow::bail!("cancel requires a non-empty reason");
         }
@@ -349,24 +367,19 @@ impl WorkContextService {
         }
 
         // Audit trail INSIDE the same transaction: rollback if insert fails.
+        // The cancel event carries the requesting invocation's provenance
+        // (Slice 1A) — the human principal who canceled is recorded on the
+        // event itself, and later `execution_interrupted` events reference
+        // this event id as their causal parent.
         let event = WorkContextEvent::new(
             Uuid::new_v4().to_string(),
             context.id.clone(),
             "context_cancelled".to_string(),
             serde_json::json!({ "from": decoded, "to": WorkStatus::Cancelled, "reason": reason }),
         );
-        tx.execute(
-            "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                &event.id,
-                &event.work_context_id,
-                &event.event_type,
-                &serde_json::to_string(&event.data)?,
-                &event.created_at.to_rfc3339(),
-            ],
-        )
-        .context("failed to record context_cancelled event")?;
+        let envelope = journal.event_envelope(None);
+        record_event_conn(&tx, &event, &envelope)
+            .context("failed to record context_cancelled event")?;
 
         tx.commit()?;
         context.status = WorkStatus::Cancelled;
@@ -375,7 +388,12 @@ impl WorkContextService {
     }
 
     /// Update the phase of a WorkContext
-    pub fn update_phase(&self, context: &mut WorkContext, phase: WorkPhase) -> Result<()> {
+    pub fn update_phase(
+        &self,
+        context: &mut WorkContext,
+        phase: WorkPhase,
+        journal: &JournalContext,
+    ) -> Result<()> {
         validate_phase_transition(context, phase)?;
 
         let old_phase = context.current_phase;
@@ -390,7 +408,7 @@ impl WorkContextService {
             "phase_transition".to_string(),
             serde_json::json!({ "from": old_phase, "to": phase }),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(())
     }
@@ -427,7 +445,12 @@ impl WorkContextService {
     }
 
     /// Set the blocked reason
-    pub fn set_blocked_reason(&self, context: &mut WorkContext, reason: String) -> Result<()> {
+    pub fn set_blocked_reason(
+        &self,
+        context: &mut WorkContext,
+        reason: String,
+        journal: &JournalContext,
+    ) -> Result<()> {
         context.blocked_reason = Some(reason);
         context.status = WorkStatus::Blocked;
         context.touch();
@@ -440,13 +463,17 @@ impl WorkContextService {
             "context_blocked".to_string(),
             serde_json::json!({ "reason": context.blocked_reason }),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(())
     }
 
     /// Clear the blocked reason
-    pub fn clear_blocked_reason(&self, context: &mut WorkContext) -> Result<()> {
+    pub fn clear_blocked_reason(
+        &self,
+        context: &mut WorkContext,
+        journal: &JournalContext,
+    ) -> Result<()> {
         context.blocked_reason = None;
         if context.status == WorkStatus::Blocked {
             context.status = WorkStatus::InProgress;
@@ -461,7 +488,7 @@ impl WorkContextService {
             "context_unblocked".to_string(),
             serde_json::json!({}),
         );
-        let _ = WorkContextEventOperations::create_event(&*self.db, &event);
+        let _ = record_event_conn(self.db.conn(), &event, &journal.event_envelope(None));
 
         Ok(())
     }
@@ -553,6 +580,16 @@ impl WorkContextService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn journal() -> crate::work::provenance::JournalContext {
+        crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        )
+    }
+
     use crate::work::types::WorkDomain;
 
     #[test]
@@ -565,6 +602,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -583,6 +621,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -601,11 +640,12 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
         service
-            .update_status(&mut context, WorkStatus::InProgress)
+            .update_status(&mut context, WorkStatus::InProgress, &journal())
             .unwrap();
 
         let retrieved = service.get_context(&context.id).unwrap().unwrap();
@@ -622,11 +662,12 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
         service
-            .update_phase(&mut context, WorkPhase::Planning)
+            .update_phase(&mut context, WorkPhase::Planning, &journal())
             .unwrap();
 
         let retrieved = service.get_context(&context.id).unwrap().unwrap();
@@ -643,6 +684,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -665,6 +707,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -691,11 +734,12 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
         service
-            .set_blocked_reason(&mut context, "Waiting for approval".to_string())
+            .set_blocked_reason(&mut context, "Waiting for approval".to_string(), &journal())
             .unwrap();
 
         let retrieved = service.get_context(&context.id).unwrap().unwrap();
@@ -716,13 +760,16 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
         service
-            .set_blocked_reason(&mut context, "Waiting for approval".to_string())
+            .set_blocked_reason(&mut context, "Waiting for approval".to_string(), &journal())
             .unwrap();
-        service.clear_blocked_reason(&mut context).unwrap();
+        service
+            .clear_blocked_reason(&mut context, &journal())
+            .unwrap();
 
         let retrieved = service.get_context(&context.id).unwrap().unwrap();
         assert_eq!(retrieved.status, WorkStatus::InProgress);
@@ -740,6 +787,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -749,6 +797,7 @@ mod tests {
                 "Write Docs".to_string(),
                 WorkDomain::Software,
                 "Write documentation".to_string(),
+                &journal(),
             )
             .unwrap();
 
@@ -767,6 +816,7 @@ mod tests {
                 "Build API".to_string(),
                 WorkDomain::Software,
                 "Create a REST API".to_string(),
+                &journal(),
             )
             .unwrap();
 

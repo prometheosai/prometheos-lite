@@ -243,6 +243,11 @@ impl Db {
                 event_type TEXT NOT NULL,
                 data TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                provenance_json TEXT,
+                source_digest TEXT,
+                run_id TEXT,
+                principal_id TEXT,
+                correlation_id TEXT,
                 FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
             )",
                 [],
@@ -341,6 +346,101 @@ impl Db {
                 [],
             )
             .context("Failed to create work_context_events(seq) index")?;
+
+        // Slice 1A (#132): durable provenance columns. Additive and
+        // nullable: legacy rows keep their honest NULLs (the read model
+        // surfaces them as `LegacyUnverified`); the database triggers
+        // below enforce complete provenance for NEW writes. Idempotent:
+        // each column is checked and added only when missing, so a
+        // partially migrated database converges on re-run.
+        for (column, ddl_type) in [
+            ("provenance_json", "TEXT"),
+            ("source_digest", "TEXT"),
+            ("run_id", "TEXT"),
+            ("principal_id", "TEXT"),
+            ("correlation_id", "TEXT"),
+        ] {
+            let has_column: bool = self
+                .conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = ?1",
+                )
+                .context("Failed to inspect work_context_events schema")?
+                .query_row([column], |row| row.get::<_, i64>(0))
+                .map(|count| count > 0)
+                .context("Failed to inspect work_context_events schema")?;
+            if !has_column {
+                self.conn
+                    .execute(
+                        &format!("ALTER TABLE work_context_events ADD COLUMN {column} {ddl_type}"),
+                        [],
+                    )
+                    .with_context(|| {
+                        format!("Failed to add work_context_events({column}) provenance column")
+                    })?;
+            }
+        }
+
+        // Query keys over the flat identity columns (the columns are
+        // derived from the envelope at write time and must match it —
+        // enforced by the single writer path plus tests).
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_work_context_events_run_id
+                 ON work_context_events(run_id)",
+                [],
+            )
+            .context("Failed to create work_context_events(run_id) index")?;
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_work_context_events_principal_id
+                 ON work_context_events(principal_id)",
+                [],
+            )
+            .context("Failed to create work_context_events(principal_id) index")?;
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_work_context_events_correlation_id
+                 ON work_context_events(correlation_id)",
+                [],
+            )
+            .context("Failed to create work_context_events(correlation_id) index")?;
+
+        // Database-boundary enforcement (Slice 1A): new inserts MUST
+        // carry complete provenance — a NULL envelope, source digest, run
+        // identity, or correlation aborts at the database, not only in
+        // Rust. `principal_id` is deliberately not enforced: an honestly
+        // absent principal is a NULL column that matches the envelope.
+        // Legacy rows are unaffected: triggers bind new writes, never
+        // history.
+        self.conn
+            .execute(
+                "CREATE TRIGGER IF NOT EXISTS work_context_events_provenance_required
+                 BEFORE INSERT ON work_context_events
+                 WHEN NEW.provenance_json IS NULL
+                   OR NEW.source_digest IS NULL
+                   OR NEW.run_id IS NULL
+                   OR NEW.correlation_id IS NULL
+                 BEGIN
+                     SELECT RAISE(ABORT, 'journal insert requires complete provenance');
+                 END",
+                [],
+            )
+            .context("Failed to create work_context_events provenance trigger")?;
+
+        // Entire journal rows are append-only: no UPDATE may modify any
+        // journal row, provenance included — a tampered or rewritten
+        // record is refused at the database boundary.
+        self.conn
+            .execute(
+                "CREATE TRIGGER IF NOT EXISTS work_context_events_append_only
+                 BEFORE UPDATE ON work_context_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'journal rows are append-only');
+                 END",
+                [],
+            )
+            .context("Failed to create work_context_events append-only trigger")?;
 
         self.conn
             .execute(
