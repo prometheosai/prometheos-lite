@@ -723,3 +723,174 @@ fn wrong_canonicalization_version_refused_with_cmp_0001() {
     let diags = verify_err(&tampered, &identity);
     assert_code(&diags, "SOMA-CMP-0001");
 }
+
+// ---------------------------------------------------------------------------
+// Strict ExecutionPlan text boundary (review blocker 4): the same shared
+// validator guards both the artifact-validation boundary and the reviewed
+// plan gate, so no caller can ingest plan text the other would refuse.
+//
+// Version shapes follow the strict typed-parse rule of the reference
+// implementation (`soma-types` SemVer::parse rejects leading zeros,
+// partials, prerelease and build tags) rather than the looser JSON-schema
+// regex, so Lite can never accept a plan the oracle itself would fail to
+// deserialize. Duplicate object members are catalogue `SOMA-CMP-0007`
+// (duplicate_key); everything else structural is `SOMA-CMP-0003`
+// (schema_violation); version shapes are `SOMA-CMP-0001`
+// (unsupported_version).
+// ---------------------------------------------------------------------------
+
+/// Mutate a compiled plan (as a JSON `Value`) and serialize it back to text.
+fn tampered_plan(rel: &str, mutate: impl FnOnce(&mut Value)) -> String {
+    tampered_text(&compiled_plan_text(rel), mutate)
+}
+
+/// Mutate arbitrary plan text (parsed as JSON) and serialize it back.
+fn tampered_text(plan_text: &str, mutate: impl FnOnce(&mut Value)) -> String {
+    let mut plan: Value = serde_json::from_str(plan_text).expect("parses");
+    mutate(&mut plan);
+    serde_json::to_string(&plan).expect("serializes")
+}
+
+/// Compiled plan text of the two-step `lite-reorder` fixture (the vendored
+/// valid fixtures are all single-step; step-key uniqueness needs two).
+fn lite_reorder_plan_text() -> String {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/soma-golden/lite-reorder.json"
+    ))
+    .expect("lite-reorder fixture exists");
+    let plan = compile_workflow_text(&text).expect("lite-reorder compiles");
+    serde_json::to_string(&plan).expect("plan serializes")
+}
+
+#[test]
+fn boundary_refuses_non_strict_semver_versions() {
+    let identity = "0".repeat(64);
+    let bad_versions = [
+        "1",
+        "1.bad",
+        "01.2.3",
+        "1.0",
+        "1.0.0-beta",
+        "1.0.0+x",
+        "1.0.0.0",
+        "v1.0.0",
+    ];
+    let base = "fixtures/valid/wf-valid-base.json";
+    for bad in bad_versions {
+        for field in ["schemaVersion", "planVersion"] {
+            let text = tampered_plan(base, |p| p[field] = json!(bad));
+            let diags = verify_err(&text, &identity);
+            assert_code(&diags, "SOMA-CMP-0001");
+        }
+        let text = tampered_plan(base, |p| p["canonicalization"]["version"] = json!(bad));
+        let diags = verify_err(&text, &identity);
+        assert_code(&diags, "SOMA-CMP-0001");
+    }
+}
+
+#[test]
+fn boundary_refuses_non_lowercase_hex_digests() {
+    let identity = "0".repeat(64);
+    let upper = "ABCDEF0123456789".repeat(4);
+    assert_eq!(upper.len(), 64, "uppercase case is sha256-shaped");
+    let base = "fixtures/valid/wf-valid-base.json";
+    let cases = [
+        tampered_plan(base, |p| p["workflowDigest"] = json!(upper)),
+        tampered_plan(base, |p| p["workflowDigest"] = json!("a".repeat(63))),
+        tampered_plan(base, |p| p["canonicalization"]["sha256"] = json!(upper)),
+        tampered_plan(base, |p| p["canonicalization"]["sha256"] = json!("b".repeat(63))),
+    ];
+    for text in cases {
+        let diags = verify_err(&text, &identity);
+        assert_code(&diags, "SOMA-CMP-0003");
+    }
+}
+
+#[test]
+fn boundary_refuses_duplicate_json_members() {
+    // Minimal document: duplicated top-level member (serde would keep the
+    // last one, so only the raw scan can refuse it).
+    let minimal = r#"{"schemaVersion":"1.1.0","schemaVersion":"1.1.0"}"#;
+    assert_code(&verify_err(minimal, "whatever"), "SOMA-CMP-0007");
+    // Real plan text with one member duplicated inside the document.
+    let compiled = compiled_plan_text("fixtures/valid/wf-valid-base.json");
+    let with_dup = compiled.replacen(
+        "{\"schemaVersion\"",
+        "{\"planVersion\":\"1.0.0\",\"schemaVersion\"",
+        1,
+    );
+    assert!(with_dup.len() > compiled.len(), "injection applied");
+    assert_code(&verify_err(&with_dup, "whatever"), "SOMA-CMP-0007");
+}
+
+#[test]
+fn boundary_refuses_duplicate_step_keys() {
+    let text = tampered_text(&lite_reorder_plan_text(), |p| {
+        assert!(
+            p["steps"].as_array().is_some_and(|s| s.len() >= 2),
+            "fixture carries at least two steps"
+        );
+        let first = p["steps"][0]["key"].clone();
+        p["steps"][1]["key"] = first;
+    });
+    assert_code(&verify_err(&text, "whatever"), "SOMA-CMP-0003");
+}
+
+#[test]
+fn boundary_refuses_unknown_members_anywhere() {
+    let base = "fixtures/valid/wf-valid-base.json";
+    let cases = [
+        tampered_plan(base, |p| p["unexpected"] = json!(true)),
+        tampered_plan(base, |p| p["steps"][0]["unknownStepMember"] = json!("x")),
+        tampered_plan(base, |p| p["canonicalization"]["extra"] = json!(1)),
+    ];
+    for text in cases {
+        assert_code(&verify_err(&text, "whatever"), "SOMA-CMP-0003");
+    }
+}
+
+#[test]
+fn validate_artifact_text_execution_plan_branch_shares_the_strict_boundary() {
+    let base = "fixtures/valid/wf-valid-base.json";
+    let upper = "ABCDEF0123456789".repeat(4);
+    let cases: Vec<(String, &str)> = vec![
+        (
+            tampered_plan(base, |p| p["planVersion"] = json!("1.bad")),
+            "SOMA-CMP-0001",
+        ),
+        (
+            tampered_plan(base, |p| p["workflowDigest"] = json!(upper)),
+            "SOMA-CMP-0003",
+        ),
+        (
+            tampered_plan(base, |p| p["unexpected"] = json!(true)),
+            "SOMA-CMP-0003",
+        ),
+        (
+            tampered_text(&lite_reorder_plan_text(), |p| {
+                let first = p["steps"][0]["key"].clone();
+                p["steps"][1]["key"] = first;
+            }),
+            "SOMA-CMP-0003",
+        ),
+        (
+            r#"{"schemaVersion":"1.0.0","schemaVersion":"1.0.0"}"#.to_string(),
+            "SOMA-CMP-0007",
+        ),
+    ];
+    for (text, expected) in cases {
+        let diags = prometheos_lite::workflow::soma::validate_artifact_text("ExecutionPlan", &text)
+            .unwrap_or_else(|e| panic!("policy refusals surface as diagnostics, not Err: {e}"));
+        assert!(
+            diags.iter().any(|d| d.code == expected),
+            "expected {expected}; got {diags:?}"
+        );
+    }
+    // A valid sealed plan passes the branch with no findings.
+    let valid = compiled_plan_text(base);
+    let diags =
+        prometheos_lite::workflow::soma::validate_artifact_text("ExecutionPlan", &valid)
+            .expect("valid plan accepted");
+    assert!(diags.is_empty(), "no diagnostics for a valid plan; got {diags:?}");
+}

@@ -190,6 +190,9 @@ pub(crate) fn numeric_lexeme(n: &serde_json::Number) -> Option<String> {
 ///
 /// Errors (`Err`) are input refusals — malformed JSON or a document that
 /// violates its declared schema; callers map them to SOMA-CMP-0003.
+/// Exception: the `ExecutionPlan` branch returns policy refusals as
+/// `Ok` diagnostics so the boundary's catalogue codes (CMP-0001, CMP-0007)
+/// survive instead of collapsing into CMP-0003.
 pub fn validate_artifact_text(artifact_kind: &str, text: &str) -> Result<Vec<Diagnostic>, String> {
     // Strict structural scan first so duplicate keys cannot pass via the DOM
     // path (serde silently keeps the last duplicate).
@@ -251,6 +254,19 @@ pub fn validate_artifact_text(artifact_kind: &str, text: &str) -> Result<Vec<Dia
             let model: adapters::AdapterConformance =
                 serde_json::from_value(raw).map_err(|e| format!("schema violation: {e}"))?;
             Ok(model.audit(&supported))
+        }
+        // The plan boundary shares `governance_compiler`'s strict validator
+        // (review blocker 4) so this branch and `verify_reviewed_plan`
+        // refuse exactly the same texts. Policy refusals keep their
+        // catalogue codes (CMP-0001/CMP-0003/CMP-0007) as diagnostics
+        // instead of collapsing into the generic Err -> CMP-0003 mapping
+        // of the other kinds; the raw dup/number/JSON scans above already
+        // ran on this text, so anything reaching here was well-formed.
+        "ExecutionPlan" => {
+            match crate::workflow::governance_compiler::validate_execution_plan_text(text) {
+                Err(d) => Ok(vec![d]),
+                Ok(_) => Ok(vec![]),
+            }
         }
         other => Err(format!("unsupported artifact kind {other:?}")),
     }

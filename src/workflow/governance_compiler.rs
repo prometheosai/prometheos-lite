@@ -22,9 +22,9 @@ use crate::workflow::AuthorityLevel;
 use crate::workflow::execution_graph::topological_order;
 use crate::workflow::policy::EffectiveExecutionSnapshotV1;
 use crate::workflow::soma::contracts::{AuthorityProfile, EscalationPolicy, WorkflowDefinition};
-use crate::workflow::soma::types::{ExecutionClass, MutationMode};
+use crate::workflow::soma::types::{ExecutionClass, Hex64, MutationMode, SemVer};
 use crate::workflow::soma::{
-    Diagnostic, DiagnosticRemediation, DiagnosticSource, SUPPORTED_SCHEMA_VERSION,
+    Diagnostic, DiagnosticRemediation, DiagnosticSource, SUPPORTED_SCHEMA_VERSION, canonical,
     try_canonical_digest, validate_artifact_text,
 };
 
@@ -269,18 +269,100 @@ fn input_refusal(reason: String) -> Diagnostic {
     Diagnostic::new("SOMA-CMP-0003", reason)
 }
 
+/// The shared strict boundary for SOMA `ExecutionPlan` text.
+///
+/// Every production path that ingests plan text runs this function first
+/// (review blocker 4): [`verify_reviewed_plan`] step 1 and the
+/// `ExecutionPlan` branch of [`validate_artifact_text`]. Checks, in order:
+///
+/// 1. Duplicate object members on the raw text (the DOM path would
+///    silently keep the last duplicate) — SOMA-CMP-0007
+///    (`duplicate_key`, per the vendored catalogue).
+/// 2. JSON parse plus typed parse against [`CompiledGovernancePlanV1`]
+///    (`deny_unknown_fields` refuses unknown members anywhere) —
+///    SOMA-CMP-0003 (`schema_violation`).
+/// 3. Strict `MAJOR.MINOR.PATCH` versions for `schemaVersion`,
+///    `planVersion` and `canonicalization.version`, schema/plan major
+///    exactly 1, and `canonicalization.version == schemaVersion` —
+///    SOMA-CMP-0001 (`unsupported_version`). The parse is the reference
+///    `SemVer::parse` rule (no leading zeros, no partials, no
+///    prerelease/build tags): stricter than the schema regex, matching
+///    exactly what the oracle's typed deserialization accepts.
+/// 4. `workflowDigest` and `canonicalization.sha256` as 64 lowercase hex
+///    chars ([`Hex64`]) — SOMA-CMP-0003.
+/// 5. Unique `steps[].key` values (the schema documents keys as unique
+///    within the plan) — SOMA-CMP-0003.
+///
+/// Returns the parsed document so callers keep the exact input shape.
+// Diagnostic carries optional source/remediation members, which pushes
+// Result<Value, Diagnostic> past clippy's large-err threshold. The Err
+// value is returned by value only on the refusal path; boxing would
+// churn every caller for no size win (same rationale as
+// governance.rs::selection_within_authority).
+#[allow(clippy::result_large_err)]
+pub fn validate_execution_plan_text(text: &str) -> Result<Value, Diagnostic> {
+    match canonical::find_duplicate_key(text.as_bytes()) {
+        Err(_) => {
+            return Err(Diagnostic::new("SOMA-CMP-0003", "malformed json"));
+        }
+        Ok(Some(_)) => {
+            return Err(Diagnostic::new("SOMA-CMP-0007", "duplicate object key"));
+        }
+        Ok(None) => {}
+    }
+    let raw: Value = serde_json::from_str(text)
+        .map_err(|e| Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")))?;
+    let plan: CompiledGovernancePlanV1 = serde_json::from_value(raw.clone())
+        .map_err(|e| Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")))?;
+
+    let version_error = || {
+        Diagnostic::new(
+            "SOMA-CMP-0001",
+            format!(
+                "unsupported governance plan version (schemaVersion={}, planVersion={}, canonicalizationVersion={})",
+                plan.schema_version, plan.plan_version, plan.canonicalization.version
+            ),
+        )
+    };
+    let (Ok(schema_major), Ok(plan_major), Ok(_)) = (
+        SemVer::parse(&plan.schema_version),
+        SemVer::parse(&plan.plan_version),
+        SemVer::parse(&plan.canonicalization.version),
+    ) else {
+        return Err(version_error());
+    };
+    if schema_major.major != 1
+        || plan_major.major != 1
+        || plan.canonicalization.version != plan.schema_version
+    {
+        return Err(version_error());
+    }
+    if let Err(e) = Hex64::parse(&plan.workflow_digest) {
+        return Err(Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")));
+    }
+    if let Err(e) = Hex64::parse(&plan.canonicalization.sha256) {
+        return Err(Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")));
+    }
+    let mut step_keys = std::collections::HashSet::new();
+    if !plan.steps.iter().all(|s| step_keys.insert(s.key.as_str())) {
+        return Err(Diagnostic::new(
+            "SOMA-CMP-0003",
+            "schema violation: duplicate step key",
+        ));
+    }
+    Ok(raw)
+}
+
 /// Digest-binding check (contract req5): refuse a plan whose compiled
 /// identity differs from the reviewed plan.
 ///
 /// Checks, in order (fail-closed, first failure wins):
-/// 1. The plan parses against the compiled-plan schema (else
-///    SOMA-CMP-0003).
-/// 2. Supported versions: schema/plan major version 1 and
-///    `canonicalization.version` equal to the plan's `schemaVersion`
-///    (else SOMA-CMP-0001).
-/// 3. The plan's self-seal verifies — digest input removes only
+/// 1. The text passes [`validate_execution_plan_text`] — the shared strict
+///    boundary (parse, strict versions, lowercase-hex digests, unique step
+///    keys; else SOMA-CMP-0007/SOMA-CMP-0003/SOMA-CMP-0001).
+/// 2. The plan's self-seal verifies — digest input removes only
 ///    `canonicalization.sha256` (else SOMA-CMP-0004, integrity).
-/// 4. The plan's canonical digest equals `reviewed_identity` — the
+/// 3. The plan's canonical digest equals `reviewed_identity` — the
 ///    identity recorded by review — so execution can never run a plan
 ///    other than the one reviewed (else SOMA-CMP-0004, binding).
 ///
@@ -290,35 +372,23 @@ pub fn verify_reviewed_plan(
     plan_text: &str,
     reviewed_identity: &str,
 ) -> Result<(), Vec<Diagnostic>> {
-    let plan: CompiledGovernancePlanV1 = match serde_json::from_str(plan_text) {
-        Ok(plan) => plan,
-        Err(e) => {
-            return Err(vec![enrich_one(
-                input_refusal(format!("schema violation: {e}")),
-                plan_digest_hint(plan_text).as_deref(),
-            )]);
+    let plan: CompiledGovernancePlanV1 = match validate_execution_plan_text(plan_text) {
+        Err(d) => {
+            return Err(vec![enrich_one(d, plan_digest_hint(plan_text).as_deref())]);
         }
+        Ok(value) => match serde_json::from_value(value) {
+            Ok(plan) => plan,
+            Err(e) => {
+                return Err(vec![enrich_one(
+                    Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}")),
+                    plan_digest_hint(plan_text).as_deref(),
+                )]);
+            }
+        },
     };
     let ctx = Some(plan.workflow_digest.as_str());
 
-    // 2. Version gate.
-    if !major_version_is_one(&plan.schema_version)
-        || !major_version_is_one(&plan.plan_version)
-        || plan.canonicalization.version != plan.schema_version
-    {
-        return Err(vec![enrich_one(
-            Diagnostic::new(
-                "SOMA-CMP-0001",
-                format!(
-                    "unsupported governance plan version (schemaVersion={}, planVersion={}, canonicalizationVersion={})",
-                    plan.schema_version, plan.plan_version, plan.canonicalization.version
-                ),
-            ),
-            ctx,
-        )]);
-    }
-
-    // 3. Self-seal integrity.
+    // 2. Self-seal integrity.
     let value = serde_json::to_value(&plan).map_err(|e| {
         vec![Diagnostic::new(
             "SOMA-CMP-0004",
@@ -357,7 +427,7 @@ pub fn verify_reviewed_plan(
         )]);
     }
 
-    // 4. Digest binding: compiled identity must equal the reviewed one.
+    // 3. Digest binding: compiled identity must equal the reviewed one.
     if plan.canonicalization.sha256 != reviewed_identity {
         let mut d = Diagnostic::new(
             "SOMA-CMP-0004",
@@ -373,11 +443,6 @@ pub fn verify_reviewed_plan(
     }
 
     Ok(())
-}
-
-/// Plan parses as JSON with a major version of exactly 1.
-fn major_version_is_one(version: &str) -> bool {
-    version.split('.').next() == Some("1")
 }
 
 /// Best-effort workflow digest from raw plan text (for diagnostic source).
