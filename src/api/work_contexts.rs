@@ -550,20 +550,24 @@ async fn execute_decide_transaction(
         if rows != 1 {
             anyhow::bail!("checkpoint digest raced: concurrent writer changed the row");
         }
-        // graph_decision event still lands in the same transaction.
-        tx.execute(
-            "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                uuid::Uuid::new_v4().to_string(),
-                work_context_id,
-                "graph_decision",
-                serde_json::to_string(&serde_json::json!({
-                    "runId": graph_run_id,
-                    "newDigest": new_digest,
-                }))?,
-                chrono::Utc::now().to_rfc3339(),
-            ],
+        // graph_decision event still lands in the same transaction — with
+        // complete Slice 1A provenance (graph-run identity preserved via
+        // graph_run_envelope; the requesting user is the principal).
+        let journal = request_journal(user_id);
+        let envelope = journal.graph_run_envelope(graph_run_id.to_string(), None);
+        let decision_event = crate::work::event::WorkContextEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            work_context_id.to_string(),
+            "graph_decision".to_string(),
+            serde_json::json!({
+                "runId": graph_run_id,
+                "newDigest": new_digest,
+            }),
+        );
+        crate::db::repository::work_context_events::record_event_conn(
+            &tx,
+            &decision_event,
+            &envelope,
         )?;
 
         tx.commit()?;
