@@ -177,6 +177,44 @@ impl AuthorityProfile {
             .unwrap_or_default()
     }
 
+    /// Declared readable scope identifiers (the `scope` part of each
+    /// `readable:<scope>` grant), as a set for exact-suffix validation.
+    /// Ported from the reference implementation (soma-validate `authority.rs`).
+    pub fn readable_scope_set(&self) -> std::collections::BTreeSet<&str> {
+        self.readable_scopes
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// Declared writable scope identifiers (the `scope` part of each
+    /// `writable:<scope>` grant), as a set for exact-suffix validation.
+    /// Ported from the reference implementation (soma-validate `authority.rs`).
+    pub fn writable_scope_set(&self) -> std::collections::BTreeSet<&str> {
+        self.writable_scopes
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// True when this profile carries no authority (used as a serde
+    /// `skip_serializing_if` guard so an empty reduction serializes as
+    /// absent). Ported from the reference implementation.
+    pub fn is_empty(&self) -> bool {
+        self.mutation == MutationMode::None_
+            && self.tools.as_ref().is_none_or(|t| t.is_empty())
+            && self.readable_scopes.as_ref().is_none_or(|s| s.is_empty())
+            && self.writable_scopes.as_ref().is_none_or(|s| s.is_empty())
+            && self.network_policy.is_none()
+            && self.provider_policy.is_none()
+            && self.secrets.as_ref().is_none_or(|s| s.is_empty())
+            && self.escalation.is_none()
+            && self.review.is_none()
+            && self.abstention.is_none()
+            && self.budgets.is_none()
+            && self.content_restrictions.is_none()
+    }
+
     pub fn has_recovery_path(&self) -> bool {
         self.escalation.as_ref().is_some_and(|e| !e.to.is_empty())
     }

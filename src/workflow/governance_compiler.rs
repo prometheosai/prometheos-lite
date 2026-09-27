@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::workflow::AuthorityLevel;
+use crate::workflow::execution_graph::topological_order;
 use crate::workflow::policy::EffectiveExecutionSnapshotV1;
 use crate::workflow::soma::contracts::{AuthorityProfile, EscalationPolicy, WorkflowDefinition};
 use crate::workflow::soma::types::{ExecutionClass, MutationMode};
@@ -116,7 +117,8 @@ pub fn map_lite_authority(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanStep {
-    /// Stable positional key (`step-<index>`) unique within the plan.
+    /// Published v1.1 step key: `s{index:04}:{operationId}` over the
+    /// workflow's topological order — unique within the plan.
     pub key: String,
     /// The workflow body operation this step executes.
     pub operation_id: String,
@@ -171,21 +173,29 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
         .map_err(|e| vec![input_refusal(format!("schema violation: {e}"))])?;
 
     let workflow_digest = workflow_digest_of(&model)?;
-    let steps = model
-        .body
+    // Steps follow the published v1.1 topological ordering; a cycle here
+    // means the audit gate was bypassed, so fail closed without a plan.
+    let Some(order) = topological_order(&model) else {
+        return Err(vec![Diagnostic::new(
+            "SOMA-EXP-0002",
+            "workflow body has an operation-edge cycle; the plan cannot be sealed".to_string(),
+        )]);
+    };
+    let steps = order
         .iter()
         .enumerate()
-        .map(|(i, op)| PlanStep {
-            key: format!("step-{i}"),
-            operation_id: op.id.clone(),
+        .map(|(i, &body_idx)| PlanStep {
+            key: format!("s{i:04}:{}", model.body[body_idx].id),
+            operation_id: model.body[body_idx].id.clone(),
         })
         .collect();
     seal_plan(workflow_digest, steps)
 }
 
 /// Canonical digest of the serialized workflow with `contentDigest`
-/// removed (the audit's SOMA-CMP-0004 rule).
-fn workflow_digest_of(model: &WorkflowDefinition) -> Result<String, Vec<Diagnostic>> {
+/// removed (the audit's SOMA-CMP-0004 rule). `pub(crate)` so the Lite
+/// execution graph binds to the same digest without re-deriving it.
+pub(crate) fn workflow_digest_of(model: &WorkflowDefinition) -> Result<String, Vec<Diagnostic>> {
     let mut value = serde_json::to_value(model).map_err(|e| {
         vec![Diagnostic::new(
             "SOMA-CMP-0004",

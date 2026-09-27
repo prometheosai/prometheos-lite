@@ -85,12 +85,18 @@ fn valid_workflow_fixtures_compile_to_sealed_plans() {
             "{rel} canonicalization.version"
         );
 
-        // Steps mirror the workflow body in order.
+        // Steps are emitted in topological order with SOMA v1.1 keys
+        // (`s{index:04}:{operationId}`); for these single-unit fixtures
+        // body order equals topological order.
         let wf: Value = serde_json::from_str(&text).expect("fixture parses");
         let body = wf["body"].as_array().expect("body is an array");
         assert_eq!(plan.steps.len(), body.len(), "{rel} step count");
         for (i, step) in plan.steps.iter().enumerate() {
-            assert_eq!(step.key, format!("step-{i}"), "{rel} step key");
+            assert_eq!(
+                step.key,
+                format!("s{i:04}:{}", step.operation_id),
+                "{rel} step key"
+            );
             assert_eq!(
                 step.operation_id,
                 body[i]["id"].as_str().expect("operation id"),
@@ -156,6 +162,34 @@ fn compile_is_byte_identical_across_two_runs() {
     let second = serde_json::to_string(&compile_workflow_text(&text).expect("compiles"))
         .expect("serializes");
     assert_eq!(first, second, "two runs must produce identical plan JSON");
+}
+
+// ---------------------------------------------------------------------------
+// T2 (review correction 1): steps follow the published v1.1 topological
+// ordering with `s{index:04}:{operationId}` keys — the plan shape stays
+// exactly v1.1.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plan_steps_follow_topological_order_with_soma_v11_keys() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/soma-golden/lite-reorder.json"
+    ))
+    .expect("lite-reorder fixture exists");
+    let plan = compile_workflow_text(&text)
+        .unwrap_or_else(|diags| panic!("lite-reorder fixture must compile, got {diags:?}"));
+
+    // The fixture declares op2 (consumer) before op1 (producer); the plan
+    // must emit op1 first under the published v1.1 topological ordering.
+    let ids: Vec<&str> = plan.steps.iter().map(|s| s.operation_id.as_str()).collect();
+    assert_eq!(ids, vec!["op1", "op2"], "operation ids in topo order");
+    let keys: Vec<&str> = plan.steps.iter().map(|s| s.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["s0000:op1", "s0001:op2"],
+        "SOMA v1.1 step keys are s{{index:04}}:{{operationId}} over topological order"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,1 @@
+{"canonicalization":{"sha256":"810f35b972f79ddf9b28a9da1614c45ab58c507197e4a118ad565f51fcb2d2ea","version":"1.1.0"},"planVersion":"1.0.0","schemaVersion":"1.1.0","steps":[{"key":"s0000:op1","operationId":"op1"},{"key":"s0001:op2","operationId":"op2"}],"workflowDigest":"9b26d2086269f571107f6af6e321238080f3d8ab9e234a06e992027446e714b0"}
