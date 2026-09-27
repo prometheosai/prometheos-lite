@@ -797,7 +797,12 @@ pub async fn run_harness(
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let service = HarnessWorkContextService::new(work_context_service);
+    // P1 gap 3: the harness runs on behalf of the requesting user — the
+    // journal records the user as principal, the harness as producer,
+    // and the actual authority derived from the context.
+    let harness_journal = work_run_journal_for(user_id, &context);
+    let service =
+        HarnessWorkContextService::with_journal(work_context_service, Some(harness_journal));
     let mut edits = req.proposed_edits;
     if let Some(raw) = req.edit_response.as_deref() {
         edits.extend(parse_edit_response(raw).map_err(|e| ApiError::BadRequest(e.to_string()))?);

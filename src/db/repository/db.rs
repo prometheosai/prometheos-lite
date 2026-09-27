@@ -421,8 +421,18 @@ impl Db {
                    OR NEW.source_digest IS NULL
                    OR NEW.run_id IS NULL
                    OR NEW.correlation_id IS NULL
+                   -- P1 gap 2: shape checks for non-null values — the
+                   -- trigger validates more than NULL presence. The
+                   -- envelope must be a non-trivial JSON object; the
+                   -- digest must be a 64-char hex string; the run and
+                   -- correlation identities must be non-empty.
+                   OR length(NEW.provenance_json) < 10
+                   OR substr(NEW.provenance_json, 1, 1) != '{'
+                   OR length(NEW.source_digest) != 64
+                   OR length(NEW.run_id) = 0
+                   OR length(NEW.correlation_id) = 0
                  BEGIN
-                     SELECT RAISE(ABORT, 'journal insert requires complete provenance');
+                     SELECT RAISE(ABORT, 'journal insert requires complete, well-formed provenance');
                  END",
                 [],
             )

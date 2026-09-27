@@ -548,3 +548,175 @@ fn graph_decision_event_carries_complete_provenance() {
         ProvenanceState::LegacyUnverified => panic!("must be verified"),
     }
 }
+
+#[test]
+fn canonical_bytes_fixpoint_and_semantic_invariants_are_enforced_at_write() {
+    let (db, wcs) = setup();
+    let context = create_context(&wcs);
+    let journal = test_journal();
+
+    // Valid envelope passes the write invariants.
+    let envelope = journal.event_envelope(None);
+    envelope.validate_write_invariants().unwrap();
+
+    // Widened effective authority is refused.
+    let mut widened = journal.event_envelope(None);
+    widened.authority.effective.execution_class =
+        prometheos_lite::work::provenance::ExecutionClass::HumanDecision;
+    widened.authority.declared.execution_class =
+        prometheos_lite::work::provenance::ExecutionClass::Deterministic;
+    assert!(
+        widened.validate_write_invariants().is_err(),
+        "widened effective authority must fail the write invariants"
+    );
+
+    // Empty producer identity is refused.
+    let mut empty_producer = journal.event_envelope(None);
+    empty_producer.producer.identity = String::new();
+    assert!(
+        empty_producer.validate_write_invariants().is_err(),
+        "empty producer identity must fail"
+    );
+
+    // The record_event_conn boundary enforces it: a malformed envelope
+    // cannot be stored.
+    let bad_event = prometheos_lite::work::event::WorkContextEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        "probe_bad".to_string(),
+        serde_json::json!({}),
+    );
+    let result = prometheos_lite::db::repository::work_context_events::record_event_conn(
+        db.conn(),
+        &bad_event,
+        &widened,
+    );
+    assert!(
+        result.is_err(),
+        "widened-authority envelope must be refused at the write boundary"
+    );
+
+    // The valid envelope round-trips through the stored bytes.
+    let good_event = prometheos_lite::work::event::WorkContextEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        "probe_good".to_string(),
+        serde_json::json!({}),
+    );
+    prometheos_lite::db::repository::work_context_events::record_event_conn(
+        db.conn(),
+        &good_event,
+        &envelope,
+    )
+    .unwrap();
+}
+
+#[test]
+fn database_trigger_rejects_malformed_non_null_provenance() {
+    let (db, _wcs) = setup();
+
+    // Non-null but too-short provenance_json (doesn't start with '{').
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-shape-1', 'ctx-shape', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 'short', '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "short/non-JSON provenance_json must be rejected by the shape check"
+    );
+
+    // Non-null but wrong-length source_digest (not 64 chars).
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-shape-2', 'ctx-shape', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\"}', 'short-digest', 'r', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "non-64-char source_digest must be rejected by the shape check"
+    );
+
+    // Non-null but empty run_id.
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-shape-3', 'ctx-shape', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\"}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', '', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "empty run_id must be rejected by the shape check"
+    );
+}
+
+#[test]
+fn mixed_legacy_provenance_state_is_refused_not_misclassified() {
+    let (db, wcs) = setup();
+    let context = create_context(&wcs);
+
+    // Simulate a mixed state: NULL envelope + NULL digest (looks legacy)
+    // but with a NON-NULL run_id column. This is neither a clean legacy
+    // row nor a clean provenanced row.
+    db.conn()
+        .execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+        .unwrap();
+    db.conn()
+        .execute(
+            "DROP TRIGGER IF EXISTS work_context_events_provenance_required",
+            [],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE work_context_events
+             SET provenance_json = NULL, source_digest = NULL,
+                 run_id = 'orphaned-run-id'
+             WHERE work_context_id = ?1",
+            rusqlite::params![context.id],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER IF NOT EXISTS work_context_events_provenance_required
+             BEFORE INSERT ON work_context_events
+             WHEN NEW.provenance_json IS NULL
+               OR NEW.source_digest IS NULL
+               OR NEW.run_id IS NULL
+               OR NEW.correlation_id IS NULL
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal insert requires complete provenance');
+             END",
+            [],
+        )
+        .unwrap();
+
+    // The read must REFUSE the mixed state, not classify it as
+    // LegacyUnverified.
+    let err =
+        WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("mixed"),
+        "mixed legacy/provenance state must be refused with 'mixed' in the error, got: {msg}"
+    );
+}

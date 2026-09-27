@@ -73,6 +73,10 @@ pub fn record_event_conn(
     event: &WorkContextEvent,
     envelope: &ProvenanceEnvelope,
 ) -> anyhow::Result<()> {
+    // P1 gap 1: enforce the canonical-bytes fixpoint and semantic
+    // invariants at the write boundary — a malformed envelope can never
+    // be stored, even from a caller that bypassed all upstream checks.
+    envelope.validate_write_invariants()?;
     let provenance_json = envelope.to_canonical_json_string()?;
     let source_digest = compute_event_source_digest(
         &event.id,
@@ -218,7 +222,28 @@ pub fn read_journal_records_conn(
                 }
                 ProvenanceState::Verified(Box::new(envelope))
             }
-            (None, None) => ProvenanceState::LegacyUnverified,
+            (None, None) => {
+                // P1 gap 5 repair: a row with NULL provenance_json and
+                // NULL source_digest is only a legitimate legacy row if
+                // EVERY derived identity column is also NULL. Any
+                // non-NULL derived column with a NULL envelope is a
+                // mixed state — neither a clean legacy row nor a clean
+                // provenanced row — and must be refused rather than
+                // silently classified as LegacyUnverified.
+                if raw.stored_run_id.is_some()
+                    || raw.stored_principal_id.is_some()
+                    || raw.stored_correlation_id.is_some()
+                {
+                    anyhow::bail!(
+                        "journal event {} has a mixed provenance state: NULL envelope with non-NULL derived columns (run_id: {:?}, principal_id: {:?}, correlation_id: {:?}) — neither legacy nor provenanced",
+                        raw.event.id,
+                        raw.stored_run_id,
+                        raw.stored_principal_id,
+                        raw.stored_correlation_id
+                    );
+                }
+                ProvenanceState::LegacyUnverified
+            }
             // A row with only one of the two provenance columns is
             // neither a complete Slice 1A record nor an untouched legacy
             // row — refuse it rather than guess.

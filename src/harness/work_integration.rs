@@ -83,23 +83,39 @@ pub fn extract_task_hints(task: &str, requirements: &[String]) -> (Vec<PathBuf>,
 
 pub struct HarnessWorkContextService {
     work_context_service: Arc<WorkContextService>,
-    /// Slice 1A: the harness pipeline does not carry the requesting
-    /// user, so its journal events record the honest state — harness
-    /// producer, absent principal (typed absence, never fabricated).
+    /// Slice 1A (P1 gap 3 repair): the harness journal is provided by the
+    /// CALLER when one exists (the API handler passes the requesting user
+    /// as principal and the real harness-run identity). The fallback
+    /// internal-system journal (honest harness producer, absent
+    /// principal) is used only when no caller-provided journal exists.
     journal: crate::work::provenance::JournalContext,
 }
 
 impl HarnessWorkContextService {
     pub fn new(work_context_service: Arc<WorkContextService>) -> Self {
-        Self {
-            work_context_service,
-            journal: crate::work::provenance::JournalContext::internal_system(
+        Self::with_journal(work_context_service, None)
+    }
+
+    /// P1 gap 3: the caller-provided journal records the real requesting
+    /// user as the principal and the real run identity. When None, the
+    /// honest internal-system state (harness producer, absent
+    /// principal) is recorded — never fabricated.
+    pub fn with_journal(
+        work_context_service: Arc<WorkContextService>,
+        journal: Option<crate::work::provenance::JournalContext>,
+    ) -> Self {
+        let journal = journal.unwrap_or_else(|| {
+            crate::work::provenance::JournalContext::internal_system(
                 format!("harness-{}", uuid::Uuid::new_v4()),
                 crate::work::provenance::JournalContext::work_authority(
                     crate::work::types::AutonomyLevel::Autonomous,
                     crate::work::types::ApprovalPolicy::Auto,
                 ),
-            ),
+            )
+        });
+        Self {
+            work_context_service,
+            journal,
         }
     }
 

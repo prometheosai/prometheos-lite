@@ -167,6 +167,60 @@ impl ProvenanceEnvelope {
         Ok(text)
     }
 
+    /// P1 gap 1 repair: enforce the canonical-bytes fixpoint and the
+    /// semantic envelope invariants at the write boundary. Returns Err
+    /// on any violation — the envelope can never be stored malformed.
+    ///
+    /// - Fixpoint: the serialized bytes must parse back to the exact
+    ///   same envelope (no silent lossy serialization).
+    /// - Semantic invariants: the effective execution class never widens
+    ///   the declared class; the schema version is the supported one;
+    ///   the producer identity is non-empty; the correlation id is
+    ///   non-empty; the request id is non-empty.
+    pub fn validate_write_invariants(&self) -> Result<()> {
+        if self.schema_version != PROVENANCE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "provenance schema version {} is not the supported {}",
+                self.schema_version,
+                PROVENANCE_SCHEMA_VERSION
+            );
+        }
+        if self.producer.identity.is_empty() {
+            anyhow::bail!("provenance producer identity must be non-empty");
+        }
+        if self.causation.correlation_id.is_empty() {
+            anyhow::bail!("provenance correlation id must be non-empty");
+        }
+        if self.run.request_id.is_empty() {
+            anyhow::bail!("provenance request id must be non-empty");
+        }
+        // Effective execution class must not widen declared.
+        let declared_class = &self.authority.declared.execution_class;
+        let effective_class = &self.authority.effective.execution_class;
+        let rank = |c: &ExecutionClass| match c {
+            ExecutionClass::Deterministic => 0,
+            ExecutionClass::ConstrainedModel => 1,
+            ExecutionClass::ScopedAgent => 2,
+            ExecutionClass::HumanDecision => 3,
+        };
+        if rank(effective_class) > rank(declared_class) {
+            anyhow::bail!(
+                "provenance effective execution class {:?} widens declared {:?}",
+                effective_class,
+                declared_class
+            );
+        }
+        // Fixpoint: the canonical bytes must round-trip exactly.
+        let text = self.to_canonical_json_string()?;
+        let reparsed = Self::parse_canonical(&text)?;
+        if reparsed != *self {
+            anyhow::bail!(
+                "provenance envelope canonical-bytes fixpoint violation: serialization is lossy"
+            );
+        }
+        Ok(())
+    }
+
     /// Parse strictly: unknown fields, a wrong schema version, or a
     /// number-policy violation in the stored bytes is refused.
     pub fn parse_canonical(text: &str) -> Result<Self> {
