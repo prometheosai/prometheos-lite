@@ -1,5 +1,5 @@
 //! Slice 1A (#132) regressions: durable provenance enforcement at the
-//! database boundary, tamper detection on read, the interruptionâ†’cancel
+//! database boundary, tamper detection on read, the interruptionÃ¢â€ â€™cancel
 //! causation reference, and legacy-row states. These run as the smoke
 //! chain's gate and in the core suite.
 
@@ -82,7 +82,7 @@ fn journal_rows_are_append_only_at_the_database_boundary() {
     let (db, wcs) = setup();
     let context = create_context(&wcs);
 
-    // Any UPDATE of a journal row aborts â€” entire rows, not just
+    // Any UPDATE of a journal row aborts Ã¢â‚¬â€ entire rows, not just
     // provenance.
     let err = db.conn().execute(
         "UPDATE work_context_events SET data = '{}' WHERE work_context_id = ?1",
@@ -253,7 +253,7 @@ fn all_nine_event_types_carry_complete_provenance() {
     // The execution_interrupted event: written through the same evidence
     // path the orchestrator uses (its parent is the cancellation event).
     let cancel_id =
-        prometheos_lite::db::repository::work_context_events::latest_cancellation_event_id_conn(
+        prometheos_lite::db::repository::work_context_events::cancellation_event_id_conn(
             db.conn(),
             &context.id,
         )
@@ -305,14 +305,14 @@ fn execution_interrupted_references_the_durable_cancellation_event_id() {
 
     // Find the cancellation event id.
     let cancel_id =
-        prometheos_lite::db::repository::work_context_events::latest_cancellation_event_id_conn(
+        prometheos_lite::db::repository::work_context_events::cancellation_event_id_conn(
             db.conn(),
             &context.id,
         )
         .unwrap()
         .expect("the durable cancellation event must exist");
 
-    // Record the interruption evidence with the journal â€” the helper
+    // Record the interruption evidence with the journal Ã¢â‚¬â€ the helper
     // that mirrors the orchestrator's evidence write.
     let event = prometheos_lite::work::event::WorkContextEvent::new(
         uuid::Uuid::new_v4().to_string(),
@@ -388,5 +388,163 @@ fn migration_is_idempotent_across_repeated_opens() {
     // Third open: still converges.
     {
         let _db = Db::new(&db_path_str).unwrap();
+    }
+}
+
+#[test]
+fn cancel_context_returns_the_exact_cancellation_event_id() {
+    let (_db, wcs) = setup();
+    let mut context = create_context(&wcs);
+    let journal = test_journal();
+
+    // The exact cancellation event id returned by the transactional
+    // cancel — callers carry this as the causal parent (P1-4), never a
+    // "latest" inference.
+    let returned_id = wcs
+        .cancel_context(&mut context, "test", &journal)
+        .unwrap()
+        .expect("first cancel must return the exact event id");
+    assert!(!returned_id.is_empty());
+
+    // The deterministic lookup agrees (exactly one, not "latest").
+    let looked_up =
+        prometheos_lite::db::repository::work_context_events::cancellation_event_id_conn(
+            _db.conn(),
+            &context.id,
+        )
+        .unwrap()
+        .expect("exactly one cancellation event");
+    assert_eq!(
+        returned_id, looked_up,
+        "the carried ID must be the exact durable event"
+    );
+
+    // Idempotent re-cancel returns None — no second event.
+    let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
+    let re_cancel = wcs
+        .cancel_context(&mut snapshot, "again", &journal)
+        .unwrap();
+    assert!(
+        re_cancel.is_none(),
+        "idempotent re-cancel returns no event id"
+    );
+}
+
+#[test]
+fn column_drift_between_envelope_and_flat_columns_fails_closed_on_read() {
+    let (db, wcs) = setup();
+    let context = create_context(&wcs);
+
+    // Simulate an out-of-band column tamper: drop the append-only
+    // trigger, change the run_id column without changing the envelope,
+    // restore the trigger.
+    db.conn()
+        .execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE work_context_events SET run_id = 'drifted-run' WHERE work_context_id = ?1",
+            rusqlite::params![context.id],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .unwrap();
+
+    // The read revalidates the flat columns against the envelope and
+    // fails closed — the drifted column surfaces as an error.
+    let err =
+        WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("column drift") || msg.contains("drift"),
+        "the read must surface the column drift, got: {msg}"
+    );
+}
+
+#[test]
+fn malformed_provenance_envelope_fails_closed_on_read() {
+    let (db, wcs) = setup();
+    let context = create_context(&wcs);
+
+    // Simulate an out-of-band envelope corruption: drop the trigger,
+    // write garbage into provenance_json, restore.
+    db.conn()
+        .execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE work_context_events SET provenance_json = '{not-json' WHERE work_context_id = ?1",
+            rusqlite::params![context.id],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .unwrap();
+
+    let err =
+        WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap_err();
+    let msg = format!("{:?}", err);
+    // The read refuses the malformed envelope (P1-3: non-null garbage is
+    // not accepted, even though the trigger only checks for NULL).
+    assert!(
+        msg.contains("envelope") || msg.contains("parse") || msg.contains("provenance"),
+        "the read must surface the malformed-envelope refusal, got: {msg}"
+    );
+}
+
+#[test]
+fn graph_decision_event_carries_complete_provenance() {
+    let (db, wcs) = setup();
+    let journal = test_journal();
+    let context = create_context(&wcs);
+
+    // Simulate the decide-path journal write: the graph_decision event
+    // carries the graph-run identity via graph_run_envelope (P1-1: the
+    // event inventory explicitly includes graph_decision).
+    let graph_run_id = "graph-run-test-1";
+    let event = prometheos_lite::work::event::WorkContextEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        "graph_decision".to_string(),
+        serde_json::json!({"runId": graph_run_id, "newDigest": "abc123"}),
+    );
+    let envelope = journal.graph_run_envelope(graph_run_id.to_string(), None);
+    prometheos_lite::db::repository::work_context_events::record_event_conn(
+        db.conn(),
+        &event,
+        &envelope,
+    )
+    .unwrap();
+
+    let records =
+        WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap();
+    let decision = records
+        .iter()
+        .find(|r| r.event.event_type == "graph_decision")
+        .expect("graph_decision event must exist");
+    match &decision.provenance {
+        ProvenanceState::Verified(envelope) => {
+            assert_eq!(
+                envelope.run.graph_run_id,
+                Some(graph_run_id.to_string()),
+                "the graph-run identity must be preserved in the envelope"
+            );
+        }
+        ProvenanceState::LegacyUnverified => panic!("must be verified"),
     }
 }

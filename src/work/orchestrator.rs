@@ -658,7 +658,7 @@ impl WorkOrchestrator {
         // a recorded real parent id, never a sequence-adjacent guess.
         let db = self.work_context_service.get_db();
         let cancel_event_id =
-            crate::db::repository::work_context_events::latest_cancellation_event_id_conn(
+            crate::db::repository::work_context_events::cancellation_event_id_conn(
                 db.conn(),
                 context_id,
             )?;

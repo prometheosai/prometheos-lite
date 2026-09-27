@@ -269,10 +269,27 @@ pub async fn get_work_context(
     Ok(Json(WorkContextResponse::from(context)))
 }
 
-/// Slice 1A: build the per-request journal context. The requesting user
-/// is the recorded principal (and, for direct human actions such as
-/// create/cancel/status, the producer); the per-request id keeps
-/// request-to-run correlation continuous.
+/// Slice 1A (P1-1 repair): build the per-request journal context with
+/// the ACTUAL authority of the context being mutated (derived from its
+/// autonomy level and approval policy, never hardcoded). The requesting
+/// user is the recorded principal and, for direct human actions
+/// (create, cancel, status), the producer.
+fn request_journal_for(
+    user_id: &str,
+    context: &crate::work::types::WorkContext,
+) -> crate::work::provenance::JournalContext {
+    crate::work::provenance::JournalContext::for_request(
+        user_id,
+        format!("req-{}", uuid::Uuid::new_v4()),
+        crate::work::provenance::JournalContext::work_authority(
+            context.autonomy_level,
+            context.approval_policy,
+        ),
+    )
+}
+
+/// Slice 1A: default journal for contexts that do not exist yet (the
+/// create path) — the default authority the created context will carry.
 fn request_journal(user_id: &str) -> crate::work::provenance::JournalContext {
     crate::work::provenance::JournalContext::for_request(
         user_id,
@@ -284,11 +301,15 @@ fn request_journal(user_id: &str) -> crate::work::provenance::JournalContext {
     )
 }
 
-/// Slice 1A: build the per-run journal context for the run endpoint:
-/// the requesting user is the initiating principal, the runtime harness
-/// is the producer of the run's events, and the work-run identity rides
-/// along with the originating request id.
-fn work_run_journal(user_id: &str) -> crate::work::provenance::JournalContext {
+/// Slice 1A (P1-1 repair): the per-run journal context with the ACTUAL
+/// authority derived from the context being run. The runtime harness is
+/// the producer of the run's events (iteration writes, exit writes,
+/// interruption evidence); the requesting user is the initiating
+/// principal; a distinct work-run identity rides with the request.
+fn work_run_journal_for(
+    user_id: &str,
+    context: &crate::work::types::WorkContext,
+) -> crate::work::provenance::JournalContext {
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let work_run_id = format!("work-run-{}", uuid::Uuid::new_v4());
     crate::work::provenance::JournalContext::for_work_run(
@@ -296,8 +317,8 @@ fn work_run_journal(user_id: &str) -> crate::work::provenance::JournalContext {
         request_id,
         work_run_id,
         crate::work::provenance::JournalContext::work_authority(
-            crate::work::types::AutonomyLevel::Review,
-            crate::work::types::ApprovalPolicy::Auto,
+            context.autonomy_level,
+            context.approval_policy,
         ),
     )
 }
@@ -615,8 +636,9 @@ pub async fn cancel_work_context(
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
+    let journal = request_journal_for(user_id, &context);
     work_context_service
-        .cancel_context(&mut context, &req.reason, &request_journal(user_id))
+        .cancel_context(&mut context, &req.reason, &journal)
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("cancelled WorkContext accepts no further status transitions")
@@ -750,7 +772,7 @@ pub async fn run_until_complete(
     // durable `context_cancelled` + `execution_interrupted` events are the
     // audit record.
     let run_guard = state.run_cancels.register(&id);
-    let journal = std::sync::Arc::new(work_run_journal(user_id));
+    let journal = std::sync::Arc::new(work_run_journal_for(user_id, &context));
     let context = orchestrator
         .run_until_blocked_or_complete_with_token(id, limits, run_guard.token(), journal)
         .await

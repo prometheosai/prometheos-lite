@@ -15,7 +15,7 @@
 
 use anyhow::Context;
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use rusqlite::{Connection, params, types::Type};
 
 use super::AsDb;
 use crate::work::event::WorkContextEvent;
@@ -121,7 +121,7 @@ pub fn read_journal_records_conn(
     let mut stmt = conn
         .prepare(
             "SELECT seq, id, work_context_id, event_type, data, created_at,
-                    provenance_json, source_digest
+                    provenance_json, source_digest, run_id, principal_id, correlation_id
              FROM work_context_events
              WHERE work_context_id = ?1 AND seq > ?2
              ORDER BY seq ASC
@@ -134,6 +134,9 @@ pub fn read_journal_records_conn(
         event: WorkContextEvent,
         provenance_json: Option<String>,
         source_digest: Option<String>,
+        stored_run_id: Option<String>,
+        stored_principal_id: Option<String>,
+        stored_correlation_id: Option<String>,
     }
 
     let rows = stmt
@@ -149,6 +152,9 @@ pub fn read_journal_records_conn(
                 },
                 provenance_json: row.get(6)?,
                 source_digest: row.get(7)?,
+                stored_run_id: row.get(8)?,
+                stored_principal_id: row.get(9)?,
+                stored_correlation_id: row.get(10)?,
             })
         })
         .context("Failed to query journal records")?;
@@ -179,6 +185,37 @@ pub fn read_journal_records_conn(
                         recomputed
                     );
                 }
+                // P1-2 repair: the derived flat identity columns are
+                // revalidated against the parsed envelope on every read —
+                // a mismatch is column drift (tamper or corruption) and
+                // fails closed, never a silently returned event.
+                let expected_run_id = envelope.run_query_key();
+                if raw.stored_run_id.as_deref() != Some(expected_run_id.as_str()) {
+                    anyhow::bail!(
+                        "journal event {} run_id column drift: stored {:?} != envelope {:?}",
+                        raw.event.id,
+                        raw.stored_run_id,
+                        expected_run_id
+                    );
+                }
+                let expected_principal = envelope.principal_query_key();
+                if raw.stored_principal_id != expected_principal {
+                    anyhow::bail!(
+                        "journal event {} principal_id column drift: stored {:?} != envelope {:?}",
+                        raw.event.id,
+                        raw.stored_principal_id,
+                        expected_principal
+                    );
+                }
+                let expected_correlation = envelope.correlation_query_key();
+                if raw.stored_correlation_id.as_deref() != Some(expected_correlation.as_str()) {
+                    anyhow::bail!(
+                        "journal event {} correlation_id column drift: stored {:?} != envelope {:?}",
+                        raw.event.id,
+                        raw.stored_correlation_id,
+                        expected_correlation
+                    );
+                }
                 ProvenanceState::Verified(Box::new(envelope))
             }
             (None, None) => ProvenanceState::LegacyUnverified,
@@ -201,24 +238,32 @@ pub fn read_journal_records_conn(
     Ok(records)
 }
 
-/// Look up the id of the most recent `context_cancelled` journal event
-/// for a context — the durable cancellation record that a later
-/// `execution_interrupted` event must reference as its causal parent.
-pub fn latest_cancellation_event_id_conn(
+/// Look up the durable cancellation event for a context — the EXACT
+/// parent that `execution_interrupted` evidence must reference. Because
+/// `cancel_context` is idempotent (exactly one `context_cancelled` event
+/// per context, written transactionally), this lookup is deterministic:
+/// it asserts there is EXACTLY ONE and returns it. Zero is an honest
+/// absence; more than one is a durability violation surfaced as an
+/// error — never a "latest" inference that could pick the wrong parent.
+pub fn cancellation_event_id_conn(
     conn: &Connection,
     work_context_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let event_id: Option<String> = conn
+    let (count, event_id): (i64, Option<String>) = conn
         .query_row(
-            "SELECT id FROM work_context_events
-             WHERE work_context_id = ?1 AND event_type = 'context_cancelled'
-             ORDER BY seq DESC LIMIT 1",
+            "SELECT COUNT(*), MAX(id) FROM work_context_events
+             WHERE work_context_id = ?1 AND event_type = 'context_cancelled'",
             params![work_context_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()
         .context("Failed to look up the durable cancellation event")?;
-    Ok(event_id)
+    match count {
+        0 => Ok(None),
+        1 => Ok(event_id),
+        n => anyhow::bail!(
+            "durability violation: {n} context_cancelled events for work context {work_context_id} (exactly one is guaranteed)"
+        ),
+    }
 }
 
 /// WorkContext event operations trait. All reads verify source digests

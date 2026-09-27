@@ -264,17 +264,17 @@ impl WorkContextService {
     /// Cancel a WorkContext (#132 Slice C). Terminal transition: sets
     /// status to `Cancelled` and records a `context_cancelled` durable
     /// event with the reason — IN ONE SQL TRANSACTION so an agent can
-    /// never observe "cancelled but no audit event" or the reverse. The
-    /// status predicate `WHERE status NOT IN ('Completed','Failed',`Archived`,`Cancelled`)` is inside the UPDATE so concurrent
-    /// cancels collapse: exactly one writer transitions, the rest either
-    /// (a) fail closed on terminal states, or (b) idempotently succeed on
-    /// an already-cancelled context without writing a duplicate event.
+    /// never observe "cancelled but no audit event" or the reverse.
+    /// Returns `Some(event_id)` when this call performed the transition
+    /// (the exact cancellation event id — callers carry it forward as
+    /// the causal parent for interruption evidence, never a "latest"
+    /// inference), or `None` on the idempotent already-cancelled path.
     pub fn cancel_context(
         &self,
         context: &mut WorkContext,
         reason: &str,
         journal: &JournalContext,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         if reason.trim().is_empty() {
             anyhow::bail!("cancel requires a non-empty reason");
         }
@@ -308,7 +308,7 @@ impl WorkContextService {
             tx.rollback()?;
             // Idempotent: caller already holds a cancelled context.
             context.status = WorkStatus::Cancelled;
-            return Ok(());
+            return Ok(None);
         }
 
         // Conditional transition: forbidden targets excluded at the SQL
@@ -361,7 +361,7 @@ impl WorkContextService {
                 .context("stored work_contexts.status must be valid WorkStatus")?;
             if after == WorkStatus::Cancelled {
                 context.status = WorkStatus::Cancelled;
-                return Ok(());
+                return Ok(None);
             }
             anyhow::bail!("cannot cancel WorkContext in terminal state {:?}", after);
         }
@@ -384,7 +384,10 @@ impl WorkContextService {
         tx.commit()?;
         context.status = WorkStatus::Cancelled;
         context.touch();
-        Ok(())
+        // The exact cancellation event id — callers carry this as the
+        // causal parent for interruption evidence (P1-4 repair), never a
+        // "latest" inference.
+        Ok(Some(event.id))
     }
 
     /// Update the phase of a WorkContext
