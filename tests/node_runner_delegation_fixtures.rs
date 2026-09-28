@@ -177,9 +177,9 @@ impl NodeRunRequestLike {
 async fn nested_node_execution_is_fully_gated_on_both_sides() {
     let child_calls = Arc::new(AtomicUsize::new(0));
     let mut parent = governed_runner(
-    delegation_registry(child_calls.clone()),
-    &["nested.parent", "delegation", "bypass"],
-);
+        delegation_registry(child_calls.clone()),
+        &["nested.parent", "delegation", "bypass"],
+    );
     let m = manifest("nested.parent");
     let r = restrictions();
     let outcome = parent

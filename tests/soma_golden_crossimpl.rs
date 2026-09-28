@@ -84,15 +84,13 @@ fn lite_plan_bytes_are_byte_identical_to_oracle_goldens() {
 fn oracle_goldens_are_canonical_and_self_consistent() {
     for (name, _) in CASES {
         let bytes = read_golden_bytes(name);
-        let value: Value =
-            serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(
             value["canonicalization"]["sha256"].as_str(),
             Some(read_golden_digest(name).as_str()),
             "{name}: recorded digest does not match the golden's seal field"
         );
-        let recanonicalized = try_canonical_bytes(&value)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let recanonicalized = try_canonical_bytes(&value).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(
             recanonicalized, bytes,
             "{name}: oracle golden is not canonical bytes (byte-compare would be unsound)"

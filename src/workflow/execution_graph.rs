@@ -123,8 +123,12 @@ pub fn compile_execution_graph(
     workflow_text: &str,
     plan_identity: &str,
 ) -> Result<CompiledExecutionGraphV1, Vec<Diagnostic>> {
-    let model: WorkflowDefinition = serde_json::from_str(workflow_text)
-        .map_err(|e| vec![Diagnostic::new("SOMA-CMP-0003", format!("schema violation: {e}"))])?;
+    let model: WorkflowDefinition = serde_json::from_str(workflow_text).map_err(|e| {
+        vec![Diagnostic::new(
+            "SOMA-CMP-0003",
+            format!("schema violation: {e}"),
+        )]
+    })?;
     let workflow_digest = workflow_digest_of(&model)?;
     let Some(order) = topological_order(&model) else {
         return Err(vec![Diagnostic::new(
@@ -222,10 +226,7 @@ fn reduce_unit_authority(
         } else if grant.is_empty() {
             diagnostics.push((
                 "SOMA-AUTH-0001",
-                format!(
-                    "operation {} declares an empty capability grant",
-                    unit.id
-                ),
+                format!("operation {} declares an empty capability grant", unit.id),
             ));
         } else if ceiling_caps.contains(grant.as_str()) {
             caps.insert(grant.clone());
@@ -288,11 +289,7 @@ fn reduce_unit_authority(
     Ok(AuthorityProfile {
         execution_class: unit.execution_class,
         mutation: MutationMode::None_,
-        tools: if tools.is_empty() {
-            None
-        } else {
-            Some(tools)
-        },
+        tools: if tools.is_empty() { None } else { Some(tools) },
         readable_scopes: if readable.is_empty() {
             None
         } else {

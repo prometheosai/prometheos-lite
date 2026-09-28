@@ -9,8 +9,9 @@
 //! identity does not match the reviewed record (digest binding).
 //!
 //! Out of scope for this slice (follow-up work, stated in the change
-//! doc): wiring the compiled plan into `node_runner`, provider execution,
-//! and UI.
+//! doc): provider execution and UI. The compiled plan IS wired into
+//! `node_runner`: a `GovernancePermit` issued from a reviewed, sealed
+//! plan is the only way to construct the runner.
 //!
 //! Ground truth: `vendored/soma/v1.1/` (schemas, diagnostics catalogue,
 //! fixtures) — read-only.
@@ -250,10 +251,7 @@ fn seal_plan(
         )]
     })?;
     canonicalization.insert("sha256".into(), json!(seal));
-    map.insert(
-        "canonicalization".into(),
-        Value::Object(canonicalization),
-    );
+    map.insert("canonicalization".into(), Value::Object(canonicalization));
 
     serde_json::from_value(Value::Object(map)).map_err(|e| {
         vec![Diagnostic::new(
@@ -365,11 +363,10 @@ pub fn validate_execution_plan_text(text: &str) -> Result<Value, Diagnostic> {
     let mut step_keys = std::collections::HashSet::new();
     for (i, step) in plan.steps.iter().enumerate() {
         if !step_keys.insert(step.key.as_str()) {
-            return Err(Diagnostic::new(
-                "SOMA-CMP-0003",
-                "schema violation: duplicate step key",
-            )
-            .with_source(format!("/steps/{i}"), None));
+            return Err(
+                Diagnostic::new("SOMA-CMP-0003", "schema violation: duplicate step key")
+                    .with_source(format!("/steps/{i}"), None),
+            );
         }
     }
     Ok(raw)
@@ -396,7 +393,11 @@ pub fn verify_reviewed_plan(
 ) -> Result<(), Vec<Diagnostic>> {
     let plan: CompiledGovernancePlanV1 = match validate_execution_plan_text(plan_text) {
         Err(d) => {
-            return Err(vec![enrich_one(d, "", plan_digest_hint(plan_text).as_deref())]);
+            return Err(vec![enrich_one(
+                d,
+                "",
+                plan_digest_hint(plan_text).as_deref(),
+            )]);
         }
         Ok(value) => match serde_json::from_value(value) {
             Ok(plan) => plan,

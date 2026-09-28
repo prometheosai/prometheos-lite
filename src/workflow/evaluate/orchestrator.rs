@@ -179,7 +179,9 @@ fn permitted_runner(
                 .join("; ")
         )
     })?;
-    Ok(crate::workflow::node_runner::NodeRunner::new(registry, permit))
+    Ok(crate::workflow::node_runner::NodeRunner::new(
+        registry, permit,
+    ))
 }
 
 /// Local restrictions mirroring what the orchestrator already enforces:

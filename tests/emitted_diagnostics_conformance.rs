@@ -133,15 +133,20 @@ fn workflow_digest_of(text: &str) -> String {
 /// Flip the first hex character of `canonicalization.sha256` (stays a
 /// lowercase-hex string, so only the seal check can fail).
 fn tamper_seal(text: &str) -> String {
-    let mut value: serde_json::Value =
-        serde_json::from_str(text).expect("plan text parses");
+    let mut value: serde_json::Value = serde_json::from_str(text).expect("plan text parses");
     let sha = value["canonicalization"]["sha256"]
         .as_str()
         .expect("canonicalization.sha256");
     let flipped: String = sha
         .chars()
         .enumerate()
-        .map(|(i, c)| if i == 0 { if c == '0' { '1' } else { '0' } } else { c })
+        .map(|(i, c)| {
+            if i == 0 {
+                if c == '0' { '1' } else { '0' }
+            } else {
+                c
+            }
+        })
         .collect();
     value["canonicalization"]["sha256"] = serde_json::Value::String(flipped);
     serde_json::to_string(&value).expect("tampered plan serializes")
@@ -170,15 +175,18 @@ fn every_emitted_code_is_catalogue_registered_and_never_general() {
             "{code} is emitted in src/ but absent from the vendored catalogue"
         );
         let category = Diagnostic::new(code, "category guard").category;
-        assert_ne!(category, "general", "{code} fell back to the general bucket");
+        assert_ne!(
+            category, "general",
+            "{code} fell back to the general bucket"
+        );
     }
 }
 
 #[test]
 fn undeclared_grant_diagnostic_points_into_the_body() {
     let text = fixture("fixtures/invalid/wf-auth-0001.json");
-    let diagnostics = compile_workflow_text(&text)
-        .expect_err("undeclared grant must refuse compilation");
+    let diagnostics =
+        compile_workflow_text(&text).expect_err("undeclared grant must refuse compilation");
     let diagnostic = diagnostics
         .iter()
         .find(|d| d.code == "SOMA-AUTH-0001")
@@ -199,8 +207,8 @@ fn undeclared_grant_diagnostic_points_into_the_body() {
 fn binding_refusal_points_at_the_plan_seal_member() {
     let text = compiled_plan_text("fixtures/valid/wf-valid-base.json");
     let workflow_digest = workflow_digest_of(&text);
-    let diagnostics = verify_reviewed_plan(&text, &"0".repeat(64))
-        .expect_err("identity mismatch must refuse");
+    let diagnostics =
+        verify_reviewed_plan(&text, &"0".repeat(64)).expect_err("identity mismatch must refuse");
     assert_eq!(diagnostics.len(), 1, "one refusal");
     let diagnostic = &diagnostics[0];
     assert_eq!(diagnostic.code, "SOMA-CMP-0004");
@@ -219,8 +227,8 @@ fn seal_tamper_refusal_points_at_the_plan_seal_member() {
     let workflow_digest = workflow_digest_of(&text);
     let tampered = tamper_seal(&text);
     assert_ne!(tampered, text, "seal member actually changed");
-    let diagnostics = verify_reviewed_plan(&tampered, &"0".repeat(64))
-        .expect_err("tampered seal must refuse");
+    let diagnostics =
+        verify_reviewed_plan(&tampered, &"0".repeat(64)).expect_err("tampered seal must refuse");
     let diagnostic = diagnostics
         .iter()
         .find(|d| d.code == "SOMA-CMP-0004")
@@ -238,10 +246,7 @@ fn seal_tamper_refusal_points_at_the_plan_seal_member() {
 fn plan_version_refusal_points_at_the_plan_version_member() {
     let text = compiled_plan_text("fixtures/valid/wf-valid-base.json");
     let workflow_digest = workflow_digest_of(&text);
-    let tampered = text.replace(
-        "\"planVersion\":\"1.0.0\"",
-        "\"planVersion\":\"2.0.0\"",
-    );
+    let tampered = text.replace("\"planVersion\":\"1.0.0\"", "\"planVersion\":\"2.0.0\"");
     assert_ne!(tampered, text, "planVersion member replaced");
     let diagnostics = verify_reviewed_plan(&tampered, &"0".repeat(64))
         .expect_err("unsupported plan version must refuse");

@@ -65,7 +65,12 @@ fn restrictions() -> LocalRestrictions {
 fn runner() -> NodeRunner {
     governed_runner(
         intake_discovery_planning_registry(),
-        &["node-intake", "node-discovery", "node-planning", "not-a-registered-capability"],
+        &[
+            "node-intake",
+            "node-discovery",
+            "node-planning",
+            "not-a-registered-capability",
+        ],
     )
 }
 
@@ -620,7 +625,10 @@ fn validation_records_exit_code_and_evidence_for_failing_command() {
 // ---------------------------------------------------------------------------
 
 fn diagnostic_pipeline_runner() -> NodeRunner {
-    governed_runner(diagnostic_registry(), &["node-diagnostic", "node-diagnostic-ev"])
+    governed_runner(
+        diagnostic_registry(),
+        &["node-diagnostic", "node-diagnostic-ev"],
+    )
 }
 
 #[test]

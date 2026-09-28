@@ -160,10 +160,9 @@ fn category_for(code: &str) -> &'static str {
     static CATALOGUE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     CATALOGUE
         .get_or_init(|| {
-            let file: CatalogueFile<'static> = serde_json::from_str(include_str!(
-                "../../../vendored/soma/v1.1/diagnostics.json"
-            ))
-            .expect("vendored diagnostics.json parses");
+            let file: CatalogueFile<'static> =
+                serde_json::from_str(include_str!("../../../vendored/soma/v1.1/diagnostics.json"))
+                    .expect("vendored diagnostics.json parses");
             file.codes
                 .into_iter()
                 .map(|entry| (entry.code, entry.category))

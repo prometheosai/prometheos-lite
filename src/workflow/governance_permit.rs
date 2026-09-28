@@ -34,10 +34,7 @@ pub struct GovernancePermit {
 }
 
 impl GovernancePermit {
-    pub fn issue(
-        workflow_text: &str,
-        reviewed_identity: &str,
-    ) -> Result<Self, Vec<Diagnostic>> {
+    pub fn issue(workflow_text: &str, reviewed_identity: &str) -> Result<Self, Vec<Diagnostic>> {
         let plan = compile_workflow_text(workflow_text)?;
         // verify_reviewed_plan takes the compiled ExecutionPlan document
         // (schemaVersion/planVersion/workflowDigest/steps/canonicalization),
@@ -57,13 +54,11 @@ impl GovernancePermit {
                     format!("schema violation: {e}"),
                 )]
             })?;
-        let authority_graph =
-            crate::workflow::governance::compile_authority(&workflow_value)?;
-        let execution_graph =
-            crate::workflow::execution_graph::compile_execution_graph(
-                workflow_text,
-                &plan.canonicalization.sha256,
-            )?;
+        let authority_graph = crate::workflow::governance::compile_authority(&workflow_value)?;
+        let execution_graph = crate::workflow::execution_graph::compile_execution_graph(
+            workflow_text,
+            &plan.canonicalization.sha256,
+        )?;
         Ok(Self {
             plan_identity: plan.canonicalization.sha256,
             authority_graph,

@@ -119,7 +119,11 @@ fn graph_refuses_scope_grants_outside_the_ceiling() {
     let err = compile_execution_graph(&text, &"ab".repeat(32))
         .expect_err("undeclared scope must fail closed");
     assert_eq!(err[0].code, "SOMA-AUTH-0003");
-    assert!(err[0].message.contains("readable scope"), "{}", err[0].message);
+    assert!(
+        err[0].message.contains("readable scope"),
+        "{}",
+        err[0].message
+    );
 }
 
 #[test]
@@ -127,10 +131,14 @@ fn graph_refuses_empty_capability_grants() {
     let text = base_with_unit_patch(|unit| {
         unit["authority"] = serde_json::json!(["ship", ""]);
     });
-    let err = compile_execution_graph(&text, &"ab".repeat(32))
-        .expect_err("empty grant must fail closed");
+    let err =
+        compile_execution_graph(&text, &"ab".repeat(32)).expect_err("empty grant must fail closed");
     assert_eq!(err[0].code, "SOMA-AUTH-0001");
-    assert!(err[0].message.contains("empty capability"), "{}", err[0].message);
+    assert!(
+        err[0].message.contains("empty capability"),
+        "{}",
+        err[0].message
+    );
 }
 
 #[test]
@@ -175,8 +183,8 @@ fn graph_refuses_cyclic_dataflow() {
         }
     ]);
     let cyclic = serde_json::to_string(&value).expect("serializes");
-    let err = compile_execution_graph(&cyclic, &"ab".repeat(32))
-        .expect_err("a cycle must fail closed");
+    let err =
+        compile_execution_graph(&cyclic, &"ab".repeat(32)).expect_err("a cycle must fail closed");
     assert_eq!(err[0].code, "SOMA-EXP-0002");
 }
 

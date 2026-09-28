@@ -39,15 +39,31 @@ other than the reviewed one.
      Vec<Diagnostic>>` — validates against the pinned v1.1 bundle
      (`validate_artifact_text`) BEFORE any plan value exists:
      input refusals → `SOMA-CMP-0003`; any audit diagnostic → `Err` (no
-     plan); on success produces a sealed `ExecutionPlan`-shaped plan
-     (`schemaVersion 1.1.0`, `planVersion 1.0.0`, positional `step-<i>`
-     keys bound to body operation ids, `workflowDigest` = canonical digest
-     of the serialized workflow minus `contentDigest` — the audit's
-     `SOMA-CMP-0004` rule — plus self-seal `canonicalization {version 1.0.0,
-     sha256}`).
+     plan); on success produces a sealed `ExecutionPlan`-shaped plan.
+     **Published v1.1 shape only (review correction 1):** `schemaVersion
+     1.1.0`, `planVersion 1.0.0`, positional
+     `s{index:04}:{operationId}` step keys over the topological order,
+     `workflowDigest` = canonical digest of the serialized workflow minus
+     `contentDigest` — the audit's `SOMA-CMP-0004` rule — plus self-seal
+     `canonicalization {version 1.0.0, sha256}`. The runtime structure
+     Lite owns beside the plan is the separately compiled, Lite-owned
+     `CompiledExecutionGraphV1` (`compile_execution_graph`); the v1.3
+     plan/member shapes are a separate PR, not mixed in here.
+     **Seal rule (review correction 2):** the seal digest input is the
+     plan with ONLY `canonicalization.sha256` removed —
+     `canonicalization.version` stays in the digest input (matches the
+     `022142b` oracle byte-for-byte; see
+     `tests/fixtures/soma-golden/provenance.md`).
    - Remediation table for the contract's key codes (AUTH-0001..0008,
      EXP-0007, CMP-0001/0003/0004/0007); every other code falls back to a
      catalogue pointer (no invented guidance).
+   - **Catalogue-backed categories + JSON-pointer sources:** every emitted
+     diagnostic's `category` is looked up in the pinned
+     `vendored/soma/v1.1/diagnostics.json` by exact code (miss → honest
+     `general` fail-safe), and every diagnostic carries
+     `source.path` as an RFC 6901 pointer into the offending document
+     (whole-document refusals use `""`) with `source.subject` naming the
+     workflow/node the diagnostic is about.
 
 3. **Digest binding** (`verify_reviewed_plan(plan_text,
    reviewed_identity)`)
@@ -59,13 +75,45 @@ other than the reviewed one.
      at review time (commits to every plan member — tamper+reseal fails the
      identity step).
 
-4. **Local gate wiring** (`scripts/local_ci.py`)
+4. **Strict `ExecutionPlan` text boundary** (`validate_execution_plan_text`)
+   - `verify_reviewed_plan` accepts ONLY plan-shaped documents
+     (`schemaVersion`/`planVersion`/`workflowDigest`/`steps`/
+     `canonicalization`, `deny_unknown_fields`, duplicate-key scan
+     first): a workflow document or any other JSON is refused with
+     `SOMA-CMP-0003` instead of being silently reinterpreted. Callers
+     that hold a compiled plan serialize it to plan text before
+     verification.
+
+5. **`GovernancePermit` — structural bypass closure**
+   (`src/workflow/governance_permit.rs`, review correction 3)
+   - `GovernancePermit::issue(workflow_text, reviewed_identity)` runs the
+     full chain — compile → verify-reviewed-plan (plan text, seal
+     recompute, identity binding) → authority compile → execution-graph
+     compile — and returns a permit whose fields are private (no
+     builder, no `Default`); it can only come from `issue`.
+   - `NodeRunner::Default` is removed; `NodeRunner::new(registry, permit)`
+     is the only constructor. All four public effect entry points
+     (`execute`, `execute_async`, `preflight_gates`, `seal_effect`) refuse
+     a request whose manifest `nodeId` is absent from the permit's
+     execution graph with `SOMA-CMP-0002` **before** capability
+     resolution or any journal/effect (membership check scope: the
+     permit governs exactly the workflow it was issued from).
+   - The evaluation orchestrator's fast-loop runs under a permit bound to
+     the embedded `FAST_LOOP_WORKFLOW_TEXT`'s real seal
+     (`FAST_LOOP_REVIEWED_IDENTITY`): this governs the current
+     orchestrator only — it is documented wiring, not a claim that every
+     future runner instantiation must reuse that workflow.
+   - Regression tests cover every entry point, ungoverned-node refusal,
+     identity drift, and the no-permit-is-impossible property
+     (`tests/node_runner_governance_permit.rs`).
+
+6. **Local gate wiring** (`scripts/local_ci.py`)
    - New core-suite check `governance compiler` →
      `cargo test --test governance_compiler_conformance --quiet` in BOTH
      `SUITE_SPEC["core"]` and `rust_core()` (identical normalized command,
      required by the #225 evidence contract).
 
-5. **Conformance suite** (`tests/governance_compiler_conformance.rs`, 24 tests)
+7. **Conformance suite** (`tests/governance_compiler_conformance.rs`)
    - Positive: 3 valid fixtures compile to sealed plans (seal recompute,
      digest rule, step order); two-run byte-identical determinism.
    - Negative (no-plan): five contract families — authority (AUTH-0001/
@@ -90,17 +138,33 @@ other than the reviewed one.
   governance-rule layer. Gap reported; no diagnostic invented.
 - **Foundry #66 row 8** (parallel write overlap): deferred with the
   graph-run work; no SOMA code exists. Gap reported.
-- **Category divergence:** `Diagnostic::category_for` maps AUTH codes to
-  `authority_expansion`; the catalogue's own categories differ (e.g.
-  `authority_exceeded_composite` for AUTH-0002). Pre-existing, out of
-  slice scope; the conformance test asserts severity, not category.
+
+## Resolved since first report
+
+- **Category divergence:** `Diagnostic::category_for` now reads the pinned
+  `vendored/soma/v1.1/diagnostics.json` by exact code (miss → honest
+  `general`), so emitted categories are the catalogue's own (e.g.
+  `authority_exceeded_composite` for AUTH-0002). `source.path` is an
+  RFC 6901 pointer into the offending document; whole-document refusals
+  use `""`.
+
+## Cross-implementation oracle (review correction 1, pin)
+
+- Oracle: **soma-core `022142b`**, whose v1.1
+  `ExecutionPlan.schema.json` was verified byte-identical to the vendored
+  schema; built offline (`cargo build -p soma-cli --offline`) on
+  2026-09-27 with `rustc 1.98.0`, worktree `E:\Projects\soma-core-golden`.
+- Goldens + digests are recorded in
+  `tests/fixtures/soma-golden/provenance.md`; Lite's sealed plans are
+  proven byte-identical to the oracle's canonical bytes and seal-equal by
+  `tests/soma_golden_crossimpl.rs`. No fallback/oracle-impersonation was
+  needed — the oracle built and ran offline.
 
 ## Out of scope (follow-ups)
 
-- Wiring the compiled plan / `verify_reviewed_plan` into `node_runner`
-  (the binding API exists and is tested; the runner call site lands with
-  the execution-path slice).
 - Provider execution, runtime routing redesign, UI, model training.
+- Full v1.3 plan/member shapes (separate PR; this slice is published
+  v1.1 shape + Lite-owned runtime structure only).
 - Any change to the vendored SOMA bundle or its semantics.
 - Dependency changes (`Cargo.toml` / `Cargo.lock` untouched).
 
@@ -109,7 +173,9 @@ other than the reviewed one.
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features --
   -D warnings`, `cargo test --all-targets --all-features --
   --test-threads 4`, `python scripts/test_local_ci_verify.py`.
-- `python scripts/local_ci.py run --suite core` at the exact candidate
-  commit (repository-owned gate, evidence attached to the PR).
+- Repository-owned gates at the exact candidate commit: `python
+  scripts/local_ci.py run --suite core`, `--suite platform`, `--suite
+  smoke`, then `verify` for the recorded evidence (`.local-ci/evidence/
+  <sha>/windows-<suite>.json`), attached to the PR.
 - No GitHub Actions, hosted runners, paid services, or third-party status
   applications; no autonomous merge.

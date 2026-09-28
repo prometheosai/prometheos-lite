@@ -1,15 +1,17 @@
 //! T5 RED test file: GovernancePermit binding.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod common;
 use common::permit_for;
 
 use prometheos_lite::workflow::governance_permit::GovernancePermit;
-use prometheos_lite::workflow::node_runner::{Capability, CapabilityRegistry, NodeRunRequest, NodeRunner};
-use prometheos_lite::workflow::policy::LocalRestrictions;
 use prometheos_lite::workflow::node_contracts::NodeManifestV1;
+use prometheos_lite::workflow::node_runner::{
+    Capability, CapabilityRegistry, NodeRunRequest, NodeRunner,
+};
+use prometheos_lite::workflow::policy::LocalRestrictions;
 
 fn restrictions() -> LocalRestrictions {
     LocalRestrictions {
@@ -24,16 +26,20 @@ fn restrictions() -> LocalRestrictions {
 }
 
 fn manifest(node_id: &str) -> NodeManifestV1 {
-    NodeManifestV1::parse_json(&serde_json::json!({
-        "schemaVersion": "1.0.0",
-        "nodeId": node_id,
-        "purpose": "governed node",
-        "inputs": [],
-        "outputs": [{"name": "result", "typeRef": "string"}],
-        "readableScopes": ["repo://evaluation"],
-        "writableScopes": ["work://evaluation"],
-        "retry": {"maxAttempts": 1, "retryableClasses": []}
-    }).to_string()).unwrap()
+    NodeManifestV1::parse_json(
+        &serde_json::json!({
+            "schemaVersion": "1.0.0",
+            "nodeId": node_id,
+            "purpose": "governed node",
+            "inputs": [],
+            "outputs": [{"name": "result", "typeRef": "string"}],
+            "readableScopes": ["repo://evaluation"],
+            "writableScopes": ["work://evaluation"],
+            "retry": {"maxAttempts": 1, "retryableClasses": []}
+        })
+        .to_string(),
+    )
+    .unwrap()
 }
 
 fn echo_runner(permit: GovernancePermit, counter: Arc<AtomicUsize>) -> NodeRunner {
@@ -42,7 +48,10 @@ fn echo_runner(permit: GovernancePermit, counter: Arc<AtomicUsize>) -> NodeRunne
         "echo",
         Capability::deterministic(&["text"], move |a| {
             counter.fetch_add(1, Ordering::SeqCst);
-            Ok(format!("echo:{}", a.get("text").and_then(|t| t.as_str()).unwrap_or("")))
+            Ok(format!(
+                "echo:{}",
+                a.get("text").and_then(|t| t.as_str()).unwrap_or("")
+            ))
         }),
     );
     NodeRunner::new(reg, permit)
@@ -114,7 +123,10 @@ fn ungoverned_node_is_refused_before_capability_resolution() {
     let m = manifest("node-b");
     let r = restrictions();
     let err = runner.execute(req(&m, &r)).unwrap_err().to_string();
-    assert!(err.contains("SOMA-CMP-0002"), "CMP-0002-family refusal: {err}");
+    assert!(
+        err.contains("SOMA-CMP-0002"),
+        "CMP-0002-family refusal: {err}"
+    );
     assert!(
         err.contains("node-b"),
         "refused node id is named in the message: {err}"
@@ -150,7 +162,10 @@ async fn ungoverned_node_refused_on_all_four_public_effect_paths() {
 
     let mut runner = echo_runner(permit.clone(), counter.clone());
     assert!(
-        runner.seal_effect(&req(&m, &r), Ok("x".into())).await.is_err(),
+        runner
+            .seal_effect(&req(&m, &r), Ok("x".into()))
+            .await
+            .is_err(),
         "seal_effect fails closed"
     );
     assert_eq!(
@@ -162,16 +177,15 @@ async fn ungoverned_node_refused_on_all_four_public_effect_paths() {
 
 #[test]
 fn fast_loop_identity_drift_is_refused() {
-use prometheos_lite::workflow::evaluate::{
-    FAST_LOOP_REVIEWED_IDENTITY, FAST_LOOP_WORKFLOW_TEXT,
-};
+    use prometheos_lite::workflow::evaluate::{
+        FAST_LOOP_REVIEWED_IDENTITY, FAST_LOOP_WORKFLOW_TEXT,
+    };
     let compiled = prometheos_lite::workflow::governance_compiler::compile_workflow_text(
         FAST_LOOP_WORKFLOW_TEXT,
     )
     .expect("embedded fast-loop workflow compiles");
     assert_eq!(
-        compiled.canonicalization.sha256,
-        FAST_LOOP_REVIEWED_IDENTITY,
+        compiled.canonicalization.sha256, FAST_LOOP_REVIEWED_IDENTITY,
         "embedded fast-loop workflow seals to the pinned reviewed identity"
     );
 

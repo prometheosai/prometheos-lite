@@ -90,13 +90,7 @@ impl WorkflowDefinition {
         for (body_index, unit) in self.body.iter().enumerate() {
             let ptr = format!("/body/{body_index}");
             audit_unit_authority(
-                self,
-                unit,
-                body_index,
-                &tool_keys,
-                &readable,
-                &writable,
-                &mut out,
+                self, unit, body_index, &tool_keys, &readable, &writable, &mut out,
             );
             // SOMA-AUTH-0005 / 0006 / 0007 / 0008 / EXP-0007
             for cap in &unit.uses {

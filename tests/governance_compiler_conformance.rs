@@ -801,7 +801,9 @@ fn boundary_refuses_non_lowercase_hex_digests() {
         tampered_plan(base, |p| p["workflowDigest"] = json!(upper)),
         tampered_plan(base, |p| p["workflowDigest"] = json!("a".repeat(63))),
         tampered_plan(base, |p| p["canonicalization"]["sha256"] = json!(upper)),
-        tampered_plan(base, |p| p["canonicalization"]["sha256"] = json!("b".repeat(63))),
+        tampered_plan(base, |p| {
+            p["canonicalization"]["sha256"] = json!("b".repeat(63))
+        }),
     ];
     for text in cases {
         let diags = verify_err(&text, &identity);
@@ -891,8 +893,10 @@ fn validate_artifact_text_execution_plan_branch_shares_the_strict_boundary() {
     }
     // A valid sealed plan passes the branch with no findings.
     let valid = compiled_plan_text(base);
-    let diags =
-        prometheos_lite::workflow::soma::validate_artifact_text("ExecutionPlan", &valid)
-            .expect("valid plan accepted");
-    assert!(diags.is_empty(), "no diagnostics for a valid plan; got {diags:?}");
+    let diags = prometheos_lite::workflow::soma::validate_artifact_text("ExecutionPlan", &valid)
+        .expect("valid plan accepted");
+    assert!(
+        diags.is_empty(),
+        "no diagnostics for a valid plan; got {diags:?}"
+    );
 }
