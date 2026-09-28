@@ -475,14 +475,19 @@ impl WorkOrchestrator {
             // this run registered), the terminal refusal stands.
             if token.is_cancelled() {
                 let phase = context.current_phase;
-                // P1 gap 4: the cancel event ID is captured at the
-                // observation point — carried forward, never
-                // rediscovered inside the evidence write.
-                let cancel_id =
-                    crate::db::repository::work_context_events::cancellation_event_id_conn(
+                // #232 finding 2: prefer the exact cancellation event ID
+                // carried through the token signal (from the cancel site).
+                // The durable lookup is only the documented cross-process
+                // fallback when no payload was carried (e.g. a cancel
+                // from a different server instance that only flipped the
+                // durable status).
+                let cancel_id = match token.cancellation_payload() {
+                    Some(id) => Some(id),
+                    None => crate::db::repository::work_context_events::cancellation_event_id_conn(
                         self.work_context_service.get_db().conn(),
                         &context_id,
-                    )?;
+                    )?,
+                };
                 self.record_execution_interrupted(&context_id, 0, &phase, cancel_id, &journal)?;
                 return Ok(context);
             }

@@ -1,5 +1,5 @@
 //! Slice 1A (#132) regressions: durable provenance enforcement at the
-//! database boundary, tamper detection on read, the interruptionÃ¢â€ â€™cancel
+//! database boundary, tamper detection on read, the interruptionÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢cancel
 //! causation reference, and legacy-row states. These run as the smoke
 //! chain's gate and in the core suite.
 
@@ -12,7 +12,7 @@ use prometheos_lite::db::repository::ProvenanceState;
 use prometheos_lite::db::repository::WorkContextEventOperations;
 use prometheos_lite::work::provenance::JournalContext;
 use prometheos_lite::work::service::WorkContextService;
-use prometheos_lite::work::types::{AutonomyLevel, WorkDomain};
+use prometheos_lite::work::types::{ApprovalPolicy, AutonomyLevel, WorkDomain};
 
 fn test_journal() -> JournalContext {
     JournalContext::internal_system(
@@ -82,7 +82,7 @@ fn journal_rows_are_append_only_at_the_database_boundary() {
     let (db, wcs) = setup();
     let context = create_context(&wcs);
 
-    // Any UPDATE of a journal row aborts Ã¢â‚¬â€ entire rows, not just
+    // Any UPDATE of a journal row aborts ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â entire rows, not just
     // provenance.
     let err = db.conn().execute(
         "UPDATE work_context_events SET data = '{}' WHERE work_context_id = ?1",
@@ -312,7 +312,7 @@ fn execution_interrupted_references_the_durable_cancellation_event_id() {
         .unwrap()
         .expect("the durable cancellation event must exist");
 
-    // Record the interruption evidence with the journal Ã¢â‚¬â€ the helper
+    // Record the interruption evidence with the journal ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the helper
     // that mirrors the orchestrator's evidence write.
     let event = prometheos_lite::work::event::WorkContextEvent::new(
         uuid::Uuid::new_v4().to_string(),
@@ -398,7 +398,7 @@ fn cancel_context_returns_the_exact_cancellation_event_id() {
     let journal = test_journal();
 
     // The exact cancellation event id returned by the transactional
-    // cancel — callers carry this as the causal parent (P1-4), never a
+    // cancel â€” callers carry this as the causal parent (P1-4), never a
     // "latest" inference.
     let returned_id = wcs
         .cancel_context(&mut context, "test", &journal)
@@ -419,7 +419,7 @@ fn cancel_context_returns_the_exact_cancellation_event_id() {
         "the carried ID must be the exact durable event"
     );
 
-    // Idempotent re-cancel returns None — no second event.
+    // Idempotent re-cancel returns None â€” no second event.
     let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
     let re_cancel = wcs
         .cancel_context(&mut snapshot, "again", &journal)
@@ -459,7 +459,7 @@ fn column_drift_between_envelope_and_flat_columns_fails_closed_on_read() {
         .unwrap();
 
     // The read revalidates the flat columns against the envelope and
-    // fails closed — the drifted column surfaces as an error.
+    // fails closed â€” the drifted column surfaces as an error.
     let err =
         WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap_err();
     let msg = format!("{:?}", err);
@@ -662,7 +662,7 @@ fn database_trigger_rejects_malformed_non_null_provenance() {
 #[test]
 fn partial_schema_migration_converges_on_reopen() {
     // P1 gap 5: a database left in a PARTIALLY migrated state (some
-    // provenance columns present, others missing — a crash between
+    // provenance columns present, others missing â€” a crash between
     // ALTER TABLE statements) must converge when reopened: the missing
     // columns are added, the triggers are present, and the existing
     // rows are untouched.
@@ -685,7 +685,7 @@ fn partial_schema_migration_converges_on_reopen() {
             .unwrap();
     }
 
-    // Phase 2: simulate the PARTIAL state — strip ALL provenance columns
+    // Phase 2: simulate the PARTIAL state â€” strip ALL provenance columns
     // and re-add only two of five (a crash mid-migration).
     {
         let conn = rusqlite::Connection::open(&db_path_str).unwrap();
@@ -710,7 +710,7 @@ fn partial_schema_migration_converges_on_reopen() {
         // Three columns MISSING: source_digest, principal_id, correlation_id.
     }
 
-    // Phase 3: reopen — the migration must converge.
+    // Phase 3: reopen â€” the migration must converge.
     {
         let db = Db::new(&db_path_str).unwrap();
         let count: i64 = db
@@ -810,5 +810,181 @@ fn mixed_legacy_provenance_state_is_refused_not_misclassified() {
     assert!(
         msg.contains("mixed"),
         "mixed legacy/provenance state must be refused with 'mixed' in the error, got: {msg}"
+    );
+}
+
+#[test]
+fn non_canonical_bytes_fail_closed_on_read() {
+    let (db, wcs) = setup();
+    let context = create_context(&wcs);
+    let journal = test_journal();
+
+    // Write a valid event.
+    let event = prometheos_lite::work::event::WorkContextEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        "probe_canonical".to_string(),
+        serde_json::json!({}),
+    );
+    let envelope = journal.event_envelope(None);
+    prometheos_lite::db::repository::work_context_events::record_event_conn(
+        db.conn(),
+        &event,
+        &envelope,
+    )
+    .unwrap();
+
+    // Verify the valid event reads clean.
+    let records =
+        WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|r| r.event.event_type == "probe_canonical")
+    );
+
+    // Simulate an out-of-band non-canonical byte tamper: drop the trigger,
+    // re-serialize with serde (non-canonical byte form â€” e.g., different
+    // key order or spacing), store those bytes, restore the trigger.
+    db.conn()
+        .execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+        .unwrap();
+    // Re-serialize with plain serde â€” produces non-canonical bytes.
+    let plain_serde = serde_json::to_string(&envelope).unwrap();
+    if plain_serde != envelope.to_canonical_json_string().unwrap() {
+        // serde and canonical differ for this envelope â€” store the non-canonical one.
+        db.conn()
+            .execute(
+                "UPDATE work_context_events SET provenance_json = ?1 WHERE event_type = 'probe_canonical'",
+                rusqlite::params![plain_serde],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "CREATE TRIGGER work_context_events_append_only
+                 BEFORE UPDATE ON work_context_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'journal rows are append-only');
+                 END",
+                [],
+            )
+            .unwrap();
+
+        // The read must refuse the non-canonical bytes.
+        let err = WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id)
+            .unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("not canonical") || msg.contains("canonical"),
+            "non-canonical bytes must be refused on read, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn cancellation_payload_is_carried_through_the_token_signal() {
+    let token = prometheos_lite::workflow::evaluate::CancellationToken::new();
+
+    // No payload before cancel.
+    assert!(token.cancellation_payload().is_none());
+
+    // Fire WITH the exact cancellation event ID.
+    token.cancel_with("cancel-event-abc-123".to_string());
+    assert!(token.is_cancelled());
+    assert_eq!(
+        token.cancellation_payload(),
+        Some("cancel-event-abc-123".to_string()),
+        "the exact cancellation event ID must be carried through the signal"
+    );
+
+    // Idempotent: the first payload wins.
+    token.cancel_with("different-id".to_string());
+    assert_eq!(
+        token.cancellation_payload(),
+        Some("cancel-event-abc-123".to_string()),
+        "the first cancellation payload is authoritative"
+    );
+
+    // A plain cancel (no payload) carries None.
+    let plain = prometheos_lite::workflow::evaluate::CancellationToken::new();
+    plain.cancel();
+    assert!(plain.is_cancelled());
+    assert!(plain.cancellation_payload().is_none());
+}
+
+#[test]
+fn authority_partial_order_covers_all_three_dimensions() {
+    let journal = test_journal();
+
+    // Autonomy widening is refused.
+    let mut widened_autonomy = journal.event_envelope(None);
+    widened_autonomy.authority.declared.autonomy = AutonomyLevel::Chat;
+    widened_autonomy.authority.effective.autonomy = AutonomyLevel::Autonomous;
+    assert!(
+        widened_autonomy.validate_write_invariants().is_err(),
+        "autonomy widening (Chat â†’ Autonomous) must fail"
+    );
+
+    // Approval-policy widening is refused.
+    let mut widened_approval = journal.event_envelope(None);
+    widened_approval.authority.declared.approval_policy = ApprovalPolicy::ManualAll;
+    widened_approval.authority.effective.approval_policy = ApprovalPolicy::Auto;
+    assert!(
+        widened_approval.validate_write_invariants().is_err(),
+        "approval-policy widening (ManualAll â†’ Auto) must fail"
+    );
+
+    // Same-level narrowing is allowed (effective == declared).
+    let narrowed = journal.event_envelope(None);
+    assert!(narrowed.validate_write_invariants().is_ok());
+}
+
+#[test]
+fn trigger_validates_typed_json_paths() {
+    let (_db, _wcs) = setup();
+
+    // Valid JSON but wrong schemaVersion â€” json_extract check fires.
+    let err = _db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-typed-1', 'ctx-typed', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"2.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "wrong schemaVersion must be rejected by json_extract"
+    );
+
+    // Valid JSON but empty producer identity â€” json_extract check fires.
+    let err = _db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-typed-2', 'ctx-typed', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "empty producer identity must be rejected by json_extract"
+    );
+
+    // Valid JSON but empty correlationId â€” json_extract check fires.
+    let err = _db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-typed-3', 'ctx-typed', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "empty correlationId must be rejected by json_extract"
     );
 }

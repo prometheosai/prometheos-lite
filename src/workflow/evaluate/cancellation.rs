@@ -24,6 +24,13 @@ use tokio::sync::Barrier;
 pub struct CancellationToken {
     flag: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+    // #232 finding 2: the cancellation payload — the exact cancellation
+    // event ID carried through the signal from the cancel site to every
+    // observer. Set by `cancel_with`; observed by `cancellation_payload`.
+    // `None` when the token was cancelled without a payload (plain
+    // test cancels, cross-process cancels that use the durable lookup
+    // fallback).
+    payload: Arc<std::sync::Mutex<Option<String>>>,
     // Optional test-only rendezvous barrier. When present, the pipeline parks at
     // each safe point until the test releases it, making cancellation
     // deterministic in tests. Always `None` in production.
@@ -44,6 +51,7 @@ impl CancellationToken {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(tokio::sync::Notify::new()),
+            payload: Arc::new(std::sync::Mutex::new(None)),
             park: Some(barrier),
         }
     }
@@ -52,6 +60,28 @@ impl CancellationToken {
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
+    }
+
+    /// #232 finding 2: cancel with a payload — the exact cancellation
+    /// event ID from `cancel_context`'s return, carried through the
+    /// signal. The observer extracts the ID from the token, not from a
+    /// database lookup. Idempotent: the first payload wins.
+    pub fn cancel_with(&self, payload: String) {
+        self.flag.store(true, Ordering::SeqCst);
+        let mut slot = self.payload.lock().expect("payload mutex poisoned");
+        if slot.is_none() {
+            *slot = Some(payload);
+        }
+        drop(slot);
+        self.notify.notify_waiters();
+    }
+
+    /// #232 finding 2: the cancellation payload (the exact cancellation
+    /// event ID) when one was carried through the signal. `None` when
+    /// the token fired without a payload — the caller then falls back to
+    /// the explicitly documented cross-process durable lookup.
+    pub fn cancellation_payload(&self) -> Option<String> {
+        self.payload.lock().expect("payload mutex poisoned").clone()
     }
 
     /// True once cancellation has been requested.
