@@ -212,11 +212,13 @@ pub struct NodeRunRequest<'a> {
 /// Constructing a runner REQUIRES a [`GovernancePermit`]: there is no
 /// `Default`, no builder, and no public permit field. Every public effect
 /// path (`execute`, `execute_async`, `preflight_gates`, `seal_effect`) runs
-/// `permit.ensure_governs(manifest.node_id)` FIRST, before any capability
-/// resolution or effect, so a request whose manifest node id is not governed
-/// by the reviewed plan is refused rather than executed. `into_effect` is
-/// covered transitively — it is only obtainable from `preflight_gates`,
-/// which already ran the check; this is stated rather than overclaimed.
+/// `permit.ensure_request(manifest, capability)` FIRST, before any
+/// capability resolution or effect, so a request whose manifest node id is
+/// not governed by the reviewed plan - or whose capability or manifest
+/// scopes diverge from the reviewed step's granted authority - is refused
+/// rather than executed. `into_effect` is covered transitively - it is
+/// only obtainable from `preflight_gates`, which already ran the check;
+/// this is stated rather than overclaimed.
 pub struct NodeRunner {
     permit: crate::workflow::governance_permit::GovernancePermit,
     registry: CapabilityRegistry,
@@ -252,22 +254,21 @@ impl NodeRunner {
         &mut self.registry
     }
 
-    /// Fail-closed membership check, run FIRST in every public effect path.
-    /// A request whose manifest node id is not governed by this runner's
-    /// reviewed plan is refused with the CMP-0002-family message before any
-    /// capability resolution or effect.
+    /// Fail-closed request binding, run FIRST in every public effect path.
+    /// The manifest node id must be governed by this runner's reviewed
+    /// plan, the requested capability must be granted to that step, and
+    /// the manifest scopes must not exceed the step's grant; refusals
+    /// surface the catalogue code (SOMA-CMP-0002 / SOMA-AUTH-0001 /
+    /// SOMA-AUTH-0003) before any capability resolution or effect.
     fn ensure_governed(&self, req: &NodeRunRequest<'_>) -> anyhow::Result<()> {
         self.permit
-            .ensure_governs(&req.manifest.node_id)
-            .map_err(|diags| {
-                anyhow::anyhow!(
-                    "SOMA-CMP-0002: node {:?} is not governed by the reviewed plan ({})",
-                    req.manifest.node_id,
-                    diags
-                        .first()
-                        .map(|d| d.message.as_str())
-                        .unwrap_or("permit does not authorize this node")
-                )
+            .ensure_request(req.manifest, &req.capability)
+            .map_err(|diags| match diags.first() {
+                Some(diag) => anyhow::anyhow!("{}: {}", diag.code, diag.message),
+                None => anyhow::anyhow!(
+                    "SOMA-CMP-0002: permit does not authorize this request ({:?})",
+                    req.manifest.node_id
+                ),
             })
     }
 
@@ -607,12 +608,13 @@ mod tests {
      "executionClass": "deterministic",
      "inputs": [{"name": "goal", "type": "string", "acceptedOutcomes": ["Produced"]}],
      "outputs": [{"name": "result", "type": "string", "emits": ["Produced"]}],
-     "authority": ["readable:repo://evaluation", "writable:work://evaluation"],
+     "authority": ["readable:repo://x", "writable:work://y", "echo", "ghost-cap"],
      "effects": [], "uses": [], "secrets": [], "context": []}
   ],
   "authority": {
-    "executionClass": "deterministic", "mutation": "none", "tools": {},
-    "readableScopes": ["repo://evaluation"], "writableScopes": ["work://evaluation"],
+    "executionClass": "deterministic", "mutation": "none",
+    "tools": {"echo": [], "ghost-cap": []},
+    "readableScopes": ["repo://x"], "writableScopes": ["work://y"],
     "networkPolicy": {"default": "deny"}, "providerPolicy": {"allowlist": []},
     "secrets": []
   }

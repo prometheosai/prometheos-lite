@@ -115,7 +115,10 @@ pub const FAST_LOOP_WORKFLOW_TEXT: &str = r#"{
       "outputs": [
         {"name": "result", "type": "string", "emits": ["Produced"]}
       ],
-      "authority": ["readable:repo://evaluation", "writable:work://evaluation"],
+      "authority": [
+        "readable:repo://evaluation", "writable:work://evaluation",
+        "provider.generate"
+      ],
       "effects": [],
       "uses": [],
       "secrets": [],
@@ -132,7 +135,10 @@ pub const FAST_LOOP_WORKFLOW_TEXT: &str = r#"{
       "outputs": [
         {"name": "result", "type": "string", "emits": ["Produced"]}
       ],
-      "authority": ["readable:repo://evaluation", "writable:work://evaluation"],
+      "authority": [
+        "readable:repo://evaluation", "writable:work://evaluation",
+        "validation.run"
+      ],
       "effects": [],
       "uses": [],
       "secrets": [],
@@ -142,7 +148,7 @@ pub const FAST_LOOP_WORKFLOW_TEXT: &str = r#"{
   "authority": {
     "executionClass": "model-assisted",
     "mutation": "none",
-    "tools": {},
+    "tools": {"provider.generate": [], "validation.run": []},
     "readableScopes": ["repo://evaluation"],
     "writableScopes": ["work://evaluation"],
     "networkPolicy": {"default": "deny"},
@@ -156,7 +162,7 @@ pub const FAST_LOOP_WORKFLOW_TEXT: &str = r#"{
 /// Pinned at compile time so a tampered copy of the embedded workflow
 /// cannot silently substitute a different reviewed identity.
 pub const FAST_LOOP_REVIEWED_IDENTITY: &str =
-    "5399b38d23367fd8b2dfeee3401f4a0561e0b4154a1610af71ff1d264022b64c";
+    "9011ff1536696a8f1de730f40a324286a3eafe8d476473af8bd140745c5894af";
 
 /// Build a governed NodeRunner for this orchestrator's fast loop, bound to
 /// the reviewed permit. Issue failure is fatal: the fast loop cannot run

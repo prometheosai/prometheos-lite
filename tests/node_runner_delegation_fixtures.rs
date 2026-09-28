@@ -28,12 +28,25 @@ use prometheos_lite::workflow::policy::LocalRestrictions;
 mod common;
 use common::permit_for;
 
+/// Capabilities this crate exercises; granted by the shared permit so the
+/// ghost-cap and strict.cap bypass tests reach their own gates
+/// (SOMA-AUTH-0005 at resolution, SOMA-CMP-0003 at argument validation).
+const DELEGATION_CAPS: &[&str] = &[
+    "nested.delegate",
+    "inner.effect",
+    "tool.bridge",
+    "external.adapter",
+    "code.eval",
+    "ghost.cap",
+    "strict.cap",
+];
+
 /// Wrap a registry with a permit governing exactly the given node ids.
 fn governed_runner(
     registry: prometheos_lite::workflow::node_runner::CapabilityRegistry,
     ids: &[&str],
 ) -> NodeRunner {
-    NodeRunner::new(registry, permit_for(ids))
+    NodeRunner::new(registry, permit_for(ids, DELEGATION_CAPS))
 }
 
 fn manifest(node_id: &str) -> NodeManifestV1 {

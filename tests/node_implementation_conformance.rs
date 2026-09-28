@@ -34,12 +34,15 @@ use prometheos_lite::workflow::workspace::{
 mod common;
 use common::permit_for;
 
+/// Capabilities this crate exercises; granted by the shared permit.
+const PERMIT_CAPS: &[&str] = &[CAP_IMPLEMENT, CAP_REPAIR];
+
 /// Wrap a registry with a permit governing exactly the given node ids.
 fn governed_runner(
     registry: prometheos_lite::workflow::node_runner::CapabilityRegistry,
     ids: &[&str],
 ) -> NodeRunner {
-    NodeRunner::new(registry, permit_for(ids))
+    NodeRunner::new(registry, permit_for(ids, PERMIT_CAPS))
 }
 
 fn restrictions_with_write() -> LocalRestrictions {

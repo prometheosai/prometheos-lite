@@ -45,11 +45,16 @@ const KIT_NODE_IDS: &[&str] = &[
     "unbounded",
 ];
 
+/// Capabilities the kit exercises; granted by the shared permit so that
+/// undeclared-capability refusals (SOMA-AUTH-0005) still surface at
+/// capability resolution rather than at the governance binding.
+const KIT_CAPS: &[&str] = &["echo", "once.cap", "ghost.cap"];
+
 /// Wrap a caller-declared capability registry with a permit governing the
 /// kit's node ids. Every construction site in this kit uses this helper
 /// instead of `kit_runner(registry)` directly.
 fn kit_runner(registry: CapabilityRegistry) -> NodeRunner {
-    NodeRunner::new(registry, permit_for(KIT_NODE_IDS))
+    NodeRunner::new(registry, permit_for(KIT_NODE_IDS, KIT_CAPS))
 }
 
 // ---------------------------------------------------------------------------

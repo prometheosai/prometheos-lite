@@ -40,6 +40,23 @@ use prometheos_lite::workflow::policy::LocalRestrictions;
 mod common;
 use common::permit_for;
 
+/// Capabilities this crate exercises; granted by the shared permit. The
+/// undeclared-capability bypass test deliberately stays outside this list
+/// (its node id is ungoverned, so it refuses at the membership gate).
+const PERMIT_CAPS: &[&str] = &[
+    CAP_INTAKE,
+    CAP_DISCOVERY,
+    CAP_PLANNING,
+    CAP_TEST_DISCOVERY,
+    CAP_VALIDATION,
+    CAP_DIAGNOSTIC,
+    CAP_SECURITY_REVIEW,
+    CAP_EVIDENCE_AUDIT,
+    CAP_INDEPENDENT_REVIEW,
+    CAP_DOC_IMPACT,
+    CAP_RELEASE_PREP,
+];
+
 /// Wrap a caller-declared capability registry with a permit governing
 /// exactly the given node ids. Every construction site in this crate uses
 /// this helper instead of `NodeRunner::new(registry)` directly.
@@ -47,7 +64,7 @@ fn governed_runner(
     registry: prometheos_lite::workflow::node_runner::CapabilityRegistry,
     ids: &[&str],
 ) -> NodeRunner {
-    NodeRunner::new(registry, permit_for(ids))
+    NodeRunner::new(registry, permit_for(ids, PERMIT_CAPS))
 }
 
 fn restrictions() -> LocalRestrictions {

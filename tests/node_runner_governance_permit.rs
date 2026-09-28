@@ -26,6 +26,14 @@ fn restrictions() -> LocalRestrictions {
 }
 
 fn manifest(node_id: &str) -> NodeManifestV1 {
+    manifest_with_scopes(node_id, &["repo://evaluation"], &["work://evaluation"])
+}
+
+fn manifest_with_scopes(
+    node_id: &str,
+    readable_scopes: &[&str],
+    writable_scopes: &[&str],
+) -> NodeManifestV1 {
     NodeManifestV1::parse_json(
         &serde_json::json!({
             "schemaVersion": "1.0.0",
@@ -33,8 +41,8 @@ fn manifest(node_id: &str) -> NodeManifestV1 {
             "purpose": "governed node",
             "inputs": [],
             "outputs": [{"name": "result", "typeRef": "string"}],
-            "readableScopes": ["repo://evaluation"],
-            "writableScopes": ["work://evaluation"],
+            "readableScopes": readable_scopes,
+            "writableScopes": writable_scopes,
             "retry": {"maxAttempts": 1, "retryableClasses": []}
         })
         .to_string(),
@@ -44,12 +52,26 @@ fn manifest(node_id: &str) -> NodeManifestV1 {
 
 fn echo_runner(permit: GovernancePermit, counter: Arc<AtomicUsize>) -> NodeRunner {
     let mut reg = CapabilityRegistry::new();
+    let echo_counter = counter.clone();
     reg.declare(
         "echo",
         Capability::deterministic(&["text"], move |a| {
-            counter.fetch_add(1, Ordering::SeqCst);
+            echo_counter.fetch_add(1, Ordering::SeqCst);
             Ok(format!(
                 "echo:{}",
+                a.get("text").and_then(|t| t.as_str()).unwrap_or("")
+            ))
+        }),
+    );
+    // Deliberately registered: the capability-substitution test needs a
+    // capability that WOULD resolve, so its refusal can only come from
+    // the governance binding and never from a missing registry entry.
+    reg.declare(
+        "sub.cap",
+        Capability::deterministic(&["text"], move |a| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(format!(
+                "sub:{}",
                 a.get("text").and_then(|t| t.as_str()).unwrap_or("")
             ))
         }),
@@ -70,7 +92,7 @@ fn req<'a>(m: &'a NodeManifestV1, r: &'a LocalRestrictions) -> NodeRunRequest<'a
 
 #[test]
 fn permit_issue_requires_exact_reviewed_identity() {
-    let text = common::governance_permit::workflow_text(&["node-a", "node-b"]);
+    let text = common::governance_permit::workflow_text(&["node-a", "node-b"], &["echo"]);
     let identity = prometheos_lite::workflow::governance_compiler::compile_workflow_text(&text)
         .expect("audit-clean workflow compiles")
         .canonicalization
@@ -93,7 +115,7 @@ fn permit_issue_requires_exact_reviewed_identity() {
         "restore-reviewed-plan remediation"
     );
 
-    let permit = permit_for(&["node-a", "node-b"]);
+    let permit = permit_for(&["node-a", "node-b"], &["echo"]);
     assert_eq!(permit.plan_identity(), &identity);
     assert!(
         !permit.authority_graph().operations.is_empty(),
@@ -107,7 +129,7 @@ fn permit_issue_requires_exact_reviewed_identity() {
 
 #[test]
 fn node_runner_requires_a_permit() {
-    let permit = permit_for(&["node-a"]);
+    let permit = permit_for(&["node-a"], &["echo"]);
     let mut runner = echo_runner(permit, Arc::new(AtomicUsize::new(0)));
     let m = manifest("node-a");
     let r = restrictions();
@@ -117,7 +139,7 @@ fn node_runner_requires_a_permit() {
 
 #[test]
 fn ungoverned_node_is_refused_before_capability_resolution() {
-    let permit = permit_for(&["node-a"]);
+    let permit = permit_for(&["node-a"], &["echo"]);
     let counter = Arc::new(AtomicUsize::new(0));
     let mut runner = echo_runner(permit, counter.clone());
     let m = manifest("node-b");
@@ -140,7 +162,7 @@ fn ungoverned_node_is_refused_before_capability_resolution() {
 
 #[tokio::test]
 async fn ungoverned_node_refused_on_all_four_public_effect_paths() {
-    let permit = permit_for(&["node-a"]);
+    let permit = permit_for(&["node-a"], &["echo"]);
     let counter = Arc::new(AtomicUsize::new(0));
     let m = manifest("node-b");
     let r = restrictions();
@@ -172,6 +194,109 @@ async fn ungoverned_node_refused_on_all_four_public_effect_paths() {
         counter.load(Ordering::SeqCst),
         0,
         "no effect ran on any path"
+    );
+}
+
+/// PR #230 bypass repair (issue comment 5874920729): a governed node id
+/// with a CAPABILITY the reviewed step does not grant must be refused on
+/// every public effect path BEFORE capability resolution - the registry
+/// declares `sub.cap`, so the only thing that can stop it is the binding
+/// of the request to the compiled step's granted authority.
+#[tokio::test]
+async fn capability_substitution_is_refused_on_every_effect_path() {
+    let permit = permit_for(&["node-a"], &["echo"]);
+    let counter = Arc::new(AtomicUsize::new(0));
+    let m = manifest("node-a");
+    let r = restrictions();
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let mut sub = req(&m, &r);
+    sub.capability = "sub.cap".into();
+    let err = runner.execute(sub).unwrap_err().to_string();
+    assert!(err.contains("SOMA-AUTH-0001"), "execute: {err}");
+    assert!(err.contains("sub.cap"), "capability named: {err}");
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let mut sub = req(&m, &r);
+    sub.capability = "sub.cap".into();
+    let err = runner.execute_async(sub).await.unwrap_err().to_string();
+    assert!(err.contains("SOMA-AUTH-0001"), "execute_async: {err}");
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let mut sub = req(&m, &r);
+    sub.capability = "sub.cap".into();
+    let err = runner
+        .preflight_gates(&sub)
+        .err()
+        .expect("substituted capability must be refused")
+        .to_string();
+    assert!(err.contains("SOMA-AUTH-0001"), "preflight_gates: {err}");
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let mut sub = req(&m, &r);
+    sub.capability = "sub.cap".into();
+    let err = runner
+        .seal_effect(&sub, Ok("x".into()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("SOMA-AUTH-0001"), "seal_effect: {err}");
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "no handler ran for the substituted capability on any path"
+    );
+}
+
+/// PR #230 bypass repair (issue comment 5874920729): a governed node id
+/// whose manifest declares a scope WIDER than the reviewed step's grant
+/// must be refused on every public effect path with SOMA-AUTH-0003, and
+/// no handler may run.
+#[tokio::test]
+async fn manifest_scope_widening_is_refused_on_every_effect_path() {
+    let permit = permit_for(&["node-a"], &["echo"]);
+    let counter = Arc::new(AtomicUsize::new(0));
+    let m = manifest_with_scopes(
+        "node-a",
+        &["repo://evaluation", "repo://unreviewed"],
+        &["work://evaluation"],
+    );
+    let r = restrictions();
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let err = runner.execute(req(&m, &r)).unwrap_err().to_string();
+    assert!(err.contains("SOMA-AUTH-0003"), "execute: {err}");
+    assert!(err.contains("repo://unreviewed"), "scope named: {err}");
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let err = runner
+        .execute_async(req(&m, &r))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("SOMA-AUTH-0003"), "execute_async: {err}");
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let err = runner
+        .preflight_gates(&req(&m, &r))
+        .err()
+        .expect("widened manifest must be refused")
+        .to_string();
+    assert!(err.contains("SOMA-AUTH-0003"), "preflight_gates: {err}");
+
+    let mut runner = echo_runner(permit.clone(), counter.clone());
+    let err = runner
+        .seal_effect(&req(&m, &r), Ok("x".into()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("SOMA-AUTH-0003"), "seal_effect: {err}");
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "no handler ran for the scope-widened manifest on any path"
     );
 }
 
