@@ -29,6 +29,29 @@ use prometheos_lite::workflow::workspace::{
     WorkspaceManifestV1, WorkspaceMode, WorkspaceRefError,
 };
 
+mod common;
+use common::permit_for;
+
+/// The governed node ids this kit exercises. The permit governs exactly
+/// these; a request whose manifest node id is not in this set is refused
+/// at the membership gate before any capability resolution.
+const KIT_NODE_IDS: &[&str] = &[
+    "ok",
+    "auth-check",
+    "idem-check",
+    "evidence-check",
+    "bypass-check",
+    "authority-defective",
+    "unbounded",
+];
+
+/// Wrap a caller-declared capability registry with a permit governing the
+/// kit's node ids. Every construction site in this kit uses this helper
+/// instead of `kit_runner(registry)` directly.
+fn kit_runner(registry: CapabilityRegistry) -> NodeRunner {
+    NodeRunner::new(registry, permit_for(KIT_NODE_IDS))
+}
+
 // ---------------------------------------------------------------------------
 // Kit plumbing
 // ---------------------------------------------------------------------------
@@ -168,7 +191,7 @@ async fn reference_compliant_node_passes_all_categories() {
     }));
 
     // -- Authority/policy --------------------------------------------------
-    let mut runner = NodeRunner::new(reference_registry(Arc::new(AtomicUsize::new(0))));
+    let mut runner = kit_runner(reference_registry(Arc::new(AtomicUsize::new(0))));
     let m = manifest("auth-check");
     let deny = LocalRestrictions {
         readable_scopes: vec!["other://r".into()],
@@ -196,7 +219,7 @@ async fn reference_compliant_node_passes_all_categories() {
 
     // -- Runtime/idempotency/retry ----------------------------------------
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut idem_runner = NodeRunner::new(reference_registry(calls.clone()));
+    let mut idem_runner = kit_runner(reference_registry(calls.clone()));
     let m2 = manifest("idem-check");
     let r2 = restrictions();
     let a = idem_runner
@@ -260,7 +283,7 @@ async fn reference_compliant_node_passes_all_categories() {
     ));
 
     // -- Evidence/durability ----------------------------------------------
-    let mut sec_runner = NodeRunner::new(reference_registry(Arc::new(AtomicUsize::new(0))));
+    let mut sec_runner = kit_runner(reference_registry(Arc::new(AtomicUsize::new(0))));
     let m4 = manifest("evidence-check");
     let r4 = restrictions();
     let out = sec_runner
@@ -299,7 +322,7 @@ async fn reference_compliant_node_passes_all_categories() {
     ));
 
     // -- Governed-path bypass ---------------------------------------------
-    let mut bp_runner = NodeRunner::new(reference_registry(Arc::new(AtomicUsize::new(0))));
+    let mut bp_runner = kit_runner(reference_registry(Arc::new(AtomicUsize::new(0))));
     let m5 = manifest("bypass-check");
     let r5 = restrictions();
     let bp_err = {
@@ -334,7 +357,7 @@ async fn reference_compliant_node_passes_all_categories() {
                 "once.cap",
                 Capability::asynchronous(&["a"], |_a| Box::pin(async { Ok("done".into()) })),
             );
-            let mut once = NodeRunner::new(reg);
+            let mut once = kit_runner(reg);
             let first = once.preflight_gates(&NodeRunRequest {
                 manifest: &m5,
                 local_restrictions: &r5,
@@ -410,7 +433,7 @@ fn defective_variants_fail_per_category_with_specific_diagnostics() {
                 writable_scopes: vec!["work://y".into()],
                 ..restrictions()
             };
-            let mut runner = NodeRunner::new(reference_registry(Arc::new(AtomicUsize::new(0))));
+            let mut runner = kit_runner(reference_registry(Arc::new(AtomicUsize::new(0))));
             let err = runner
                 .execute(NodeRunRequest {
                     manifest: &m,

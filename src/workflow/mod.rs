@@ -21,6 +21,7 @@ pub mod evaluate;
 pub mod execution_graph;
 pub mod governance;
 pub mod governance_compiler;
+pub mod governance_permit;
 pub mod graph_exec;
 pub mod graph_gates;
 pub mod graph_parallel;

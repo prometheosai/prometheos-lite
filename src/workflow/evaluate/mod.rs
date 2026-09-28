@@ -51,7 +51,10 @@ pub use identity::{
 pub use integrity::verify_repo_integrity;
 pub use journal::{JournalEvent, read_journal};
 pub use lock::WorkflowFileLock;
-pub use orchestrator::{EvaluationConfig, evaluate, evaluate_with_cancellation};
+pub use orchestrator::{
+    EvaluationConfig, evaluate, evaluate_with_cancellation, FAST_LOOP_REVIEWED_IDENTITY,
+    FAST_LOOP_WORKFLOW_TEXT,
+};
 pub use preflight::{DiskSpaceStatus, PreflightResult, available_disk_bytes};
 pub use recovery::{
     RecoveredEvaluation, RecoveryDisposition, determine_recovery_disposition, ensure_resumable,

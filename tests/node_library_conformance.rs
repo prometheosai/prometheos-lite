@@ -37,6 +37,19 @@ use prometheos_lite::workflow::node_validation::{
 };
 use prometheos_lite::workflow::policy::LocalRestrictions;
 
+mod common;
+use common::permit_for;
+
+/// Wrap a caller-declared capability registry with a permit governing
+/// exactly the given node ids. Every construction site in this crate uses
+/// this helper instead of `NodeRunner::new(registry)` directly.
+fn governed_runner(
+    registry: prometheos_lite::workflow::node_runner::CapabilityRegistry,
+    ids: &[&str],
+) -> NodeRunner {
+    NodeRunner::new(registry, permit_for(ids))
+}
+
 fn restrictions() -> LocalRestrictions {
     LocalRestrictions {
         readable_scopes: vec!["repo://fixture".to_string()],
@@ -50,7 +63,10 @@ fn restrictions() -> LocalRestrictions {
 }
 
 fn runner() -> NodeRunner {
-    NodeRunner::new(intake_discovery_planning_registry())
+    governed_runner(
+        intake_discovery_planning_registry(),
+        &["node-intake", "node-discovery", "node-planning", "not-a-registered-capability"],
+    )
 }
 
 /// Execute a node through the nine-gate pipeline (runner is mutable for the
@@ -365,7 +381,7 @@ fn governed_path_bypass_is_blocked_for_undeclared_capability() {
 // ---------------------------------------------------------------------------
 
 fn validation_runner() -> NodeRunner {
-    NodeRunner::new(test_discovery_registry())
+    governed_runner(test_discovery_registry(), &["node-test-discovery"])
 }
 
 /// Build a small git repository with the named manifest files at the root.
@@ -481,7 +497,10 @@ fn test_discovery_emits_deterministic_evidence_refs() {
 // ---------------------------------------------------------------------------
 
 fn validation_pipeline_runner() -> NodeRunner {
-    NodeRunner::new(validation_registry())
+    governed_runner(
+        validation_registry(),
+        &["node-validation-isolated", "node-validation-fail"],
+    )
 }
 
 #[test]
@@ -601,7 +620,7 @@ fn validation_records_exit_code_and_evidence_for_failing_command() {
 // ---------------------------------------------------------------------------
 
 fn diagnostic_pipeline_runner() -> NodeRunner {
-    NodeRunner::new(diagnostic_registry())
+    governed_runner(diagnostic_registry(), &["node-diagnostic", "node-diagnostic-ev"])
 }
 
 #[test]
@@ -779,7 +798,14 @@ fn diagnostic_emits_evidence_backed_classifications() {
 // ---------------------------------------------------------------------------
 
 fn review_runner() -> NodeRunner {
-    NodeRunner::new(review_registry())
+    governed_runner(
+        review_registry(),
+        &[
+            "node-security-review",
+            "node-evidence-audit",
+            "node-independent-review",
+        ],
+    )
 }
 
 #[test]
@@ -979,7 +1005,10 @@ fn independent_review_composes_security_and_audit() {
 // ---------------------------------------------------------------------------
 
 fn doc_release_runner() -> NodeRunner {
-    NodeRunner::new(doc_release_registry())
+    governed_runner(
+        doc_release_registry(),
+        &["node-doc-impact", "node-release-prep"],
+    )
 }
 
 #[test]

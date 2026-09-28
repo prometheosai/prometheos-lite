@@ -79,6 +79,109 @@ fn evaluation_node_manifest(_manifest: &TaskManifest, stage: &str) -> Result<Nod
     NodeManifestV1::parse_json(&serde_json::to_string(&json)?)
 }
 
+/// The reviewed workflow that governs THIS orchestrator's fast loop.
+/// Identity and authority graph derive from this single source of truth:
+/// the workflow text is compiled into a sealed governance plan, verified
+/// against `FAST_LOOP_REVIEWED_IDENTITY`, and the resulting
+/// `GovernancePermit` binds the execution graph to that exact reviewed
+/// identity. A runner built from this permit can only execute the units
+/// this workflow declares (`fast-loop.generate`, `fast-loop.validate`).
+///
+/// This governs this orchestrator's fast loop only - it is not a universal
+/// governance primitive (issue #163 correction 3).
+pub const FAST_LOOP_WORKFLOW_TEXT: &str = r#"{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "lite-fast-loop",
+  "name": "Lite fast loop",
+  "kind": "atomic",
+  "inputPorts": [
+    {"name": "goal", "direction": "input", "type": "string",
+     "cardinality": "single", "requiredness": "required"}
+  ],
+  "outputPorts": [
+    {"name": "result", "direction": "output", "type": "string",
+     "cardinality": "single", "requiredness": "required"}
+  ],
+  "body": [
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "fast-loop.generate",
+      "executionClass": "model-assisted",
+      "inputs": [
+        {"name": "goal", "type": "string", "acceptedOutcomes": ["Produced"]}
+      ],
+      "outputs": [
+        {"name": "result", "type": "string", "emits": ["Produced"]}
+      ],
+      "authority": ["readable:repo://evaluation", "writable:work://evaluation"],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "fast-loop.validate",
+      "executionClass": "model-assisted",
+      "inputs": [
+        {"name": "goal", "type": "string", "acceptedOutcomes": ["Produced"]}
+      ],
+      "outputs": [
+        {"name": "result", "type": "string", "emits": ["Produced"]}
+      ],
+      "authority": ["readable:repo://evaluation", "writable:work://evaluation"],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    }
+  ],
+  "authority": {
+    "executionClass": "model-assisted",
+    "mutation": "none",
+    "tools": {},
+    "readableScopes": ["repo://evaluation"],
+    "writableScopes": ["work://evaluation"],
+    "networkPolicy": {"default": "deny"},
+    "providerPolicy": {"allowlist": []},
+    "secrets": []
+  }
+}"#;
+
+/// The reviewed identity this orchestrator's fast-loop plan was sealed
+/// against - the exact `canonicalization.sha256` of the compiled plan.
+/// Pinned at compile time so a tampered copy of the embedded workflow
+/// cannot silently substitute a different reviewed identity.
+pub const FAST_LOOP_REVIEWED_IDENTITY: &str =
+    "5399b38d23367fd8b2dfeee3401f4a0561e0b4154a1610af71ff1d264022b64c";
+
+/// Build a governed NodeRunner for this orchestrator's fast loop, bound to
+/// the reviewed permit. Issue failure is fatal: the fast loop cannot run
+/// without a permit, and a workflow that fails to compile or verify must
+/// never reach execution.
+fn permitted_runner(
+    registry: crate::workflow::node_runner::CapabilityRegistry,
+) -> anyhow::Result<crate::workflow::node_runner::NodeRunner> {
+    let permit = crate::workflow::governance_permit::GovernancePermit::issue(
+        FAST_LOOP_WORKFLOW_TEXT,
+        FAST_LOOP_REVIEWED_IDENTITY,
+    )
+    .map_err(|diags| {
+        anyhow::anyhow!(
+            "fast-loop governance permit could not be issued: {}",
+            diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    Ok(crate::workflow::node_runner::NodeRunner::new(registry, permit))
+}
+
 /// Local restrictions mirroring what the orchestrator already enforces:
 /// forbidden paths carry over verbatim; one attempt per stage; escalation is
 /// the human review gate (the loop never auto-approves).
@@ -487,8 +590,8 @@ pub async fn evaluate_with_cancellation(
         idempotency_key: format!("{identity_key}:generate"),
         known_secrets: known_secrets.clone(),
     };
-    let mut gen_runner = crate::workflow::node_runner::NodeRunner::default();
-    gen_runner.registry_mut().declare(
+    let mut gen_reg = crate::workflow::node_runner::CapabilityRegistry::new();
+    gen_reg.declare(
         "provider.generate",
         crate::workflow::node_runner::Capability::asynchronous(&["goal"], {
             let repo_c = repo.clone();
@@ -517,6 +620,7 @@ pub async fn evaluate_with_cancellation(
             }
         }),
     );
+    let mut gen_runner = permitted_runner(gen_reg)?;
     let resolved_generate = gen_runner.preflight_gates(&gen_req)?;
     let gen_fut = resolved_generate.into_effect();
     tokio::pin!(gen_fut);
@@ -743,8 +847,8 @@ pub async fn evaluate_with_cancellation(
         idempotency_key: format!("{identity_key}:validate"),
         known_secrets: known_secrets.clone(),
     };
-    let mut val_runner = crate::workflow::node_runner::NodeRunner::default();
-    val_runner.registry_mut().declare(
+    let mut val_reg = crate::workflow::node_runner::CapabilityRegistry::new();
+    val_reg.declare(
         "validation.run",
         crate::workflow::node_runner::Capability::asynchronous(&["proposal_id"], {
             let repo_c = repo.clone();
@@ -771,6 +875,7 @@ pub async fn evaluate_with_cancellation(
             }
         }),
     );
+    let mut val_runner = permitted_runner(val_reg)?;
     let validation_outcome = val_runner.execute_async(val_req).await;
     let validation_result: Result<ValidationRecord> = match validation_outcome {
         Ok(outcome) => Ok(serde_json::from_str(&outcome.output)

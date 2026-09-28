@@ -25,6 +25,17 @@ use prometheos_lite::workflow::node_contracts::NodeManifestV1;
 use prometheos_lite::workflow::node_runner::{Capability, CapabilityRegistry, NodeRunner};
 use prometheos_lite::workflow::policy::LocalRestrictions;
 
+mod common;
+use common::permit_for;
+
+/// Wrap a registry with a permit governing exactly the given node ids.
+fn governed_runner(
+    registry: prometheos_lite::workflow::node_runner::CapabilityRegistry,
+    ids: &[&str],
+) -> NodeRunner {
+    NodeRunner::new(registry, permit_for(ids))
+}
+
 fn manifest(node_id: &str) -> NodeManifestV1 {
     NodeManifestV1::parse_json(&{
         serde_json::json!({
@@ -82,7 +93,7 @@ fn delegation_registry(child_calls: Arc<AtomicUsize>) -> CapabilityRegistry {
                             ))
                         }),
                     );
-                    let mut child = NodeRunner::new(child_reg);
+                    let mut child = governed_runner(child_reg, &["nested.child"]);
                     let m = manifest("nested.child");
                     let r = restrictions();
                     let outcome = child.execute(NodeRunRequestLike::build(
@@ -165,7 +176,10 @@ impl NodeRunRequestLike {
 #[tokio::test]
 async fn nested_node_execution_is_fully_gated_on_both_sides() {
     let child_calls = Arc::new(AtomicUsize::new(0));
-    let mut parent = NodeRunner::new(delegation_registry(child_calls.clone()));
+    let mut parent = governed_runner(
+    delegation_registry(child_calls.clone()),
+    &["nested.parent", "delegation", "bypass"],
+);
     let m = manifest("nested.parent");
     let r = restrictions();
     let outcome = parent
@@ -211,7 +225,10 @@ async fn nested_node_execution_is_fully_gated_on_both_sides() {
 
 #[tokio::test]
 async fn code_tool_and_adapter_paths_run_only_through_resolved_capabilities() {
-    let mut runner = NodeRunner::new(delegation_registry(Arc::new(AtomicUsize::new(0))));
+    let mut runner = governed_runner(
+        delegation_registry(Arc::new(AtomicUsize::new(0))),
+        &["delegation"],
+    );
     let m = manifest("delegation");
     let r = restrictions();
     for (cap, args, prefix) in [
@@ -249,7 +266,10 @@ async fn code_tool_and_adapter_paths_run_only_through_resolved_capabilities() {
 
 #[tokio::test]
 async fn bypass_attempts_fail_closed() {
-    let mut runner = NodeRunner::new(delegation_registry(Arc::new(AtomicUsize::new(0))));
+    let mut runner = governed_runner(
+        delegation_registry(Arc::new(AtomicUsize::new(0))),
+        &["delegation", "bypass"],
+    );
     let m = manifest("bypass");
     let r = restrictions();
 
@@ -275,7 +295,7 @@ async fn bypass_attempts_fail_closed() {
         "strict.cap",
         Capability::asynchronous(&["needed"], |_a| Box::pin(async { Ok("x".into()) })),
     );
-    let mut strict = NodeRunner::new(reg2);
+    let mut strict = governed_runner(reg2, &["bypass"]);
     let bad = NodeRunRequestLike::build(&m, &r, "strict.cap", serde_json::json!({}));
     let err2 = strict.execute_async(bad).await.unwrap_err().to_string();
     assert!(err2.contains("SOMA-CMP-0003"), "{err2}");
