@@ -54,3 +54,6 @@ prometheos-output/
 
 # Repo Workbench local state (demo fixtures create their own)
 .prometheos-lite/
+
+# Superpowers skills cache (never staged)
+docs/superpowers/
