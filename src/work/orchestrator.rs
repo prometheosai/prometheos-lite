@@ -188,6 +188,19 @@ impl WorkOrchestrator {
         // Chat mode: create + set AwaitingApproval (no execution)
         // Review mode: execute planning → Await approval
         // Autonomous mode: execute immediately
+        //
+        // P1 gap 3: the create/status events above record the HUMAN
+        // producer (the user directly acts). The execution events below
+        // are produced by the RUNTIME HARNESS on the user's behalf, and
+        // the authority derives from the context's actual state —
+        // never from whatever the handler guessed before the context
+        // was created/configured.
+        let execution_journal = std::sync::Arc::new(
+            (*journal)
+                .clone()
+                .with_context_authority(&context)
+                .with_harness_producer(),
+        );
         if context.autonomy_level == AutonomyLevel::Chat {
             self.work_context_service.update_status(
                 &mut context,
@@ -198,7 +211,7 @@ impl WorkOrchestrator {
         } else if context.autonomy_level == AutonomyLevel::Review {
             // Review mode: execute planning flow
             self.work_execution_service
-                .continue_context(&context.id, &journal)
+                .continue_context(&context.id, &execution_journal)
                 .await?;
 
             // Reload context to get updated state
@@ -211,7 +224,7 @@ impl WorkOrchestrator {
         } else {
             // Autonomous mode: execute immediately
             self.work_execution_service
-                .continue_context(&context.id, &journal)
+                .continue_context(&context.id, &execution_journal)
                 .await?;
 
             // Reload context to get updated state
@@ -746,22 +759,36 @@ impl WorkOrchestrator {
     /// observation — co-located with the read that detected the
     /// cancellation. The ID is carried forward to the evidence write;
     /// it is never rediscovered by a separate lookup inside the write.
+    /// P1 gap 4: ATOMIC cancellation observation — the context status and
+    /// the cancellation event ID are read in ONE SQL transaction, so they
+    /// provably observe the SAME database state. The event ID is part
+    /// of the cancellation signal (carried from the observation), never
+    /// a separate later lookup. Two individual reads could see different
+    /// states under a concurrent write; one transaction cannot.
     fn observe_cancellation(
         &self,
         context_id: &str,
     ) -> Result<Option<(WorkContext, Option<String>)>> {
+        let conn = self.work_context_service.get_db().conn();
+        let tx = conn.unchecked_transaction()?;
+
+        // Read the context within the transaction.
         let fresh = match self.work_context_service.get_context(context_id)? {
             Some(context) if context.is_cancelled() => context,
-            _ => return Ok(None),
+            _ => {
+                tx.rollback()?;
+                return Ok(None);
+            }
         };
-        // The deterministic exactly-one cancellation-event lookup,
-        // co-located with the observation — not a "latest" inference,
-        // and not a separate query inside the evidence write.
+
+        // Read the cancellation event within the SAME transaction —
+        // same snapshot, same state, one signal.
         let cancel_event_id =
             crate::db::repository::work_context_events::cancellation_event_id_conn(
-                self.work_context_service.get_db().conn(),
-                context_id,
+                &tx, context_id,
             )?;
+
+        tx.commit()?;
         Ok(Some((fresh, cancel_event_id)))
     }
 

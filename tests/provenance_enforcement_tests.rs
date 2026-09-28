@@ -660,6 +660,98 @@ fn database_trigger_rejects_malformed_non_null_provenance() {
 }
 
 #[test]
+fn partial_schema_migration_converges_on_reopen() {
+    // P1 gap 5: a database left in a PARTIALLY migrated state (some
+    // provenance columns present, others missing — a crash between
+    // ALTER TABLE statements) must converge when reopened: the missing
+    // columns are added, the triggers are present, and the existing
+    // rows are untouched.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("partial.db");
+    let db_path_str = db_path.to_str().unwrap().to_string();
+
+    // Phase 1: create a real full-schema database with a context + event.
+    {
+        let db = Db::new(&db_path_str).unwrap();
+        let wcs = WorkContextService::new(std::sync::Arc::new(db));
+        let _ctx = wcs
+            .create_context(
+                "user".to_string(),
+                "Partial test".to_string(),
+                prometheos_lite::work::types::WorkDomain::General,
+                "goal".to_string(),
+                &test_journal(),
+            )
+            .unwrap();
+    }
+
+    // Phase 2: simulate the PARTIAL state — strip ALL provenance columns
+    // and re-add only two of five (a crash mid-migration).
+    {
+        let conn = rusqlite::Connection::open(&db_path_str).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS work_context_events_provenance_required;
+             DROP TRIGGER IF EXISTS work_context_events_append_only;
+             CREATE TABLE work_context_events_stripped AS
+                 SELECT seq, id, work_context_id, event_type, data, created_at
+                 FROM work_context_events;
+             DROP TABLE work_context_events;
+             ALTER TABLE work_context_events_stripped RENAME TO work_context_events;",
+        )
+        .unwrap();
+        // Re-add only two of five.
+        conn.execute(
+            "ALTER TABLE work_context_events ADD COLUMN provenance_json TEXT",
+            [],
+        )
+        .unwrap();
+        conn.execute("ALTER TABLE work_context_events ADD COLUMN run_id TEXT", [])
+            .unwrap();
+        // Three columns MISSING: source_digest, principal_id, correlation_id.
+    }
+
+    // Phase 3: reopen — the migration must converge.
+    {
+        let db = Db::new(&db_path_str).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('work_context_events')
+                 WHERE name IN ('provenance_json','source_digest','run_id','principal_id','correlation_id')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 5, "all five columns must converge");
+
+        // The pre-existing row is untouched (legacy NULLs).
+        let (envelope, digest): (Option<String>, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT provenance_json, source_digest FROM work_context_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(envelope.is_none(), "existing row's provenance stays NULL");
+        assert!(digest.is_none(), "existing row's digest stays NULL");
+
+        // The triggers exist.
+        let triggers: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'trigger' AND tbl_name = 'work_context_events'
+                   AND name IN ('work_context_events_provenance_required','work_context_events_append_only')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 2, "both triggers must exist after convergence");
+    }
+}
+
+#[test]
 fn mixed_legacy_provenance_state_is_refused_not_misclassified() {
     let (db, wcs) = setup();
     let context = create_context(&wcs);

@@ -323,6 +323,57 @@ fn work_run_journal_for(
     )
 }
 
+/// P1 gap 3: detect the actual repository binding from the repo root.
+/// Bound = a git repo with a clean working tree; Dirty = a git repo
+/// with uncommitted changes (deterministic workspace digest computed
+/// from the dirty state); Unbound = no git repo or git unavailable.
+/// Never a hardcoded value.
+fn detect_repo_binding(repo_root: &std::path::Path) -> crate::work::provenance::RepoBinding {
+    use crate::work::provenance::RepoBinding;
+    let git_dir = repo_root.join(".git");
+    if !git_dir.exists() {
+        return RepoBinding::Unbound;
+    }
+    let revision = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+    let Some(revision) = revision else {
+        return RepoBinding::Unbound;
+    };
+    let status_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("status")
+        .arg("--porcelain")
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        .unwrap_or_default();
+    if status_output.trim().is_empty() {
+        RepoBinding::Bound { revision }
+    } else {
+        let digest = crate::workflow::soma::try_canonical_digest(
+            &serde_json::json!({"porcelain": status_output}),
+        )
+        .unwrap_or_else(|_| "unavailable".to_string());
+        RepoBinding::Dirty {
+            revision,
+            workspace_digest: digest,
+        }
+    }
+}
+
 /// Create a new WorkContext
 pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
@@ -799,8 +850,11 @@ pub async fn run_harness(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     // P1 gap 3: the harness runs on behalf of the requesting user — the
     // journal records the user as principal, the harness as producer,
-    // and the actual authority derived from the context.
-    let harness_journal = work_run_journal_for(user_id, &context);
+    // the actual authority derived from the context, and the ACTUAL
+    // repository binding (Bound/Dirty/Unbound based on the repo_root's
+    // git state — never a hardcoded Unbound).
+    let harness_journal = work_run_journal_for(user_id, &context)
+        .with_repo_binding(detect_repo_binding(&req.repo_root));
     let service =
         HarnessWorkContextService::with_journal(work_context_service, Some(harness_journal));
     let mut edits = req.proposed_edits;

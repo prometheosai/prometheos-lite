@@ -167,16 +167,12 @@ impl ProvenanceEnvelope {
         Ok(text)
     }
 
-    /// P1 gap 1 repair: enforce the canonical-bytes fixpoint and the
-    /// semantic envelope invariants at the write boundary. Returns Err
-    /// on any violation — the envelope can never be stored malformed.
-    ///
-    /// - Fixpoint: the serialized bytes must parse back to the exact
-    ///   same envelope (no silent lossy serialization).
-    /// - Semantic invariants: the effective execution class never widens
-    ///   the declared class; the schema version is the supported one;
-    ///   the producer identity is non-empty; the correlation id is
-    ///   non-empty; the request id is non-empty.
+    /// P1 gap 1 repair: enforce the canonical-BYTES fixpoint — not just
+    /// serde round-tripping. The serialized bytes must re-serialize to
+    /// the exact same bytes after a parse round-trip: any divergence
+    /// means the serialization is not canonical (map ordering, escaping,
+    /// or representation drift between serialize and re-serialize). The
+    /// semantic invariants are also enforced.
     pub fn validate_write_invariants(&self) -> Result<()> {
         if self.schema_version != PROVENANCE_SCHEMA_VERSION {
             anyhow::bail!(
@@ -210,12 +206,19 @@ impl ProvenanceEnvelope {
                 declared_class
             );
         }
-        // Fixpoint: the canonical bytes must round-trip exactly.
-        let text = self.to_canonical_json_string()?;
-        let reparsed = Self::parse_canonical(&text)?;
+        // Canonical-BYTES fixpoint: serialize → parse → re-serialize must
+        // produce byte-identical output. This proves the bytes ARE
+        // canonical, not merely that they parse back to the same value
+        // (serde round-tripping alone does not prove canonical form).
+        let bytes1 = self.to_canonical_json_string()?;
+        let reparsed = Self::parse_canonical(&bytes1)?;
         if reparsed != *self {
+            anyhow::bail!("provenance envelope value fixpoint violation: parse(serialize(x)) != x");
+        }
+        let bytes2 = reparsed.to_canonical_json_string()?;
+        if bytes1 != bytes2 {
             anyhow::bail!(
-                "provenance envelope canonical-bytes fixpoint violation: serialization is lossy"
+                "provenance envelope canonical-BYTES fixpoint violation: serialize(parse(serialize(x))) != serialize(x) — the bytes are not in canonical form"
             );
         }
         Ok(())
@@ -416,6 +419,41 @@ impl JournalContext {
         let mut envelope = self.event_envelope(parent_event_id);
         envelope.run.graph_run_id = Some(graph_run_id);
         envelope
+    }
+
+    /// P1 gap 3 repair: re-derive the authority from the ACTUAL context —
+    /// the caller (the orchestrator) has the context at hand and adjusts
+    /// the journal so events record the context's real authority, not
+    /// whatever the API handler guessed before the context was known.
+    pub fn with_context_authority(mut self, context: &crate::work::types::WorkContext) -> Self {
+        self.authority = Self::work_authority(context.autonomy_level, context.approval_policy);
+        self
+    }
+
+    /// P1 gap 3: switch the producer to the runtime harness — for paths
+    /// where a human creates the context but the runtime executes on
+    /// their behalf (submit_intent → create with Human producer →
+    /// execute with Harness producer). The principal stays the
+    /// initiating human.
+    pub fn with_harness_producer(mut self) -> Self {
+        self.producer = Producer {
+            kind: ProducerKind::Harness,
+            identity: "prometheos-lite".to_string(),
+            implementation: Some(Implementation {
+                name: "prometheos-lite".to_string(),
+                revision: env!("CARGO_PKG_VERSION").to_string(),
+                build: None,
+            }),
+        };
+        self
+    }
+
+    /// P1 gap 3: record the actual repository binding — the caller knows
+    /// the repo state (Bound/Dirty with revision + workspace digest, or
+    /// Unbound for repo-less paths). Never defaulted.
+    pub fn with_repo_binding(mut self, binding: RepoBinding) -> Self {
+        self.repo_binding = binding;
+        self
     }
 
     /// Build the default authority record for the work path from the
