@@ -5,6 +5,16 @@
 
 use prometheos_lite::db::Db;
 use prometheos_lite::harness::completion::CompletionDecision;
+fn test_journal() -> prometheos_lite::work::JournalContext {
+    prometheos_lite::work::JournalContext::internal_system(
+        format!("test-{}", uuid::Uuid::new_v4()),
+        prometheos_lite::work::JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
 use prometheos_lite::work::{
     WorkContextService,
     types::{HarnessMetadata, WorkDomain, WorkPhase, WorkStatus},
@@ -22,6 +32,7 @@ fn test_work_context_create() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -44,6 +55,7 @@ fn test_work_context_persistence() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -68,6 +80,7 @@ fn test_work_context_list() {
             "Context 1".to_string(),
             WorkDomain::Software,
             "Goal 1".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -77,6 +90,7 @@ fn test_work_context_list() {
             "Context 2".to_string(),
             WorkDomain::Business,
             "Goal 2".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -98,11 +112,12 @@ fn test_work_context_phase_update() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
     work_context_service
-        .update_phase(&mut context, WorkPhase::Planning)
+        .update_phase(&mut context, WorkPhase::Planning, &test_journal())
         .expect("Failed to update phase");
 
     assert_eq!(context.current_phase, WorkPhase::Planning);
@@ -126,11 +141,12 @@ fn test_work_context_status_update() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .expect("Failed to update status");
 
     assert_eq!(context.status, WorkStatus::InProgress);
@@ -154,6 +170,7 @@ fn test_work_context_add_artifact() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -170,7 +187,7 @@ fn test_work_context_add_artifact() {
     );
 
     work_context_service
-        .add_artifact(&mut context, artifact)
+        .add_artifact(&mut context, artifact, &test_journal())
         .expect("Failed to add artifact");
 
     assert_eq!(context.artifacts.len(), 1);
@@ -188,6 +205,7 @@ fn test_work_context_artifact_persistence() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -204,7 +222,7 @@ fn test_work_context_artifact_persistence() {
     );
 
     work_context_service
-        .add_artifact(&mut context, artifact)
+        .add_artifact(&mut context, artifact, &test_journal())
         .expect("Failed to add artifact");
 
     // Persist the context
@@ -235,6 +253,7 @@ fn test_phase_controller_next_phase() {
             "Test Context".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -311,6 +330,7 @@ async fn test_deterministic_flow_execution() {
             "Test Task".to_string(),
             WorkDomain::Software,
             "Test goal".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -331,7 +351,7 @@ async fn test_deterministic_flow_execution() {
     );
 
     work_context_service
-        .add_artifact(&mut context, test_artifact)
+        .add_artifact(&mut context, test_artifact, &test_journal())
         .expect("Failed to add artifact");
 
     // Update phase using PhaseController (not string matching)
@@ -339,13 +359,13 @@ async fn test_deterministic_flow_execution() {
     let next_phase = PhaseController::next_phase(&context);
     if let Some(phase) = next_phase {
         work_context_service
-            .update_phase(&mut context, phase)
+            .update_phase(&mut context, phase, &test_journal())
             .expect("Failed to update phase");
     }
 
     // Update status
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .expect("Failed to update status");
 
     // Persist and verify
@@ -396,6 +416,7 @@ async fn test_golden_integration_with_flow_execution() {
             "Build REST API".to_string(),
             WorkDomain::Software,
             "Create a REST API for user management".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -412,6 +433,7 @@ async fn test_golden_integration_with_flow_execution() {
             &mut context,
             "planning.flow.yaml",
             &prometheos_lite::workflow::evaluate::CancellationToken::new(),
+            &test_journal(),
         )
         .await;
 
@@ -438,19 +460,19 @@ async fn test_golden_integration_with_flow_execution() {
         );
 
         work_context_service
-            .add_artifact(&mut context, plan_artifact)
+            .add_artifact(&mut context, plan_artifact, &test_journal())
             .expect("Failed to add plan artifact");
     }
 
     // Step 3: Update phase to Planning after artifact creation
     work_context_service
-        .update_phase(&mut context, WorkPhase::Planning)
+        .update_phase(&mut context, WorkPhase::Planning, &test_journal())
         .expect("Failed to update phase to Planning");
     assert_eq!(context.current_phase, WorkPhase::Planning);
 
     // Step 4: Set status to InProgress
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .expect("Failed to update status to InProgress");
     assert_eq!(context.status, WorkStatus::InProgress);
 
@@ -498,6 +520,7 @@ fn test_golden_integration_work_context_lifecycle() {
             "Build REST API".to_string(),
             WorkDomain::Software,
             "Create a REST API for user management".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -506,13 +529,13 @@ fn test_golden_integration_work_context_lifecycle() {
 
     // Step 2: Transition to Planning phase
     work_context_service
-        .update_phase(&mut context, WorkPhase::Planning)
+        .update_phase(&mut context, WorkPhase::Planning, &test_journal())
         .expect("Failed to update phase to Planning");
     assert_eq!(context.current_phase, WorkPhase::Planning);
 
     // Step 3: Set status to InProgress
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .expect("Failed to update status to InProgress");
     assert_eq!(context.status, WorkStatus::InProgress);
 
@@ -522,19 +545,19 @@ fn test_golden_integration_work_context_lifecycle() {
 
     // Step 5: Transition to Execution phase
     work_context_service
-        .update_phase(&mut context, WorkPhase::Execution)
+        .update_phase(&mut context, WorkPhase::Execution, &test_journal())
         .expect("Failed to update phase to Execution");
     assert_eq!(context.current_phase, WorkPhase::Execution);
 
     // Step 6: Set status to AwaitingApproval (simulating approval requirement)
     work_context_service
-        .update_status(&mut context, WorkStatus::AwaitingApproval)
+        .update_status(&mut context, WorkStatus::AwaitingApproval, &test_journal())
         .expect("Failed to update status to AwaitingApproval");
     assert_eq!(context.status, WorkStatus::AwaitingApproval);
 
     // Step 7: Approve and transition to Review phase
     work_context_service
-        .update_status(&mut context, WorkStatus::InProgress)
+        .update_status(&mut context, WorkStatus::InProgress, &test_journal())
         .expect("Failed to update status to InProgress");
 
     // V1.6.1 strict gate: software Execution -> Review requires patch + validation evidence.
@@ -550,13 +573,13 @@ fn test_golden_integration_work_context_lifecycle() {
     });
 
     work_context_service
-        .update_phase(&mut context, WorkPhase::Review)
+        .update_phase(&mut context, WorkPhase::Review, &test_journal())
         .expect("Failed to update phase to Review");
     assert_eq!(context.current_phase, WorkPhase::Review);
 
     // Step 8: Complete the context
     work_context_service
-        .update_status(&mut context, WorkStatus::Completed)
+        .update_status(&mut context, WorkStatus::Completed, &test_journal())
         .expect("Failed to update status to Completed");
     assert_eq!(context.status, WorkStatus::Completed);
 
@@ -615,12 +638,17 @@ fn test_guardrail_blocked_context_cannot_continue() {
             "Blocked Task".to_string(),
             WorkDomain::Software,
             "Task that should be blocked".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
     // Set context to blocked with a reason
     work_context_service
-        .set_blocked_reason(&mut context, "Security violation detected".to_string())
+        .set_blocked_reason(
+            &mut context,
+            "Security violation detected".to_string(),
+            &test_journal(),
+        )
         .expect("Failed to set blocked reason");
 
     // Verify context is blocked
@@ -658,6 +686,7 @@ fn test_guardrail_review_mode_requires_approval() {
             "Review Task".to_string(),
             WorkDomain::Software,
             "Task requiring review".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 
@@ -698,6 +727,7 @@ fn test_guardrail_autonomous_mode_allows_execution() {
             "Autonomous Task".to_string(),
             WorkDomain::Software,
             "Task that can run autonomously".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create WorkContext");
 

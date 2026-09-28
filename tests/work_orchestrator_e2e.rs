@@ -16,6 +16,19 @@ use prometheos_lite::work::playbook_resolver::PlaybookResolver;
 use prometheos_lite::work::service::WorkContextService;
 use prometheos_lite::work::types::{CompletionCriterion, WorkPhase, WorkStatus};
 use std::sync::Arc;
+fn test_journal() -> prometheos_lite::work::JournalContext {
+    prometheos_lite::work::JournalContext::internal_system(
+        format!("test-{}", uuid::Uuid::new_v4()),
+        prometheos_lite::work::JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
+fn test_journal_arc() -> std::sync::Arc<prometheos_lite::work::JournalContext> {
+    std::sync::Arc::new(test_journal())
+}
 
 struct DeterministicTestProvider;
 
@@ -92,7 +105,12 @@ async fn test_submit_intent_creates_context() {
     let orchestrator = setup_orchestrator();
 
     let context = orchestrator
-        .submit_user_intent("test-user".to_string(), "test message".to_string(), None)
+        .submit_user_intent(
+            "test-user".to_string(),
+            "test message".to_string(),
+            None,
+            test_journal_arc(),
+        )
         .await
         .expect("submit_user_intent should succeed");
 
@@ -114,6 +132,7 @@ async fn test_submit_intent_coding_task_sets_review_mode() {
             "test-user".to_string(),
             "implement a function to parse JSON".to_string(),
             None,
+            test_journal_arc(),
         )
         .await
         .expect("submit_user_intent should succeed");
@@ -134,6 +153,7 @@ async fn test_submit_intent_general_chat_sets_chat_mode() {
             "test-user".to_string(),
             "hello, how are you?".to_string(),
             None,
+            test_journal_arc(),
         )
         .await
         .expect("submit_user_intent should succeed");
@@ -150,12 +170,17 @@ async fn test_continue_context_advances_phase() {
     let orchestrator = setup_orchestrator();
 
     let context = orchestrator
-        .submit_user_intent("test-user".to_string(), "test message".to_string(), None)
+        .submit_user_intent(
+            "test-user".to_string(),
+            "test message".to_string(),
+            None,
+            test_journal_arc(),
+        )
         .await
         .expect("submit_user_intent should succeed");
 
     let context = orchestrator
-        .continue_context(context.id)
+        .continue_context(context.id, test_journal_arc())
         .await
         .expect("continue_context should succeed");
 
@@ -170,7 +195,12 @@ async fn test_run_until_complete_with_limits() {
     let orchestrator = setup_orchestrator();
 
     let context = orchestrator
-        .submit_user_intent("test-user".to_string(), "test message".to_string(), None)
+        .submit_user_intent(
+            "test-user".to_string(),
+            "test message".to_string(),
+            None,
+            test_journal_arc(),
+        )
         .await
         .expect("submit_user_intent should succeed");
 
@@ -180,7 +210,7 @@ async fn test_run_until_complete_with_limits() {
         .with_max_tool_calls(10);
 
     let context = orchestrator
-        .run_until_blocked_or_complete(context.id, limits)
+        .run_until_blocked_or_complete(context.id, limits, test_journal_arc())
         .await
         .expect("run_until_blocked_or_complete should succeed");
 
@@ -201,6 +231,7 @@ async fn test_full_lifecycle() {
             "test-user".to_string(),
             "implement a simple function".to_string(),
             None,
+            test_journal_arc(),
         )
         .await
         .expect("submit_user_intent should succeed");
@@ -211,7 +242,7 @@ async fn test_full_lifecycle() {
 
     // Continue to advance phase
     context = orchestrator
-        .continue_context(context.id)
+        .continue_context(context.id, test_journal_arc())
         .await
         .expect("continue_context should succeed");
 
@@ -222,7 +253,7 @@ async fn test_full_lifecycle() {
         .with_max_tool_calls(20);
 
     context = orchestrator
-        .run_until_blocked_or_complete(context.id, limits)
+        .run_until_blocked_or_complete(context.id, limits, test_journal_arc())
         .await
         .expect("run_until_blocked_or_complete should succeed");
 
@@ -290,6 +321,7 @@ async fn test_run_until_blocked_or_complete_triggers_evolution() {
             "test-user".to_string(),
             prometheos_lite::work::types::WorkDomain::Software,
             "Test evolution trigger".to_string(),
+            &test_journal(),
         )
         .expect("Failed to create context");
 
@@ -316,7 +348,7 @@ async fn test_run_until_blocked_or_complete_triggers_evolution() {
     // Call run_until_blocked_or_complete - this should trigger complete_context() and evolution
     let limits = ExecutionLimits::default();
     let result = orchestrator
-        .run_until_blocked_or_complete(context_id.clone(), limits)
+        .run_until_blocked_or_complete(context_id.clone(), limits, test_journal_arc())
         .await;
 
     assert!(

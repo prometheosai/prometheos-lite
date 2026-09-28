@@ -18,12 +18,41 @@ use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::repo_workbench;
 use prometheos_lite::work::{
-    ExecutionLimits, PlaybookResolver, WorkContextService, WorkOrchestrator,
+    ExecutionLimits, JournalContext, PlaybookResolver, WorkContextService, WorkOrchestrator,
     evolution_engine::EvolutionEngine,
     execution_service::WorkExecutionService,
     template_loader::TemplateLoader,
     types::{WorkDomain, WorkStatus},
 };
+
+/// Slice 1A: the CLI's journal context for direct human mutations
+/// (create, status). The operator is the recorded principal and
+/// producer; the per-invocation id keeps request-to-run correlation
+/// continuous.
+fn cli_journal() -> JournalContext {
+    JournalContext::for_request(
+        "cli-user",
+        format!("cli-{}", uuid::Uuid::new_v4()),
+        JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            prometheos_lite::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
+/// P1 gap 3: the CLI's work-run journal — the runtime harness produces
+/// the run's events, the CLI operator is the initiating principal, the
+/// authority is derived from the actual context being run (never
+/// hardcoded), and a distinct work-run identity rides with the
+/// invocation.
+fn cli_work_run_journal(context: &prometheos_lite::work::types::WorkContext) -> JournalContext {
+    JournalContext::for_work_run(
+        "cli-user",
+        format!("cli-{}", uuid::Uuid::new_v4()),
+        format!("work-run-{}", uuid::Uuid::new_v4()),
+        JournalContext::work_authority(context.autonomy_level, context.approval_policy),
+    )
+}
 
 #[derive(Debug, Parser)]
 pub struct WorkCommand {
@@ -296,6 +325,7 @@ impl WorkCommand {
                     title,
                     domain,
                     goal,
+                    &cli_journal(),
                 )?;
 
                 println!("Created WorkContext:");
@@ -388,7 +418,12 @@ impl WorkCommand {
                 conversation_id,
             } => {
                 let context = work_orchestrator
-                    .submit_user_intent("cli-user".to_string(), message, conversation_id)
+                    .submit_user_intent(
+                        "cli-user".to_string(),
+                        message,
+                        conversation_id,
+                        std::sync::Arc::new(cli_journal()),
+                    )
                     .await?;
 
                 println!("Submitted intent to WorkContext:");
@@ -412,7 +447,16 @@ impl WorkCommand {
                     return Ok(());
                 }
 
-                let context = work_orchestrator.continue_context(id).await?;
+                // P1 gap 3: the continue path flows through the run
+                // loop — the harness is the producer, the CLI operator
+                // is the principal, and the authority derives from the
+                // actual context.
+                let loaded = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
+                let context = work_orchestrator
+                    .continue_context(id, std::sync::Arc::new(cli_work_run_journal(&loaded)))
+                    .await?;
 
                 println!("Continued WorkContext:");
                 println!("  ID: {}", context.id);
@@ -457,8 +501,18 @@ impl WorkCommand {
                     .with_max_iterations(max_iterations.unwrap_or(10))
                     .with_max_runtime_ms(max_runtime_ms.unwrap_or(300_000));
 
+                // P1 gap 3: the run loop's events are produced by the
+                // runtime harness — the CLI operator is the principal,
+                // and the authority derives from the actual context.
+                let loaded = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("WorkContext not found"))?;
                 let context = work_orchestrator
-                    .run_until_blocked_or_complete(id, limits)
+                    .run_until_blocked_or_complete(
+                        id,
+                        limits,
+                        std::sync::Arc::new(cli_work_run_journal(&loaded)),
+                    )
                     .await?;
 
                 println!("Ran WorkContext:");
@@ -483,7 +537,7 @@ impl WorkCommand {
                     _ => return Err(anyhow::anyhow!("Invalid status: {}", status)),
                 };
 
-                work_context_service.update_status(&mut context, new_status)?;
+                work_context_service.update_status(&mut context, new_status, &cli_journal())?;
 
                 println!("Updated WorkContext status to {:?}", new_status);
             }

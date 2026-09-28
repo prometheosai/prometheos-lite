@@ -269,6 +269,111 @@ pub async fn get_work_context(
     Ok(Json(WorkContextResponse::from(context)))
 }
 
+/// Slice 1A (P1-1 repair): build the per-request journal context with
+/// the ACTUAL authority of the context being mutated (derived from its
+/// autonomy level and approval policy, never hardcoded). The requesting
+/// user is the recorded principal and, for direct human actions
+/// (create, cancel, status), the producer.
+fn request_journal_for(
+    user_id: &str,
+    context: &crate::work::types::WorkContext,
+) -> crate::work::provenance::JournalContext {
+    crate::work::provenance::JournalContext::for_request(
+        user_id,
+        format!("req-{}", uuid::Uuid::new_v4()),
+        crate::work::provenance::JournalContext::work_authority(
+            context.autonomy_level,
+            context.approval_policy,
+        ),
+    )
+}
+
+/// Slice 1A: default journal for contexts that do not exist yet (the
+/// create path) — the default authority the created context will carry.
+fn request_journal(user_id: &str) -> crate::work::provenance::JournalContext {
+    crate::work::provenance::JournalContext::for_request(
+        user_id,
+        format!("req-{}", uuid::Uuid::new_v4()),
+        crate::work::provenance::JournalContext::work_authority(
+            crate::work::types::AutonomyLevel::Review,
+            crate::work::types::ApprovalPolicy::Auto,
+        ),
+    )
+}
+
+/// Slice 1A (P1-1 repair): the per-run journal context with the ACTUAL
+/// authority derived from the context being run. The runtime harness is
+/// the producer of the run's events (iteration writes, exit writes,
+/// interruption evidence); the requesting user is the initiating
+/// principal; a distinct work-run identity rides with the request.
+fn work_run_journal_for(
+    user_id: &str,
+    context: &crate::work::types::WorkContext,
+) -> crate::work::provenance::JournalContext {
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let work_run_id = format!("work-run-{}", uuid::Uuid::new_v4());
+    crate::work::provenance::JournalContext::for_work_run(
+        user_id,
+        request_id,
+        work_run_id,
+        crate::work::provenance::JournalContext::work_authority(
+            context.autonomy_level,
+            context.approval_policy,
+        ),
+    )
+}
+
+/// P1 gap 3: detect the actual repository binding from the repo root.
+/// Bound = a git repo with a clean working tree; Dirty = a git repo
+/// with uncommitted changes (deterministic workspace digest computed
+/// from the dirty state); Unbound = no git repo or git unavailable.
+/// Never a hardcoded value.
+fn detect_repo_binding(repo_root: &std::path::Path) -> crate::work::provenance::RepoBinding {
+    use crate::work::provenance::RepoBinding;
+    let git_dir = repo_root.join(".git");
+    if !git_dir.exists() {
+        return RepoBinding::Unbound;
+    }
+    let revision = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+    let Some(revision) = revision else {
+        return RepoBinding::Unbound;
+    };
+    let status_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("status")
+        .arg("--porcelain")
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        .unwrap_or_default();
+    if status_output.trim().is_empty() {
+        RepoBinding::Bound { revision }
+    } else {
+        let digest = crate::workflow::soma::try_canonical_digest(
+            &serde_json::json!({"porcelain": status_output}),
+        )
+        .unwrap_or_else(|_| "unavailable".to_string());
+        RepoBinding::Dirty {
+            revision,
+            workspace_digest: digest,
+        }
+    }
+}
+
 /// Create a new WorkContext
 pub async fn create_work_context(
     State(state): State<Arc<AppState>>,
@@ -293,7 +398,13 @@ pub async fn create_work_context(
     };
 
     let context = work_context_service
-        .create_context(req.user_id, req.title, domain, req.goal)
+        .create_context(
+            req.user_id.clone(),
+            req.title,
+            domain,
+            req.goal,
+            &request_journal(&req.user_id),
+        )
         .map_err(|e| ApiError::Internal(format!("Failed to create context: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -335,7 +446,7 @@ pub async fn update_work_context_status(
     };
 
     work_context_service
-        .update_status(&mut context, new_status)
+        .update_status(&mut context, new_status, &request_journal(user_id))
         .map_err(|e| ApiError::Internal(format!("Failed to update status: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -511,20 +622,24 @@ async fn execute_decide_transaction(
         if rows != 1 {
             anyhow::bail!("checkpoint digest raced: concurrent writer changed the row");
         }
-        // graph_decision event still lands in the same transaction.
-        tx.execute(
-            "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                uuid::Uuid::new_v4().to_string(),
-                work_context_id,
-                "graph_decision",
-                serde_json::to_string(&serde_json::json!({
-                    "runId": graph_run_id,
-                    "newDigest": new_digest,
-                }))?,
-                chrono::Utc::now().to_rfc3339(),
-            ],
+        // graph_decision event still lands in the same transaction — with
+        // complete Slice 1A provenance (graph-run identity preserved via
+        // graph_run_envelope; the requesting user is the principal).
+        let journal = request_journal(user_id);
+        let envelope = journal.graph_run_envelope(graph_run_id.to_string(), None);
+        let decision_event = crate::work::event::WorkContextEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            work_context_id.to_string(),
+            "graph_decision".to_string(),
+            serde_json::json!({
+                "runId": graph_run_id,
+                "newDigest": new_digest,
+            }),
+        );
+        crate::db::repository::work_context_events::record_event_conn(
+            &tx,
+            &decision_event,
+            &envelope,
         )?;
 
         tx.commit()?;
@@ -572,8 +687,9 @@ pub async fn cancel_work_context(
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
+    let journal = request_journal_for(user_id, &context);
     work_context_service
-        .cancel_context(&mut context, &req.reason)
+        .cancel_context(&mut context, &req.reason, &journal)
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("cancelled WorkContext accepts no further status transitions")
@@ -649,8 +765,9 @@ pub async fn continue_work_context(
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let journal = std::sync::Arc::new(request_journal(user_id));
     let context = orchestrator
-        .continue_context(id)
+        .continue_context(id, journal)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
@@ -667,8 +784,9 @@ pub async fn submit_intent(
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let journal = std::sync::Arc::new(request_journal(&req.user_id));
     let context = orchestrator
-        .submit_user_intent(req.user_id, req.message, req.conversation_id)
+        .submit_user_intent(req.user_id, req.message, req.conversation_id, journal)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(WorkContextResponse::from(context)))
@@ -705,8 +823,9 @@ pub async fn run_until_complete(
     // durable `context_cancelled` + `execution_interrupted` events are the
     // audit record.
     let run_guard = state.run_cancels.register(&id);
+    let journal = std::sync::Arc::new(work_run_journal_for(user_id, &context));
     let context = orchestrator
-        .run_until_blocked_or_complete_with_token(id, limits, run_guard.token())
+        .run_until_blocked_or_complete_with_token(id, limits, run_guard.token(), journal)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     drop(run_guard);
@@ -729,7 +848,15 @@ pub async fn run_harness(
     let work_context_service = state
         .create_work_context_service()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let service = HarnessWorkContextService::new(work_context_service);
+    // P1 gap 3: the harness runs on behalf of the requesting user — the
+    // journal records the user as principal, the harness as producer,
+    // the actual authority derived from the context, and the ACTUAL
+    // repository binding (Bound/Dirty/Unbound based on the repo_root's
+    // git state — never a hardcoded Unbound).
+    let harness_journal = work_run_journal_for(user_id, &context)
+        .with_repo_binding(detect_repo_binding(&req.repo_root));
+    let service =
+        HarnessWorkContextService::with_journal(work_context_service, Some(harness_journal));
     let mut edits = req.proposed_edits;
     if let Some(raw) = req.edit_response.as_deref() {
         edits.extend(parse_edit_response(raw).map_err(|e| ApiError::BadRequest(e.to_string()))?);
@@ -981,8 +1108,8 @@ mod tests {
         get_harness_completion, get_harness_evidence, get_harness_patches, get_harness_review,
         get_harness_risk, get_harness_validation, get_trace_by_run, get_work_context,
         get_work_context_artifacts, get_work_cost, get_work_quality, list_work_contexts,
-        list_work_traces, required_harness_view, required_user_id, run_harness, run_until_complete,
-        update_work_context_status,
+        list_work_traces, request_journal, required_harness_view, required_user_id, run_harness,
+        run_until_complete, update_work_context_status,
     };
     use crate::api::state::AppState;
     use crate::flow::memory::db::MemoryDb;
@@ -1093,6 +1220,7 @@ mod tests {
                 "Owned Context".to_string(),
                 WorkDomain::Software,
                 "goal".to_string(),
+                &request_journal("user-1"),
             )
             .expect("create context");
         TestState {

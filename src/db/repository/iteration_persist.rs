@@ -81,6 +81,7 @@ pub fn persist_iteration_conn(
     context: &crate::work::types::WorkContext,
     draft: &IterationDraft,
     performance: Option<&FlowPerformanceRecord>,
+    envelope: &crate::work::provenance::ProvenanceEnvelope,
 ) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
 
@@ -156,6 +157,7 @@ pub fn persist_iteration_conn(
             &context.id,
             "artifact_added",
             serde_json::json!({ "artifact_count": base_count + index + 1 }),
+            envelope,
         )?;
     }
 
@@ -165,6 +167,7 @@ pub fn persist_iteration_conn(
             &context.id,
             "phase_transition",
             serde_json::json!({ "from": from, "to": to }),
+            envelope,
         )?;
     }
 
@@ -174,6 +177,7 @@ pub fn persist_iteration_conn(
             &context.id,
             "status_changed",
             serde_json::json!({ "from": from, "to": to }),
+            envelope,
         )?;
     }
 
@@ -183,6 +187,7 @@ pub fn persist_iteration_conn(
             &context.id,
             "status_changed",
             serde_json::json!({ "from": from, "to": to }),
+            envelope,
         )?;
     }
 
@@ -215,20 +220,16 @@ fn insert_event(
     context_id: &str,
     event_type: &str,
     data: serde_json::Value,
+    envelope: &crate::work::provenance::ProvenanceEnvelope,
 ) -> Result<()> {
-    tx.execute(
-        "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            uuid::Uuid::new_v4().to_string(),
-            context_id,
-            event_type,
-            serde_json::to_string(&data)?,
-            chrono::Utc::now().to_rfc3339(),
-        ],
-    )
-    .with_context(|| format!("failed to record {event_type} event"))?;
-    Ok(())
+    let event = crate::work::event::WorkContextEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        context_id.to_string(),
+        event_type.to_string(),
+        data,
+    );
+    super::work_context_events::record_event_conn(tx, &event, envelope)
+        .with_context(|| format!("failed to record {event_type} event"))
 }
 
 /// Atomic completion persistence (#228 repair): every durable effect of
@@ -250,6 +251,7 @@ pub fn persist_completion_conn(
     playbook: Option<&crate::work::playbook::WorkContextPlaybook>,
     status_from: WorkStatus,
     status_to: WorkStatus,
+    envelope: &crate::work::provenance::ProvenanceEnvelope,
 ) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
 
@@ -290,6 +292,7 @@ pub fn persist_completion_conn(
         &context.id,
         "status_changed",
         serde_json::json!({ "from": status_from, "to": status_to }),
+        envelope,
     )?;
 
     tx.commit()?;
@@ -299,6 +302,16 @@ pub fn persist_completion_conn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn journal() -> crate::work::provenance::JournalContext {
+        crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        )
+    }
+
     use crate::db::Db;
     use crate::work::artifact::{Artifact, ArtifactKind};
     use crate::work::types::{WorkContext, WorkDomain, WorkPhase, WorkStatus};
@@ -332,7 +345,20 @@ mod tests {
         draft: &IterationDraft,
         performance: Option<&FlowPerformanceRecord>,
     ) -> Result<bool> {
-        persist_iteration_conn(db.conn(), context, draft, performance)
+        persist_iteration_conn(
+            db.conn(),
+            context,
+            draft,
+            performance,
+            &crate::work::provenance::JournalContext::internal_system(
+                format!("test-{}", uuid::Uuid::new_v4()),
+                crate::work::provenance::JournalContext::work_authority(
+                    crate::work::types::AutonomyLevel::Review,
+                    crate::work::types::ApprovalPolicy::Auto,
+                ),
+            )
+            .event_envelope(None),
+        )
     }
 
     fn count(db: &Arc<Db>, table: &str) -> i64 {
@@ -347,6 +373,7 @@ mod tests {
             "T".to_string(),
             WorkDomain::General,
             "goal".to_string(),
+            &journal(),
         )
         .unwrap()
     }
@@ -411,7 +438,8 @@ mod tests {
         // Then the durable cancel lands on top through its own conditional
         // transaction (InProgress is cancellable).
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "after commit").unwrap();
+        wcs.cancel_context(&mut snapshot, "after commit", &journal())
+            .unwrap();
 
         // Both writers' effects are fully present: the committed
         // iteration's rows AND the terminal cancel.
@@ -442,7 +470,8 @@ mod tests {
 
         // The cancel wins before the transaction.
         let mut snapshot = wcs.get_context(&context.id).unwrap().unwrap();
-        wcs.cancel_context(&mut snapshot, "race").unwrap();
+        wcs.cancel_context(&mut snapshot, "race", &journal())
+            .unwrap();
 
         let committed = persist(&db, &context, &draft, None).unwrap();
         assert!(!committed, "must observe cancellation");

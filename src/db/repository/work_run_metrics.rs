@@ -123,6 +123,16 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn journal() -> crate::work::provenance::JournalContext {
+        crate::work::provenance::JournalContext::internal_system(
+            format!("test-{}", uuid::Uuid::new_v4()),
+            crate::work::provenance::JournalContext::work_authority(
+                crate::work::types::AutonomyLevel::Review,
+                crate::work::types::ApprovalPolicy::Auto,
+            ),
+        )
+    }
+
     use crate::db::repository::Db;
     use crate::work::types::{HarnessQualityMetrics, HarnessTraceSummary, TokenUsageSummary};
     use crate::work::{WorkContextService, types::WorkDomain};
@@ -138,6 +148,7 @@ mod tests {
                 "ctx".to_string(),
                 WorkDomain::Software,
                 "goal".to_string(),
+                &journal(),
             )
             .expect("create context");
         let record = HarnessRunMetricsRecord {
