@@ -87,25 +87,34 @@ impl WorkflowDefinition {
             .collect();
         let secret_names: BTreeSet<&str> = authority.declared_secret_names().into_iter().collect();
 
-        for unit in &self.body {
-            audit_unit_authority(self, unit, &tool_keys, &readable, &writable, &mut out);
+        for (body_index, unit) in self.body.iter().enumerate() {
+            let ptr = format!("/body/{body_index}");
+            audit_unit_authority(
+                self, unit, body_index, &tool_keys, &readable, &writable, &mut out,
+            );
             // SOMA-AUTH-0005 / 0006 / 0007 / 0008 / EXP-0007
             for cap in &unit.uses {
                 if !tool_keys.is_empty() && !tool_keys.contains(cap.as_str()) {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0005",
-                        "operation outside allowed set",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0005",
+                            "operation outside allowed set",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
             for sec in &unit.secrets {
                 if !secret_names.contains(sec.as_str()) {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0006",
-                        "secret outside declared policy",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0006",
+                            "secret outside declared policy",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
             for eff in &unit.effects {
@@ -113,21 +122,29 @@ impl WorkflowDefinition {
                     && authority.review.as_ref().and_then(|r| r.effect.as_deref())
                         != Some(eff.name.as_str())
                 {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0007",
-                        "review-gated effect without covering review gate",
-                        format!("{}/{}", unit.id, eff.name),
-                    ));
+                    let subject = format!("{}/{}", unit.id, eff.name);
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0007",
+                            "review-gated effect without covering review gate",
+                            subject.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(subject)),
+                    );
                 }
                 if eff.irreversible.unwrap_or(false)
                     && authority.mutation != super::types::MutationMode::Explicit
                     && !authority.has_recovery_path()
                 {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0008",
-                        "irreversible effect without explicit mutation or recovery",
-                        format!("{}/{}", unit.id, eff.name),
-                    ));
+                    let subject = format!("{}/{}", unit.id, eff.name);
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0008",
+                            "irreversible effect without explicit mutation or recovery",
+                            subject.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(subject)),
+                    );
                 }
                 // SOMA-EXP-0007 (effects), gated on KEY PRESENCE
                 // (`effectExports` declared).
@@ -138,11 +155,15 @@ impl WorkflowDefinition {
                         .flatten()
                         .any(|e| e.name == eff.name)
                 {
-                    out.push(Diagnostic::related(
-                        "SOMA-EXP-0007",
-                        "undeclared effect crossing",
-                        format!("{}/{}", unit.id, eff.name),
-                    ));
+                    let subject = format!("{}/{}", unit.id, eff.name);
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-EXP-0007",
+                            "undeclared effect crossing",
+                            subject.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(subject)),
+                    );
                 }
             }
             for c in &unit.context {
@@ -150,11 +171,15 @@ impl WorkflowDefinition {
                     // Gate on key PRESENCE (discloses is Some), not on
                     // non-empty list.
                     if ctx.discloses.is_some() && !ctx.discloses.as_ref().unwrap().contains(c) {
-                        out.push(Diagnostic::related(
-                            "SOMA-EXP-0007",
-                            "undeclared context crossing",
-                            format!("{}/{}", unit.id, c),
-                        ));
+                        let subject = format!("{}/{}", unit.id, c);
+                        out.push(
+                            Diagnostic::related(
+                                "SOMA-EXP-0007",
+                                "undeclared context crossing",
+                                subject.clone(),
+                            )
+                            .with_source(ptr.clone(), Some(subject)),
+                        );
                     }
                 }
             }
@@ -221,27 +246,34 @@ impl WorkflowDefinition {
             .iter()
             .map(|p| (p.name.as_str(), p.ty.as_str()))
             .collect();
-        for unit in &self.body {
+        for (body_index, unit) in self.body.iter().enumerate() {
+            let ptr = format!("/body/{body_index}");
             for inp in &unit.inputs {
                 if let Some(t) = in_types.get(inp.name.as_str())
                     && *t != inp.ty
                 {
-                    out.push(Diagnostic::related(
-                        "SOMA-CMP-0005",
-                        "port/edge type mismatch",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-CMP-0005",
+                            "port/edge type mismatch",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
             for o in &unit.outputs {
                 if let Some(t) = out_types.get(o.name.as_str())
                     && *t != o.ty
                 {
-                    out.push(Diagnostic::related(
-                        "SOMA-CMP-0005",
-                        "port/edge type mismatch",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-CMP-0005",
+                            "port/edge type mismatch",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
         }
@@ -327,31 +359,39 @@ impl WorkflowDefinition {
         }
 
         // SOMA-EXP-0005: dead inputs
-        for unit in &self.body {
+        for (body_index, unit) in self.body.iter().enumerate() {
+            let ptr = format!("/body/{body_index}");
             for inp in &unit.inputs {
                 if !producers.contains_key(inp.name.as_str())
                     && !boundary_in.contains(inp.name.as_str())
                 {
-                    out.push(Diagnostic::related(
-                        "SOMA-EXP-0005",
-                        "required input not fed/defaulted",
-                        format!("{}/{}", unit.id, inp.name),
-                    ));
+                    let subject = format!("{}/{}", unit.id, inp.name);
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-EXP-0005",
+                            "required input not fed/defaulted",
+                            subject.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(subject)),
+                    );
                 }
             }
         }
 
         // SOMA-EXP-0004: orphan operations
-        for unit in &self.body {
+        for (body_index, unit) in self.body.iter().enumerate() {
             if unit.inputs.is_empty() {
                 let produced: BTreeSet<&str> =
                     unit.outputs.iter().map(|o| o.name.as_str()).collect();
                 if produced.is_disjoint(&consumed) && produced.is_disjoint(&boundary_out) {
-                    out.push(Diagnostic::related(
-                        "SOMA-EXP-0004",
-                        "operation unreachable from any boundary",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-EXP-0004",
+                            "operation unreachable from any boundary",
+                            unit.id.clone(),
+                        )
+                        .with_source(format!("/body/{body_index}"), Some(unit.id.clone())),
+                    );
                 }
             }
         }
@@ -362,7 +402,8 @@ impl WorkflowDefinition {
         }
 
         // SOMA-OUT-0001 / 0002
-        for unit in &self.body {
+        for (body_index, unit) in self.body.iter().enumerate() {
+            let ptr = format!("/body/{body_index}");
             for inp in &unit.inputs {
                 let accepted: BTreeSet<OutcomeVariant> =
                     inp.accepted_outcomes.iter().copied().collect();
@@ -381,17 +422,25 @@ impl WorkflowDefinition {
                     && !accepted.is_empty()
                     && accepted == BTreeSet::from([SUCCESS_VARIANT]);
                 if failure_into_success {
-                    out.push(Diagnostic::related(
-                        "SOMA-OUT-0001",
-                        "failure-like outcome coerced to success",
-                        format!("{}/{}", unit.id, inp.name),
-                    ));
+                    let subject = format!("{}/{}", unit.id, inp.name);
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-OUT-0001",
+                            "failure-like outcome coerced to success",
+                            subject.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(subject)),
+                    );
                 } else if emitted.iter().any(|v| !accepted.contains(v)) {
-                    out.push(Diagnostic::related(
-                        "SOMA-OUT-0002",
-                        "upstream outcome not in accept set",
-                        format!("{}/{}", unit.id, inp.name),
-                    ));
+                    let subject = format!("{}/{}", unit.id, inp.name);
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-OUT-0002",
+                            "upstream outcome not in accept set",
+                            subject.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(subject)),
+                    );
                 }
             }
         }
@@ -406,42 +455,56 @@ impl WorkflowDefinition {
 }
 
 /// SOMA-AUTH-0001 / 0002 / 0003 over one body unit's authority grants.
+///
+/// `body_index` is the unit's position in `body`, used to anchor each
+/// diagnostic at its RFC 6901 pointer `/body/<body_index>`.
 fn audit_unit_authority(
     wf: &WorkflowDefinition,
     unit: &OperationDefinition,
+    body_index: usize,
     tool_keys: &BTreeSet<&str>,
     readable: &BTreeSet<&str>,
     writable: &BTreeSet<&str>,
     out: &mut Vec<Diagnostic>,
 ) {
+    let ptr = format!("/body/{body_index}");
     let imported: BTreeSet<&str> = wf.authority_imports.iter().map(String::as_str).collect();
     for grant in &unit.authority {
         match grant.split_once(':') {
             Some(("readable", scope)) => {
                 if !readable.contains(scope) {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0003",
-                        "readable scope not declared",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0003",
+                            "readable scope not declared",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
             Some(("writable", scope)) => {
                 if !writable.contains(scope) {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0003",
-                        "writable scope not declared",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0003",
+                            "writable scope not declared",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
             _ => {
                 if !tool_keys.contains(grant.as_str()) {
-                    out.push(Diagnostic::related(
-                        "SOMA-AUTH-0001",
-                        "capability used but not granted",
-                        unit.id.clone(),
-                    ));
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-AUTH-0001",
+                            "capability used but not granted",
+                            unit.id.clone(),
+                        )
+                        .with_source(ptr.clone(), Some(unit.id.clone())),
+                    );
                 }
             }
         }
@@ -449,11 +512,14 @@ fn audit_unit_authority(
         // the import set — including scope-prefixed grants; the prefix
         // exemption exists only in AUTH-0001.
         if wf.is_composite() && !imported.contains(grant.as_str()) {
-            out.push(Diagnostic::related(
-                "SOMA-AUTH-0002",
-                "composite exceeding imported authority",
-                unit.id.clone(),
-            ));
+            out.push(
+                Diagnostic::related(
+                    "SOMA-AUTH-0002",
+                    "composite exceeding imported authority",
+                    unit.id.clone(),
+                )
+                .with_source(ptr.clone(), Some(unit.id.clone())),
+            );
         }
     }
 }

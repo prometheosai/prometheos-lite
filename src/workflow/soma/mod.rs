@@ -22,6 +22,9 @@ pub mod event;
 pub mod profile;
 pub mod types;
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use types::SemVer;
 
 pub type SupportedVersion = SemVer;
@@ -43,6 +46,34 @@ pub struct Diagnostic {
     pub message: String,
     #[serde(default)]
     pub related: Vec<String>,
+    /// Optional source location (contract req3): where the offending
+    /// input came from. Omitted from the wire when unset so previously
+    /// serialized diagnostics remain byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DiagnosticSource>,
+    /// Optional remediation (contract req3): how to fix the issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<DiagnosticRemediation>,
+}
+
+/// Source location attached to a [`Diagnostic`]. All members are optional
+/// per the published Diagnostic schema (`source.path`/`source.subject`
+/// are the only members Lite populates).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticSource {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// Remediation hint attached to a [`Diagnostic`]. `summary` is required
+/// by the published Diagnostic schema; `action` is an optional stable
+/// identifier for tooling.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticRemediation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    pub summary: String,
 }
 
 impl Diagnostic {
@@ -53,6 +84,8 @@ impl Diagnostic {
             category: category_for(code).to_string(),
             message: message.into(),
             related: Vec::new(),
+            source: None,
+            remediation: None,
         }
     }
 
@@ -65,30 +98,79 @@ impl Diagnostic {
         d.related.push(related.into());
         d
     }
+
+    /// Attach a source location and optional subject.
+    ///
+    /// `path` is an RFC 6901 JSON pointer into the offending document
+    /// (`""` = the whole document); e.g. `/body/0` for the first body
+    /// unit or `/canonicalization/sha256` for a plan seal member. Per
+    /// the published Diagnostic schema both members are plain strings —
+    /// no runtime shape is enforced.
+    ///
+    /// `subject` carries a stable identifier of the offending element
+    /// (operation id, workflow id, workflowDigest), usually the first
+    /// `related` entry.
+    pub fn with_source(mut self, path: impl Into<String>, subject: Option<String>) -> Self {
+        self.source = Some(DiagnosticSource {
+            path: path.into(),
+            subject,
+        });
+        self
+    }
+
+    /// Attach a remediation action id and human-readable summary.
+    pub fn with_remediation(
+        mut self,
+        action: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        self.remediation = Some(DiagnosticRemediation {
+            action: Some(action.into()),
+            summary: summary.into(),
+        });
+        self
+    }
 }
 
+/// Borrowed view of the vendored catalogue — deserialized straight from
+/// the static `include_str!` text so every entry is a `&'static str`.
+#[derive(serde::Deserialize)]
+struct CatalogueFile<'a> {
+    #[serde(borrow)]
+    codes: Vec<CatalogueEntry<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogueEntry<'a> {
+    code: &'a str,
+    category: &'a str,
+}
+
+/// The published per-code category table — vendored
+/// `vendored/soma/v1.1/diagnostics.json`, the normative source of truth
+/// (same rule as the oracle's exact-match `category_for`). Every stable
+/// diagnostic code resolves to its exact pinned category, never a
+/// family-generic stand-in derived from substring matching.
+///
+/// Fail-safe: codes absent from the catalogue fall back to `"general"`;
+/// `tests/emitted_diagnostics_conformance.rs` proves every code Lite
+/// emits is catalogue-registered, so production diagnostics never take
+/// the fallback.
 fn category_for(code: &str) -> &'static str {
-    if code.contains("AUTH") {
-        "authority_expansion"
-    } else if code.contains("GOV") {
-        "governance"
-    } else if code.contains("EXP") {
-        "expansion"
-    } else if code.contains("OUT") {
-        "outcome"
-    } else if code.contains("CMP") {
-        "canonical_integrity"
-    } else if code.contains("RES") {
-        "resume"
-    } else if code.contains("EVT") {
-        "event"
-    } else if code.contains("PROF") {
-        "profile"
-    } else if code.contains("ADAPT") {
-        "adapter"
-    } else {
-        "general"
-    }
+    static CATALOGUE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    CATALOGUE
+        .get_or_init(|| {
+            let file: CatalogueFile<'static> =
+                serde_json::from_str(include_str!("../../../vendored/soma/v1.1/diagnostics.json"))
+                    .expect("vendored diagnostics.json parses");
+            file.codes
+                .into_iter()
+                .map(|entry| (entry.code, entry.category))
+                .collect()
+        })
+        .get(code)
+        .copied()
+        .unwrap_or("general")
 }
 
 /// Canonical digest of a parsed JSON value (normative decimal-v2 policy).
@@ -137,6 +219,9 @@ pub(crate) fn numeric_lexeme(n: &serde_json::Number) -> Option<String> {
 ///
 /// Errors (`Err`) are input refusals — malformed JSON or a document that
 /// violates its declared schema; callers map them to SOMA-CMP-0003.
+/// Exception: the `ExecutionPlan` branch returns policy refusals as
+/// `Ok` diagnostics so the boundary's catalogue codes (CMP-0001, CMP-0007)
+/// survive instead of collapsing into CMP-0003.
 pub fn validate_artifact_text(artifact_kind: &str, text: &str) -> Result<Vec<Diagnostic>, String> {
     // Strict structural scan first so duplicate keys cannot pass via the DOM
     // path (serde silently keeps the last duplicate).
@@ -198,6 +283,19 @@ pub fn validate_artifact_text(artifact_kind: &str, text: &str) -> Result<Vec<Dia
             let model: adapters::AdapterConformance =
                 serde_json::from_value(raw).map_err(|e| format!("schema violation: {e}"))?;
             Ok(model.audit(&supported))
+        }
+        // The plan boundary shares `governance_compiler`'s strict validator
+        // (review blocker 4) so this branch and `verify_reviewed_plan`
+        // refuse exactly the same texts. Policy refusals keep their
+        // catalogue codes (CMP-0001/CMP-0003/CMP-0007) as diagnostics
+        // instead of collapsing into the generic Err -> CMP-0003 mapping
+        // of the other kinds; the raw dup/number/JSON scans above already
+        // ran on this text, so anything reaching here was well-formed.
+        "ExecutionPlan" => {
+            match crate::workflow::governance_compiler::validate_execution_plan_text(text) {
+                Err(d) => Ok(vec![d]),
+                Ok(_) => Ok(vec![]),
+            }
         }
         other => Err(format!("unsupported artifact kind {other:?}")),
     }

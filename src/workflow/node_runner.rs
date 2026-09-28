@@ -208,20 +208,41 @@ pub struct NodeRunRequest<'a> {
 }
 
 /// The generic governed node runner.
-#[derive(Default)]
+///
+/// Constructing a runner REQUIRES a [`GovernancePermit`]: there is no
+/// `Default`, no builder, and no public permit field. Every public effect
+/// path (`execute`, `execute_async`, `preflight_gates`, `seal_effect`) runs
+/// `permit.ensure_request(manifest, capability)` FIRST, before any
+/// capability resolution or effect, so a request whose manifest node id is
+/// not governed by the reviewed plan - or whose capability or manifest
+/// scopes diverge from the reviewed step's granted authority - is refused
+/// rather than executed. `into_effect` is covered transitively - it is
+/// only obtainable from `preflight_gates`, which already ran the check;
+/// this is stated rather than overclaimed.
 pub struct NodeRunner {
+    permit: crate::workflow::governance_permit::GovernancePermit,
     registry: CapabilityRegistry,
     completed: BTreeMap<String, NodeRunOutcome>,
     journal: Vec<JournalEntryV1>,
 }
 
 impl NodeRunner {
-    pub fn new(registry: CapabilityRegistry) -> Self {
+    /// Construct a runner bound to a reviewed governance permit.
+    pub fn new(
+        registry: CapabilityRegistry,
+        permit: crate::workflow::governance_permit::GovernancePermit,
+    ) -> Self {
         Self {
+            permit,
             registry,
             completed: BTreeMap::new(),
             journal: Vec::new(),
         }
+    }
+
+    /// The permit this runner is bound to.
+    pub fn permit(&self) -> &crate::workflow::governance_permit::GovernancePermit {
+        &self.permit
     }
 
     pub fn journal(&self) -> &[JournalEntryV1] {
@@ -233,6 +254,24 @@ impl NodeRunner {
         &mut self.registry
     }
 
+    /// Fail-closed request binding, run FIRST in every public effect path.
+    /// The manifest node id must be governed by this runner's reviewed
+    /// plan, the requested capability must be granted to that step, and
+    /// the manifest scopes must not exceed the step's grant; refusals
+    /// surface the catalogue code (SOMA-CMP-0002 / SOMA-AUTH-0001 /
+    /// SOMA-AUTH-0003) before any capability resolution or effect.
+    fn ensure_governed(&self, req: &NodeRunRequest<'_>) -> anyhow::Result<()> {
+        self.permit
+            .ensure_request(req.manifest, &req.capability)
+            .map_err(|diags| match diags.first() {
+                Some(diag) => anyhow::anyhow!("{}: {}", diag.code, diag.message),
+                None => anyhow::anyhow!(
+                    "SOMA-CMP-0002: permit does not authorize this request ({:?})",
+                    req.manifest.node_id
+                ),
+            })
+    }
+
     /// Gates 1-4 for an async effect whose future the CALLER drives (e.g. a
     /// provider call raced against a heartbeat). Returns the resolved
     /// capability; pair with [`NodeRunner::seal_effect`], which enforces
@@ -242,6 +281,7 @@ impl NodeRunner {
         &'a mut self,
         req: &'a NodeRunRequest<'_>,
     ) -> Result<ResolvedAsyncCapability> {
+        self.ensure_governed(req)?;
         if self.completed.contains_key(&req.idempotency_key) {
             anyhow::bail!("idempotency conflict: key already completed");
         }
@@ -311,6 +351,7 @@ impl NodeRunner {
         req: &NodeRunRequest<'_>,
         effect: Result<String>,
     ) -> Result<NodeRunOutcome> {
+        self.ensure_governed(req)?;
         let mut stage = GateStage::Executed;
         let redacted_output = match effect {
             Ok(text) => {
@@ -386,6 +427,7 @@ impl NodeRunner {
     /// handler, then gates 6-9. For effects the caller must race/select,
     /// use [`NodeRunner::preflight_gates`] + [`NodeRunner::seal_effect`].
     pub async fn execute_async(&mut self, req: NodeRunRequest<'_>) -> Result<NodeRunOutcome> {
+        self.ensure_governed(&req)?;
         if self.completed.contains_key(&req.idempotency_key) {
             return Ok(self.completed[&req.idempotency_key].clone());
         }
@@ -396,6 +438,7 @@ impl NodeRunner {
 
     /// Execute through all nine gates. Idempotent on `idempotency_key`.
     pub fn execute(&mut self, req: NodeRunRequest<'_>) -> Result<NodeRunOutcome> {
+        self.ensure_governed(&req)?;
         if let Some(cached) = self.completed.get(&req.idempotency_key) {
             return Ok(cached.clone());
         }
@@ -547,9 +590,41 @@ fn journal_entry_digest(entry: &JournalEntryV1) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::governance_permit::GovernancePermit;
     use crate::workflow::policy::LocalRestrictions;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn permit() -> GovernancePermit {
+        let text = r#"{
+  "schemaVersion": "1.1.0", "version": "1.1.0", "id": "lite-runner-test",
+  "name": "Runner test", "kind": "atomic",
+  "inputPorts": [{"name": "goal", "direction": "input", "type": "string",
+                  "cardinality": "single", "requiredness": "required"}],
+  "outputPorts": [{"name": "result", "direction": "output", "type": "string",
+                   "cardinality": "single", "requiredness": "required"}],
+  "body": [
+    {"schemaVersion": "1.1.0", "version": "1.1.0", "id": "node-1",
+     "executionClass": "deterministic",
+     "inputs": [{"name": "goal", "type": "string", "acceptedOutcomes": ["Produced"]}],
+     "outputs": [{"name": "result", "type": "string", "emits": ["Produced"]}],
+     "authority": ["readable:repo://x", "writable:work://y", "echo", "ghost-cap"],
+     "effects": [], "uses": [], "secrets": [], "context": []}
+  ],
+  "authority": {
+    "executionClass": "deterministic", "mutation": "none",
+    "tools": {"echo": [], "ghost-cap": []},
+    "readableScopes": ["repo://x"], "writableScopes": ["work://y"],
+    "networkPolicy": {"default": "deny"}, "providerPolicy": {"allowlist": []},
+    "secrets": []
+  }
+}"#;
+        let identity = crate::workflow::governance_compiler::compile_workflow_text(text)
+            .expect("audit-clean workflow compiles")
+            .canonicalization
+            .sha256;
+        GovernancePermit::issue(text, &identity).expect("permit issues")
+    }
 
     fn manifest() -> NodeManifestV1 {
         NodeManifestV1::parse_json(
@@ -592,7 +667,7 @@ mod tests {
                 ))
             }),
         );
-        NodeRunner::new(registry)
+        NodeRunner::new(registry, permit())
     }
 
     fn request<'a>(

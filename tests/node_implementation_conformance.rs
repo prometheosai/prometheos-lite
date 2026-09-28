@@ -31,6 +31,20 @@ use prometheos_lite::workflow::workspace::{
     WorkspaceRefError, WorkspaceRefV1, stable_repo_identity_digest,
 };
 
+mod common;
+use common::permit_for;
+
+/// Capabilities this crate exercises; granted by the shared permit.
+const PERMIT_CAPS: &[&str] = &[CAP_IMPLEMENT, CAP_REPAIR];
+
+/// Wrap a registry with a permit governing exactly the given node ids.
+fn governed_runner(
+    registry: prometheos_lite::workflow::node_runner::CapabilityRegistry,
+    ids: &[&str],
+) -> NodeRunner {
+    NodeRunner::new(registry, permit_for(ids, PERMIT_CAPS))
+}
+
 fn restrictions_with_write() -> LocalRestrictions {
     LocalRestrictions {
         readable_scopes: vec!["repo://fixture".to_string()],
@@ -56,7 +70,19 @@ fn restrictions_readonly() -> LocalRestrictions {
 }
 
 fn runner() -> NodeRunner {
-    NodeRunner::new(implementation_repair_registry())
+    governed_runner(
+        implementation_repair_registry(),
+        &[
+            "node-impl",
+            "node-repair",
+            "node-impl-deny",
+            "node-impl-bad",
+            "node-impl-p11",
+            "node-repair-p11",
+            "node-impl-p13",
+            "node-impl-p2",
+        ],
+    )
 }
 
 fn run_node(

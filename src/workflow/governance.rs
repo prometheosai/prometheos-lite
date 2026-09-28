@@ -53,6 +53,11 @@ impl CompiledAuthorityGraph {
     /// Per-operation authority projection check: provider/harness selection
     /// expressed as an authority projection must not widen the compiled
     /// effective profile. Any widening is rejected before effects run.
+    // Diagnostic gained optional source/remediation members for issue #163
+    // req3, which pushes Result<(), Diagnostic> past clippy's large-err
+    // threshold. The Err value is returned by value only on the refusal
+    // path; boxing would churn every caller for no size win.
+    #[allow(clippy::result_large_err)]
     pub fn selection_within_authority(
         &self,
         op_id: &str,
