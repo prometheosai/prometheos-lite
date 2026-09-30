@@ -122,6 +122,12 @@ pub enum RepoBinding {
         revision: String,
         #[serde(rename = "workspaceDigest")]
         workspace_digest: String,
+        /// #232 P1: the digest-policy version — a first-class envelope
+        /// field (not merely an input to the digest computation) so
+        /// consumers know how to interpret `workspace_digest` without
+        /// re-deriving the policy from the digest bytes.
+        #[serde(rename = "digestPolicy")]
+        digest_policy: String,
     },
     Unbound,
 }

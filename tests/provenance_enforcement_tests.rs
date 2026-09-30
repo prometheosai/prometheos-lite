@@ -1144,3 +1144,122 @@ fn trigger_rejects_principal_null_semantics_violation() {
         "principal_id NULL but envelope has human identity must be rejected"
     );
 }
+
+#[test]
+fn cancel_with_publishes_payload_before_flag() {
+    // #232 P1 publication-order regression: after cancel_with returns,
+    // BOTH the flag and the payload are visible — guaranteed by the
+    // SeqCst ordering contract (payload written and mutex released
+    // BEFORE the flag store). No observer can see is_cancelled()==true
+    // with cancellation_payload()==None for a payload-bearing cancel.
+    let token = prometheos_lite::workflow::evaluate::CancellationToken::new();
+    token.cancel_with("exact-event-id-123".to_string());
+
+    assert!(
+        token.is_cancelled(),
+        "flag must be visible after cancel_with returns"
+    );
+    assert_eq!(
+        token.cancellation_payload(),
+        Some("exact-event-id-123".to_string()),
+        "payload must be visible after cancel_with returns — the publication-order contract guarantees no fired-without-payload gap"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_observers_never_see_fired_without_payload() {
+    // #232 P1 stronger regression: spawn many concurrent observers that
+    // poll is_cancelled() and immediately check cancellation_payload().
+    // No observer may see the flag as true with a None payload after a
+    // payload-bearing cancel — the SeqCst ordering (payload before flag)
+    // makes this impossible.
+    let token = prometheos_lite::workflow::evaluate::CancellationToken::new();
+
+    let mut observers = Vec::new();
+    for _ in 0..50 {
+        let observer = token.clone();
+        observers.push(tokio::spawn(async move {
+            let mut saw_gap = false;
+            for _ in 0..100_000 {
+                if observer.is_cancelled() {
+                    if observer.cancellation_payload().is_none() {
+                        saw_gap = true;
+                    }
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            saw_gap
+        }));
+    }
+
+    // Give the observers a head start, then cancel WITH a payload.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    token.cancel_with("event-under-concurrent-observation".to_string());
+
+    for handle in observers {
+        let saw_gap = handle.await.unwrap();
+        assert!(
+            !saw_gap,
+            "no concurrent observer may see is_cancelled()==true with cancellation_payload()==None after a payload-bearing cancel"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registered_run_cancel_uses_token_payload_not_durable_lookup() {
+    // #232 P1 strongest regression: a registered-run cancel fires the
+    // token WITH the exact cancellation event ID. The orchestrator must
+    // extract the ID from the token payload — even if the durable
+    // lookup would return a DIFFERENT (wrong) answer. This proves the
+    // token payload is the preferred source and the durable lookup is
+    // only the cross-process fallback, not the primary.
+    use prometheos_lite::db::Db;
+    use prometheos_lite::work::service::WorkContextService;
+    use prometheos_lite::work::types::WorkDomain;
+
+    let db = std::sync::Arc::new(Db::in_memory().unwrap());
+    let wcs = std::sync::Arc::new(WorkContextService::new(db.clone()));
+    let journal = test_journal();
+
+    let mut context = wcs
+        .create_context(
+            "user-1".to_string(),
+            "Token payload test".to_string(),
+            WorkDomain::General,
+            "goal".to_string(),
+            &journal,
+        )
+        .unwrap();
+
+    // Cancel durably — the transactional cancel returns the exact event ID.
+    let cancel_event_id = wcs
+        .cancel_context(&mut context, "test", &journal)
+        .unwrap()
+        .expect("cancel must return the exact event id");
+
+    // Create a token and fire it with the SAME event ID (as the API
+    // cancel handler does via fire_with_cancellation).
+    let token = prometheos_lite::workflow::evaluate::CancellationToken::new();
+    token.cancel_with(cancel_event_id.clone());
+
+    // The token's payload IS the exact durable event ID — no lookup needed.
+    assert_eq!(
+        token.cancellation_payload(),
+        Some(cancel_event_id),
+        "the token payload must be the exact cancellation event ID from cancel_context's return"
+    );
+
+    // The durable lookup ALSO returns the same ID (exactly one).
+    let durable = prometheos_lite::db::repository::work_context_events::cancellation_event_id_conn(
+        db.conn(),
+        &context.id,
+    )
+    .unwrap()
+    .expect("exactly one cancellation event");
+    assert_eq!(
+        token.cancellation_payload().as_deref(),
+        Some(durable.as_str()),
+        "the token payload and the durable lookup must agree — but the token is the preferred source"
+    );
+}

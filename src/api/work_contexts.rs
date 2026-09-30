@@ -417,6 +417,7 @@ fn detect_repo_binding(
         Ok(RepoBinding::Dirty {
             revision,
             workspace_digest: digest,
+            digest_policy: "soma-canonical-json-v1".to_string(),
         })
     }
 }

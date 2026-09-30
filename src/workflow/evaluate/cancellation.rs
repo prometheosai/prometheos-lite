@@ -65,14 +65,28 @@ impl CancellationToken {
     /// #232 finding 2: cancel with a payload — the exact cancellation
     /// event ID from `cancel_context`'s return, carried through the
     /// signal. The observer extracts the ID from the token, not from a
-    /// database lookup. Idempotent: the first payload wins.
+    /// database lookup.
+    ///
+    /// Synchronization contract (publication order): the payload is
+    /// written and the mutex released BEFORE the flag is set. With
+    /// SeqCst ordering, any observer that sees `is_cancelled() == true`
+    /// is guaranteed the payload is already visible — no observer can
+    /// observe a fired-without-payload gap for a payload-bearing cancel.
+    /// Idempotent: the first payload wins; later calls are no-ops on
+    /// the payload (but still set the flag for safety).
     pub fn cancel_with(&self, payload: String) {
+        // 1. Write the payload first (inside the mutex).
+        {
+            let mut slot = self.payload.lock().expect("payload mutex poisoned");
+            if slot.is_none() {
+                *slot = Some(payload);
+            }
+        } // Mutex dropped — payload is now visible to any lock holder.
+        // 2. Set the flag AFTER the payload is published. SeqCst ensures
+        //    the flag store happens-after the payload write; any observer
+        //    that sees the flag as true can safely read the payload.
         self.flag.store(true, Ordering::SeqCst);
-        let mut slot = self.payload.lock().expect("payload mutex poisoned");
-        if slot.is_none() {
-            *slot = Some(payload);
-        }
-        drop(slot);
+        // 3. Wake waiters.
         self.notify.notify_waiters();
     }
 
