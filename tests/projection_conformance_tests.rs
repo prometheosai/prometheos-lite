@@ -48,3 +48,130 @@ fn envelope_rejects_unknown_fields() {
     let parsed = serde_json::from_value::<VersionedProjectionEnvelope<serde_json::Value>>(value);
     assert!(parsed.is_err(), "unknown envelope field must fail closed");
 }
+
+use prometheos_lite::workflow::governance_compiler::compile_workflow_text;
+use prometheos_lite::workflow::projection::{project_canonical_json, validated_source};
+use prometheos_lite::workflow::soma::contracts::WorkflowDefinition;
+
+const VENDORED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendored/soma/v1.1");
+
+fn fixture(rel: &str) -> String {
+    std::fs::read_to_string(format!("{VENDORED}/{rel}")).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+fn base_text() -> String {
+    fixture("fixtures/valid/wf-valid-base.json")
+}
+
+fn base_wf() -> WorkflowDefinition {
+    serde_json::from_str(&base_text()).expect("base fixture parses")
+}
+
+/// Same AST content built from JSON texts whose `tools` object keys appear
+/// in seed-dependent textual insertion orders; serde's BTreeMap-backed Map
+/// must converge them to one canonical projection.
+fn seed_wf(seed: usize) -> WorkflowDefinition {
+    let mut value: serde_json::Value = serde_json::from_str(&base_text()).expect("base parses");
+    let tools_text = match seed % 3 {
+        0 => r#"{"ship":["ship.v1"],"archive":["archive.v1"],"alpha":["alpha.v1"]}"#,
+        1 => r#"{"alpha":["alpha.v1"],"ship":["ship.v1"],"archive":["archive.v1"]}"#,
+        _ => r#"{"archive":["archive.v1"],"alpha":["alpha.v1"],"ship":["ship.v1"]}"#,
+    };
+    value["authority"]["tools"] = serde_json::from_str(tools_text).expect("tools value");
+    serde_json::from_value(value).expect("seeded workflow parses")
+}
+
+/// Base fixture with a purpose that embeds the secret canary (redaction seed).
+/// Consumed by the disclosure-policy task of this slice; allowed dead code
+/// until that task appends its tests.
+#[allow(dead_code)]
+fn redacted_seed_text() -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&base_text()).expect("base parses");
+    value["purpose"] = serde_json::json!(format!(
+        "handle orders for {}",
+        prometheos_lite::workflow::redaction::SECRET_CANARY
+    ));
+    serde_json::to_string(&value).expect("seed serializes")
+}
+
+#[test]
+fn canonical_projection_is_byte_deterministic_across_seeds() {
+    let mut ref_bytes: Option<Vec<u8>> = None;
+    let mut ref_digests: Option<(String, String)> = None;
+    for seed in 0..10usize {
+        let wf = seed_wf(seed);
+        let env = project_canonical_json(&wf).expect("seed projects");
+        let bytes = env.canonical_bytes().expect("canonical bytes");
+        match (&ref_bytes, &ref_digests) {
+            (None, None) => {
+                ref_bytes = Some(bytes);
+                ref_digests = Some((env.source_digest.clone(), env.projection_digest.clone()));
+            }
+            (Some(rb), Some((sd, pd))) => {
+                assert_eq!(&bytes, rb, "seed {seed} produced different envelope bytes");
+                assert_eq!(&env.source_digest, sd, "seed {seed} source digest differs");
+                assert_eq!(
+                    &env.projection_digest, pd,
+                    "seed {seed} projection digest differs"
+                );
+            }
+            _ => unreachable!("both set together"),
+        }
+    }
+}
+
+#[test]
+fn one_byte_semantic_change_changes_both_digests() {
+    let a = base_wf();
+    let mut b = base_wf();
+    b.name = "Bass".to_string(); // "Base" -> "Bass": exactly one byte differs
+    let ea = project_canonical_json(&a).expect("a projects");
+    let eb = project_canonical_json(&b).expect("b projects");
+    assert_ne!(
+        ea.source_digest, eb.source_digest,
+        "source digest must change"
+    );
+    assert_ne!(
+        ea.projection_digest, eb.projection_digest,
+        "projection digest must change"
+    );
+}
+
+#[test]
+fn source_digest_matches_workflow_digest_of() {
+    let plan = compile_workflow_text(&base_text()).expect("base compiles");
+    let env = project_canonical_json(&base_wf()).expect("projects");
+    assert_eq!(env.source_digest, plan.workflow_digest);
+    assert_eq!(env.projection_version, "projection.v1");
+    assert_eq!(env.schema_version, "1.1.0");
+}
+
+#[test]
+fn projection_input_requires_validated_ast() {
+    // Wrong schema version: audit reports SOMA-CMP-0001, gate refuses.
+    let mut bad = base_wf();
+    bad.schema_version = "0.9.0".to_string();
+    let err = project_canonical_json(&bad).expect_err("wrong schema must be refused");
+    assert!(
+        err.iter()
+            .any(|d| d.code == "SOMA-CMP-0001" || d.code == "PROJ-0001"),
+        "expected a version refusal, got {err:?}"
+    );
+    assert!(
+        validated_source(&bad).is_err(),
+        "gate must refuse directly too"
+    );
+
+    // Broken contentDigest: audit reports SOMA-CMP-0004, gate refuses.
+    let mut value: serde_json::Value = serde_json::from_str(&base_text()).unwrap();
+    value["contentDigest"] = serde_json::json!("0".repeat(64));
+    let bad: WorkflowDefinition = serde_json::from_value(value).expect("parses");
+    let err = project_canonical_json(&bad).expect_err("bad contentDigest must be refused");
+    assert!(
+        err.iter().any(|d| d.code == "SOMA-CMP-0004"),
+        "expected a digest refusal, got {err:?}"
+    );
+
+    // Sanity: the honest fixture passes the gate.
+    assert!(validated_source(&base_wf()).is_ok());
+}
