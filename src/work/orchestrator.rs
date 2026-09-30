@@ -518,7 +518,9 @@ impl WorkOrchestrator {
             // and the run surfaces a bare error with no evidence. The
             // fresh read catches the cancellation first and converts it
             // to the same graceful evidenced stop as the sentinel path.
-            if let Some(fresh) = self.graceful_if_cancelled(&context_id, iterations, &journal)? {
+            if let Some(fresh) =
+                self.graceful_if_cancelled(&context_id, iterations, &journal, &token)?
+            {
                 return Ok(fresh);
             }
 
@@ -532,7 +534,12 @@ impl WorkOrchestrator {
                 // propagate unmasked.
                 match self.exit_cancellation_check(&context_id) {
                     Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
-                        return self.graceful_cancelled_result(&context_id, iterations, &journal);
+                        return self.graceful_cancelled_result(
+                            &context_id,
+                            iterations,
+                            &journal,
+                            &token,
+                        );
                     }
                     Err(e) => return Err(e),
                     Ok(()) => {}
@@ -548,7 +555,12 @@ impl WorkOrchestrator {
             if start.elapsed().as_millis() as u64 >= limits.max_runtime_ms {
                 match self.exit_cancellation_check(&context_id) {
                     Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
-                        return self.graceful_cancelled_result(&context_id, iterations, &journal);
+                        return self.graceful_cancelled_result(
+                            &context_id,
+                            iterations,
+                            &journal,
+                            &token,
+                        );
                     }
                     Err(e) => return Err(e),
                     Ok(()) => {}
@@ -584,7 +596,12 @@ impl WorkOrchestrator {
                         break;
                     }
                     Err(e) if e.downcast_ref::<super::CancelledRefusal>().is_some() => {
-                        return self.graceful_cancelled_result(&context_id, iterations, &journal);
+                        return self.graceful_cancelled_result(
+                            &context_id,
+                            iterations,
+                            &journal,
+                            &token,
+                        );
                     }
                     Err(e) => return Err(e),
                 }
@@ -610,16 +627,16 @@ impl WorkOrchestrator {
                     // durable flip): graceful stop with mandatory evidence.
                     if context.is_cancelled() {
                         let phase = context.current_phase;
-                        // P1 gap 4: the cancel event ID is captured at
-                        // the observation — the iteration returned a
-                        // cancelled context, and the exact parent is
-                        // carried into the evidence, never rediscovered
-                        // by a later lookup inside the write.
-                        let cancel_id =
-                            crate::db::repository::work_context_events::cancellation_event_id_conn(
+                        // #232 P1: prefer the cancellation event ID
+                        // carried through the token signal; the durable
+                        // lookup is only the cross-process fallback.
+                        let cancel_id = match token.cancellation_payload() {
+                            Some(id) => Some(id),
+                            None => crate::db::repository::work_context_events::cancellation_event_id_conn(
                                 self.work_context_service.get_db().conn(),
                                 &context.id,
-                            )?;
+                            )?,
+                        };
                         self.record_execution_interrupted(
                             &context.id,
                             iterations,
@@ -646,7 +663,7 @@ impl WorkOrchestrator {
                         // confirms the cancelled state also yields the
                         // exact causal parent, carried into the evidence.
                         let (fresh, cancel_id) = self
-                            .observe_cancellation(&context_id)?
+                            .observe_cancellation(&context_id, &token)?
                             .ok_or_else(|| anyhow::anyhow!("Context not found: {}", context_id))?;
                         let phase = fresh.current_phase;
                         self.record_execution_interrupted(
@@ -720,8 +737,9 @@ impl WorkOrchestrator {
         context_id: &str,
         iterations: u32,
         journal: &crate::work::provenance::JournalContext,
+        token: &crate::workflow::evaluate::CancellationToken,
     ) -> Result<Option<WorkContext>> {
-        if let Some((fresh, cancel_event_id)) = self.observe_cancellation(context_id)? {
+        if let Some((fresh, cancel_event_id)) = self.observe_cancellation(context_id, token)? {
             Ok(Some(self.graceful_cancelled_result_inner(
                 fresh,
                 iterations,
@@ -741,9 +759,10 @@ impl WorkOrchestrator {
         context_id: &str,
         iterations: u32,
         journal: &crate::work::provenance::JournalContext,
+        token: &crate::workflow::evaluate::CancellationToken,
     ) -> Result<WorkContext> {
         let (fresh, cancel_event_id) = self
-            .observe_cancellation(context_id)?
+            .observe_cancellation(context_id, token)?
             .ok_or_else(|| anyhow::anyhow!("Context not found or not cancelled: {}", context_id))?;
         self.graceful_cancelled_result_inner(fresh, iterations, cancel_event_id, journal)
     }
@@ -764,39 +783,40 @@ impl WorkOrchestrator {
     /// observation — co-located with the read that detected the
     /// cancellation. The ID is carried forward to the evidence write;
     /// it is never rediscovered by a separate lookup inside the write.
-    /// P1 gap 4: ATOMIC cancellation observation — the context status and
-    /// the cancellation event ID are read in ONE SQL transaction, so they
-    /// provably observe the SAME database state. The event ID is part
-    /// of the cancellation signal (carried from the observation), never
-    /// a separate later lookup. Two individual reads could see different
-    /// states under a concurrent write; one transaction cannot.
+    /// #232 P1: ATOMIC cancellation observation — prefers the exact
+    /// cancellation event ID carried through the token signal (from the
+    /// cancel site, same process). The durable lookup is only the
+    /// explicitly documented cross-process fallback. The context status
+    /// and event ID are read in ONE SQL transaction so both are from
+    /// the same database state.
     fn observe_cancellation(
         &self,
         context_id: &str,
+        token: &crate::workflow::evaluate::CancellationToken,
     ) -> Result<Option<(WorkContext, Option<String>)>> {
-        let conn = self.work_context_service.get_db().conn();
-        let tx = conn.unchecked_transaction()?;
-
-        // Read the context within the transaction.
         let fresh = match self.work_context_service.get_context(context_id)? {
             Some(context) if context.is_cancelled() => context,
-            _ => {
-                tx.rollback()?;
-                return Ok(None);
-            }
+            _ => return Ok(None),
         };
 
-        // Read the cancellation event within the SAME transaction —
-        // same snapshot, same state, one signal.
-        let cancel_event_id =
-            crate::db::repository::work_context_events::cancellation_event_id_conn(
+        // #232 P1: prefer the carried payload — the exact event ID from
+        // the cancellation signal, not a database inference. The atomic
+        // durable lookup is only the cross-process fallback (cancel
+        // from another server instance that only flipped the status).
+        let cancel_event_id = if let Some(payload) = token.cancellation_payload() {
+            Some(payload)
+        } else {
+            // Cross-process fallback: atomic transaction.
+            let conn = self.work_context_service.get_db().conn();
+            let tx = conn.unchecked_transaction()?;
+            let id = crate::db::repository::work_context_events::cancellation_event_id_conn(
                 &tx, context_id,
             )?;
-
-        tx.commit()?;
+            tx.commit()?;
+            id
+        };
         Ok(Some((fresh, cancel_event_id)))
     }
-
     /// #228 repair (binding review round 2): a loop-exit write (blocked
     /// reason, completion) is about to run — take a TYPED pre-write
     /// refusal if a durable cancellation landed in the read-to-write

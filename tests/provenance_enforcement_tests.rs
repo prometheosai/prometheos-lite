@@ -916,27 +916,76 @@ fn cancellation_payload_is_carried_through_the_token_signal() {
 fn authority_partial_order_covers_all_three_dimensions() {
     let journal = test_journal();
 
-    // Autonomy widening is refused.
+    // === WIDENING REFUSED (all three dimensions) ===
+
+    // Autonomy widening: Chat (0) → Autonomous (2) is refused.
     let mut widened_autonomy = journal.event_envelope(None);
     widened_autonomy.authority.declared.autonomy = AutonomyLevel::Chat;
     widened_autonomy.authority.effective.autonomy = AutonomyLevel::Autonomous;
     assert!(
         widened_autonomy.validate_write_invariants().is_err(),
-        "autonomy widening (Chat â†’ Autonomous) must fail"
+        "autonomy widening (Chat → Autonomous) must fail"
     );
 
-    // Approval-policy widening is refused.
+    // Approval-policy widening: ManualAll (0) → Auto (4) is refused.
+    // Ordering justification: the approval-policy rank measures how much
+    // the runtime may do WITHOUT human approval. ManualAll (every action
+    // needs approval, rank 0) is the most restrictive. Auto (no approval
+    // needed, rank 4) is the most permissive. Widening means the effective
+    // policy allows MORE without approval than what was declared.
     let mut widened_approval = journal.event_envelope(None);
     widened_approval.authority.declared.approval_policy = ApprovalPolicy::ManualAll;
     widened_approval.authority.effective.approval_policy = ApprovalPolicy::Auto;
     assert!(
         widened_approval.validate_write_invariants().is_err(),
-        "approval-policy widening (ManualAll â†’ Auto) must fail"
+        "approval-policy widening (ManualAll → Auto) must fail"
     );
 
-    // Same-level narrowing is allowed (effective == declared).
-    let narrowed = journal.event_envelope(None);
-    assert!(narrowed.validate_write_invariants().is_ok());
+    // Execution-class widening: Deterministic (0) → HumanDecision (3) refused.
+    let mut widened_execution = journal.event_envelope(None);
+    widened_execution.authority.declared.execution_class =
+        prometheos_lite::work::provenance::ExecutionClass::Deterministic;
+    widened_execution.authority.effective.execution_class =
+        prometheos_lite::work::provenance::ExecutionClass::HumanDecision;
+    assert!(
+        widened_execution.validate_write_invariants().is_err(),
+        "execution-class widening (Deterministic → HumanDecision) must fail"
+    );
+
+    // === NARROWING PERMITTED (effective may reduce declared) ===
+
+    // Autonomy narrowing: Autonomous declared, Review effective — OK.
+    let mut narrowed_autonomy = journal.event_envelope(None);
+    narrowed_autonomy.authority.declared.autonomy = AutonomyLevel::Autonomous;
+    narrowed_autonomy.authority.effective.autonomy = AutonomyLevel::Review;
+    assert!(
+        narrowed_autonomy.validate_write_invariants().is_ok(),
+        "autonomy narrowing (Autonomous declared, Review effective) must pass"
+    );
+
+    // Approval narrowing: Auto declared, ManualAll effective — OK.
+    let mut narrowed_approval = journal.event_envelope(None);
+    narrowed_approval.authority.declared.approval_policy = ApprovalPolicy::Auto;
+    narrowed_approval.authority.effective.approval_policy = ApprovalPolicy::ManualAll;
+    assert!(
+        narrowed_approval.validate_write_invariants().is_ok(),
+        "approval narrowing (Auto declared, ManualAll effective) must pass"
+    );
+
+    // Execution narrowing: HumanDecision declared, Deterministic effective — OK.
+    let mut narrowed_execution = journal.event_envelope(None);
+    narrowed_execution.authority.declared.execution_class =
+        prometheos_lite::work::provenance::ExecutionClass::HumanDecision;
+    narrowed_execution.authority.effective.execution_class =
+        prometheos_lite::work::provenance::ExecutionClass::Deterministic;
+    assert!(
+        narrowed_execution.validate_write_invariants().is_ok(),
+        "execution narrowing (HumanDecision declared, Deterministic effective) must pass"
+    );
+
+    // Same-level is always permitted.
+    let same = journal.event_envelope(None);
+    assert!(same.validate_write_invariants().is_ok());
 }
 
 #[test]
@@ -986,5 +1035,112 @@ fn trigger_validates_typed_json_paths() {
     assert!(
         err.is_err(),
         "empty correlationId must be rejected by json_extract"
+    );
+}
+
+#[test]
+fn trigger_rejects_non_hex_digest() {
+    let (db, _wcs) = setup();
+
+    // 64 chars but NOT all lowercase hex (contains 'G').
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-hex-1', 'ctx-hex', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '00000000000000000000000000000000000000000000000000000000000000GG', 'r', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "non-hex characters in source_digest must be rejected by the GLOB check"
+    );
+
+    // 64 chars, all hex, correct — accepted (no error from the hex check).
+    // (The insert may still fail from the flat-column equality checks
+    // because the run_id/correlation_id must match the envelope's
+    // derived keys — but the HEX check itself passes.)
+    let _ = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-hex-2', 'ctx-hex', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'c')",
+        [],
+    );
+    // Should succeed: all-hex digest, run_id='r' matches request_id='r',
+    // correlation_id='c' matches correlationId='c', principal_id NULL
+    // with principal='absent' (no human identity in the envelope).
+}
+
+#[test]
+fn trigger_rejects_flat_column_envelope_mismatch() {
+    let (db, _wcs) = setup();
+
+    // run_id column doesn't match the envelope's derived run key.
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-flat-1', 'ctx-flat', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'WRONG', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "run_id column mismatching the envelope must be rejected"
+    );
+
+    // correlation_id column doesn't match the envelope's derived correlation.
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, correlation_id)
+         VALUES ('ev-flat-2', 'ctx-flat', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'WRONG')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "correlation_id column mismatching the envelope must be rejected"
+    );
+}
+
+#[test]
+fn trigger_rejects_principal_null_semantics_violation() {
+    let (db, _wcs) = setup();
+
+    // principal_id is non-NULL but the envelope says absent (no human identity).
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, principal_id, correlation_id)
+         VALUES ('ev-principal-1', 'ctx-principal', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":\"absent\",\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', 'user-1', 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "principal_id set but envelope says absent must be rejected"
+    );
+
+    // principal_id is NULL but the envelope has a human identity.
+    let err = db.conn().execute(
+        "INSERT INTO work_context_events
+            (id, work_context_id, event_type, data, created_at,
+             provenance_json, source_digest, run_id, principal_id, correlation_id)
+         VALUES ('ev-principal-2', 'ctx-principal', 'probe', '{}', '2026-01-01T00:00:00Z',
+                 '{\"schemaVersion\":\"1.0.0\",\"producer\":{\"identity\":\"x\",\"kind\":\"harness\"},\"principal\":{\"human\":{\"identity\":\"user-1\"}},\"causation\":{\"correlationId\":\"c\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"r\"}}',
+                 '0000000000000000000000000000000000000000000000000000000000000000', 'r', NULL, 'c')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "principal_id NULL but envelope has human identity must be rejected"
     );
 }

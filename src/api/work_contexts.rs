@@ -332,13 +332,32 @@ fn detect_repo_binding(
     repo_root: &std::path::Path,
 ) -> anyhow::Result<crate::work::provenance::RepoBinding> {
     use crate::work::provenance::RepoBinding;
-    let git_dir = repo_root.join(".git");
-    if !git_dir.exists() {
-        return Ok(RepoBinding::Unbound);
+
+    // #232 P1: use git itself to detect the repo — handles linked
+    // worktrees (.git is a FILE not a directory) and subdirectories
+    // (no .git at all, but git walks up to find the repo root).
+    let git_dir_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("--git-dir")
+        .output()
+        .map_err(|e| anyhow::anyhow!("git inspection failed at {}: {e}", repo_root.display()))?;
+
+    // Exit code 128 = "not a git repository" — the honest Unbound state.
+    if !git_dir_out.status.success() {
+        let stderr = String::from_utf8_lossy(&git_dir_out.stderr);
+        if stderr.contains("not a git repository") || git_dir_out.status.code() == Some(128) {
+            return Ok(RepoBinding::Unbound);
+        }
+        anyhow::bail!(
+            "git rev-parse --git-dir failed at {} (exit {:?}): a path claiming a binding must be inspectable",
+            repo_root.display(),
+            git_dir_out.status.code()
+        );
     }
-    // #232 finding 3: FAIL CLOSED when a .git directory exists but
-    // inspection fails — a path claiming a binding that cannot be
-    // inspected is a provenance error, not a silent Unbound.
+
+    // Get the HEAD revision — fail closed if unavailable.
     let rev_out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -348,7 +367,7 @@ fn detect_repo_binding(
         .map_err(|e| anyhow::anyhow!("repo inspection failed at {}: {e}", repo_root.display()))?;
     if !rev_out.status.success() {
         anyhow::bail!(
-            "git rev-parse failed at {} (exit {:?}): a repo-backed path claiming a binding must be inspectable",
+            "git rev-parse HEAD failed at {} (exit {:?}): a repo-backed path claiming a binding must yield a revision",
             repo_root.display(),
             rev_out.status.code()
         );
@@ -360,6 +379,7 @@ fn detect_repo_binding(
             repo_root.display()
         );
     }
+
     let status_out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -382,10 +402,11 @@ fn detect_repo_binding(
     if status_text.trim().is_empty() {
         Ok(RepoBinding::Bound { revision })
     } else {
-        // #232 finding 3: the dirty digest fails closed on computation
-        // failure — never a silent "unavailable" placeholder.
+        // #232 P1: the dirty digest carries its POLICY VERSION —
+        // consumers know how to interpret the digest. Fails closed
+        // on computation failure — never a silent "unavailable".
         let digest = crate::workflow::soma::try_canonical_digest(
-            &serde_json::json!({"porcelain": status_text}),
+            &serde_json::json!({"porcelain": status_text, "digestPolicy": "soma-canonical-json-v1"}),
         )
         .map_err(|e| {
             anyhow::anyhow!(

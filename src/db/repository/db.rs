@@ -430,7 +430,11 @@ impl Db {
             .optional()
             .context("Failed to inspect provenance trigger")?;
         let needs_upgrade = match trigger_sql {
-            Some(sql) => !sql.contains("json_extract"),
+            Some(sql) => {
+                !sql.contains("json_extract")
+                    || !sql.contains("GLOB")
+                    || !sql.contains("principal_id")
+            }
             None => true, // trigger doesn't exist — create it
         };
         if needs_upgrade {
@@ -458,8 +462,20 @@ impl Db {
                        OR json_extract(NEW.provenance_json, '$.producer.identity') IS NULL
                        OR json_extract(NEW.provenance_json, '$.producer.identity') = ''
                        OR length(NEW.source_digest) != 64
+                       OR NEW.source_digest GLOB '*[^0-9a-f]*'
                        OR length(NEW.run_id) = 0
                        OR length(NEW.correlation_id) = 0
+                       OR NEW.run_id != COALESCE(
+                           json_extract(NEW.provenance_json, '$.run.workRunId'),
+                           json_extract(NEW.provenance_json, '$.run.graphRunId'),
+                           json_extract(NEW.provenance_json, '$.run.requestId'))
+                       OR NEW.correlation_id != COALESCE(
+                           json_extract(NEW.provenance_json, '$.run.workRunId'),
+                           json_extract(NEW.provenance_json, '$.run.requestId'))
+                       OR (NEW.principal_id IS NOT NULL
+                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') != NEW.principal_id)
+                       OR (NEW.principal_id IS NULL
+                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') IS NOT NULL)
                      BEGIN
                          SELECT RAISE(ABORT, 'journal insert requires complete, well-formed provenance');
                      END",
