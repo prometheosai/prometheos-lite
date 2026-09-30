@@ -150,6 +150,30 @@ pub fn project_human_plan(
 ) -> Result<VersionedProjectionEnvelope<String>, Vec<Diagnostic>>
 ```
 
+```rust
+pub struct RedactionPolicy {
+    /// Literal secrets to replace verbatim (seeded by the caller, e.g. from
+    /// `workflow::redaction::collect_known_secrets(repo)`).
+    pub known_secrets: Vec<String>,
+    /// Rendered `Field:` line keys whose values are suppressed, e.g. "Purpose".
+    pub omitted_fields: Vec<String>,
+}
+```
+
+```rust
+pub fn verify_human_projection_bytes(
+    raw: &[u8],
+) -> Result<VersionedProjectionEnvelope<String>, Vec<Diagnostic>>
+
+pub fn verify_human_against_source(
+    envelope: &VersionedProjectionEnvelope<String>,
+    wf: &WorkflowDefinition,
+    policy: Option<&RedactionPolicy>,
+) -> Result<(), Vec<Diagnostic>>
+```
+
+`verify_human_projection_bytes` applies the same ordered fail-closed checks as the canonical verifier (duplicate keys, shape/unknown fields, `projectionVersion`, lowercase-64-hex digests, byte-identical canonical re-render) and then requires `sha256_hex(payload.as_bytes()) == projection_digest` (`SOMA-CMP-0004` otherwise). `verify_human_against_source` runs the §3 gate, requires `source_digest` equality and requires `payload` equality against a fresh `project_human_plan(wf, policy)` render (`PROJ-0002` otherwise).
+
 - Non-normative, non-editable, read-only text. First line of the artifact:
   `NON-NORMATIVE VIEW — derived from source digest <source_digest>; not an executable contract.`
 - `projection_digest = sha256_hex(plan_text_bytes)` — any tamper (including the disclosure section) is detectable against the expected digest.
@@ -162,34 +186,49 @@ Section order and field lines are fixed; tests assert exact byte equality agains
 ```
 NON-NORMATIVE VIEW — derived from source digest <source_digest>; not an executable contract.
 # Workflow: <id> v<version> (<name>)
-Schema: <schema_version>  Kind: <workflow kind or plain>
-Purpose: <purpose or omitted line>
+Schema: <schema_version>  Kind: <atomic|composite>
+Purpose: <purpose>                          (line omitted when the AST has no purpose)
+Discloses: <compact-json-array|none>        (line omitted when the AST has no workflow context)
+Requires: <compact-json-array|none>         (line omitted when the AST has no workflow context)
 
 ## Authority Ceiling
-  ExecutionClass / Mutation / Readable scopes / Writable scopes / Tools /
-  Network / Provider / Secrets / Escalation / Review / Abstention /
-  Budgets / Content restrictions   (each: value or "none")
+ExecutionClass: <executionClass>
+Mutation: <mutation>
+Readable scopes: <compact-json|none>
+Writable scopes: <compact-json|none>
+Tools: <compact-json|none>
+Network: <compact-json|none>
+Provider: <compact-json|none>
+Secrets: <compact-json|none>
+Escalation: <compact-json|none>
+Review: <compact-json|none>
+Abstention: <compact-json|none>
+Budgets: <compact-json|none>
+Content restrictions: <compact-json|none>
 
 ## Body (topological order)
-### s<ordinal>:<operation_id> [COMPOSITE|ATOMIC]
-  Inputs:  <name>: <type>[, outcomes...]
-  Outputs: <name>: <type>[, emits...]
-  Authority: <reduced authority delta vs ceiling, or "inherit ceiling">
-  Effects: <name> [review] [irreversible]
-  Uses: [<capabilities>]
-  Secrets: [<names>]
-  Context: discloses=[...] requires=[...]
-  Grants: <authority grants on this unit, or "none">
+### s<NNNN>:<operation_id> [ATOMIC|COMPOSITE]     (marker = workflow-level kind)
+  Inputs: <name>: <type>[<outcome,...>], ...      (or "  Inputs: none")
+  Outputs: <name>: <type>[<outcome,...>], ...     (or "  Outputs: none")
+  Authority: [<grant>, ...]                       (unit-declared grants; or "none")
+  Effects: <name>[ review][ irreversible], ...    (suffix flags only when true; or "none")
+  Uses: [<capability>, ...]                       (or "none")
+  Secrets: [<name>, ...]                          (or "none")
+  Context: [<key>, ...]                           (or "none")
 
 ## Constraints
   <id>: <predicate> (<violationCategory>, <kind>, eval=<evaluationPoint|none>)
+  none                                            (when the AST declares no constraints)
 
 ## Evidence References
   <id>: event=<eventDigest> artifact=<artifactDigest> kind=<artifactKind> by=<producedBy> at=<producedAt|->
+  none                                            (when the AST declares no evidence)
 
 ## Disclosure
-  Redactions: <n>   Omissions: <n>
-  redacted: <item>   omitted: <item>       (one line each, when present)
+  Redactions: <n> Omissions: <m>
+  redacted: secret-<first 12 hex chars of sha256(secret)>   (one per known secret actually present)
+  redacted: credential-pattern                              (at most one, when a pattern layer changed text)
+  omitted: <field>                                           (one per field whose value was suppressed)
 ```
 
 Composite boundaries are explicit: each body unit prints its ordinal + `[COMPOSITE]`/`[ATOMIC]` marker; the workflow-level `kind: composite` is shown in the header. Typed inputs/outcomes, reduced authority, review/escalation gates, and explicit omissions/redactions are all first-class lines per the activation contract.
@@ -202,10 +241,7 @@ Composite boundaries are explicit: each body unit prints its ordinal + `[COMPOSI
 
 **Canonical JSON is an unredacted semantic projection and is never redacted; the human plan may apply an optional disclosure/redaction policy, applied to the rendered text before envelope serialization, and its output is not a semantic authority artifact.**
 
-- Human path, `policy = Some(p)`:
-  - known secrets = `p.known_secrets` ∪ `workflow::redaction::collect_known_secrets(wf)`;
-  - rendered text passed through `workflow::redaction::Redactor` (verbatim replacement with `REDACTED_PLACEHOLDER`, plus the existing credential-shape patterns: URL userinfo, auth headers, Bearer tokens, JSON/query credentials);
-  - replaced/omitted items are enumerated in the `## Disclosure` section with counts (redaction may drop or mask text).
+- Human path, `policy = Some(p)`: applied **in this order** — (1) known literal secrets are replaced with `REDACTED_PLACEHOLDER` and recorded as `redacted: secret-<hash12>`, (2) the credential-shape pattern layer runs (`Redactor::new()`); if it changes the text, `redacted: credential-pattern` is recorded, (3) each `omitted_fields` entry matching a rendered `Field:` line has its value replaced by `<omitted>` and is recorded as `omitted: <field>`; counts land in `## Disclosure`. Callers must not claim bit-stability of redacted plans across secret-set changes.
 - Human path, `policy = None`: no redaction; `Disclosure: Redactions: 0 Omissions: 0`.
 - Re-uses **only** `crate::workflow::redaction` — no second redaction taxonomy.
 - Bit-stability: unredacted human plans are byte-stable; redacted plans are stable **only for a pinned secret set** (tests pin it). Redacted output must never be presented as an authority-bearing artifact.
@@ -216,10 +252,10 @@ Composite boundaries are explicit: each body unit prints its ordinal + `[COMPOSI
 
 | Code | Meaning |
 |------|---------|
-| `PROJ-0001` | projection input failed the validation gate, or ordering/cycle failure |
-| `PROJ-0002` | projection identity mismatch (source_digest / payload vs expected) |
-| `SOMA-CMP-0001` | unsupported version (SOMA schema **or** `projection_version`) |
-| `SOMA-CMP-0004` | digest / canonicalization failure (CanonicalError mapping) |
+| `PROJ-0001` | validation-gate failure, envelope shape/parse refusal (unknown field, malformed/duplicate keys), non-canonical projection bytes, topological cycle |
+| `PROJ-0002` | identity mismatch against the expected source (`source_digest` or payload equality) or malformed digest hex |
+| `SOMA-CMP-0001` | unsupported version: SOMA schema/workflow version **or** `projectionVersion` |
+| `SOMA-CMP-0004` | digest or canonicalization failure (`CanonicalError`, `projection_digest` mismatch) |
 
 All errors are `Vec<Diagnostic>`; no panics, no partial outputs, no silent fallbacks.
 
