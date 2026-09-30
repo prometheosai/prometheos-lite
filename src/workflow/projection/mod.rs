@@ -74,3 +74,49 @@ pub fn project_canonical_json(
         payload,
     })
 }
+
+/// Fail-closed read/verify path for canonical projection bytes.
+pub fn verify_canonical_projection_bytes(
+    raw: &[u8],
+) -> Result<VersionedProjectionEnvelope<serde_json::Value>, Vec<Diagnostic>> {
+    let env = envelope::parse_envelope_bytes::<serde_json::Value>(raw)?;
+    let expected = digest_of(&env.payload)?;
+    if expected != env.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "canonical projection digest does not verify",
+        )]);
+    }
+    Ok(env)
+}
+
+/// Identity layer: the envelope must match the source AST it claims.
+pub fn verify_projection_against_source(
+    envelope: &VersionedProjectionEnvelope<serde_json::Value>,
+    wf: &WorkflowDefinition,
+) -> Result<(), Vec<Diagnostic>> {
+    validated_source(wf)?;
+    let mut source_value = serde_json::to_value(wf).map_err(|e| {
+        vec![Diagnostic::new(
+            "PROJ-0001",
+            format!("workflow cannot be serialized for verification ({e})"),
+        )]
+    })?;
+    if let Some(obj) = source_value.as_object_mut() {
+        obj.remove("contentDigest");
+    }
+    let expected_source = digest_of(&source_value)?;
+    if expected_source != envelope.source_digest {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "sourceDigest does not match the source AST",
+        )]);
+    }
+    if source_value != envelope.payload {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "projection payload does not match the source AST",
+        )]);
+    }
+    Ok(())
+}

@@ -175,3 +175,132 @@ fn projection_input_requires_validated_ast() {
     // Sanity: the honest fixture passes the gate.
     assert!(validated_source(&base_wf()).is_ok());
 }
+
+use prometheos_lite::workflow::projection::{
+    verify_canonical_projection_bytes, verify_projection_against_source,
+};
+use prometheos_lite::workflow::soma::canonical::{try_canonical_bytes, try_canonical_digest};
+use serde_json::Value;
+
+fn honest_canonical_bytes() -> Vec<u8> {
+    project_canonical_json(&base_wf())
+        .expect("projects")
+        .canonical_bytes()
+        .expect("canonical bytes")
+}
+
+fn rekeyed(raw: &[u8], mutate: impl FnOnce(&mut Value)) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(raw).expect("parses");
+    mutate(&mut value);
+    try_canonical_bytes(&value).expect("re-canonicalized")
+}
+
+#[test]
+fn verify_accepts_honest_canonical_bytes() {
+    let bytes = honest_canonical_bytes();
+    let verified = verify_canonical_projection_bytes(&bytes).expect("honest bytes verify");
+    let env = project_canonical_json(&base_wf()).expect("projects");
+    assert_eq!(verified, env);
+    assert!(verify_projection_against_source(&verified, &base_wf()).is_ok());
+}
+
+#[test]
+fn tampered_payload_fails_projection_digest_check() {
+    let bytes = honest_canonical_bytes();
+    let tampered = rekeyed(&bytes, |v| {
+        v["payload"]["name"] = Value::String("Bast".to_string());
+    });
+    let err =
+        verify_canonical_projection_bytes(&tampered).expect_err("payload tamper must fail closed");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+}
+
+#[test]
+fn tampered_source_identity_fails_against_source() {
+    let bytes = honest_canonical_bytes();
+    let tampered = rekeyed(&bytes, |v| {
+        v["sourceDigest"] = Value::String("f".repeat(64));
+    });
+    // Structurally valid: the payload digest still matches.
+    let env = verify_canonical_projection_bytes(&tampered)
+        .expect("identity tamper survives structural checks");
+    let err = verify_projection_against_source(&env, &base_wf())
+        .expect_err("identity tamper must fail against the source AST");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+}
+
+#[test]
+fn co_tampered_canonical_payload_fails_against_source() {
+    // Attacker edits payload AND recomputes projectionDigest: structural
+    // verify passes; the source-equality check still fails closed.
+    let bytes = honest_canonical_bytes();
+    let tampered = rekeyed(&bytes, |v| {
+        v["payload"]["name"] = Value::String("Bast".to_string());
+        let digest = try_canonical_digest(&v["payload"]).expect("tampered payload digests");
+        v["projectionDigest"] = Value::String(digest);
+    });
+    let env = verify_canonical_projection_bytes(&tampered).expect("structurally consistent");
+    let err = verify_projection_against_source(&env, &base_wf())
+        .expect_err("payload divergence must fail against the source AST");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+}
+
+#[test]
+fn tampered_version_fails_closed() {
+    // Built honestly at the envelope level, but with an unsupported version.
+    let mut env = project_canonical_json(&base_wf()).expect("projects");
+    env.projection_version = "projection.v2".to_string();
+    let bytes = env.canonical_bytes().expect("bytes");
+    let err =
+        verify_canonical_projection_bytes(&bytes).expect_err("projection.v2 must fail closed");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+#[test]
+fn non_canonical_bytes_fail_closed_on_read() {
+    let mut raw = honest_canonical_bytes();
+    let idx = raw.iter().position(|&c| c == b'{').expect("object opens");
+    raw.insert(idx + 1, b' '); // whitespace the canonical renderer never emits
+    let err =
+        verify_canonical_projection_bytes(&raw).expect_err("non-canonical bytes must fail closed");
+    assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+}
+
+#[test]
+fn duplicate_keys_fail_closed_on_read() {
+    let text = String::from_utf8(honest_canonical_bytes()).expect("utf-8");
+    let injected = text.replace("\"payload\"", "\"schemaVersion\":\"1.1.0\",\"payload\"");
+    let err = verify_canonical_projection_bytes(injected.as_bytes())
+        .expect_err("duplicate key must fail closed");
+    assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+}
+
+#[test]
+fn unknown_fields_fail_closed_on_read() {
+    let text = String::from_utf8(honest_canonical_bytes()).expect("utf-8");
+    let injected = text.replace("\"payload\"", "\"extra\":1,\"payload\"");
+    let err = verify_canonical_projection_bytes(injected.as_bytes())
+        .expect_err("unknown field must fail closed");
+    assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+}
+
+#[test]
+fn projection_data_cannot_add_canonical_fields() {
+    // Negative: projection data cannot smuggle authority or fields the
+    // source AST does not declare.
+    let bytes = honest_canonical_bytes();
+    let tampered = rekeyed(&bytes, |v| {
+        v["payload"]["authority"] = serde_json::json!({"tools": {"root.shell": ["root.v1"]}});
+    });
+    let err = verify_canonical_projection_bytes(&tampered)
+        .expect_err("added payload field must fail the digest check");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // And even with a consistent digest, the source equality refuses it.
+    let env = verify_canonical_projection_bytes(&honest_canonical_bytes()).expect("honest");
+    let mut env = env;
+    env.payload["authority"] = serde_json::json!({"tools": {"root.shell": ["root.v1"]}});
+    let err = verify_projection_against_source(&env, &base_wf())
+        .expect_err("added authority must fail against the source AST");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+}
