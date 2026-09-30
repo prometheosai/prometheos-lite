@@ -5,10 +5,12 @@
 //! that own them.
 
 pub mod envelope;
+pub mod human;
 
 pub use envelope::{
     ALLOWED_PROJECTION_VERSIONS, PROJECTION_VERSION_V1, VersionedProjectionEnvelope,
 };
+pub use human::project_human_plan;
 
 use crate::workflow::soma::canonical::try_canonical_digest;
 use crate::workflow::soma::contracts::WorkflowDefinition;

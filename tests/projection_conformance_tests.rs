@@ -304,3 +304,147 @@ fn projection_data_cannot_add_canonical_fields() {
         .expect_err("added authority must fail against the source AST");
     assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
 }
+
+// `compile_workflow_text` is already imported above.
+use prometheos_lite::workflow::execution_graph::compile_execution_graph;
+use prometheos_lite::workflow::projection::project_human_plan;
+
+fn reorder_text() -> String {
+    std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/soma-golden/lite-reorder.json"
+    ))
+    .expect("lite-reorder fixture exists")
+}
+
+fn golden_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR")))
+        .join("tests/projection_golden")
+        .join(format!("{name}.human.txt"))
+}
+
+#[test]
+fn human_order_matches_compiler_topological_order() {
+    let text = reorder_text();
+    let wf: WorkflowDefinition = serde_json::from_str(&text).expect("parses");
+    let plan = compile_workflow_text(&text).expect("compiles");
+    let graph =
+        compile_execution_graph(&text, &plan.canonicalization.sha256).expect("graph compiles");
+
+    let env = project_human_plan(&wf).expect("projects");
+    let headers: Vec<String> = env
+        .payload
+        .lines()
+        .filter(|l| l.starts_with("### s"))
+        .map(|l| l.split(" [").next().expect("header shape").to_string())
+        .collect();
+    let expected: Vec<String> = graph
+        .steps
+        .iter()
+        .map(|s| format!("### {}", s.key))
+        .collect();
+    assert_eq!(headers, expected, "human order must equal compiler order");
+}
+
+#[test]
+fn human_plan_cannot_add_authority_or_canonical_fields() {
+    let wf = base_wf();
+    let env = project_human_plan(&wf).expect("projects");
+    for forbidden in [
+        "root.shell",
+        "fs.write",
+        "network.exfiltrate",
+        "provider.override",
+    ] {
+        assert!(
+            !env.payload.contains(forbidden),
+            "human plan leaked forbidden capability {forbidden}"
+        );
+    }
+    // The Tools line lists exactly the ceiling's declared tool keys.
+    let tools_line = env
+        .payload
+        .lines()
+        .find(|l| l.starts_with("Tools: "))
+        .expect("Tools line");
+    let tools: Value =
+        serde_json::from_str(tools_line.trim_start_matches("Tools: ")).expect("json");
+    let keys: Vec<&str> = tools
+        .as_object()
+        .expect("tools object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        wf.authority.tool_keys(),
+        "tools must be the source set"
+    );
+    // No envelope field beyond the five defined ones.
+    let value = serde_json::to_value(&env).expect("envelope serializes");
+    assert_eq!(value.as_object().expect("object").len(), 5);
+}
+
+#[test]
+fn human_golden_fixtures_match() {
+    let cases: [(&str, String, &[&str]); 2] = [
+        (
+            "wf-base",
+            base_text(),
+            &[
+                "NON-NORMATIVE VIEW — derived from source digest",
+                "not an executable contract",
+                "# Workflow: wf-base v1.1.0 (Base)",
+                "Schema: 1.1.0  Kind: atomic",
+                "## Authority Ceiling",
+                "ExecutionClass: deterministic",
+                "Mutation: none",
+                "Escalation: none",
+                "Review: none",
+                "Tools: {\"ship\":[\"ship.v1\"]}",
+                "### s0000:op1 [ATOMIC]",
+                "Inputs: order: Order[Produced]",
+                "Outputs: shipment: Shipment[Produced]",
+                "Authority: [\"ship\"]",
+                "## Disclosure",
+                "Redactions: 0 Omissions: 0",
+            ],
+        ),
+        (
+            "lite-reorder",
+            reorder_text(),
+            &[
+                "### s0000:op1 [",
+                "### s0001:op2 [",
+                "## Constraints",
+                "## Disclosure",
+            ],
+        ),
+    ];
+    for (name, text, needles) in cases {
+        let wf: WorkflowDefinition = serde_json::from_str(&text).expect("parses");
+        let env = project_human_plan(&wf).expect("projects");
+        let path = golden_path(name);
+        if std::env::var("PROJECTION_GOLDEN_REGEN").is_ok() {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("golden dir");
+            std::fs::write(&path, &env.payload).expect("write golden");
+        }
+        let golden = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("missing golden {name} ({e}); regenerate with PROJECTION_GOLDEN_REGEN=1")
+        });
+        assert_eq!(env.payload, golden, "golden drift for {name}");
+        for needle in needles {
+            assert!(
+                golden.contains(needle),
+                "{name} golden must cover {needle:?} (activation requires authority, gates, typed outcomes, composite markers)"
+            );
+        }
+        // Every body header carries an explicit composite/atomic marker.
+        for line in golden.lines().filter(|l| l.starts_with("### s")) {
+            assert!(
+                line.ends_with(" [ATOMIC]") || line.ends_with(" [COMPOSITE]"),
+                "missing boundary marker in {line:?}"
+            );
+        }
+    }
+}
