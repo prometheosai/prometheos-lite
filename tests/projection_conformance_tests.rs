@@ -82,9 +82,6 @@ fn seed_wf(seed: usize) -> WorkflowDefinition {
 }
 
 /// Base fixture with a purpose that embeds the secret canary (redaction seed).
-/// Consumed by the disclosure-policy task of this slice; allowed dead code
-/// until that task appends its tests.
-#[allow(dead_code)]
 fn redacted_seed_text() -> String {
     let mut value: serde_json::Value = serde_json::from_str(&base_text()).expect("base parses");
     value["purpose"] = serde_json::json!(format!(
@@ -331,7 +328,7 @@ fn human_order_matches_compiler_topological_order() {
     let graph =
         compile_execution_graph(&text, &plan.canonicalization.sha256).expect("graph compiles");
 
-    let env = project_human_plan(&wf).expect("projects");
+    let env = project_human_plan(&wf, None).expect("projects");
     let headers: Vec<String> = env
         .payload
         .lines()
@@ -349,7 +346,7 @@ fn human_order_matches_compiler_topological_order() {
 #[test]
 fn human_plan_cannot_add_authority_or_canonical_fields() {
     let wf = base_wf();
-    let env = project_human_plan(&wf).expect("projects");
+    let env = project_human_plan(&wf, None).expect("projects");
     for forbidden in [
         "root.shell",
         "fs.write",
@@ -423,7 +420,7 @@ fn human_golden_fixtures_match() {
     ];
     for (name, text, needles) in cases {
         let wf: WorkflowDefinition = serde_json::from_str(&text).expect("parses");
-        let env = project_human_plan(&wf).expect("projects");
+        let env = project_human_plan(&wf, None).expect("projects");
         let path = golden_path(name);
         if std::env::var("PROJECTION_GOLDEN_REGEN").is_ok() {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("golden dir");
@@ -446,5 +443,150 @@ fn human_golden_fixtures_match() {
                 "missing boundary marker in {line:?}"
             );
         }
+    }
+}
+
+use prometheos_lite::workflow::projection::{
+    RedactionPolicy, verify_human_against_source, verify_human_projection_bytes,
+};
+use prometheos_lite::workflow::redaction::{REDACTED_PLACEHOLDER, SECRET_CANARY};
+use prometheos_lite::workflow::soma::canonical::sha256_hex;
+
+fn canary_policy(omitted: &[&str]) -> RedactionPolicy {
+    RedactionPolicy {
+        known_secrets: vec![SECRET_CANARY.to_string()],
+        omitted_fields: omitted.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn human_redaction_masks_canary_and_canonical_stays_unredacted() {
+    let wf: WorkflowDefinition = serde_json::from_str(&redacted_seed_text()).expect("seed parses");
+    let human = project_human_plan(&wf, Some(canary_policy(&[]))).expect("projects");
+    assert!(
+        !human.payload.contains(SECRET_CANARY),
+        "known secret must be redacted from the human plan"
+    );
+    assert!(
+        human.payload.contains(REDACTED_PLACEHOLDER),
+        "placeholder must be present"
+    );
+    let expected_id = format!("secret-{}", &sha256_hex(SECRET_CANARY.as_bytes())[..12]);
+    assert!(
+        human
+            .payload
+            .contains(&format!("  redacted: {expected_id}\n")),
+        "disclosure must record the redacted secret id, got:\n{}",
+        human.payload
+    );
+    assert!(human.payload.contains("Redactions: 1 Omissions: 0"));
+
+    // Binding rule: canonical JSON is NEVER redacted.
+    let canon = project_canonical_json(&wf).expect("projects");
+    let canon_text = serde_json::to_string(&canon.payload).expect("stringifies");
+    assert!(
+        canon_text.contains(SECRET_CANARY),
+        "canonical projection must stay unredacted"
+    );
+}
+
+#[test]
+fn human_omission_suppresses_field_and_records_disclosure() {
+    let wf: WorkflowDefinition = serde_json::from_str(&redacted_seed_text()).expect("seed parses");
+    let human = project_human_plan(
+        &wf,
+        Some(RedactionPolicy {
+            known_secrets: vec![],
+            omitted_fields: vec!["Purpose".to_string()],
+        }),
+    )
+    .expect("projects");
+    assert!(
+        human.payload.contains("Purpose: <omitted>\n"),
+        "omitted field value must be suppressed"
+    );
+    assert!(!human.payload.contains(SECRET_CANARY));
+    assert!(human.payload.contains("Redactions: 0 Omissions: 1"));
+    assert!(human.payload.contains("  omitted: Purpose\n"));
+}
+
+#[test]
+fn tampered_disclosure_metadata_fails_closed() {
+    let wf: WorkflowDefinition = serde_json::from_str(&redacted_seed_text()).expect("seed parses");
+    let env = project_human_plan(&wf, Some(canary_policy(&[]))).expect("projects");
+    let raw = env.canonical_bytes().expect("bytes");
+    let mut v: Value = serde_json::from_slice(&raw).expect("parses");
+    v["payload"] = Value::String(
+        v["payload"]
+            .as_str()
+            .expect("payload is text")
+            .replace("Redactions: 1", "Redactions: 0")
+            .to_string(),
+    );
+    let tampered = try_canonical_bytes(&v).expect("re-canonicalized");
+    let err = verify_human_projection_bytes(&tampered)
+        .expect_err("disclosure tamper must fail the payload digest");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+}
+
+#[test]
+fn co_tampered_human_projection_fails_against_source() {
+    let wf: WorkflowDefinition = serde_json::from_str(&redacted_seed_text()).expect("seed parses");
+    let env = project_human_plan(&wf, Some(canary_policy(&[]))).expect("projects");
+    let raw = env.canonical_bytes().expect("bytes");
+    let mut v: Value = serde_json::from_slice(&raw).expect("parses");
+    let edited = v["payload"]
+        .as_str()
+        .expect("payload is text")
+        .replace("Redactions: 1", "Redactions: 0");
+    v["payload"] = Value::String(edited.clone());
+    v["projectionDigest"] = Value::String(sha256_hex(edited.as_bytes()));
+    let tampered = try_canonical_bytes(&v).expect("re-canonicalized");
+    // Structural verify passes (payload + digest are consistent) …
+    let env = verify_human_projection_bytes(&tampered).expect("structurally consistent");
+    // … but the source-equality layer refuses it.
+    let err = verify_human_against_source(&env, &wf, Some(&canary_policy(&[])))
+        .expect_err("co-tamper must fail against the source AST");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+}
+
+#[test]
+fn verify_human_accepts_honest_bytes_and_source() {
+    let wf: WorkflowDefinition = serde_json::from_str(&redacted_seed_text()).expect("seed parses");
+    let policy = canary_policy(&[]);
+    let env = project_human_plan(&wf, Some(policy.clone())).expect("projects");
+    let raw = env.canonical_bytes().expect("bytes");
+    let verified = verify_human_projection_bytes(&raw).expect("honest bytes verify");
+    assert_eq!(verified, env);
+    assert!(verify_human_against_source(&verified, &wf, Some(&policy)).is_ok());
+}
+
+#[test]
+fn human_golden_redacted_fixture_matches() {
+    let wf: WorkflowDefinition = serde_json::from_str(&redacted_seed_text()).expect("seed parses");
+    let env = project_human_plan(&wf, Some(canary_policy(&["Purpose"]))).expect("projects");
+    let path = golden_path("wf-base-redacted");
+    if std::env::var("PROJECTION_GOLDEN_REGEN").is_ok() {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("golden dir");
+        std::fs::write(&path, &env.payload).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("missing golden wf-base-redacted ({e}); regenerate with PROJECTION_GOLDEN_REGEN=1")
+    });
+    assert_eq!(env.payload, golden, "golden drift for wf-base-redacted");
+    let secret_id = format!(
+        "redacted: secret-{}",
+        &sha256_hex(SECRET_CANARY.as_bytes())[..12]
+    );
+    for needle in [
+        "Purpose: <omitted>",
+        "Redactions: 1 Omissions: 1",
+        "omitted: Purpose",
+        secret_id.as_str(),
+    ] {
+        assert!(
+            golden.contains(needle),
+            "redacted golden must cover {needle:?}"
+        );
     }
 }

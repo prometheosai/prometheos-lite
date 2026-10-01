@@ -6,10 +6,12 @@
 
 use crate::workflow::execution_graph::topological_order;
 use crate::workflow::governance_compiler::workflow_digest_of;
+use crate::workflow::redaction::Redactor;
 use crate::workflow::soma::contracts::{OperationDefinition, WorkflowDefinition};
 use crate::workflow::soma::{Diagnostic, canonical::sha256_hex};
 
 use super::envelope::{PROJECTION_VERSION_V1, VersionedProjectionEnvelope};
+use super::redaction::RedactionPolicy;
 use super::validated_source;
 
 /// Render the non-normative plan body (everything except the Disclosure
@@ -210,16 +212,71 @@ fn list_or_none(v: &[String]) -> String {
     }
 }
 
-/// Non-normative human plan projection of the validated AST. Disclosure
-/// counts are always rendered; Slice 1 without a policy records zeros.
+/// Non-normative human plan projection of the validated AST. The optional
+/// disclosure/redaction policy is applied to the rendered body BEFORE the
+/// `## Disclosure` section is appended and before the projection digest is
+/// computed; without a policy the counts are zeros and the text is
+/// byte-stable.
 pub fn project_human_plan(
     wf: &WorkflowDefinition,
+    policy: Option<RedactionPolicy>,
 ) -> Result<VersionedProjectionEnvelope<String>, Vec<Diagnostic>> {
     validated_source(wf)?;
     let source_digest = workflow_digest_of(wf)?;
     let mut text = render_plan_body(wf, &source_digest)?;
+
+    let mut redactions: Vec<String> = Vec::new();
+    let mut omissions: Vec<String> = Vec::new();
+    if let Some(p) = policy {
+        // (1) known literal secrets, recorded by stable hash id.
+        for secret in &p.known_secrets {
+            if !secret.is_empty() && text.contains(secret.as_str()) {
+                let id = sha256_hex(secret.as_bytes());
+                redactions.push(format!("secret-{}", &id[..12]));
+            }
+        }
+        // (2) credential-shape pattern layer.
+        let patterns_applied = Redactor::new().redact(&text) != text;
+        text = Redactor::new()
+            .with_known_secrets(&p.known_secrets)
+            .redact(&text);
+        if patterns_applied {
+            redactions.push("credential-pattern".to_string());
+        }
+        // (3) field omissions, recorded per field.
+        for field in &p.omitted_fields {
+            let prefix = format!("{field}:");
+            let mut replaced = false;
+            let mut lines: Vec<String> = Vec::new();
+            for line in text.lines() {
+                if !replaced && line.starts_with(&prefix) {
+                    lines.push(format!("{prefix} <omitted>"));
+                    replaced = true;
+                } else {
+                    lines.push(line.to_string());
+                }
+            }
+            if replaced {
+                omissions.push(field.clone());
+                text = lines.join("\n");
+                text.push('\n');
+            }
+        }
+    }
+
     text.push_str("## Disclosure\n");
-    text.push_str("  Redactions: 0 Omissions: 0\n");
+    text.push_str(&format!(
+        "  Redactions: {} Omissions: {}\n",
+        redactions.len(),
+        omissions.len()
+    ));
+    for r in &redactions {
+        text.push_str(&format!("  redacted: {r}\n"));
+    }
+    for o in &omissions {
+        text.push_str(&format!("  omitted: {o}\n"));
+    }
+
     let projection_digest = sha256_hex(text.as_bytes());
     Ok(VersionedProjectionEnvelope {
         projection_version: PROJECTION_VERSION_V1.to_string(),

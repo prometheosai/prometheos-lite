@@ -6,11 +6,13 @@
 
 pub mod envelope;
 pub mod human;
+pub mod redaction;
 
 pub use envelope::{
     ALLOWED_PROJECTION_VERSIONS, PROJECTION_VERSION_V1, VersionedProjectionEnvelope,
 };
 pub use human::project_human_plan;
+pub use redaction::RedactionPolicy;
 
 use crate::workflow::soma::canonical::try_canonical_digest;
 use crate::workflow::soma::contracts::WorkflowDefinition;
@@ -118,6 +120,38 @@ pub fn verify_projection_against_source(
         return Err(vec![Diagnostic::new(
             "PROJ-0002",
             "projection payload does not match the source AST",
+        )]);
+    }
+    Ok(())
+}
+
+/// Fail-closed read/verify path for human plan projection bytes.
+pub fn verify_human_projection_bytes(
+    raw: &[u8],
+) -> Result<VersionedProjectionEnvelope<String>, Vec<Diagnostic>> {
+    let env = envelope::parse_envelope_bytes::<String>(raw)?;
+    let expected = crate::workflow::soma::canonical::sha256_hex(env.payload.as_bytes());
+    if expected != env.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "human projection digest does not verify",
+        )]);
+    }
+    Ok(env)
+}
+
+/// Identity layer for human plans: digest + payload must equal a fresh
+/// deterministic render from the source AST under the same policy.
+pub fn verify_human_against_source(
+    envelope: &VersionedProjectionEnvelope<String>,
+    wf: &WorkflowDefinition,
+    policy: Option<&RedactionPolicy>,
+) -> Result<(), Vec<Diagnostic>> {
+    let fresh = human::project_human_plan(wf, policy.cloned())?;
+    if fresh.source_digest != envelope.source_digest || fresh.payload != envelope.payload {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "human projection does not match a fresh render of the source AST",
         )]);
     }
     Ok(())

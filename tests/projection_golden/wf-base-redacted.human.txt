@@ -1,0 +1,40 @@
+NON-NORMATIVE VIEW — derived from source digest 91e14394f9bbb8a46f55c7037eeb425fc7f7fdcba81825d425ceb56193ee88f2; not an executable contract.
+# Workflow: wf-base v1.1.0 (Base)
+Schema: 1.1.0  Kind: atomic
+Purpose: <omitted>
+
+## Authority Ceiling
+ExecutionClass: deterministic
+Mutation: none
+Readable scopes: ["orders"]
+Writable scopes: ["shipping"]
+Tools: {"ship":["ship.v1"]}
+Network: {"default":"deny"}
+Provider: {"allowlist":["provider-1"]}
+Secrets: [{"name":"cred","scopes":["shipping"]}]
+Escalation: none
+Review: none
+Abstention: none
+Budgets: none
+Content restrictions: none
+
+## Body (topological order)
+### s0000:op1 [ATOMIC]
+  Inputs: order: Order[Produced]
+  Outputs: shipment: Shipment[Produced]
+  Authority: ["ship"]
+  Effects: none
+  Uses: none
+  Secrets: none
+  Context: none
+
+## Constraints
+  none
+
+## Evidence References
+  none
+
+## Disclosure
+  Redactions: 1 Omissions: 1
+  redacted: secret-3aa8dbb1b937
+  omitted: Purpose
