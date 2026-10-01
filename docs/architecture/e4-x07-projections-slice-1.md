@@ -57,7 +57,7 @@ tests/
 Both projection functions run a **fail-closed gate** before rendering:
 
 1. `wf.audit(&super::supported_version())` must return no diagnostics (this covers `SOMA-CMP-0001` unsupported schema/workflow versions and `SOMA-CMP-0004` `contentDigest` verification).
-2. `wf.schema_version` must equal the supported SOMA schema (`super::SUPPORTED_SCHEMA_VERSION`-compatible per `SemVer::is_compatible_with`).
+2. `wf.schema_version` must equal the supported SOMA schema (exact equality against `super::SUPPORTED_SCHEMA_VERSION`).
 
 Failure ⇒ `Err(diagnostics)` with the original audit codes; no partial projection. Half-parsed, non-canonical, or non-audited AST input is never projected.
 
