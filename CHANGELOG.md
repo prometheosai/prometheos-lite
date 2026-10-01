@@ -1,5 +1,17 @@
 ## Unreleased
 
+- #164 E4/X07 Slice 1 — deterministic projection identity plus canonical and
+  human views: versioned projection envelope (`projection.v1`, nested payload,
+  source + projection digests under the SOMA DecimalV2 canonical rules), the
+  canonical JSON projection (byte-deterministic, never redacted) with a
+  fail-closed read/verify path (duplicate keys, unknown fields, non-canonical
+  bytes, unsupported versions, digest and identity mismatches), and the
+  non-normative human plan (compiler topological order, golden fixtures,
+  optional policy redaction with explicit `## Disclosure` counts). Projections
+  are read-only views over the validated canonical AST; projection data can
+  never add authority or canonical fields. Regressions: determinism across
+  map insertion orders, one-byte semantic change, tamper (payload / identity /
+  version / disclosure / co-tamper), authority-subset, input gate.
 - Repository-native verification replaces GitHub Actions as merge and release
   authority. `scripts/local_ci.py` runs the Rust, platform, smoke, install, and
   frontend gates on operator-owned machines and emits exact-commit JSON evidence
