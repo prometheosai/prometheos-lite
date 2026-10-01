@@ -590,3 +590,74 @@ fn human_golden_redacted_fixture_matches() {
         );
     }
 }
+
+use prometheos_lite::workflow::soma::contracts::RetryPolicy;
+use prometheos_lite::workflow::soma::types::Hex64;
+
+/// C1-a: an honest AST carrying a correct `contentDigest` must survive the
+/// whole canonical round-trip — project, bytes verify, verify against source.
+#[test]
+fn content_digest_bearing_ast_round_trips() {
+    let mut wf = base_wf();
+    let plan = compile_workflow_text(&base_text()).expect("base compiles");
+    wf.content_digest = Some(Hex64::parse(&plan.workflow_digest).expect("valid hex64"));
+    let env = project_canonical_json(&wf).expect("honest contentDigest AST projects");
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let verified = verify_canonical_projection_bytes(&bytes).expect("honest bytes verify");
+    verify_projection_against_source(&verified, &wf)
+        .expect("honest contentDigest AST must verify against source");
+}
+
+/// C1-b: an attacker who strips `payload.contentDigest` and recomputes
+/// `projectionDigest` survives the structural check but must fail closed
+/// against the source AST.
+#[test]
+fn stripped_payload_tamper_fails_against_source() {
+    let mut wf = base_wf();
+    let plan = compile_workflow_text(&base_text()).expect("base compiles");
+    wf.content_digest = Some(Hex64::parse(&plan.workflow_digest).expect("valid hex64"));
+    let env = project_canonical_json(&wf).expect("honest contentDigest AST projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]
+        .as_object_mut()
+        .expect("payload is an object")
+        .remove("contentDigest");
+    let digest = try_canonical_digest(&value["payload"]).expect("tampered payload digests");
+    value["projectionDigest"] = Value::String(digest);
+    let tampered = try_canonical_bytes(&value).expect("re-canonicalized");
+    let env = verify_canonical_projection_bytes(&tampered).expect("structural verify passes");
+    let err = verify_projection_against_source(&env, &wf)
+        .expect_err("stripped-payload tamper must fail against the source AST");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+}
+
+/// I2 (spec §9): a raw, non-canonical number lexeme injected into honest
+/// bytes must fail closed on read — the canonical re-render diverges.
+#[test]
+fn raw_number_lexeme_fails_closed_on_read() {
+    // No shipped workflow fixture carries a JSON numeric literal, so the
+    // test puts one in the AST: `retry.maxAttempts: 2` (the audit has no
+    // retry rule, so the gate stays honest).
+    let mut wf = base_wf();
+    wf.body[0].retry = Some(RetryPolicy {
+        max_attempts: 2,
+        backoff: None,
+    });
+    let bytes = project_canonical_json(&wf)
+        .expect("projects")
+        .canonical_bytes()
+        .expect("canonical bytes");
+    let text = String::from_utf8(bytes).expect("utf-8");
+    let needle = "\"maxAttempts\":2";
+    assert_eq!(
+        text.matches(needle).count(),
+        1,
+        "expected exactly one {needle} in honest bytes"
+    );
+    // Inject directly into honest bytes — NO re-key: re-canonicalizing would
+    // normalize `2.0` back to `2` and heal the very lexeme under test.
+    let injected = text.replace(needle, "\"maxAttempts\":2.0");
+    let err = verify_canonical_projection_bytes(injected.as_bytes())
+        .expect_err("non-canonical number lexeme must fail closed");
+    assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+}

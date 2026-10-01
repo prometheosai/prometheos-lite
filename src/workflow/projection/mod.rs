@@ -1,8 +1,8 @@
 //! Deterministic, read-only projections of the canonical SOMA++ AST.
 //!
-//! Slice 1 ships the versioned envelope and the canonical JSON view. The
-//! human plan, verify path, and disclosure policy are added by the tasks
-//! that own them.
+//! Slice 1 ships the versioned projection envelope, the canonical JSON
+//! project + verify path, the non-normative human plan project + verify
+//! path, and the redaction/disclosure policy applied to human plans.
 
 pub mod envelope;
 pub mod human;
@@ -100,16 +100,17 @@ pub fn verify_projection_against_source(
     wf: &WorkflowDefinition,
 ) -> Result<(), Vec<Diagnostic>> {
     validated_source(wf)?;
-    let mut source_value = serde_json::to_value(wf).map_err(|e| {
+    let source_value = serde_json::to_value(wf).map_err(|e| {
         vec![Diagnostic::new(
             "PROJ-0001",
             format!("workflow cannot be serialized for verification ({e})"),
         )]
     })?;
-    if let Some(obj) = source_value.as_object_mut() {
+    let mut digest_value = source_value.clone();
+    if let Some(obj) = digest_value.as_object_mut() {
         obj.remove("contentDigest");
     }
-    let expected_source = digest_of(&source_value)?;
+    let expected_source = digest_of(&digest_value)?;
     if expected_source != envelope.source_digest {
         return Err(vec![Diagnostic::new(
             "PROJ-0002",
