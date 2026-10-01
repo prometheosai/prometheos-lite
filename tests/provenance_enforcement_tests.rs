@@ -1263,3 +1263,272 @@ async fn registered_run_cancel_uses_token_payload_not_durable_lookup() {
         "the token payload and the durable lookup must agree — but the token is the preferred source"
     );
 }
+
+#[tokio::test]
+async fn orchestrator_uses_token_payload_when_durable_lookup_is_broken() {
+    // #232 P1 HARDEST regression: the orchestrator must produce correct
+    // evidence referencing the TOKEN payload's event ID even when the
+    // durable lookup is deliberately broken (two cancellation events
+    // = a durability violation that makes cancellation_event_id_conn
+    // return Err). This proves the token is the primary source.
+    use prometheos_lite::db::repository::WorkContextEventOperations;
+    use prometheos_lite::db::repository::work_context_events::{
+        cancellation_event_id_conn, record_event_conn,
+    };
+    use prometheos_lite::flow::RuntimeContext;
+    use prometheos_lite::flow::execution_service::FlowExecutionService;
+    use prometheos_lite::work::event::WorkContextEvent;
+    use prometheos_lite::work::evolution_engine::EvolutionEngine;
+    use prometheos_lite::work::execution_service::WorkExecutionService;
+    use prometheos_lite::work::orchestrator::{ExecutionLimits, WorkOrchestrator};
+    use prometheos_lite::work::playbook_resolver::PlaybookResolver;
+    use prometheos_lite::work::service::WorkContextService;
+
+    let db = Arc::new(Db::in_memory().unwrap());
+    let wcs = Arc::new(WorkContextService::new(db.clone()));
+    let journal = test_journal();
+
+    let mut context = wcs
+        .create_context(
+            "user-1".to_string(),
+            "Token-vs-lookup test".to_string(),
+            prometheos_lite::work::types::WorkDomain::General,
+            "goal".to_string(),
+            &journal,
+        )
+        .unwrap();
+    context.autonomy_level = AutonomyLevel::Review;
+    wcs.update_context(&context).unwrap();
+
+    // Step 1: Cancel durably — the exact event ID is returned.
+    let real_cancel_id = wcs
+        .cancel_context(&mut context, "test", &journal)
+        .unwrap()
+        .expect("cancel must return the exact event id");
+
+    // Step 2: BREAK the durable lookup — insert a FAKE second
+    // cancellation event so COUNT(*) == 2 (durability violation).
+    db.conn()
+        .execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+        .unwrap();
+    let fake_event = WorkContextEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        context.id.clone(),
+        "context_cancelled".to_string(),
+        serde_json::json!({"reason": "fake second cancel for the test"}),
+    );
+    record_event_conn(db.conn(), &fake_event, &journal.event_envelope(None)).unwrap();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .unwrap();
+
+    // Verify the durable lookup IS broken.
+    let lookup_result = cancellation_event_id_conn(db.conn(), &context.id);
+    assert!(
+        lookup_result.is_err(),
+        "the durable lookup must be broken (two cancellation events = durability violation)"
+    );
+
+    // Step 3: The token carries the EXACT event ID — fire with payload.
+    let token = prometheos_lite::workflow::evaluate::CancellationToken::new();
+    token.cancel_with(real_cancel_id.clone());
+
+    // Step 4: Build the orchestrator and run — the observation must use
+    // the token payload, NOT the broken durable lookup.
+    let model_router = Arc::new(prometheos_lite::flow::intelligence::ModelRouter::new(
+        vec![],
+    ));
+    let runtime = Arc::new(RuntimeContext::default().with_model_router(model_router));
+    let flow_execution_service = Arc::new(FlowExecutionService::new(runtime).unwrap());
+    let work_execution_service = Arc::new(WorkExecutionService::new(
+        wcs.clone(),
+        flow_execution_service,
+    ));
+    let playbook_resolver = Arc::new(PlaybookResolver::new(db.clone()));
+    let intent_classifier = Arc::new(prometheos_lite::intent::IntentClassifier::new().unwrap());
+    let evolution_engine = Arc::new(EvolutionEngine::new(db.clone()));
+    let orchestrator = WorkOrchestrator::new(
+        wcs.clone(),
+        playbook_resolver,
+        work_execution_service,
+        intent_classifier,
+        evolution_engine,
+    );
+
+    let result = orchestrator
+        .run_until_blocked_or_complete_with_token(
+            context.id.clone(),
+            ExecutionLimits::default(),
+            token,
+            Arc::new(journal),
+        )
+        .await;
+
+    // The run must NOT error — the token payload was used.
+    let final_context = result.expect(
+        "the orchestrator must succeed despite the broken durable lookup — the token payload is the primary source",
+    );
+    assert!(final_context.is_cancelled());
+
+    // Step 5: The evidence references the TOKEN's payload ID.
+    let records =
+        WorkContextEventOperations::get_journal_records_for_context(&*db, &context.id).unwrap();
+    let interrupted = records
+        .iter()
+        .find(|r| r.event.event_type == "execution_interrupted")
+        .expect("interruption evidence must exist");
+    match &interrupted.provenance {
+        ProvenanceState::Verified(envelope) => {
+            assert_eq!(
+                envelope.causation.parent_event_id,
+                Some(real_cancel_id),
+                "the evidence must reference the TOKEN payload's event ID — not the fake, not a durable-lookup error"
+            );
+        }
+        ProvenanceState::LegacyUnverified => panic!("must be verified"),
+    }
+}
+
+#[test]
+fn repo_binding_clean_directory_returns_unbound() {
+    let dir = tempfile::tempdir().unwrap();
+    let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path()).unwrap();
+    assert!(matches!(
+        binding,
+        prometheos_lite::work::provenance::RepoBinding::Unbound
+    ));
+}
+
+#[test]
+fn repo_binding_clean_committed_repo_returns_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .arg("init")
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "initial").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path()).unwrap();
+    assert!(
+        matches!(
+            binding,
+            prometheos_lite::work::provenance::RepoBinding::Bound { .. }
+        ),
+        "a clean committed repo must be Bound"
+    );
+}
+
+#[test]
+fn repo_binding_dirty_repo_returns_dirty_with_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .arg("init")
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "initial").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("b.txt"), "dirty").unwrap();
+
+    let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path()).unwrap();
+    match binding {
+        prometheos_lite::work::provenance::RepoBinding::Dirty {
+            revision,
+            workspace_digest,
+            digest_policy,
+        } => {
+            assert!(!revision.is_empty());
+            assert!(!workspace_digest.is_empty());
+            assert_eq!(digest_policy, "soma-canonical-json-v1");
+        }
+        other => panic!("expected Dirty, got {:?}", other),
+    }
+}
+
+#[test]
+fn repo_binding_empty_repo_fails_closed() {
+    // A repo with no commits: rev-parse HEAD fails — fail closed,
+    // not a silent Unbound.
+    let dir = tempfile::tempdir().unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .arg("init")
+        .output()
+        .unwrap();
+
+    let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path());
+    assert!(
+        binding.is_err(),
+        "an empty git repo claiming a binding but with no HEAD must fail closed"
+    );
+}
+
+#[test]
+fn repo_binding_subdirectory_detected_by_git_walk_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .arg("init")
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "initial").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    let subdir = dir.path().join("subdir");
+    std::fs::create_dir_all(&subdir).unwrap();
+
+    let binding = prometheos_lite::api::work_contexts::detect_repo_binding(&subdir).unwrap();
+    assert!(
+        matches!(
+            binding,
+            prometheos_lite::work::provenance::RepoBinding::Bound { .. }
+        ),
+        "a subdirectory of a git repo must be detected via git rev-parse walk-up"
+    );
+}

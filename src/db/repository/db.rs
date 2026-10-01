@@ -429,12 +429,14 @@ impl Db {
             )
             .optional()
             .context("Failed to inspect provenance trigger")?;
+        // #232 P1: exact version-marker detection — the trigger SQL
+        // embeds a `provenance-trigger-v<N>` marker. The upgrade fires
+        // ONLY when the marker is absent or a different version. This is
+        // immune to partial-marker false positives (three separate
+        // string checks could all be present in an incomplete trigger).
+        let provenance_trigger_version = "provenance-trigger-v3";
         let needs_upgrade = match trigger_sql {
-            Some(sql) => {
-                !sql.contains("json_extract")
-                    || !sql.contains("GLOB")
-                    || !sql.contains("principal_id")
-            }
+            Some(sql) => !sql.contains(provenance_trigger_version),
             None => true, // trigger doesn't exist — create it
         };
         if needs_upgrade {
@@ -448,6 +450,7 @@ impl Db {
             self.conn
                 .execute(
                     "CREATE TRIGGER work_context_events_provenance_required
+                     -- provenance-trigger-v3
                      BEFORE INSERT ON work_context_events
                      WHEN NEW.provenance_json IS NULL
                        OR NEW.source_digest IS NULL

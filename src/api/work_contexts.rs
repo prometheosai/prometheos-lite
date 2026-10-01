@@ -328,7 +328,13 @@ fn work_run_journal_for(
 /// with uncommitted changes (deterministic workspace digest computed
 /// from the dirty state); Unbound = no git repo or git unavailable.
 /// Never a hardcoded value.
-fn detect_repo_binding(
+/// #232 P1: detect the actual repository binding from the repo root.
+/// Public so integration tests exercise the real implementation (not a
+/// copy that can drift). Uses `git rev-parse --git-dir` instead of
+/// checking `.git` existence so linked worktrees and subdirectories are
+/// correctly detected. FAILS CLOSED when a repo is detected but
+/// inspection fails.
+pub fn detect_repo_binding(
     repo_root: &std::path::Path,
 ) -> anyhow::Result<crate::work::provenance::RepoBinding> {
     use crate::work::provenance::RepoBinding;
