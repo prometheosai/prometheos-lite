@@ -72,6 +72,8 @@ pub struct VersionedProjectionEnvelope<V> {
     /// Projection format version. Slice 1 accepts exactly "projection.v1".
     pub projection_version: String,
     /// SOMA schema version of the source workflow (e.g. "1.1.0").
+    /// Strict SemVer, bound at verification to the supported SOMA schema
+    /// version — anything else fails closed (SOMA-CMP-0001).
     pub schema_version: String,
     /// Canonical digest of the SOURCE AST: serde_json::to_value(wf) with
     /// `contentDigest` removed, then soma::canonical::try_canonical_digest.
@@ -93,6 +95,8 @@ Two identity layers, both covered by tamper tests:
 **Digest policy (pinned, shared by both digests):** SOMA canonicalization v1.0.0 / DecimalV2 via `soma::canonical::{try_canonical_bytes, try_canonical_digest, sha256_hex}` — lexicographic key order, no whitespace, canonical number lexemes, declared array order, fail-closed on magnitude > 1e10000 / precision > 400 digits / non-finite (`CanonicalError` ⇒ `SOMA-CMP-0004`).
 
 **`projection_version` policy (fail closed):** allowed set is `{"projection.v1"}` only. Any other value, missing or unknown, is rejected — never silently passed (`SOMA-CMP-0001` family).
+
+**`schema_version` policy (fail closed):** strict SemVer (SOMA parser) **and** equal to the supported SOMA schema version; bound at every verification path (byte and against-source), not merely copied from the source AST at production time (`SOMA-CMP-0001`).
 
 ---
 
@@ -125,10 +129,10 @@ pub fn verify_canonical_projection_bytes(
 Rejects, in order:
 1. duplicate keys (`soma::canonical::find_duplicate_key`);
 2. unknown fields / wrong shape (serde `deny_unknown_fields`);
-3. unsupported `projection_version` (not `projection.v1`);
-4. non-canonical bytes — re-rendering the parsed envelope through `try_canonical_bytes` must reproduce `raw` byte-for-byte (this rejects whitespace, unsorted keys, and forbidden raw-number lexemes);
-5. `projection_digest` mismatch against recomputed payload digest;
-6. `source_digest`/`projection_digest` not lowercase 64-hex.
+3. unsupported `projection_version` (not `projection.v1`) or unsupported `schema_version` (not strict SemVer equal to the supported SOMA schema);
+4. `source_digest`/`projection_digest` not lowercase 64-hex;
+5. non-canonical bytes — re-rendering the parsed envelope through `try_canonical_bytes` must reproduce `raw` byte-for-byte (this rejects whitespace, unsorted keys, and forbidden raw-number lexemes);
+6. `projection_digest` mismatch against recomputed payload digest.
 
 ```rust
 pub fn verify_projection_against_source(
@@ -137,7 +141,7 @@ pub fn verify_projection_against_source(
 ) -> Result<(), Vec<Diagnostic>>
 ```
 
-Recomputes the source identity from the AST (§3 gate + digest) and requires both the `source_digest` and the payload equality to match — this is the identity layer that catches a tampered `source_digest`. The envelope is not self-authenticating; identity is always established against the source AST (or a sealed record of it).
+Recomputes the source identity from the AST (§3 gate + digest) and requires, in order: envelope metadata (`projectionVersion`, `schemaVersion` bound to the supported SOMA schema, lowercase-64-hex digests), `projection_digest` against the recomputed payload digest (`SOMA-CMP-0004`), `schemaVersion` equality against the AST (`PROJ-0002`), then `source_digest` and payload equality (`PROJ-0002`). The verifier is self-contained — a forged envelope fails here without any prior byte-verification call. The envelope is not self-authenticating; identity is always established against the source AST (or a sealed record of it).
 
 ---
 
@@ -172,7 +176,7 @@ pub fn verify_human_against_source(
 ) -> Result<(), Vec<Diagnostic>>
 ```
 
-`verify_human_projection_bytes` applies the same ordered fail-closed checks as the canonical verifier (duplicate keys, shape/unknown fields, `projectionVersion`, lowercase-64-hex digests, byte-identical canonical re-render) and then requires `sha256_hex(payload.as_bytes()) == projection_digest` (`SOMA-CMP-0004` otherwise). `verify_human_against_source` runs the §3 gate, requires `source_digest` equality and requires `payload` equality against a fresh `project_human_plan(wf, policy)` render (`PROJ-0002` otherwise).
+`verify_human_projection_bytes` applies the same ordered fail-closed checks as the canonical verifier (duplicate keys, shape/unknown fields, `projectionVersion`, `schemaVersion`, lowercase-64-hex digests, byte-identical canonical re-render) and then requires `sha256_hex(payload.as_bytes()) == projection_digest` (`SOMA-CMP-0004` otherwise). `verify_human_against_source` runs the §3 gate, then validates envelope metadata, the payload digest against `sha256_hex(envelope.payload)` (`SOMA-CMP-0004` otherwise), `schemaVersion` equality against the AST (`PROJ-0002`), and finally `source_digest` equality plus `payload` equality against a fresh `project_human_plan(wf, policy)` render (`PROJ-0002` otherwise) — self-contained, with no reliance on a prior byte-verification call.
 
 - Non-normative, non-editable, read-only text. First line of the artifact:
   `NON-NORMATIVE VIEW — derived from source digest <source_digest>; not an executable contract.`
@@ -231,7 +235,7 @@ Content restrictions: <compact-json|none>
   omitted: <field>                                           (one per field whose value was suppressed)
 ```
 
-Composite boundaries are explicit: each body unit prints its ordinal + `[COMPOSITE]`/`[ATOMIC]` marker; the workflow-level `kind: composite` is shown in the header. Typed inputs/outcomes, reduced authority, review/escalation gates, and explicit omissions/redactions are all first-class lines per the activation contract.
+Composite boundaries are explicit: each body unit prints its ordinal + `[COMPOSITE]`/`[ATOMIC]` marker; the workflow-level `kind: composite` is shown in the header. Typed inputs/outcomes, declared unit grants, review/escalation gates, and explicit omissions/redactions are all first-class lines per the activation contract.
 
 **Map ordering:** every map-like field (tools, budgets) is rendered from `BTreeMap` iteration or explicitly sorted — never from `HashMap` order.
 
@@ -253,8 +257,8 @@ Composite boundaries are explicit: each body unit prints its ordinal + `[COMPOSI
 | Code | Meaning |
 |------|---------|
 | `PROJ-0001` | validation-gate failure, envelope shape/parse refusal (unknown field, malformed/duplicate keys), non-canonical projection bytes, topological cycle |
-| `PROJ-0002` | identity mismatch against the expected source (`source_digest` or payload equality) or malformed digest hex |
-| `SOMA-CMP-0001` | unsupported version: SOMA schema/workflow version **or** `projectionVersion` |
+| `PROJ-0002` | identity mismatch against the expected source (`schemaVersion`, `source_digest`, or payload equality) or malformed digest hex |
+| `SOMA-CMP-0001` | unsupported version: SOMA schema/workflow version (including the envelope's bound `schemaVersion`) **or** `projectionVersion` |
 | `SOMA-CMP-0004` | digest or canonicalization failure (`CanonicalError`, `projection_digest` mismatch) |
 
 All errors are `Vec<Diagnostic>`; no panics, no partial outputs, no silent fallbacks.
@@ -276,6 +280,18 @@ All errors are `Vec<Diagnostic>`; no panics, no partial outputs, no silent fallb
 | `human_order_matches_compiler_topological_order` | printed order = `execution_graph::topological_order` |
 | `human_plan_cannot_add_authority_or_canonical_fields` | negative: no capability/scope/field appears in human output that is absent from the source AST |
 | `projection_input_requires_validated_ast` | un-audited / wrong-schema AST ⇒ `PROJ-0001`, no output |
+| `forged_top_level_schema_version_fails_canonical_bytes` | envelope `schemaVersion` rewritten to `"9.9.9"` ⇒ byte verifier fails `SOMA-CMP-0001` |
+| `forged_top_level_schema_version_fails_human_bytes` | same rewrite against human-plan bytes ⇒ `SOMA-CMP-0001` |
+| `forged_projection_digest_fails_projection_against_source` | valid-hex64 `projectionDigest` forgery ⇒ against-source verifier fails `SOMA-CMP-0004` without any byte-verification call |
+| `forged_projection_version_fails_projection_against_source` | `projectionVersion = "projection.v99"` ⇒ `SOMA-CMP-0001` at the against-source layer |
+| `forged_schema_version_fails_projection_against_source` | `schemaVersion = "9.9.9"` ⇒ `SOMA-CMP-0001` at the against-source layer |
+| `forged_projection_digest_fails_human_against_source` | human flavor: valid-hex64 `projectionDigest` forgery ⇒ `SOMA-CMP-0004` |
+| `forged_projection_version_fails_human_against_source` | human flavor: `projectionVersion = "projection.v99"` ⇒ `SOMA-CMP-0001` |
+| `forged_schema_version_fails_human_against_source` | human flavor: `schemaVersion = "9.9.9"` ⇒ `SOMA-CMP-0001` |
+| `content_digest_bearing_ast_round_trips` | C1-a: AST with a correct `contentDigest` survives projection and against-source verification |
+| `stripped_payload_tamper_fails_against_source` | C1-b: attacker strips `payload.contentDigest` and recomputes `projectionDigest` ⇒ structural pass, against-source fails `PROJ-0002` |
+| `raw_number_lexeme_fails_closed_on_read` | C1-c: injected raw-number lexeme ⇒ rejected on read |
+| `projection_data_cannot_add_canonical_fields` | smuggled payload field ⇒ byte layer fails `SOMA-CMP-0004`; with a recomputed consistent digest, source equality refuses it `PROJ-0002` |
 | `existing_compiler_and_permit_tests_remain_green` | full suite (covered by local gates) |
 
 Golden fixtures: regenerate only via an explicit, reviewed version bump — never silently.
