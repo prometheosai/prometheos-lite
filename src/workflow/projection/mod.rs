@@ -95,6 +95,9 @@ pub fn verify_canonical_projection_bytes(
 }
 
 /// Identity layer: the envelope must match the source AST it claims.
+/// Self-contained: envelope metadata (`projectionVersion`, `schemaVersion`,
+/// digest shapes) and the payload digest are validated here directly, so a
+/// forged envelope fails closed without a prior byte-verification call.
 pub fn verify_projection_against_source(
     envelope: &VersionedProjectionEnvelope<serde_json::Value>,
     wf: &WorkflowDefinition,
@@ -106,6 +109,20 @@ pub fn verify_projection_against_source(
             format!("workflow cannot be serialized for verification ({e})"),
         )]
     })?;
+    envelope::verify_envelope_metadata(envelope)?;
+    let expected_payload = digest_of(&envelope.payload)?;
+    if expected_payload != envelope.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "canonical projection digest does not verify",
+        )]);
+    }
+    if envelope.schema_version != wf.schema_version {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "schemaVersion does not match the source AST",
+        )]);
+    }
     let mut digest_value = source_value.clone();
     if let Some(obj) = digest_value.as_object_mut() {
         obj.remove("contentDigest");
@@ -143,12 +160,29 @@ pub fn verify_human_projection_bytes(
 
 /// Identity layer for human plans: digest + payload must equal a fresh
 /// deterministic render from the source AST under the same policy.
+/// Self-contained: envelope metadata and the payload digest are validated
+/// here directly, so a forged envelope fails closed without a prior
+/// byte-verification call.
 pub fn verify_human_against_source(
     envelope: &VersionedProjectionEnvelope<String>,
     wf: &WorkflowDefinition,
     policy: Option<&RedactionPolicy>,
 ) -> Result<(), Vec<Diagnostic>> {
     let fresh = human::project_human_plan(wf, policy.cloned())?;
+    envelope::verify_envelope_metadata(envelope)?;
+    let expected = crate::workflow::soma::canonical::sha256_hex(envelope.payload.as_bytes());
+    if expected != envelope.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "human projection digest does not verify",
+        )]);
+    }
+    if envelope.schema_version != wf.schema_version {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "schemaVersion does not match the source AST",
+        )]);
+    }
     if fresh.source_digest != envelope.source_digest || fresh.payload != envelope.payload {
         return Err(vec![Diagnostic::new(
             "PROJ-0002",

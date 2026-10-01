@@ -297,6 +297,7 @@ fn projection_data_cannot_add_canonical_fields() {
     let env = verify_canonical_projection_bytes(&honest_canonical_bytes()).expect("honest");
     let mut env = env;
     env.payload["authority"] = serde_json::json!({"tools": {"root.shell": ["root.v1"]}});
+    env.projection_digest = try_canonical_digest(&env.payload).expect("mutated payload digests");
     let err = verify_projection_against_source(&env, &base_wf())
         .expect_err("added authority must fail against the source AST");
     assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
@@ -660,4 +661,105 @@ fn raw_number_lexeme_fails_closed_on_read() {
     let err = verify_canonical_projection_bytes(injected.as_bytes())
         .expect_err("non-canonical number lexeme must fail closed");
     assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Independent exact-head review repairs (B1/B2): top-level schemaVersion is
+// bound on parse, and both public against-source verifiers independently
+// validate complete envelope integrity before identity comparison.
+// ---------------------------------------------------------------------------
+
+/// B1 structural path: a forged top-level `schemaVersion` on an otherwise
+/// honest canonical envelope must fail closed on read.
+#[test]
+fn forged_top_level_schema_version_fails_canonical_bytes() {
+    let mut env = project_canonical_json(&base_wf()).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let err = verify_canonical_projection_bytes(&bytes)
+        .expect_err("forged top-level schemaVersion must fail closed");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// B1 structural path, human flavor: same forgery through the human byte
+/// verifier must fail closed with the same version-refusal code.
+#[test]
+fn forged_top_level_schema_version_fails_human_bytes() {
+    let mut env = project_human_plan(&base_wf(), None).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let err = verify_human_projection_bytes(&bytes)
+        .expect_err("forged top-level schemaVersion must fail closed");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// B2: a structurally plausible but wrong `projectionDigest` (valid hex64)
+/// must be caught by `verify_projection_against_source` itself — no prior
+/// byte-verification call required.
+#[test]
+fn forged_projection_digest_fails_projection_against_source() {
+    let wf = base_wf();
+    let mut env = project_canonical_json(&wf).expect("projects");
+    env.projection_digest = "f".repeat(64);
+    let err = verify_projection_against_source(&env, &wf)
+        .expect_err("forged projectionDigest must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+}
+
+/// B2: an unsupported `projectionVersion` must be refused by the
+/// against-source verifier itself.
+#[test]
+fn forged_projection_version_fails_projection_against_source() {
+    let wf = base_wf();
+    let mut env = project_canonical_json(&wf).expect("projects");
+    env.projection_version = "projection.v99".to_string();
+    let err = verify_projection_against_source(&env, &wf)
+        .expect_err("forged projectionVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// B2: a forged top-level `schemaVersion` must be refused by the
+/// against-source verifier itself (strict SemVer bound to supported).
+#[test]
+fn forged_schema_version_fails_projection_against_source() {
+    let wf = base_wf();
+    let mut env = project_canonical_json(&wf).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let err = verify_projection_against_source(&env, &wf)
+        .expect_err("forged schemaVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// B2, human flavor: forged `projectionDigest` caught by
+/// `verify_human_against_source` without a prior byte-verification call.
+#[test]
+fn forged_projection_digest_fails_human_against_source() {
+    let wf = base_wf();
+    let mut env = project_human_plan(&wf, None).expect("projects");
+    env.projection_digest = "f".repeat(64);
+    let err = verify_human_against_source(&env, &wf, None)
+        .expect_err("forged projectionDigest must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+}
+
+/// B2, human flavor: unsupported `projectionVersion` refused directly.
+#[test]
+fn forged_projection_version_fails_human_against_source() {
+    let wf = base_wf();
+    let mut env = project_human_plan(&wf, None).expect("projects");
+    env.projection_version = "projection.v99".to_string();
+    let err = verify_human_against_source(&env, &wf, None)
+        .expect_err("forged projectionVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// B2, human flavor: forged top-level `schemaVersion` refused directly.
+#[test]
+fn forged_schema_version_fails_human_against_source() {
+    let wf = base_wf();
+    let mut env = project_human_plan(&wf, None).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let err = verify_human_against_source(&env, &wf, None)
+        .expect_err("forged schemaVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
 }
