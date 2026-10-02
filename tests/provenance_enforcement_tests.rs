@@ -1546,21 +1546,6 @@ fn repo_binding_linked_worktree_detected() {
         .output();
 }
 
-/// Get the sqlite_master rowid for the provenance trigger. The rowid is
-/// SQLite's internal identity for the catalog row — if the trigger is
-/// dropped and recreated (even with identical SQL), the rowid changes.
-/// Comparing rowids proves the trigger was truly untouched.
-fn get_trigger_rowid(db: &Db) -> i64 {
-    db.conn()
-        .query_row(
-            "SELECT rowid FROM sqlite_master
-             WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
-}
-
 #[test]
 fn trigger_version_upgrade_replaces_incomplete_trigger() {
     // #232 P1: a trigger WITHOUT the v3 version marker is replaced by
@@ -1688,37 +1673,52 @@ fn trigger_with_v3_marker_but_partial_checks_is_not_upgraded() {
 }
 
 #[test]
-fn trigger_v3_rowid_unchanged_on_reopen() {
-    // #232 P1: SQL text equality alone cannot prove a trigger was not
-    // dropped and recreated. The sqlite_master rowid is SQLite's internal
-    // catalog-row identity — if the trigger were dropped and recreated
-    // (even with identical SQL), the rowid would change. Comparing
-    // rowids proves the trigger row was truly untouched.
+fn trigger_v3_schema_version_unchanged_on_reopen() {
+    // #232 P1: PRAGMA schema_version is SQLite's documented DDL counter —
+    // it increments on every schema change (CREATE, DROP, ALTER) but NOT
+    // on data changes (INSERT, UPDATE, DELETE). If the trigger were
+    // dropped and recreated (even with identical SQL), schema_version
+    // would increment. Comparing schema_version before and after reopen
+    // proves NO DDL occurred — a stable, documented SQLite guarantee.
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("trigger_rowid.db");
+    let db_path = dir.path().join("trigger_schema_version.db");
     let db_path_str = db_path.to_str().unwrap().to_string();
 
-    let rowid_before;
+    let schema_version_before: i64;
     {
         let db = Db::new(&db_path_str).unwrap();
-        rowid_before = get_trigger_rowid(&db);
+        schema_version_before = db
+            .conn()
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
     }
 
-    // Reopen — the trigger's rowid must be IDENTICAL (no drop/recreate).
+    // Reopen — schema_version must be IDENTICAL (no DDL on the trigger).
     {
         let db = Db::new(&db_path_str).unwrap();
-        let rowid_after = get_trigger_rowid(&db);
+        let schema_version_after: i64 = db
+            .conn()
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(
-            rowid_before, rowid_after,
-            "the trigger's sqlite_master rowid must be unchanged on reopen (identical SQL + identical rowid = truly untouched, not drop-and-recreate)"
+            schema_version_before, schema_version_after,
+            "PRAGMA schema_version must be unchanged on reopen (no DDL = trigger truly untouched)"
         );
     }
 
-    // Contrast: after a manual drop + recreate, the rowid CHANGES.
+    // Contrast: after a manual DROP TRIGGER, schema_version INCREMENTS.
     {
         let conn = rusqlite::Connection::open(&db_path_str).unwrap();
         conn.execute("DROP TRIGGER work_context_events_provenance_required", [])
             .unwrap();
+        let after_drop: i64 = conn
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            after_drop > schema_version_before,
+            "a DROP TRIGGER must increment schema_version (proving the counter detects DDL)"
+        );
+
         conn.execute(
             "CREATE TRIGGER work_context_events_provenance_required
              -- provenance-trigger-v3
@@ -1730,27 +1730,28 @@ fn trigger_v3_rowid_unchanged_on_reopen() {
             [],
         )
         .unwrap();
-    }
-    {
-        let db = Db::new(&db_path_str).unwrap();
-        let rowid_after_manual = get_trigger_rowid(&db);
-        assert_ne!(
-            rowid_before, rowid_after_manual,
-            "a manual drop+recreate must change the rowid (proving the rowid comparison detects real changes)"
+        let after_recreate: i64 = conn
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            after_recreate > after_drop,
+            "a CREATE TRIGGER must increment schema_version again"
         );
     }
 }
 
 #[test]
-fn repo_binding_corrupted_index_fails_closed() {
+fn repo_binding_corrupted_index_never_returns_unbound() {
     // #232 P1: a repo with a VALID HEAD but a CORRUPTED index —
-    // `git status --porcelain` fails. The binding must fail closed
-    // (Err), not silently return a value. This is the "valid-HEAD
-    // inspection failure" case.
+    // `git rev-parse HEAD` succeeds (the repo IS a git repo) but
+    // `git status` may fail. The function must produce:
+    //   Err → fail-closed (git status genuinely failed)
+    //   Ok(Bound) or Ok(Dirty) → git recovered and produced an honest binding
+    // NEVER Ok(Unbound) — the repo WAS detected via --git-dir and HEAD,
+    // so returning Unbound would be a silent lie about the repo state.
     let dir = tempfile::tempdir().unwrap();
     make_committed_repo(dir.path());
 
-    // Corrupt the index so git status fails.
     let index_path = dir.path().join(".git").join("index");
     std::fs::write(
         &index_path,
@@ -1759,18 +1760,29 @@ fn repo_binding_corrupted_index_fails_closed() {
     .unwrap();
 
     let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path());
-    // git rev-parse HEAD still succeeds (HEAD is fine); the failure
-    // comes from git status on the corrupted index. Depending on the
-    // git version, this may succeed with a warning or fail outright.
-    // Either way, the function must NOT silently produce a wrong
-    // binding — it either errors or produces an honest one.
     match binding {
-        Err(_) => { /* Fail-closed: the correct behavior for a corrupted repo */ }
-        Ok(_) => {
-            // Some git versions rebuild the index and succeed. In that
-            // case the binding is an honest observation of the
-            // (recovered) repo state — also correct. The key invariant
-            // is: no silent substitution of "unavailable" for the digest.
+        Err(_) => {
+            // Fail-closed: git status genuinely failed — the correct behavior.
+        }
+        Ok(prometheos_lite::work::provenance::RepoBinding::Bound { revision }) => {
+            // Git rebuilt the index and reports a clean tree — honest.
+            assert!(!revision.is_empty());
+        }
+        Ok(prometheos_lite::work::provenance::RepoBinding::Dirty {
+            revision,
+            workspace_digest,
+            digest_policy,
+        }) => {
+            // Git rebuilt the index and reports dirty state — honest.
+            assert!(!revision.is_empty());
+            assert!(!workspace_digest.is_empty());
+            assert_eq!(digest_policy, "soma-canonical-json-v1");
+        }
+        Ok(other) => {
+            panic!(
+                "a detected repo (rev-parse --git-dir succeeded, HEAD present) must never return {:?} — Unbound is a silent lie about a repo that exists",
+                other
+            );
         }
     }
 }
