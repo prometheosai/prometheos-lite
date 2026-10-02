@@ -1396,6 +1396,38 @@ async fn orchestrator_uses_token_payload_when_durable_lookup_is_broken() {
     }
 }
 
+/// Test fixture helper: runs a git command, asserts success, returns output.
+/// Every git fixture must use this — never a bare `.output().unwrap()` that
+/// silently swallows command failures.
+fn git_cmd(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Provenance Test")
+        .env("GIT_AUTHOR_EMAIL", "provenance-test@test.local")
+        .env("GIT_COMMITTER_NAME", "Provenance Test")
+        .env("GIT_COMMITTER_EMAIL", "provenance-test@test.local")
+        .output()
+        .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {e}", args));
+    assert!(
+        out.status.success(),
+        "git {:?} failed (exit {:?}): {}",
+        args,
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Create a clean committed git repo at `dir` with one file.
+fn make_committed_repo(dir: &std::path::Path) {
+    git_cmd(dir, &["init"]);
+    std::fs::write(dir.join("a.txt"), "initial").unwrap();
+    git_cmd(dir, &["add", "."]);
+    git_cmd(dir, &["commit", "-m", "init"]);
+}
+
 #[test]
 fn repo_binding_clean_directory_returns_unbound() {
     let dir = tempfile::tempdir().unwrap();
@@ -1409,26 +1441,7 @@ fn repo_binding_clean_directory_returns_unbound() {
 #[test]
 fn repo_binding_clean_committed_repo_returns_bound() {
     let dir = tempfile::tempdir().unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .arg("init")
-        .output()
-        .unwrap();
-    std::fs::write(dir.path().join("a.txt"), "initial").unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["add", "."])
-        .output()
-        .unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["commit", "-m", "init"])
-        .output()
-        .unwrap();
-
+    make_committed_repo(dir.path());
     let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path()).unwrap();
     assert!(
         matches!(
@@ -1442,25 +1455,7 @@ fn repo_binding_clean_committed_repo_returns_bound() {
 #[test]
 fn repo_binding_dirty_repo_returns_dirty_with_policy() {
     let dir = tempfile::tempdir().unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .arg("init")
-        .output()
-        .unwrap();
-    std::fs::write(dir.path().join("a.txt"), "initial").unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["add", "."])
-        .output()
-        .unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["commit", "-m", "init"])
-        .output()
-        .unwrap();
+    make_committed_repo(dir.path());
     std::fs::write(dir.path().join("b.txt"), "dirty").unwrap();
 
     let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path()).unwrap();
@@ -1480,15 +1475,8 @@ fn repo_binding_dirty_repo_returns_dirty_with_policy() {
 
 #[test]
 fn repo_binding_empty_repo_fails_closed() {
-    // A repo with no commits: rev-parse HEAD fails — fail closed,
-    // not a silent Unbound.
     let dir = tempfile::tempdir().unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .arg("init")
-        .output()
-        .unwrap();
+    git_cmd(dir.path(), &["init"]);
 
     let binding = prometheos_lite::api::work_contexts::detect_repo_binding(dir.path());
     assert!(
@@ -1500,25 +1488,7 @@ fn repo_binding_empty_repo_fails_closed() {
 #[test]
 fn repo_binding_subdirectory_detected_by_git_walk_up() {
     let dir = tempfile::tempdir().unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .arg("init")
-        .output()
-        .unwrap();
-    std::fs::write(dir.path().join("a.txt"), "initial").unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["add", "."])
-        .output()
-        .unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["commit", "-m", "init"])
-        .output()
-        .unwrap();
+    make_committed_repo(dir.path());
 
     let subdir = dir.path().join("subdir");
     std::fs::create_dir_all(&subdir).unwrap();
@@ -1531,4 +1501,158 @@ fn repo_binding_subdirectory_detected_by_git_walk_up() {
         ),
         "a subdirectory of a git repo must be detected via git rev-parse walk-up"
     );
+}
+
+#[test]
+fn repo_binding_linked_worktree_detected() {
+    // #232 P1: in a linked worktree, `.git` is a FILE (not a directory).
+    // detect_repo_binding uses `git rev-parse --git-dir` instead of
+    // checking `.git` existence, so linked worktrees must be detected.
+    let main_dir = tempfile::tempdir().unwrap();
+    make_committed_repo(main_dir.path());
+
+    // Create a branch for the worktree.
+    git_cmd(main_dir.path(), &["branch", "wt-branch"]);
+
+    // Create the worktree at a separate path.
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir.path().join("linked-worktree");
+    git_cmd(
+        main_dir.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-branch"],
+    );
+
+    // Verify: `.git` is a FILE in a linked worktree (not a directory).
+    assert!(
+        wt_path.join(".git").is_file(),
+        "linked worktree .git must be a file, not a directory"
+    );
+
+    // The binding must be detected (Bound — clean committed worktree).
+    let binding = prometheos_lite::api::work_contexts::detect_repo_binding(&wt_path).unwrap();
+    assert!(
+        matches!(
+            binding,
+            prometheos_lite::work::provenance::RepoBinding::Bound { .. }
+        ),
+        "a linked worktree must be detected via git rev-parse --git-dir (not .git existence)"
+    );
+
+    // Clean up the worktree so the tempdirs can be removed.
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(main_dir.path())
+        .args(["worktree", "remove", "--force", wt_path.to_str().unwrap()])
+        .output();
+}
+
+#[test]
+fn trigger_version_upgrade_replaces_incomplete_trigger() {
+    // #232 P1: a database with an INCOMPLETE trigger (e.g. the v2 version
+    // without the v3 marker) must have it REPLACED by the v3 version on
+    // reopen. This proves the version-marker detection works.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("trigger_upgrade.db");
+    let db_path_str = db_path.to_str().unwrap().to_string();
+
+    // Phase 1: create a full-schema database (v3 trigger created).
+    {
+        let _db = Db::new(&db_path_str).unwrap();
+    }
+
+    // Phase 2: simulate a v2 trigger (drop the v3, create one without
+    // the v3 version marker but with some of the v2 checks).
+    {
+        let conn = rusqlite::Connection::open(&db_path_str).unwrap();
+        conn.execute(
+            "DROP TRIGGER IF EXISTS work_context_events_provenance_required",
+            [],
+        )
+        .unwrap();
+        // Create a v2-style trigger (no version marker, fewer checks).
+        conn.execute(
+            "CREATE TRIGGER work_context_events_provenance_required
+             BEFORE INSERT ON work_context_events
+             WHEN NEW.provenance_json IS NULL
+               OR NEW.source_digest IS NULL
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal insert requires complete provenance');
+             END",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Phase 3: reopen — the v3 trigger must replace the v2 one.
+    {
+        let db = Db::new(&db_path_str).unwrap();
+        let sql: String = db
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("provenance-trigger-v3"),
+            "the v3 trigger must replace the v2 trigger on reopen (found SQL without v3 marker)"
+        );
+        assert!(
+            sql.contains("json_extract"),
+            "the v3 trigger must have json_extract checks"
+        );
+        assert!(
+            sql.contains("GLOB"),
+            "the v3 trigger must have the GLOB hex check"
+        );
+        assert!(
+            sql.contains("principal_id"),
+            "the v3 trigger must have the principal-null checks"
+        );
+    }
+}
+
+#[test]
+fn trigger_version_v3_untouched_on_reopen() {
+    // #232 P1: a database that already has the correct v3 trigger must
+    // NOT have it dropped and recreated on reopen — the upgrade is a
+    // no-op (no unnecessary write lock).
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("trigger_noop.db");
+    let db_path_str = db_path.to_str().unwrap().to_string();
+
+    // Phase 1: create and capture the v3 trigger SQL.
+    let trigger_sql_v1;
+    {
+        let db = Db::new(&db_path_str).unwrap();
+        trigger_sql_v1 = db
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+    }
+
+    // Phase 2: reopen — the trigger must be IDENTICAL (no drop/recreate).
+    {
+        let db = Db::new(&db_path_str).unwrap();
+        let trigger_sql_v2: String = db
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            trigger_sql_v1, trigger_sql_v2,
+            "the v3 trigger must be untouched on reopen (no drop/recreate)"
+        );
+    }
 }
