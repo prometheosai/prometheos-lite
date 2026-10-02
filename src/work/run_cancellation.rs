@@ -58,14 +58,31 @@ impl RunCancelRegistry {
         }
     }
 
-    /// Fire every token registered for `context_id`. Returns how many runs
-    /// were signalled. No registered runs => 0 (idempotent no-op).
+    /// Fire every token registered for `context_id` — carrying the
+    /// EXACT cancellation event ID from `cancel_context`'s return through
+    /// the signal (#232 finding 2). Returns how many runs were
+    /// signalled. No registered runs => 0 (idempotent no-op).
     pub fn fire(&self, context_id: &str) -> usize {
+        self.fire_with_cancellation(context_id, None)
+    }
+
+    /// #232 finding 2: fire with the exact cancellation event ID — the
+    /// observer extracts the ID from the token payload, never from a
+    /// database lookup. The atomic durable lookup is only the documented
+    /// cross-process fallback for when no payload is available.
+    pub fn fire_with_cancellation(
+        &self,
+        context_id: &str,
+        cancellation_event_id: Option<&str>,
+    ) -> usize {
         let map = self.inner.lock().expect("RunCancelRegistry mutex poisoned");
         match map.get(context_id) {
             Some(tokens) => {
                 for (_, token) in tokens {
-                    token.cancel();
+                    match cancellation_event_id {
+                        Some(id) => token.cancel_with(id.to_string()),
+                        None => token.cancel(),
+                    }
                 }
                 tokens.len()
             }

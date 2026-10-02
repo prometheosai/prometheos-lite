@@ -122,6 +122,12 @@ pub enum RepoBinding {
         revision: String,
         #[serde(rename = "workspaceDigest")]
         workspace_digest: String,
+        /// #232 P1: the digest-policy version — a first-class envelope
+        /// field (not merely an input to the digest computation) so
+        /// consumers know how to interpret `workspace_digest` without
+        /// re-deriving the policy from the digest bytes.
+        #[serde(rename = "digestPolicy")]
+        digest_policy: String,
     },
     Unbound,
 }
@@ -156,15 +162,19 @@ pub struct ProvenanceEnvelope {
 }
 
 impl ProvenanceEnvelope {
-    /// Serialize to canonical JSON bytes, validated against the SOMA
-    /// number policy at the boundary. The typed structures contain only
-    /// strings and enum names, but the byte validation still runs: an
-    /// envelope that fails canonical byte rules can never be stored.
+    /// #232 finding 1: serialize through the DESIGNATED SOMA canonical
+    /// renderer — not serde's default. The SOMA renderer produces a
+    /// specific byte form (sorted keys, no whitespace, canonical number
+    /// representations). On read, the parsed envelope's re-rendered
+    /// bytes must equal the stored bytes exactly — any divergence means
+    /// the stored bytes are not canonical and the read fails closed.
     pub fn to_canonical_json_string(&self) -> Result<String> {
-        let text = serde_json::to_string(self).context("serializing provenance envelope")?;
-        canonical::validate_number_lexemes(text.as_bytes())
+        let value = serde_json::to_value(self).context("serializing provenance envelope")?;
+        let bytes = canonical::try_canonical_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("provenance envelope canonical render failed: {e}"))?;
+        canonical::validate_number_lexemes(&bytes)
             .map_err(|e| anyhow::anyhow!("provenance envelope byte validation failed: {e}"))?;
-        Ok(text)
+        String::from_utf8(bytes).context("canonical bytes are not valid UTF-8")
     }
 
     /// P1 gap 1 repair: enforce the canonical-BYTES fixpoint — not just
@@ -190,20 +200,50 @@ impl ProvenanceEnvelope {
         if self.run.request_id.is_empty() {
             anyhow::bail!("provenance request id must be non-empty");
         }
-        // Effective execution class must not widen declared.
-        let declared_class = &self.authority.declared.execution_class;
-        let effective_class = &self.authority.effective.execution_class;
-        let rank = |c: &ExecutionClass| match c {
+        // #232 finding 4: FULL authority partial order — effective must
+        // never widen declared across ALL three dimensions: execution
+        // class, autonomy level, and approval policy.
+        let declared = &self.authority.declared;
+        let effective = &self.authority.effective;
+
+        let rank_execution = |c: &ExecutionClass| match c {
             ExecutionClass::Deterministic => 0,
             ExecutionClass::ConstrainedModel => 1,
             ExecutionClass::ScopedAgent => 2,
             ExecutionClass::HumanDecision => 3,
         };
-        if rank(effective_class) > rank(declared_class) {
+        let rank_autonomy = |a: &AutonomyLevel| match a {
+            AutonomyLevel::Chat => 0,
+            AutonomyLevel::Review => 1,
+            AutonomyLevel::Autonomous => 2,
+        };
+        let rank_approval = |p: &ApprovalPolicy| match p {
+            ApprovalPolicy::ManualAll => 0,
+            ApprovalPolicy::RequireForUntrusted => 1,
+            ApprovalPolicy::RequireForSideEffects => 2,
+            ApprovalPolicy::RequireForTools => 3,
+            ApprovalPolicy::Auto => 4,
+        };
+
+        if rank_execution(&effective.execution_class) > rank_execution(&declared.execution_class) {
             anyhow::bail!(
                 "provenance effective execution class {:?} widens declared {:?}",
-                effective_class,
-                declared_class
+                effective.execution_class,
+                declared.execution_class
+            );
+        }
+        if rank_autonomy(&effective.autonomy) > rank_autonomy(&declared.autonomy) {
+            anyhow::bail!(
+                "provenance effective autonomy {:?} widens declared {:?}",
+                effective.autonomy,
+                declared.autonomy
+            );
+        }
+        if rank_approval(&effective.approval_policy) > rank_approval(&declared.approval_policy) {
+            anyhow::bail!(
+                "provenance effective approval policy {:?} widens declared {:?}",
+                effective.approval_policy,
+                declared.approval_policy
             );
         }
         // Canonical-BYTES fixpoint: serialize → parse → re-serialize must
@@ -226,6 +266,10 @@ impl ProvenanceEnvelope {
 
     /// Parse strictly: unknown fields, a wrong schema version, or a
     /// number-policy violation in the stored bytes is refused.
+    /// #232 finding 1: the stored bytes must BE canonical — re-rendering
+    /// the parsed envelope through the designated SOMA canonical
+    /// renderer must produce byte-identical output. Any divergence
+    /// (reordered keys, extra whitespace, non-canonical numbers) fails.
     pub fn parse_canonical(text: &str) -> Result<Self> {
         canonical::validate_number_lexemes(text.as_bytes())?;
         let envelope: ProvenanceEnvelope = serde_json::from_str(text)
@@ -234,6 +278,14 @@ impl ProvenanceEnvelope {
             anyhow::bail!(
                 "unsupported provenance schema version: {} (supported: {PROVENANCE_SCHEMA_VERSION})",
                 envelope.schema_version
+            );
+        }
+        // The stored bytes must be canonical: re-render through the
+        // designated SOMA renderer and require byte equality.
+        let canonical_bytes = envelope.to_canonical_json_string()?;
+        if canonical_bytes != text {
+            anyhow::bail!(
+                "provenance envelope bytes are not canonical: stored bytes differ from the designated renderer's output (reordered keys, whitespace, or non-canonical representation)"
             );
         }
         Ok(envelope)

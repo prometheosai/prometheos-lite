@@ -328,49 +328,103 @@ fn work_run_journal_for(
 /// with uncommitted changes (deterministic workspace digest computed
 /// from the dirty state); Unbound = no git repo or git unavailable.
 /// Never a hardcoded value.
-fn detect_repo_binding(repo_root: &std::path::Path) -> crate::work::provenance::RepoBinding {
+/// #232 P1: detect the actual repository binding from the repo root.
+/// Public so integration tests exercise the real implementation (not a
+/// copy that can drift). Uses `git rev-parse --git-dir` instead of
+/// checking `.git` existence so linked worktrees and subdirectories are
+/// correctly detected. FAILS CLOSED when a repo is detected but
+/// inspection fails.
+pub fn detect_repo_binding(
+    repo_root: &std::path::Path,
+) -> anyhow::Result<crate::work::provenance::RepoBinding> {
     use crate::work::provenance::RepoBinding;
-    let git_dir = repo_root.join(".git");
-    if !git_dir.exists() {
-        return RepoBinding::Unbound;
+
+    // #232 P1: use git itself to detect the repo — handles linked
+    // worktrees (.git is a FILE not a directory) and subdirectories
+    // (no .git at all, but git walks up to find the repo root).
+    let git_dir_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("--git-dir")
+        .output()
+        .map_err(|e| anyhow::anyhow!("git inspection failed at {}: {e}", repo_root.display()))?;
+
+    // Exit code 128 = "not a git repository" — the honest Unbound state.
+    if !git_dir_out.status.success() {
+        let stderr = String::from_utf8_lossy(&git_dir_out.stderr);
+        if stderr.contains("not a git repository") || git_dir_out.status.code() == Some(128) {
+            return Ok(RepoBinding::Unbound);
+        }
+        anyhow::bail!(
+            "git rev-parse --git-dir failed at {} (exit {:?}): a path claiming a binding must be inspectable",
+            repo_root.display(),
+            git_dir_out.status.code()
+        );
     }
-    let revision = std::process::Command::new("git")
+
+    // Get the HEAD revision — fail closed if unavailable.
+    let rev_out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("rev-parse")
         .arg("HEAD")
         .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-    let Some(revision) = revision else {
-        return RepoBinding::Unbound;
-    };
-    let status_output = std::process::Command::new("git")
+        .map_err(|e| anyhow::anyhow!("repo inspection failed at {}: {e}", repo_root.display()))?;
+    if !rev_out.status.success() {
+        anyhow::bail!(
+            "git rev-parse HEAD failed at {} (exit {:?}): a repo-backed path claiming a binding must yield a revision",
+            repo_root.display(),
+            rev_out.status.code()
+        );
+    }
+    let revision = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+    if revision.is_empty() {
+        anyhow::bail!(
+            "git rev-parse returned empty HEAD at {}: a repo-backed path claiming a binding must yield a revision",
+            repo_root.display()
+        );
+    }
+
+    let status_out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("status")
         .arg("--porcelain")
         .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-        .unwrap_or_default();
-    if status_output.trim().is_empty() {
-        RepoBinding::Bound { revision }
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "repo status inspection failed at {}: {e}",
+                repo_root.display()
+            )
+        })?;
+    if !status_out.status.success() {
+        anyhow::bail!(
+            "git status failed at {}: a repo-backed path claiming a binding must be inspectable",
+            repo_root.display()
+        );
+    }
+    let status_text = String::from_utf8_lossy(&status_out.stdout).to_string();
+    if status_text.trim().is_empty() {
+        Ok(RepoBinding::Bound { revision })
     } else {
+        // #232 P1: the dirty digest carries its POLICY VERSION —
+        // consumers know how to interpret the digest. Fails closed
+        // on computation failure — never a silent "unavailable".
         let digest = crate::workflow::soma::try_canonical_digest(
-            &serde_json::json!({"porcelain": status_output}),
+            &serde_json::json!({"porcelain": status_text, "digestPolicy": "soma-canonical-json-v1"}),
         )
-        .unwrap_or_else(|_| "unavailable".to_string());
-        RepoBinding::Dirty {
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "dirty-workspace digest failed at {}: {e} — fail closed",
+                repo_root.display()
+            )
+        })?;
+        Ok(RepoBinding::Dirty {
             revision,
             workspace_digest: digest,
-        }
+            digest_policy: "soma-canonical-json-v1".to_string(),
+        })
     }
 }
 
@@ -445,8 +499,11 @@ pub async fn update_work_context_status(
         }
     };
 
+    // #232 finding 3: the status handler has the loaded context — derive
+    // the authority from it, not from a hardcoded default.
+    let journal = request_journal_for(user_id, &context);
     work_context_service
-        .update_status(&mut context, new_status, &request_journal(user_id))
+        .update_status(&mut context, new_status, &journal)
         .map_err(|e| ApiError::Internal(format!("Failed to update status: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -624,8 +681,9 @@ async fn execute_decide_transaction(
         }
         // graph_decision event still lands in the same transaction — with
         // complete Slice 1A provenance (graph-run identity preserved via
-        // graph_run_envelope; the requesting user is the principal).
-        let journal = request_journal(user_id);
+        // graph_run_envelope; the requesting user is the principal; the
+        // authority derives from the loaded context — #232 finding 3).
+        let journal = request_journal_for(user_id, &context);
         let envelope = journal.graph_run_envelope(graph_run_id.to_string(), None);
         let decision_event = crate::work::event::WorkContextEvent::new(
             uuid::Uuid::new_v4().to_string(),
@@ -688,7 +746,7 @@ pub async fn cancel_work_context(
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let journal = request_journal_for(user_id, &context);
-    work_context_service
+    let cancellation_event_id = work_context_service
         .cancel_context(&mut context, &req.reason, &journal)
         .map_err(|e| {
             let msg = e.to_string();
@@ -703,9 +761,12 @@ pub async fn cancel_work_context(
 
     // #222: the durable flip has committed — wake any in-flight run
     // registered for this context so it stops at its next cancellation
-    // checkpoint. No registered run (or an already-fired token) is a
-    // no-op; this never retroactively changes the durable outcome.
-    let fired = state.run_cancels.fire(&id);
+    // checkpoint. #232 finding 2: the EXACT cancellation event ID from
+    // cancel_context's return is carried through the signal — the
+    // observer extracts it from the token, never from a database lookup.
+    let fired = state
+        .run_cancels
+        .fire_with_cancellation(&id, cancellation_event_id.as_deref());
     if fired > 0 {
         tracing::debug!("cancelled work context {id}: signalled {fired} in-flight run(s)");
     }
@@ -765,7 +826,7 @@ pub async fn continue_work_context(
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let journal = std::sync::Arc::new(request_journal(user_id));
+    let journal = std::sync::Arc::new(work_run_journal_for(user_id, &context));
     let context = orchestrator
         .continue_context(id, journal)
         .await
@@ -853,8 +914,9 @@ pub async fn run_harness(
     // the actual authority derived from the context, and the ACTUAL
     // repository binding (Bound/Dirty/Unbound based on the repo_root's
     // git state — never a hardcoded Unbound).
-    let harness_journal = work_run_journal_for(user_id, &context)
-        .with_repo_binding(detect_repo_binding(&req.repo_root));
+    let repo_binding = detect_repo_binding(&req.repo_root)
+        .map_err(|e| ApiError::Internal(format!("repository provenance inspection failed: {e}")))?;
+    let harness_journal = work_run_journal_for(user_id, &context).with_repo_binding(repo_binding);
     let service =
         HarnessWorkContextService::with_journal(work_context_service, Some(harness_journal));
     let mut edits = req.proposed_edits;

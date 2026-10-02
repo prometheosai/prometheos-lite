@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 
 use super::artifacts::ArtifactOperations;
 use super::conversations::ConversationOperations;
@@ -413,27 +414,78 @@ impl Db {
         // absent principal is a NULL column that matches the envelope.
         // Legacy rows are unaffected: triggers bind new writes, never
         // history.
-        self.conn
-            .execute(
-                "CREATE TRIGGER IF NOT EXISTS work_context_events_provenance_required
-                 BEFORE INSERT ON work_context_events
-                 WHEN NEW.provenance_json IS NULL
-                   OR NEW.source_digest IS NULL
-                   OR NEW.run_id IS NULL
-                   OR NEW.correlation_id IS NULL
-                   -- P1 gap 2: json_valid() validates actual JSON structure
-                   -- at the database boundary — well-shaped garbage like
-                   -- '{malformed}' is rejected, not merely NULL absence.
-                   OR json_valid(NEW.provenance_json) = 0
-                   OR length(NEW.source_digest) != 64
-                   OR length(NEW.run_id) = 0
-                   OR length(NEW.correlation_id) = 0
-                 BEGIN
-                     SELECT RAISE(ABORT, 'journal insert requires complete, well-formed provenance');
-                 END",
+        // #232 finding 4: upgrade the provenance trigger to the
+        // strengthened version — but ONLY when the current trigger lacks
+        // the json_extract checks (detected by inspecting its SQL). On
+        // already-upgraded databases this is a no-op that needs no
+        // write lock, so concurrent connections are unaffected.
+        let trigger_sql: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
                 [],
+                |r| r.get(0),
             )
-            .context("Failed to create work_context_events provenance trigger")?;
+            .optional()
+            .context("Failed to inspect provenance trigger")?;
+        // #232 P1: exact version-marker detection — the trigger SQL
+        // embeds a `provenance-trigger-v<N>` marker. The upgrade fires
+        // ONLY when the marker is absent or a different version. This is
+        // immune to partial-marker false positives (three separate
+        // string checks could all be present in an incomplete trigger).
+        let provenance_trigger_version = "provenance-trigger-v3";
+        let needs_upgrade = match trigger_sql {
+            Some(sql) => !sql.contains(provenance_trigger_version),
+            None => true, // trigger doesn't exist — create it
+        };
+        if needs_upgrade {
+            self.conn
+                .execute(
+                    "DROP TRIGGER IF EXISTS work_context_events_provenance_required",
+                    [],
+                )
+                .context("Failed to drop prior provenance trigger for upgrade")?;
+
+            self.conn
+                .execute(
+                    "CREATE TRIGGER work_context_events_provenance_required
+                     -- provenance-trigger-v3
+                     BEFORE INSERT ON work_context_events
+                     WHEN NEW.provenance_json IS NULL
+                       OR NEW.source_digest IS NULL
+                       OR NEW.run_id IS NULL
+                       OR NEW.correlation_id IS NULL
+                       OR json_valid(NEW.provenance_json) = 0
+                       OR json_extract(NEW.provenance_json, '$.schemaVersion') != '1.0.0'
+                       OR json_extract(NEW.provenance_json, '$.run.requestId') IS NULL
+                       OR json_extract(NEW.provenance_json, '$.run.requestId') = ''
+                       OR json_extract(NEW.provenance_json, '$.causation.correlationId') IS NULL
+                       OR json_extract(NEW.provenance_json, '$.causation.correlationId') = ''
+                       OR json_extract(NEW.provenance_json, '$.producer.identity') IS NULL
+                       OR json_extract(NEW.provenance_json, '$.producer.identity') = ''
+                       OR length(NEW.source_digest) != 64
+                       OR NEW.source_digest GLOB '*[^0-9a-f]*'
+                       OR length(NEW.run_id) = 0
+                       OR length(NEW.correlation_id) = 0
+                       OR NEW.run_id != COALESCE(
+                           json_extract(NEW.provenance_json, '$.run.workRunId'),
+                           json_extract(NEW.provenance_json, '$.run.graphRunId'),
+                           json_extract(NEW.provenance_json, '$.run.requestId'))
+                       OR NEW.correlation_id != COALESCE(
+                           json_extract(NEW.provenance_json, '$.run.workRunId'),
+                           json_extract(NEW.provenance_json, '$.run.requestId'))
+                       OR (NEW.principal_id IS NOT NULL
+                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') != NEW.principal_id)
+                       OR (NEW.principal_id IS NULL
+                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') IS NOT NULL)
+                     BEGIN
+                         SELECT RAISE(ABORT, 'journal insert requires complete, well-formed provenance');
+                     END",
+                    [],
+                )
+                .context("Failed to create work_context_events provenance trigger")?;
+        }
 
         // Entire journal rows are append-only: no UPDATE may modify any
         // journal row, provenance included — a tampered or rewritten
