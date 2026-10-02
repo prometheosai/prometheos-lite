@@ -1,0 +1,45 @@
+NON-NORMATIVE VIEW — derived from source digest 9b26d2086269f571107f6af6e321238080f3d8ab9e234a06e992027446e714b0; not an executable contract.
+# Workflow: lite-reorder v1.1.0 (Lite Reorder)
+Schema: 1.1.0  Kind: composite
+
+## Authority Ceiling
+ExecutionClass: deterministic
+Mutation: none
+Readable scopes: ["orders"]
+Writable scopes: ["shipping"]
+Tools: {"ship":["ship.v1"]}
+Network: {"default":"deny"}
+Provider: {"allowlist":["provider-1"]}
+Secrets: [{"name":"cred","scopes":["shipping"]}]
+Escalation: none
+Review: none
+Abstention: none
+Budgets: none
+Content restrictions: none
+
+## Body (topological order)
+### s0000:op1 [COMPOSITE]
+  Inputs: order: Order[Produced]
+  Outputs: shipment: Shipment[Produced]
+  Authority: ["ship"]
+  Effects: none
+  Uses: none
+  Secrets: none
+  Context: none
+### s0001:op2 [COMPOSITE]
+  Inputs: shipment: Shipment[Produced]
+  Outputs: none
+  Authority: ["ship"]
+  Effects: none
+  Uses: none
+  Secrets: none
+  Context: none
+
+## Constraints
+  none
+
+## Evidence References
+  none
+
+## Disclosure
+  Redactions: 0 Omissions: 0
