@@ -243,6 +243,155 @@ pub fn map_record(record: &JournalRecord) -> Result<WorkEvent, ProjectionError> 
     Ok(work_event)
 }
 
+/// A reconnectable stream segment — deliberately NOT a SOMA
+/// `WorkEventBatch` (approved plan, correction 1): a page's causal
+/// parents may live in earlier pages, so the batch type — whose audit
+/// demands in-batch parent closure — would be a type-level lie. The
+/// events inside are real `WorkEvent`s, each passing the full per-event
+/// audit; only batch-level closure checks do not apply, because there
+/// is no batch.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorkEventStreamPage {
+    /// Seq-ordered projected events (durable `seq` ASC).
+    pub events: Vec<WorkEvent>,
+}
+
+/// One projected page: the versioned envelope wrapping a stream segment,
+/// plus the durable cursor for reconnecting without gaps or duplication.
+#[derive(Debug, Clone)]
+pub struct ProjectionPage {
+    pub envelope: crate::workflow::projection::VersionedProjectionEnvelope<WorkEventStreamPage>,
+    /// The `after_seq` cursor for the next page (`None` = exhausted).
+    /// `seq` is the journal's `INTEGER PRIMARY KEY AUTOINCREMENT`:
+    /// monotonic, never reused, stable across VACUUM/rebuilds.
+    pub next_after: Option<i64>,
+}
+
+/// The complete-record source-digest input for one verified record
+/// (approved plan, correction 2): EVERY column the read path returned —
+/// `data` explicitly included, the row's own `sourceDigest` included
+/// (chaining the projection digest to the journal's row-level digest),
+/// and the derived identity columns included so the digest is a
+/// function of the complete stored row. Two journals differing in ANY
+/// column produce different projection source digests.
+fn complete_record_source_value(record: &JournalRecord) -> serde_json::Value {
+    serde_json::json!({
+        "seq": record.seq,
+        "id": record.event.id,
+        "workContextId": record.event.work_context_id,
+        "eventType": record.event.event_type,
+        "data": record.event.data,
+        "createdAt": record.event.created_at.to_rfc3339(),
+        "provenanceJson": record.stored.provenance_json,
+        "sourceDigest": record.stored.source_digest,
+        "runId": record.stored.run_id,
+        "principalId": record.stored.principal_id,
+        "correlationId": record.stored.correlation_id,
+    })
+}
+
+/// Build the versioned envelope around a mapped projection payload:
+/// `sourceDigest` binds the projection to the exact journal bytes it
+/// was derived from; `projectionDigest` binds the emitted payload.
+fn projection_envelope<V: serde::Serialize>(
+    source: &serde_json::Value,
+    payload: V,
+) -> Result<crate::workflow::projection::VersionedProjectionEnvelope<V>, ProjectionError> {
+    use crate::workflow::projection::{PROJECTION_VERSION_V1, VersionedProjectionEnvelope};
+    let payload_value = serde_json::to_value(&payload).map_err(|e| {
+        ProjectionError::Journal(anyhow::anyhow!("projection payload serialization: {e}"))
+    })?;
+    let source_digest =
+        crate::workflow::soma::canonical::try_canonical_digest(source).map_err(|e| {
+            ProjectionError::Journal(anyhow::anyhow!("projection source digest unavailable: {e}"))
+        })?;
+    let projection_digest = crate::workflow::soma::canonical::try_canonical_digest(&payload_value)
+        .map_err(|e| {
+            ProjectionError::Journal(anyhow::anyhow!("projection digest unavailable: {e}"))
+        })?;
+    Ok(VersionedProjectionEnvelope {
+        projection_version: PROJECTION_VERSION_V1.to_string(),
+        schema_version: SUPPORTED_SCHEMA_VERSION.to_string(),
+        source_digest,
+        projection_digest,
+        payload,
+    })
+}
+
+/// The shared fail-closed core of every projection entry point
+/// (binding requirement 2 — read-gate precedence): the verified journal
+/// read ALWAYS runs first and its errors ALWAYS fail before any mapping
+/// work; then each record maps and passes the full per-event audit.
+fn map_verified_records(records: &[JournalRecord]) -> Result<Vec<WorkEvent>, ProjectionError> {
+    let supported = crate::workflow::soma::supported_version();
+    let mut events = Vec::with_capacity(records.len());
+    for record in records {
+        let mapped = map_record(record)?;
+        let diags = mapped.audit(&supported);
+        if !diags.is_empty() {
+            return Err(ProjectionError::Audit(diags));
+        }
+        events.push(mapped);
+    }
+    Ok(events)
+}
+
+/// Project up to `limit` (clamped 1..=500) verified journal events for
+/// the context whose durable `seq` exceeds `after_seq` (0 = from the
+/// beginning), ordered `seq` ASC. A reconnectable stream segment — see
+/// [`WorkEventStreamPage`] for why this is not a `WorkEventBatch`.
+///
+/// Fail closed: tampered/mixed/corrupt rows fail in the verified read
+/// gate BEFORE any projection work; legacy rows, unmapped event types,
+/// the `HumanDecision` execution class, and stored `system` producers
+/// fail with explicit `Unsupported` errors — never fabricated events,
+/// never a partial page.
+pub fn project_page(
+    db: &crate::db::Db,
+    context_id: &str,
+    after_seq: i64,
+    limit: usize,
+) -> Result<ProjectionPage, ProjectionError> {
+    use crate::db::repository::work_context_events::read_journal_records_conn;
+
+    let clamped = limit.clamp(1, 500);
+    // Read-gate precedence (binding requirement 2): the verified read
+    // runs and fails FIRST; its errors are surfaced, never swallowed.
+    let records = read_journal_records_conn(
+        db.conn(),
+        context_id,
+        after_seq,
+        i64::try_from(clamped + 1).unwrap_or(i64::MAX),
+    )
+    .map_err(ProjectionError::Journal)?;
+
+    let exhausted = records.len() <= clamped;
+    let page_records: &[JournalRecord] = if exhausted {
+        &records
+    } else {
+        &records[..clamped]
+    };
+
+    let events = map_verified_records(page_records)?;
+    let source = serde_json::Value::Array(
+        page_records
+            .iter()
+            .map(complete_record_source_value)
+            .collect(),
+    );
+    let next_after = page_records
+        .last()
+        .filter(|_| !exhausted)
+        .map(|record| record.seq);
+    let envelope = projection_envelope(&source, WorkEventStreamPage { events })?;
+
+    Ok(ProjectionPage {
+        envelope,
+        next_after,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +414,7 @@ mod tests {
                 serde_json::json!({ "from": "Draft", "to": "InProgress" }),
             ),
             provenance: ProvenanceState::Verified(Box::new(envelope)),
+            stored: crate::db::repository::work_context_events::StoredColumns::default(),
         }
     }
 
@@ -358,6 +508,7 @@ mod tests {
                 serde_json::json!({}),
             ),
             provenance: ProvenanceState::LegacyUnverified,
+            stored: crate::db::repository::work_context_events::StoredColumns::default(),
         };
         match map_record(&record) {
             Err(ProjectionError::Unsupported { event_id, reason }) => {
