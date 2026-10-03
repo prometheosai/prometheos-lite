@@ -18,10 +18,7 @@ use prometheos_lite::workflow::soma::event::{WorkEvent, WorkEventBatch};
 use prometheos_lite::workflow::soma::supported_version;
 use serde::Deserialize;
 
-const FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/vendored/soma/v1.1/fixtures"
-);
+const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendored/soma/v1.1/fixtures");
 
 #[derive(Debug, Deserialize)]
 struct ManifestEntry {
@@ -115,7 +112,10 @@ fn vendored_event_fixtures_match_their_manifest_digests() {
 #[test]
 fn vendored_valid_event_fixtures_audit_clean() {
     let supported = supported_version();
-    for entry in event_manifest_entries().into_iter().filter(|e| e.kind == "valid") {
+    for entry in event_manifest_entries()
+        .into_iter()
+        .filter(|e| e.kind == "valid")
+    {
         let bytes = fixture_bytes(&entry);
         match entry.artifact.as_str() {
             "WorkEvent" => {
@@ -149,18 +149,29 @@ fn vendored_valid_event_fixtures_audit_clean() {
 #[test]
 fn vendored_invalid_event_fixtures_produce_manifest_pinned_codes() {
     let supported = supported_version();
-    for entry in event_manifest_entries().into_iter().filter(|e| e.kind == "invalid") {
+    for entry in event_manifest_entries()
+        .into_iter()
+        .filter(|e| e.kind == "invalid")
+    {
         let bytes = fixture_bytes(&entry);
         let codes: Vec<String> = match entry.artifact.as_str() {
             "WorkEvent" => {
                 let event: WorkEvent = serde_json::from_slice(&bytes)
                     .unwrap_or_else(|e| panic!("{}: parse failed: {e}", entry.path));
-                event.audit(&supported).into_iter().map(|d| d.code).collect()
+                event
+                    .audit(&supported)
+                    .into_iter()
+                    .map(|d| d.code)
+                    .collect()
             }
             "WorkEventBatch" => {
                 let batch: WorkEventBatch = serde_json::from_slice(&bytes)
                     .unwrap_or_else(|e| panic!("{}: parse failed: {e}", entry.path));
-                batch.audit(&supported).into_iter().map(|d| d.code).collect()
+                batch
+                    .audit(&supported)
+                    .into_iter()
+                    .map(|d| d.code)
+                    .collect()
             }
             other => panic!("{}: unknown artifact {other}", entry.path),
         };
