@@ -30,6 +30,12 @@ pub const PROVENANCE_SCHEMA_VERSION: &str = "1.0.0";
 /// Who or what produced the event. `Human` is a valid producer: a human
 /// acting directly (e.g. canceling a context by request) is recorded as
 /// the producer, not laundered through a system identity.
+///
+/// `System` is a LEGACY WRITE-TIME VOCABULARY member only: nothing
+/// constructs it anymore (the runtime process records itself as
+/// `Harness`), but already-stored envelopes must keep parsing. The
+/// Slice 1B projection fails closed on any stored `system` producer —
+/// it has no honest SOMA `ActorKind` representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum ProducerKind {
@@ -415,10 +421,20 @@ impl JournalContext {
     /// Internal-system context: for invocations with no initiating human
     /// (internal maintenance, test harnesses). The principal absence is
     /// the honest recorded state — never a fabricated identity.
+    ///
+    /// #132 Slice 1B correction 3: the producer is recorded as `Harness`
+    /// at write time. The Lite runtime process producing maintenance
+    /// events IS the harness — SOMA's closed `ActorKind` vocabulary has
+    /// no `system`, and projecting a stored `system` producer would be a
+    /// semantic collapse. The meaningful distinction of these invocations
+    /// is the ABSENT PRINCIPAL, which is recorded honestly and unchanged.
+    /// `ProducerKind::System` remains in the vocabulary solely so
+    /// already-stored envelopes keep parsing; the Slice 1B projection
+    /// fails closed on any such row.
     pub fn internal_system(request_id: String, authority: AuthorityRecord) -> Self {
         Self {
             producer: Producer {
-                kind: ProducerKind::System,
+                kind: ProducerKind::Harness,
                 identity: "prometheos-lite".to_string(),
                 implementation: Some(Implementation {
                     name: "prometheos-lite".to_string(),
@@ -547,6 +563,42 @@ mod tests {
         assert!(text.contains("\"schemaVersion\":\"1.0.0\""));
         let parsed = ProvenanceEnvelope::parse_canonical(&text).unwrap();
         assert_eq!(parsed, envelope);
+    }
+
+    /// #132 Slice 1B correction 3: internal invocations record the
+    /// runtime process as `Harness` at write time — never `System`.
+    #[test]
+    fn internal_system_records_harness_producer() {
+        let ctx = JournalContext::internal_system(
+            "req-sys".to_string(),
+            JournalContext::work_authority(AutonomyLevel::Chat, ApprovalPolicy::ManualAll),
+        );
+        assert_eq!(ctx.producer.kind, ProducerKind::Harness);
+        assert_eq!(ctx.producer.identity, "prometheos-lite");
+        // The meaningful distinction is the honest absent principal.
+        assert!(matches!(ctx.principal, PrincipalRef::Absent));
+        let envelope = ctx.event_envelope(None);
+        assert_eq!(envelope.producer.kind, ProducerKind::Harness);
+        assert!(text_of(envelope).contains("\"kind\":\"harness\""));
+    }
+
+    /// #132 Slice 1B correction 3: `System` remains parseable from
+    /// already-stored envelopes (backward read compatibility) — but
+    /// nothing writes it anymore.
+    #[test]
+    fn system_kind_still_parses_from_stored_envelopes() {
+        let ctx = JournalContext::internal_system(
+            "req-old".to_string(),
+            JournalContext::work_authority(AutonomyLevel::Chat, ApprovalPolicy::ManualAll),
+        );
+        let text = text_of(ctx.event_envelope(None));
+        let legacy = text.replace("\"kind\":\"harness\"", "\"kind\":\"system\"");
+        let parsed = ProvenanceEnvelope::parse_canonical(&legacy).unwrap();
+        assert_eq!(parsed.producer.kind, ProducerKind::System);
+    }
+
+    fn text_of(envelope: ProvenanceEnvelope) -> String {
+        envelope.to_canonical_json_string().unwrap()
     }
 
     #[test]

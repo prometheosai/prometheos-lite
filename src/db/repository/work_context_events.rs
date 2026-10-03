@@ -51,12 +51,32 @@ pub enum ProvenanceState {
     LegacyUnverified,
 }
 
+/// The stored row's provenance and derived identity columns, exactly as
+/// read and re-verified by the Slice 1A gate (`StoredColumns::default`
+/// for legacy rows). The Slice 1B projection's source digest covers
+/// these complete-record columns — the projection must see every byte
+/// the journal actually stored, not a reconstruction.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StoredColumns {
+    /// The canonical provenance bytes (parse-canonical verified at read).
+    pub provenance_json: Option<String>,
+    /// The row-level source digest (re-verified at read).
+    pub source_digest: Option<String>,
+    /// The derived flat identity columns (revalidated against the
+    /// parsed envelope at read).
+    pub run_id: Option<String>,
+    pub principal_id: Option<String>,
+    pub correlation_id: Option<String>,
+}
+
 /// One journal row with its verified provenance state.
 #[derive(Debug, Clone)]
 pub struct JournalRecord {
     pub seq: i64,
     pub event: WorkContextEvent,
     pub provenance: ProvenanceState,
+    /// The complete stored row columns (Slice 1B digest binding).
+    pub stored: StoredColumns,
 }
 
 /// The single journal writer (Slice 1A): records the event together with
@@ -166,6 +186,13 @@ pub fn read_journal_records_conn(
     let mut records = Vec::new();
     for raw in rows {
         let raw = raw.context("Failed to parse journal record")?;
+        let stored = StoredColumns {
+            provenance_json: raw.provenance_json.clone(),
+            source_digest: raw.source_digest.clone(),
+            run_id: raw.stored_run_id.clone(),
+            principal_id: raw.stored_principal_id.clone(),
+            correlation_id: raw.stored_correlation_id.clone(),
+        };
         let provenance = match (raw.provenance_json, raw.source_digest) {
             (Some(envelope_json), Some(stored_digest)) => {
                 let envelope =
@@ -258,6 +285,7 @@ pub fn read_journal_records_conn(
             seq: raw.seq,
             event: raw.event,
             provenance,
+            stored,
         });
     }
     Ok(records)
