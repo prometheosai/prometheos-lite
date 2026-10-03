@@ -811,3 +811,227 @@ fn cancelled_work_run_batch_matches_the_locked_golden_bytes() {
         "the golden digest lock diverges"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The durable fail-closed matrix: legacy, tampered, drifted, and mixed
+// journal states are REFUSED — never fabricated into projections. The
+// read-gate precedence test (binding requirement 2) proves tamper
+// errors surface as Journal failures BEFORE any mapping work.
+// ---------------------------------------------------------------------------
+
+/// The established out-of-band technique (see the Slice 1A enforcement
+/// suite): suspend the append-only and provenance triggers, mutate the
+/// row directly, restore both triggers.
+fn with_triggers_suspended<T>(db: &Db, f: impl FnOnce() -> T) -> T {
+    db.conn()
+        .execute("DROP TRIGGER IF EXISTS work_context_events_append_only", [])
+        .unwrap();
+    db.conn()
+        .execute(
+            "DROP TRIGGER IF EXISTS work_context_events_provenance_required",
+            [],
+        )
+        .unwrap();
+    let out = f();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER work_context_events_append_only
+             BEFORE UPDATE ON work_context_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal rows are append-only');
+             END",
+            [],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "CREATE TRIGGER IF NOT EXISTS work_context_events_provenance_required
+             BEFORE INSERT ON work_context_events
+             WHEN NEW.provenance_json IS NULL
+               OR NEW.source_digest IS NULL
+               OR NEW.run_id IS NULL
+               OR NEW.correlation_id IS NULL
+             BEGIN
+                 SELECT RAISE(ABORT, 'journal insert requires complete provenance');
+             END",
+            [],
+        )
+        .unwrap();
+    out
+}
+
+#[test]
+fn legacy_rows_are_refused_never_fabricated() {
+    let (db, wcs) = setup();
+    let context = drive_events(&wcs);
+
+    // Strip provenance out-of-band: the row becomes a legacy row.
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET provenance_json = NULL, source_digest = NULL, run_id = NULL,
+                     principal_id = NULL, correlation_id = NULL
+                 WHERE work_context_id = ?1",
+                rusqlite::params![context.id],
+            )
+            .unwrap();
+    });
+
+    for case in ["page", "run_keys", "run_batch"] {
+        let result = match case {
+            "page" => project_page(&db, &context.id, 0, 10).map(|_| ()),
+            "run_keys" => recorded_run_keys(&db, &context.id).map(|_| ()),
+            _ => project_run_work_event_batch(
+                &db,
+                &context.id,
+                &RunKey {
+                    kind: RunKeyKind::WorkRun,
+                    id: "wr-1".to_string(),
+                },
+            )
+            .map(|_| ()),
+        };
+        match result {
+            Err(ProjectionError::Unsupported { reason, .. }) => {
+                assert!(reason.contains("legacy"), "{case}: {reason}");
+            }
+            other => panic!("{case}: expected Unsupported, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn tampered_source_digest_fails_closed_before_projection() {
+    let (db, wcs) = setup();
+    let context = drive_events(&wcs);
+
+    // Tamper the event data WITHOUT updating the stored source digest.
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET data = '{\"tampered\": true}'
+                 WHERE work_context_id = ?1",
+                rusqlite::params![context.id],
+            )
+            .unwrap();
+    });
+
+    // Read-gate precedence (binding requirement 2): the verified read
+    // fails FIRST — a Journal error carrying the tamper detection,
+    // never an Unsupported mapping error, never a fabricated event.
+    match project_page(&db, &context.id, 0, 10) {
+        Err(ProjectionError::Journal(err)) => {
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("source-digest verification") || msg.contains("tamper"),
+                "the read-gate tamper detection must surface: {msg}"
+            );
+        }
+        other => panic!("expected Journal, got {other:?}"),
+    }
+    match recorded_run_keys(&db, &context.id) {
+        Err(ProjectionError::Journal(err)) => {
+            assert!(format!("{err:#}").contains("tamper"));
+        }
+        other => panic!("expected Journal, got {other:?}"),
+    }
+}
+
+#[test]
+fn column_drift_fails_closed_before_projection() {
+    let (db, wcs) = setup();
+    let context = drive_events(&wcs);
+
+    // Drift a derived identity column against the stored envelope.
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET run_id = 'forged-run'
+                 WHERE work_context_id = ?1",
+                rusqlite::params![context.id],
+            )
+            .unwrap();
+    });
+
+    match project_page(&db, &context.id, 0, 10) {
+        Err(ProjectionError::Journal(err)) => {
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("column drift"),
+                "the read-gate drift detection must surface: {msg}"
+            );
+        }
+        other => panic!("expected Journal, got {other:?}"),
+    }
+}
+
+#[test]
+fn mixed_provenance_state_is_refused_before_projection() {
+    let (db, wcs) = setup();
+    let context = drive_events(&wcs);
+
+    // NULL the envelope/digest but KEEP a derived column: neither a
+    // clean legacy row nor a clean provenanced row.
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET provenance_json = NULL, source_digest = NULL
+                 WHERE work_context_id = ?1",
+                rusqlite::params![context.id],
+            )
+            .unwrap();
+    });
+
+    match project_page(&db, &context.id, 0, 10) {
+        Err(ProjectionError::Journal(err)) => {
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("mixed provenance state"),
+                "the mixed-state refusal must surface: {msg}"
+            );
+        }
+        other => panic!("expected Journal, got {other:?}"),
+    }
+}
+
+#[test]
+fn stored_system_producer_fails_closed_during_projection() {
+    let (db, _wcs) = setup();
+    let context_id = "ctx-stored-system".to_string();
+    persist_context(&db, &context_id);
+
+    // Hand-store a legacy 'system' producer envelope through the ONE
+    // writer: write invariants pass (the vocabulary stays parseable),
+    // the PROJECTION must refuse it.
+    let journal = JournalContext::internal_system(
+        "req-sys".to_string(),
+        JournalContext::work_authority(
+            prometheos_lite::work::types::AutonomyLevel::Review,
+            Default::default(),
+        ),
+    );
+    let mut envelope = journal.event_envelope(None);
+    envelope.producer.kind = prometheos_lite::work::provenance::ProducerKind::System;
+    let event = WorkContextEvent {
+        id: "ev-sys".to_string(),
+        work_context_id: context_id.clone(),
+        event_type: "status_changed".to_string(),
+        data: serde_json::json!({}),
+        created_at: chrono::DateTime::parse_from_rfc3339("2026-10-02T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    };
+    record_event_conn(db.conn(), &event, &envelope).unwrap();
+
+    match project_page(&db, &context_id, 0, 10) {
+        Err(ProjectionError::Unsupported { event_id, reason }) => {
+            assert_eq!(event_id, "ev-sys");
+            assert!(reason.contains("system"), "{reason}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
