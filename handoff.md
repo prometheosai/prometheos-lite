@@ -1,6 +1,6 @@
 # Handoff
 
-_Last updated: September 30, 2026, after PR #233 (#232 residual provenance) merged as `c7feab8`, and PR #234 (e4-x07 projections) merged as `84d44e4`._
+_Last updated: October 2, 2026, after PR #233 (#232 residual provenance) merged as `c7feab8`, and PR #234 (e4-x07 projections) merged as `84d44e4`._
 
 ## Authority state
 
