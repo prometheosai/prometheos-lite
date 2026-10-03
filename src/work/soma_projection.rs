@@ -22,7 +22,9 @@
 //! No endpoint, no transport, no client (Slice 2/3 boundaries).
 
 use crate::db::repository::work_context_events::{JournalRecord, ProvenanceState};
-use crate::work::provenance::{ExecutionClass as LiteExecutionClass, ProducerKind, RepoBinding};
+use crate::work::provenance::{
+    ExecutionClass as LiteExecutionClass, ProducerKind, RepoBinding, RunIdentity,
+};
 use crate::workflow::soma::Diagnostic;
 use crate::workflow::soma::SUPPORTED_SCHEMA_VERSION;
 use crate::workflow::soma::contracts::AuthorityProfile;
@@ -323,9 +325,11 @@ fn projection_envelope<V: serde::Serialize>(
 /// (binding requirement 2 — read-gate precedence): the verified journal
 /// read ALWAYS runs first and its errors ALWAYS fail before any mapping
 /// work; then each record maps and passes the full per-event audit.
-fn map_verified_records(records: &[JournalRecord]) -> Result<Vec<WorkEvent>, ProjectionError> {
+fn map_verified_records<'a>(
+    records: impl IntoIterator<Item = &'a JournalRecord>,
+) -> Result<Vec<WorkEvent>, ProjectionError> {
     let supported = crate::workflow::soma::supported_version();
-    let mut events = Vec::with_capacity(records.len());
+    let mut events = Vec::new();
     for record in records {
         let mapped = map_record(record)?;
         let diags = mapped.audit(&supported);
@@ -390,6 +394,212 @@ pub fn project_page(
         envelope,
         next_after,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Typed run identity + per-run batches (correction 4 + binding
+// requirement 1: differently typed run identities with equal strings
+// must never silently merge).
+// ---------------------------------------------------------------------------
+
+/// The KIND of a recorded run identity — `work_run_id`, `graph_run_id`,
+/// or `request_id` are three DIFFERENT identity types that happen to be
+/// stored as strings. Grouping by the bare string would silently merge,
+/// e.g., a work run and a graph run that share an id value; the typed
+/// key keeps them distinct runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RunKeyKind {
+    WorkRun,
+    GraphRun,
+    Request,
+}
+
+/// A real recorded run identity: kind + id. Derives ONLY from the
+/// envelope's `RunIdentity` — never from the work-context container.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunKey {
+    pub kind: RunKeyKind,
+    pub id: String,
+}
+
+impl RunKey {
+    /// Derive the typed key from the envelope's real recorded identity
+    /// (work run, else graph run, else request — the same precedence as
+    /// the flat query column, but TYPED so equal strings of different
+    /// kinds never merge).
+    pub fn from_run_identity(run: &RunIdentity) -> Self {
+        if let Some(id) = &run.work_run_id {
+            Self {
+                kind: RunKeyKind::WorkRun,
+                id: id.clone(),
+            }
+        } else if let Some(id) = &run.graph_run_id {
+            Self {
+                kind: RunKeyKind::GraphRun,
+                id: id.clone(),
+            }
+        } else {
+            Self {
+                kind: RunKeyKind::Request,
+                id: run.request_id.clone(),
+            }
+        }
+    }
+}
+
+impl JournalRecord {
+    /// The record's typed run key, from its VERIFIED envelope only.
+    fn verified_run_key(&self) -> Result<RunKey, ProjectionError> {
+        match &self.provenance {
+            ProvenanceState::Verified(envelope) => Ok(RunKey::from_run_identity(&envelope.run)),
+            ProvenanceState::LegacyUnverified => Err(ProjectionError::Unsupported {
+                event_id: self.event.id.clone(),
+                reason: "legacy row without provenance — run identity is unavailable \
+                         and the projection never fabricates one"
+                    .to_string(),
+            }),
+        }
+    }
+}
+
+/// The context's distinct recorded run keys, in first-appearance seq
+/// order — the read-model rebuild enumeration. Fail closed on any
+/// non-verified record (a context with legacy rows cannot be rebuilt;
+/// silently listing runs that would then fail to project is a lie).
+pub fn recorded_run_keys(
+    db: &crate::db::Db,
+    context_id: &str,
+) -> Result<Vec<RunKey>, ProjectionError> {
+    use crate::db::repository::work_context_events::read_journal_records_conn;
+    let records = read_journal_records_conn(db.conn(), context_id, 0, i64::MAX)
+        .map_err(ProjectionError::Journal)?;
+    let mut keys: Vec<RunKey> = Vec::new();
+    for record in &records {
+        let key = record.verified_run_key()?;
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// Project the recorded run's event history as a causally-closed SOMA
+/// `WorkEventBatch` with `runId` = the run's REAL recorded identity
+/// (approved plan, correction 4 — never the work-context container).
+///
+/// The batch contains the run's own events PLUS the transitive causal
+/// ancestors of those events that live outside the run (each ancestor
+/// verbatim — its own correlation, actor, and run identity intact;
+/// nothing rewritten, nothing invented, nothing erased). Parent
+/// closure therefore holds BY CONSTRUCTION and the full vendored
+/// `WorkEventBatch::audit` gate runs before the batch is returned; a
+/// batch is never emitted dirty.
+pub fn project_run_work_event_batch(
+    db: &crate::db::Db,
+    context_id: &str,
+    run_key: &RunKey,
+) -> Result<
+    crate::workflow::projection::VersionedProjectionEnvelope<
+        crate::workflow::soma::event::WorkEventBatch,
+    >,
+    ProjectionError,
+> {
+    use crate::db::repository::work_context_events::read_journal_records_conn;
+    use crate::workflow::soma::event::WorkEventBatch;
+
+    // Read-gate precedence: the verified read runs and fails FIRST.
+    let records = read_journal_records_conn(db.conn(), context_id, 0, i64::MAX)
+        .map_err(ProjectionError::Journal)?;
+
+    // The run's own records (typed key from the parsed envelope — the
+    // flat column is the index, the envelope is truth).
+    let mut own: Vec<&JournalRecord> = Vec::new();
+    for record in &records {
+        if record.verified_run_key()? == *run_key {
+            own.push(record);
+        }
+    }
+    if own.is_empty() {
+        return Err(ProjectionError::Unsupported {
+            event_id: context_id.to_string(),
+            reason: format!(
+                "no recorded events for run key {run_key:?} — the projection never \
+                 invents an empty run"
+            ),
+        });
+    }
+
+    // Causal-ancestor closure: pull in parents that live outside the
+    // run, transitively, from the context's verified records. The walk
+    // fails closed on unresolvable parents; cycles are caught by the
+    // batch audit gate below (the vendored verifier is the authority).
+    let by_id: std::collections::HashMap<&str, &JournalRecord> = records
+        .iter()
+        .map(|record| (record.event.id.as_str(), record))
+        .collect();
+    let mut selected: Vec<&JournalRecord> = own.clone();
+    let mut seen_ids: std::collections::HashSet<String> =
+        own.iter().map(|record| record.event.id.clone()).collect();
+    for record in &own {
+        let mut next = verified_parent_id(record)?;
+        while let Some(parent_id) = next {
+            if !seen_ids.insert(parent_id.clone()) {
+                break; // already included (an own record or a visited ancestor)
+            }
+            let parent =
+                by_id
+                    .get(parent_id.as_str())
+                    .ok_or_else(|| ProjectionError::Unsupported {
+                        event_id: record.event.id.clone(),
+                        reason: format!(
+                            "causal parent {parent_id:?} does not resolve within the \
+                         context's verified records"
+                        ),
+                    })?;
+            selected.push(parent);
+            next = verified_parent_id(parent)?;
+        }
+    }
+    // Durable seq order for the batch.
+    selected.sort_by_key(|record| record.seq);
+
+    let events = map_verified_records(selected.iter().copied())?;
+    let source = serde_json::Value::Array(
+        selected
+            .iter()
+            .map(|record| complete_record_source_value(record))
+            .collect(),
+    );
+    let batch = WorkEventBatch {
+        schema_version: SUPPORTED_SCHEMA_VERSION.to_string(),
+        version: SUPPORTED_SCHEMA_VERSION.to_string(),
+        run_id: run_key.id.clone(),
+        events,
+        compatibility: Some(Compatibility {
+            schema_version: SUPPORTED_SCHEMA_VERSION.to_string(),
+            min_reader_version: None,
+        }),
+    };
+
+    // The full audit gate (parent closure, cycles, per-event checks) —
+    // a batch is never emitted dirty.
+    let diags = batch.audit(&crate::workflow::soma::supported_version());
+    if !diags.is_empty() {
+        return Err(ProjectionError::Audit(diags));
+    }
+
+    projection_envelope(&source, batch)
+}
+
+/// The record's recorded causal parent id, from its VERIFIED envelope.
+fn verified_parent_id(record: &JournalRecord) -> Result<Option<String>, ProjectionError> {
+    match &record.provenance {
+        ProvenanceState::Verified(envelope) => Ok(envelope.causation.parent_event_id.clone()),
+        ProvenanceState::LegacyUnverified => Err(ProjectionError::Unsupported {
+            event_id: record.event.id.clone(),
+            reason: "legacy row without provenance — causation is unavailable".to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
