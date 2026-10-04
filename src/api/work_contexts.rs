@@ -151,26 +151,51 @@ fn map_projection_error(err: crate::work::soma_projection::ProjectionError) -> A
     }
 }
 
-/// Build the canonical-bytes response for a projection envelope: the
-/// body IS `canonical_bytes()` (the golden-locked form), `ETag` is the
-/// projection digest, and an optional cursor rides in `X-Next-Cursor`.
+/// Build the canonical-bytes response for a projection envelope
+/// (review P1a: the ETag identifies the COMPLETE response
+/// representation — the sha256 of the exact canonical bytes served,
+/// not the payload-only `projectionDigest`, so any body change —
+/// including a `sourceDigest` change with an identical semantic
+/// payload — changes the ETag). Handles HTTP conditional
+/// revalidation: a matching `If-None-Match` (exact quoted value or
+/// `*`) yields 304 with the ETag set and no body.
 fn canonical_projection_response(
     envelope: &crate::workflow::projection::VersionedProjectionEnvelope<impl serde::Serialize>,
     next_cursor: Option<i64>,
+    more_available: bool,
+    if_none_match: Option<&str>,
 ) -> Result<axum::response::Response, ApiError> {
     let bytes = envelope.canonical_bytes().map_err(|diags| {
         ApiError::Internal(format!("projection cannot be canonicalized: {diags:?}"))
     })?;
+    let etag = format!(
+        "\"{}\"",
+        crate::workflow::soma::canonical::sha256_hex(&bytes)
+    );
+    if let Some(header_value) = if_none_match {
+        let requested = header_value.trim();
+        if requested == etag || requested == "*" {
+            return axum::http::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(axum::http::header::ETAG, etag)
+                .body(axum::body::Body::empty())
+                .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
+        }
+    }
     let mut builder = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .header(
-            axum::http::header::ETAG,
-            format!("\"{}\"", envelope.projection_digest),
-        );
+        .header(axum::http::header::ETAG, etag);
+    // Review P1b: the continuation cursor is ALWAYS present (last
+    // returned seq, or the request's cursor for an empty page);
+    // "more currently available" is represented separately.
     if let Some(next) = next_cursor {
         builder = builder.header("x-next-cursor", next.to_string());
     }
+    builder = builder.header(
+        "x-more-available",
+        if more_available { "true" } else { "false" },
+    );
     builder
         .body(axum::body::Body::from(bytes))
         .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
@@ -178,11 +203,15 @@ fn canonical_projection_response(
 
 /// `GET /work-contexts/:id/work-events` — one reconnectable stream
 /// segment of the projected SOMA `WorkEvent` stream. Byte-deterministic;
-/// resume with `?after=<X-Next-Cursor>`; no gaps, no duplication.
+/// resume with `?after=<X-Next-Cursor>` (always present — the final
+/// page carries the position to resume from when NEW events arrive);
+/// no gaps, no duplication. `X-More-Available` reports whether more
+/// events currently exist beyond this page.
 pub async fn get_work_event_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<WorkEventStreamQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     if query.user_id.trim().is_empty() {
         return Err(ApiError::BadRequest("user_id is required".to_string()));
@@ -204,16 +233,26 @@ pub async fn get_work_event_stream(
     let limit = query.limit.unwrap_or(50);
     let page = crate::work::soma_projection::project_page(&db, &id, after, limit)
         .map_err(map_projection_error)?;
-    canonical_projection_response(&page.envelope, page.next_after)
+    canonical_projection_response(
+        &page.envelope,
+        Some(page.next_after),
+        page.more_available,
+        headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 /// `GET /work-contexts/:id/work-event-runs` — the context's distinct
 /// recorded run keys (the read-model rebuild enumeration), in
 /// first-appearance seq order. Typed kinds never merge equal strings.
+/// The ETag is the sha256 of the exact canonical bytes served (the
+/// complete representation), with `If-None-Match` revalidation.
 pub async fn list_work_event_runs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<UserIdentityQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     if query.user_id.trim().is_empty() {
         return Err(ApiError::BadRequest("user_id is required".to_string()));
@@ -238,12 +277,30 @@ pub async fn list_work_event_runs(
     );
     let bytes: Vec<u8> = crate::workflow::soma::canonical::try_canonical_bytes(&value)
         .map_err(|e| ApiError::Internal(format!("run keys cannot be canonicalized: {e}")))?;
-    let digest = crate::workflow::soma::canonical::try_canonical_digest(&value)
-        .map_err(|e| ApiError::Internal(format!("run keys digest unavailable: {e}")))?;
+    // The ETag identifies the complete representation: the sha256 of
+    // the exact bytes served (identical to the canonical content
+    // digest for this endpoint's body).
+    let etag = format!(
+        "\"{}\"",
+        crate::workflow::soma::canonical::sha256_hex(&bytes)
+    );
+    if let Some(header_value) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        let requested = header_value.trim();
+        if requested == etag || requested == "*" {
+            return axum::http::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(axum::http::header::ETAG, etag)
+                .body(axum::body::Body::empty())
+                .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
+        }
+    }
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .header(axum::http::header::ETAG, format!("\"{digest}\""))
+        .header(axum::http::header::ETAG, etag)
         .body(axum::body::Body::from(bytes))
         .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
 }
@@ -257,6 +314,7 @@ pub async fn get_work_event_run_batch(
     State(state): State<Arc<AppState>>,
     Path((id, kind, run_id)): Path<(String, String, String)>,
     Query(query): Query<UserIdentityQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     if query.user_id.trim().is_empty() {
         return Err(ApiError::BadRequest("user_id is required".to_string()));
@@ -275,7 +333,14 @@ pub async fn get_work_event_run_batch(
     let run_key = crate::work::soma_projection::RunKey { kind, id: run_id };
     let envelope = crate::work::soma_projection::project_run_work_event_batch(&db, &id, &run_key)
         .map_err(map_projection_error)?;
-    canonical_projection_response(&envelope, None)
+    canonical_projection_response(
+        &envelope,
+        None,
+        false,
+        headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 /// Request to create a new WorkContext

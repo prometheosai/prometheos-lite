@@ -94,6 +94,25 @@ async fn get(app: &axum::Router, uri: &str) -> axum::response::Response {
         .unwrap()
 }
 
+async fn get_with_header(
+    app: &axum::Router,
+    uri: &str,
+    header: &str,
+    value: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(header, value)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 async fn post(app: &axum::Router, uri: &str) -> axum::response::Response {
     app.clone()
         .oneshot(
@@ -283,11 +302,20 @@ async fn http_paging_has_no_gaps_or_duplication() {
     loop {
         let resp = get(&app, &uri).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        // The continuation cursor is ALWAYS present (review P1b);
+        // paging terminates on X-More-Available, not on cursor absence.
         let next_cursor = resp
             .headers()
             .get("x-next-cursor")
             .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
+            .expect("the continuation cursor is always present")
+            .to_string();
+        let more = resp
+            .headers()
+            .get("x-more-available")
+            .and_then(|v| v.to_str().ok())
+            .expect("x-more-available is always present")
+            .to_string();
         let bytes = body_bytes(resp).await;
         let envelope: VersionedProjectionEnvelope<WorkEventStreamPage> =
             serde_json::from_slice(&bytes).expect("canonical bytes parse as the envelope");
@@ -295,12 +323,10 @@ async fn http_paging_has_no_gaps_or_duplication() {
             seen.push(event.id.clone());
         }
         pages += 1;
-        match next_cursor {
-            Some(next) => {
-                uri = format!("/work-contexts/{id}/work-events?user_id=owner&limit=1&after={next}")
-            }
-            None => break,
+        if more != "true" {
+            break;
         }
+        uri = format!("/work-contexts/{id}/work-events?user_id=owner&limit=1&after={next_cursor}");
         assert!(pages < 10, "paging must terminate");
     }
     assert_eq!(pages, 2, "2 events with limit 1 -> exactly 2 pages");
@@ -364,25 +390,114 @@ async fn response_body_is_the_canonical_envelope_bytes() {
 }
 
 #[tokio::test]
-async fn etag_equals_projection_digest() {
+async fn etag_identifies_the_complete_response_representation() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = test_router(&state);
+    let id = driven_context(&app, "owner").await;
+    let uri = format!("/work-contexts/{id}/work-events?user_id=owner");
+
+    let first = get(&app, &uri).await;
+    let first_etag = first
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag present")
+        .to_string();
+    let first_body = body_bytes(first).await;
+
+    // The ETag is the sha256 of the EXACT body bytes (the complete
+    // representation), not the payload-only projectionDigest.
+    assert_eq!(
+        first_etag,
+        format!(
+            "\"{}\"",
+            prometheos_lite::workflow::soma::canonical::sha256_hex(&first_body)
+        )
+    );
+
+    // Review P1a regression: a LEXICAL source-row change (same parsed
+    // value — the read gate passes, the semantic payload is IDENTICAL,
+    // so the projectionDigest is unchanged) changes sourceDigest and
+    // therefore the response bytes — and the ETag MUST change with
+    // them. The old payload-only ETag would have stayed identical.
+    let db = Db::new(&db_path).unwrap();
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET data = '{ \"from\" : \"Draft\" , \"to\" : \"InProgress\" }'
+                 WHERE work_context_id = ?1 AND event_type = 'status_changed'",
+                rusqlite::params![id],
+            )
+            .unwrap();
+    });
+    drop(db);
+
+    let second = get(&app, &uri).await;
+    let second_etag = second
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag present")
+        .to_string();
+    let second_body = body_bytes(second).await;
+
+    let first_env: VersionedProjectionEnvelope<WorkEventStreamPage> =
+        serde_json::from_slice(&first_body).unwrap();
+    let second_env: VersionedProjectionEnvelope<WorkEventStreamPage> =
+        serde_json::from_slice(&second_body).unwrap();
+    // The semantic payload is unchanged (same projectionDigest)…
+    assert_eq!(
+        first_env.projection_digest, second_env.projection_digest,
+        "the re-lex preserves the semantic payload"
+    );
+    // …but sourceDigest, the body bytes, and therefore the ETag differ.
+    assert_ne!(first_env.source_digest, second_env.source_digest);
+    assert_ne!(first_body, second_body);
+    assert_ne!(
+        first_etag, second_etag,
+        "different canonical bodies must always produce different ETags"
+    );
+}
+
+#[tokio::test]
+async fn if_none_match_revalidates() {
     let (state, _db_path, _dir) = test_app_state();
     let app = test_router(&state);
     let id = driven_context(&app, "owner").await;
+    let uri = format!("/work-contexts/{id}/work-events?user_id=owner");
 
-    let resp = get(
-        &app,
-        &format!("/work-contexts/{id}/work-events?user_id=owner"),
-    )
-    .await;
+    let resp = get(&app, &uri).await;
     let etag = resp
         .headers()
         .get(axum::http::header::ETAG)
         .and_then(|v| v.to_str().ok())
-        .expect("ETag is present")
+        .expect("ETag present")
         .to_string();
-    let envelope: VersionedProjectionEnvelope<WorkEventStreamPage> =
-        serde_json::from_slice(&body_bytes(resp).await).unwrap();
-    assert_eq!(etag, format!("\"{}\"", envelope.projection_digest));
+    drop(resp);
+
+    // A matching If-None-Match yields 304 Not Modified (empty body,
+    // ETag set).
+    let resp = get_with_header(&app, &uri, "if-none-match", &etag).await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::ETAG)
+            .and_then(|v| v.to_str().ok()),
+        Some(etag.as_str())
+    );
+    assert!(body_bytes(resp).await.is_empty());
+
+    // A stale If-None-Match yields the full 200 representation.
+    let stale = format!("\"{}\"", "0".repeat(64));
+    let resp = get_with_header(&app, &uri, "if-none-match", &stale).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!body_bytes(resp).await.is_empty());
+
+    // `If-None-Match: *` also revalidates to 304 for an existing
+    // representation.
+    let resp = get_with_header(&app, &uri, "if-none-match", "*").await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
 }
 
 #[tokio::test]
@@ -707,6 +822,136 @@ async fn audit_failure_is_500() {
 }
 
 // --- Boundary ---------------------------------------------------------------
+
+#[tokio::test]
+async fn final_non_empty_page_returns_its_last_seq_cursor() {
+    let (state, _db_path, _dir) = test_app_state();
+    let app = test_router(&state);
+    let id = driven_context(&app, "owner").await; // 2 events
+
+    // A page that exhausts the existing events (review P1b): the
+    // continuation cursor is STILL present — the last returned seq —
+    // so the client keeps the reconnect position for events that
+    // arrive later. X-More-Available carries the exhaustion fact.
+    let resp = get(
+        &app,
+        &format!("/work-contexts/{id}/work-events?user_id=owner"),
+    )
+    .await;
+    let next_cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .expect("the final non-empty page still carries the cursor")
+        .to_string();
+    let more = resp
+        .headers()
+        .get("x-more-available")
+        .and_then(|v| v.to_str().ok())
+        .expect("x-more-available present")
+        .to_string();
+    let bytes = body_bytes(resp).await;
+    let envelope: VersionedProjectionEnvelope<WorkEventStreamPage> =
+        serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(more, "false");
+    // The cursor is the LAST RETURNED event's durable seq.
+    let last_seq = envelope.payload.events.last().unwrap().sequence as i64;
+    assert_eq!(next_cursor, last_seq.to_string());
+}
+
+#[tokio::test]
+async fn empty_page_preserves_the_supplied_cursor() {
+    let (state, _db_path, _dir) = test_app_state();
+    let app = test_router(&state);
+    let id = driven_context(&app, "owner").await; // 2 events at seq 1..2
+
+    // Polling beyond the current end: an empty page whose continuation
+    // cursor is the REQUEST's cursor — the reconnect position survives
+    // an exhausted poll (review P1b).
+    let resp = get(
+        &app,
+        &format!("/work-contexts/{id}/work-events?user_id=owner&after=500"),
+    )
+    .await;
+    let next_cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .expect("the empty page still carries the cursor")
+        .to_string();
+    let more = resp
+        .headers()
+        .get("x-more-available")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let envelope: VersionedProjectionEnvelope<WorkEventStreamPage> =
+        serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(next_cursor, "500");
+    assert_eq!(more, "false");
+    assert!(envelope.payload.events.is_empty());
+}
+
+#[tokio::test]
+async fn polling_after_a_new_event_returns_only_that_event() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = test_router(&state);
+    let id = driven_context(&app, "owner").await; // 2 events
+
+    // Exhaust the stream and keep the preserved cursor.
+    let resp = get(
+        &app,
+        &format!("/work-contexts/{id}/work-events?user_id=owner"),
+    )
+    .await;
+    let cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .expect("cursor present on the final page")
+        .to_string();
+    drop(resp);
+
+    // A NEW event arrives later (a direct journal write — any writer
+    // would do): polling from the preserved cursor returns EXACTLY the
+    // new event and nothing else.
+    let db = Db::new(&db_path).unwrap();
+    let journal =
+        JournalContext::internal_system(format!("req-{}", uuid::Uuid::new_v4()), authority());
+    record_direct(
+        &db,
+        &id,
+        "ev-late",
+        "status_changed",
+        &journal.event_envelope(None),
+        "2026-10-04T12:00:00+00:00",
+    );
+    drop(db);
+
+    let resp = get(
+        &app,
+        &format!("/work-contexts/{id}/work-events?user_id=owner&after={cursor}"),
+    )
+    .await;
+    let more = resp
+        .headers()
+        .get("x-more-available")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let new_cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let envelope: VersionedProjectionEnvelope<WorkEventStreamPage> =
+        serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(envelope.payload.events.len(), 1, "exactly the new event");
+    assert_eq!(envelope.payload.events[0].id, "ev-late");
+    assert_eq!(more, "false");
+    assert_eq!(new_cursor, envelope.payload.events[0].sequence.to_string());
+}
 
 #[tokio::test]
 async fn all_new_routes_are_get_only() {

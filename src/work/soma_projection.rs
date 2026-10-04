@@ -269,14 +269,23 @@ pub struct WorkEventStreamPage {
 }
 
 /// One projected page: the versioned envelope wrapping a stream segment,
-/// plus the durable cursor for reconnecting without gaps or duplication.
+/// plus the transport-independent reconnect contract.
 #[derive(Debug, Clone)]
 pub struct ProjectionPage {
     pub envelope: crate::workflow::projection::VersionedProjectionEnvelope<WorkEventStreamPage>,
-    /// The `after_seq` cursor for the next page (`None` = exhausted).
+    /// The CONTINUATION cursor — ALWAYS present (review P1b: a final
+    /// page must never lose the reconnect position). It is the last
+    /// returned record's durable `seq`, or the request's `after_seq`
+    /// for an empty page — so a client that follows the contract can
+    /// resume later when NEW events arrive after an exhausted poll.
     /// `seq` is the journal's `INTEGER PRIMARY KEY AUTOINCREMENT`:
     /// monotonic, never reused, stable across VACUUM/rebuilds.
-    pub next_after: Option<i64>,
+    pub next_after: i64,
+    /// Whether MORE events are currently available beyond this page
+    /// (the limit+1 lookahead). The continuation cursor is
+    /// independent: polling again with `after = next_after` returns
+    /// exactly the events written since — possibly none.
+    pub more_available: bool,
 }
 
 /// The complete-record source-digest input for one verified record
@@ -395,15 +404,20 @@ pub fn project_page(
             .map(complete_record_source_value)
             .collect(),
     );
+    // Review P1b: the continuation cursor is ALWAYS present — the last
+    // returned seq (non-empty page) or the request's cursor (empty
+    // page) — so an exhausted poll never loses the reconnect position.
     let next_after = page_records
         .last()
-        .filter(|_| !exhausted)
-        .map(|record| record.seq);
+        .map(|record| record.seq)
+        .unwrap_or(after_seq);
+    let more_available = !exhausted;
     let envelope = projection_envelope(&source, WorkEventStreamPage { events })?;
 
     Ok(ProjectionPage {
         envelope,
         next_after,
+        more_available,
     })
 }
 

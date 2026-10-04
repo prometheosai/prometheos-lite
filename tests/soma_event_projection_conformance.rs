@@ -285,10 +285,11 @@ fn page_payload_is_not_a_batch_on_the_wire() {
 #[test]
 fn pages_cover_the_journal_without_gaps_or_duplication() {
     let (db, wcs) = setup();
-    let context = drive_events(&wcs); // exactly 3 events
+    let mut context = drive_events(&wcs); // exactly 3 events
 
     // Page through with a small limit; the union must be every event,
-    // seq-ordered, exactly once.
+    // seq-ordered, exactly once. Paging terminates on `more_available`
+    // — the CONTINUATION cursor is always present (review P1b).
     let mut seen: Vec<(u64, String)> = Vec::new();
     let mut after = 0i64;
     let mut pages = 0;
@@ -298,10 +299,10 @@ fn pages_cover_the_journal_without_gaps_or_duplication() {
             seen.push((event.sequence, event.id.clone()));
         }
         pages += 1;
-        match page.next_after {
-            Some(next) => after = next,
-            None => break,
+        if !page.more_available {
+            break;
         }
+        after = page.next_after;
         assert!(pages < 10, "paging must terminate");
     }
     assert_eq!(pages, 2, "3 events with limit 2 -> exactly 2 pages");
@@ -313,12 +314,37 @@ fn pages_cover_the_journal_without_gaps_or_duplication() {
     seqs.dedup();
     assert_eq!(seqs.len(), 3, "no duplicates across pages");
 
-    // Resuming from the last DELIVERED seq (the exhausted cursor) yields
-    // an empty page: no gaps, no duplication on reconnect.
+    // The FINAL non-empty page carries its last-seq continuation
+    // cursor — the reconnect position for events that arrive LATER.
+    let final_page = project_page(&db, &context.id, after, 2).unwrap();
+    // (the loop's last `after` is the second page's continuation cursor)
     let last_delivered = seen.last().unwrap().0 as i64;
+    assert_eq!(final_page.next_after, last_delivered);
+    assert!(!final_page.more_available);
+
+    // Resuming from that cursor yields an empty page that PRESERVES
+    // the cursor: no gaps, no duplication, and the reconnect position
+    // survives even an exhausted poll.
     let done = project_page(&db, &context.id, last_delivered, 2).unwrap();
     assert!(done.envelope.payload.events.is_empty());
-    assert_eq!(done.next_after, None);
+    assert_eq!(
+        done.next_after, last_delivered,
+        "an empty page preserves the supplied cursor"
+    );
+    assert!(!done.more_available);
+
+    // When a NEW event arrives, polling from the preserved cursor
+    // returns exactly that event — the reconnect contract end-to-end.
+    let journal = test_journal();
+    wcs.update_phase(
+        &mut context,
+        prometheos_lite::work::types::WorkPhase::Execution,
+        &journal,
+    )
+    .unwrap();
+    let resumed = project_page(&db, &context.id, last_delivered, 2).unwrap();
+    assert_eq!(resumed.envelope.payload.events.len(), 1);
+    assert_eq!(resumed.next_after, last_delivered + 1);
 }
 
 #[test]
@@ -356,10 +382,18 @@ fn page_envelope_carries_verified_digests_and_is_deterministic() {
 #[test]
 fn empty_context_projects_an_empty_page() {
     let (db, _wcs) = setup();
-    // A context id with no journal at all: an honest empty stream page.
+    // A context id with no journal at all: an honest empty stream page
+    // whose continuation cursor is the REQUEST's cursor (preserved).
     let page = project_page(&db, &uuid::Uuid::new_v4().to_string(), 0, 10).unwrap();
     assert!(page.envelope.payload.events.is_empty());
-    assert_eq!(page.next_after, None);
+    assert_eq!(page.next_after, 0);
+    assert!(!page.more_available);
+
+    // A non-zero request cursor is preserved verbatim on the empty page.
+    let page = project_page(&db, &uuid::Uuid::new_v4().to_string(), 41, 10).unwrap();
+    assert!(page.envelope.payload.events.is_empty());
+    assert_eq!(page.next_after, 41);
+    assert!(!page.more_available);
 }
 
 // ---------------------------------------------------------------------------
