@@ -1035,3 +1035,126 @@ fn stored_system_producer_fails_closed_during_projection() {
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }
+
+/// Review P1 regression 1: the projection source digest binds the RAW
+/// stored `data` bytes. Lexically different stored JSON (reordered
+/// keys / added whitespace) parses to the SAME value — the Slice 1A
+/// read gate correctly passes (it binds semantic content) — but the
+/// PROJECTION source digest MUST change, because it binds the bytes.
+#[test]
+fn lexical_json_differences_change_the_projection_source_digest() {
+    let (db, wcs) = setup();
+    let context = drive_events(&wcs);
+
+    let before = project_page(&db, &context.id, 0, 500).unwrap();
+
+    // Re-lex the stored data WITHOUT changing its parsed value (the
+    // read gate passes before AND after — same semantics). The
+    // status_changed event of drive_events is Draft -> InProgress.
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET data = '{ \"from\" : \"Draft\" , \"to\" : \"InProgress\" }'
+                 WHERE work_context_id = ?1 AND event_type = 'status_changed'",
+                rusqlite::params![context.id],
+            )
+            .unwrap();
+    });
+
+    let after = project_page(&db, &context.id, 0, 500).unwrap();
+    assert_ne!(
+        before.envelope.source_digest, after.envelope.source_digest,
+        "lexically different stored JSON must change the projection source digest"
+    );
+    // The events themselves are semantically identical (same ids,
+    // same sequence); only the byte binding changed.
+    let ids: Vec<&str> = after
+        .envelope
+        .payload
+        .events
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    let before_ids: Vec<&str> = before
+        .envelope
+        .payload
+        .events
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(ids, before_ids);
+}
+
+/// Review P1 regression 2: the projection source digest binds the RAW
+/// stored timestamp text, and the projected event's timestamp IS the
+/// stored representation. `Z` vs `+00:00` denote the same instant — the
+/// read gate passes both (it re-renders through chrono) — but both the
+/// projection source digest AND the projected timestamp must preserve
+/// the difference.
+#[test]
+fn z_timestamp_preserves_stored_form_and_changes_digest() {
+    let (db, wcs) = setup();
+    let context = drive_events(&wcs);
+
+    let before = project_page(&db, &context.id, 0, 500).unwrap();
+    let before_ts: Vec<&str> = before
+        .envelope
+        .payload
+        .events
+        .iter()
+        .map(|e| e.timestamp.as_str())
+        .collect();
+    assert!(
+        before_ts.iter().all(|ts| ts.ends_with("+00:00")),
+        "the writer stores to_rfc3339 form: {before_ts:?}"
+    );
+
+    // Rewrite one timestamp to the `Z` form of the SAME instant.
+    with_triggers_suspended(&db, || {
+        db.conn()
+            .execute(
+                "UPDATE work_context_events
+                 SET created_at = replace(created_at, '+00:00', 'Z')
+                 WHERE work_context_id = ?1 AND event_type = 'status_changed'",
+                rusqlite::params![context.id],
+            )
+            .unwrap();
+    });
+
+    let after = project_page(&db, &context.id, 0, 500).unwrap();
+    assert_ne!(
+        before.envelope.source_digest, after.envelope.source_digest,
+        "a different stored timestamp representation must change the projection source digest"
+    );
+    // The projected event carries the stored `Z` form verbatim —
+    // never normalized back to `+00:00`. drive_events writes
+    // context_created, status_changed, phase_transition in seq order,
+    // so the rewritten row is the middle event.
+    assert!(
+        after.envelope.payload.events[1].timestamp.ends_with('Z'),
+        "the stored Z form must surface verbatim: {}",
+        after.envelope.payload.events[1].timestamp
+    );
+    assert_eq!(
+        after.envelope.payload.events[1].timestamp,
+        format!(
+            "{}Z",
+            before.envelope.payload.events[1]
+                .timestamp
+                .trim_end_matches("+00:00")
+        ),
+        "same instant, different (stored) representation"
+    );
+    // The untouched events keep their stored form.
+    assert!(
+        after.envelope.payload.events[0]
+            .timestamp
+            .ends_with("+00:00")
+    );
+    assert!(
+        after.envelope.payload.events[2]
+            .timestamp
+            .ends_with("+00:00")
+    );
+}

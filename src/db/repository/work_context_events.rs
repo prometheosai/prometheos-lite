@@ -51,13 +51,22 @@ pub enum ProvenanceState {
     LegacyUnverified,
 }
 
-/// The stored row's provenance and derived identity columns, exactly as
-/// read and re-verified by the Slice 1A gate (`StoredColumns::default`
-/// for legacy rows). The Slice 1B projection's source digest covers
-/// these complete-record columns — the projection must see every byte
-/// the journal actually stored, not a reconstruction.
+/// The stored row's raw and provenance columns, exactly as read by the
+/// Slice 1A gate. The Slice 1B projection's source digest binds these
+/// RAW bytes — the projection must see every byte the journal actually
+/// stored, never a parsed/normalized reconstruction (review P1:
+/// lexically different stored JSON or RFC 3339 text must produce a
+/// different projection source digest).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StoredColumns {
+    /// The RAW `data` TEXT as stored — byte-exact, never re-serialized
+    /// from the parsed value. (Key order, whitespace, and number lexemes
+    /// are binding.)
+    pub data_text: String,
+    /// The RAW `created_at` TEXT as stored — byte-exact (`Z` vs
+    /// `+00:00` are DIFFERENT stored bytes and bind differently; the
+    /// projected event's timestamp is this exact string).
+    pub created_at_text: String,
     /// The canonical provenance bytes (parse-canonical verified at read).
     pub provenance_json: Option<String>,
     /// The row-level source digest (re-verified at read).
@@ -156,6 +165,8 @@ pub fn read_journal_records_conn(
     struct RawRow {
         seq: i64,
         event: WorkContextEvent,
+        data_text: String,
+        created_at_text: String,
         provenance_json: Option<String>,
         source_digest: Option<String>,
         stored_run_id: Option<String>,
@@ -174,6 +185,8 @@ pub fn read_journal_records_conn(
                     data: parse_event_data(row, 4)?,
                     created_at: parse_event_created_at(row, 5)?,
                 },
+                data_text: row.get(4)?,
+                created_at_text: row.get(5)?,
                 provenance_json: row.get(6)?,
                 source_digest: row.get(7)?,
                 stored_run_id: row.get(8)?,
@@ -187,6 +200,8 @@ pub fn read_journal_records_conn(
     for raw in rows {
         let raw = raw.context("Failed to parse journal record")?;
         let stored = StoredColumns {
+            data_text: raw.data_text,
+            created_at_text: raw.created_at_text,
             provenance_json: raw.provenance_json.clone(),
             source_digest: raw.source_digest.clone(),
             run_id: raw.stored_run_id.clone(),

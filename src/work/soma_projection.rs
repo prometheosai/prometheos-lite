@@ -211,9 +211,10 @@ pub fn map_record(record: &JournalRecord) -> Result<WorkEvent, ProjectionError> 
         // construction (strictly positive, never reused).
         sequence: u64::try_from(record.seq)
             .map_err(|_| unsupported(format!("journal seq {} is not a u64", record.seq)))?,
-        // The exact stored RFC 3339 string — never reformatted. The
-        // verified read gate already proved parse→render fixpoint.
-        timestamp: record.event.created_at.to_rfc3339(),
+        // The RAW stored timestamp text, byte-exact (review P1): the
+        // projected event's timestamp IS the stored representation —
+        // `Z` stays `Z`, `+00:00` stays `+00:00`. Never reformatted.
+        timestamp: record.stored.created_at_text.clone(),
         idempotency_key: record.event.id.clone(),
         correlation_id: envelope.causation.correlation_id.clone(),
         repo_revision: map_repo_revision(&envelope.repo_binding),
@@ -271,20 +272,22 @@ pub struct ProjectionPage {
 }
 
 /// The complete-record source-digest input for one verified record
-/// (approved plan, correction 2): EVERY column the read path returned —
-/// `data` explicitly included, the row's own `sourceDigest` included
-/// (chaining the projection digest to the journal's row-level digest),
-/// and the derived identity columns included so the digest is a
-/// function of the complete stored row. Two journals differing in ANY
-/// column produce different projection source digests.
+/// (approved plan, correction 2; review P1): EVERY column the read path
+/// returned, binding the RAW STORED BYTES — `data` as the raw SQLite
+/// TEXT (never re-serialized from the parsed value: key order,
+/// whitespace, and number lexemes are binding), `createdAt` as the raw
+/// stored text (`Z` vs `+00:00` bind differently), the row's own
+/// `sourceDigest` (chaining to the journal's row-level digest), and
+/// the derived identity columns. Two journals differing in ANY stored
+/// byte produce different projection source digests.
 fn complete_record_source_value(record: &JournalRecord) -> serde_json::Value {
     serde_json::json!({
         "seq": record.seq,
         "id": record.event.id,
         "workContextId": record.event.work_context_id,
         "eventType": record.event.event_type,
-        "data": record.event.data,
-        "createdAt": record.event.created_at.to_rfc3339(),
+        "data": record.stored.data_text,
+        "createdAt": record.stored.created_at_text,
         "provenanceJson": record.stored.provenance_json,
         "sourceDigest": record.stored.source_digest,
         "runId": record.stored.run_id,
@@ -624,7 +627,11 @@ mod tests {
                 serde_json::json!({ "from": "Draft", "to": "InProgress" }),
             ),
             provenance: ProvenanceState::Verified(Box::new(envelope)),
-            stored: crate::db::repository::work_context_events::StoredColumns::default(),
+            stored: crate::db::repository::work_context_events::StoredColumns {
+                data_text: r#"{"from":"Draft","to":"InProgress"}"#.to_string(),
+                created_at_text: "2026-10-02T12:00:00+00:00".to_string(),
+                ..Default::default()
+            },
         }
     }
 
@@ -819,9 +826,11 @@ mod tests {
         let mapped = map_record(&record).unwrap();
         assert_eq!(mapped.sequence, 7);
         assert_eq!(mapped.idempotency_key, "ev-1");
-        // The exact stored RFC 3339 string — the read gate already
-        // proved the parse→render fixpoint for this record.
-        assert_eq!(mapped.timestamp, record.event.created_at.to_rfc3339());
+        // The RAW stored timestamp text, byte-exact (review P1) — the
+        // projected event's timestamp IS the stored representation,
+        // never a parsed/re-rendered normalization of it.
+        assert_eq!(mapped.timestamp, record.stored.created_at_text);
+        assert_eq!(mapped.timestamp, "2026-10-02T12:00:00+00:00");
         assert_eq!(mapped.schema_version, SUPPORTED_SCHEMA_VERSION);
         assert_eq!(mapped.version, SUPPORTED_SCHEMA_VERSION);
         assert_eq!(

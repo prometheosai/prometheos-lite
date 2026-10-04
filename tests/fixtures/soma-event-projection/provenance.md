@@ -34,3 +34,11 @@ feed these bytes). Byte stability is enforced by
 `cancelled_work_run_batch_matches_the_locked_golden_bytes` in
 `tests/soma_event_projection_conformance.rs`; the directory is
 `-text` in `.gitattributes` (no EOL conversion on any platform).
+
+Relock history: the review-P1 fix (raw stored-byte binding — `data` and
+`createdAt` bind as the raw SQLite TEXT rather than parsed/re-serialized
+forms) changed the envelope's `sourceDigest` field; the golden was
+regenerated deterministically from the same fixed scenario. The payload
+(`WorkEventBatch`) itself is unchanged by that fix beyond the projected
+timestamps being the exact stored strings (the `+00:00` forms the
+writer stores).
