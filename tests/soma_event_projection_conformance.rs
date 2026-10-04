@@ -718,10 +718,13 @@ fn unknown_run_key_fails_closed() {
             id: "wr-nope".to_string(),
         },
     ) {
-        Err(ProjectionError::Unsupported { reason, .. }) => {
-            assert!(reason.contains("wr-nope"), "{reason}")
+        // Slice 2: the honest absence is a DISTINCT error shape so
+        // transports map it to not-found, never to unprocessable
+        // content, and never to an invented empty batch.
+        Err(ProjectionError::UnknownRun { run_key }) => {
+            assert_eq!(run_key, "work-run:wr-nope");
         }
-        other => panic!("expected Unsupported, got {other:?}"),
+        other => panic!("expected UnknownRun, got {other:?}"),
     }
 }
 

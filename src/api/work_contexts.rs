@@ -103,6 +103,181 @@ pub async fn get_work_context_events(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// #132 Slice 2: portable observation endpoints over the Slice 1B SOMA
+// WorkEvent projections. READ-ONLY, GET-only, experimental-router-only.
+// Every response body IS the projection envelope's canonical bytes —
+// byte-deterministic, digest-locked, rebuildable; the cursor rides in
+// the `X-Next-Cursor` header so the artifact stays pure.
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the projected stream endpoint. `after` is the
+/// durable `seq` cursor from the previous page's `X-Next-Cursor`
+/// header; `limit` is clamped to 1..=500.
+#[derive(Debug, Deserialize)]
+pub struct WorkEventStreamQuery {
+    pub user_id: String,
+    #[serde(default)]
+    pub after: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Map a Slice 1B projection refusal to the HTTP surface (the approved
+/// plan's fail-closed table). The gate/precedence order is Slice 1B's:
+/// journal read-gate failures surface as 500 with the gate's own
+/// detection text (integrity failures are server-state problems);
+/// unprojectable records surface as 422 naming the event; the honest
+/// absence of a run key surfaces as 404; audit-gated batches are never
+/// emitted dirty (500 with the diagnostic codes).
+fn map_projection_error(err: crate::work::soma_projection::ProjectionError) -> ApiError {
+    use crate::work::soma_projection::ProjectionError;
+    match err {
+        ProjectionError::Journal(e) => ApiError::Internal(format!("{e:#}")),
+        ProjectionError::Unsupported { event_id, reason } => {
+            ApiError::Unprocessable(format!("event {event_id}: {reason}"))
+        }
+        ProjectionError::UnknownRun { run_key } => {
+            ApiError::NotFound(format!("no recorded events for run key {run_key}"))
+        }
+        ProjectionError::Audit(diags) => ApiError::Internal(format!(
+            "projected batch failed the SOMA audit: {}",
+            diags
+                .iter()
+                .map(|d| d.code.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Build the canonical-bytes response for a projection envelope: the
+/// body IS `canonical_bytes()` (the golden-locked form), `ETag` is the
+/// projection digest, and an optional cursor rides in `X-Next-Cursor`.
+fn canonical_projection_response(
+    envelope: &crate::workflow::projection::VersionedProjectionEnvelope<impl serde::Serialize>,
+    next_cursor: Option<i64>,
+) -> Result<axum::response::Response, ApiError> {
+    let bytes = envelope.canonical_bytes().map_err(|diags| {
+        ApiError::Internal(format!("projection cannot be canonicalized: {diags:?}"))
+    })?;
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::ETAG,
+            format!("\"{}\"", envelope.projection_digest),
+        );
+    if let Some(next) = next_cursor {
+        builder = builder.header("x-next-cursor", next.to_string());
+    }
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
+}
+
+/// `GET /work-contexts/:id/work-events` — one reconnectable stream
+/// segment of the projected SOMA `WorkEvent` stream. Byte-deterministic;
+/// resume with `?after=<X-Next-Cursor>`; no gaps, no duplication.
+pub async fn get_work_event_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<WorkEventStreamQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let after = query.after.unwrap_or(0);
+    if after < 0 {
+        return Err(ApiError::BadRequest(
+            "after cursor must be >= 0".to_string(),
+        ));
+    }
+    // Ownership scoping: the same rule every other read on this router
+    // applies (404 unknown, 403 wrong user).
+    get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {e}")))?;
+    let db = service.get_db().clone();
+    let limit = query.limit.unwrap_or(50);
+    let page = crate::work::soma_projection::project_page(&db, &id, after, limit)
+        .map_err(map_projection_error)?;
+    canonical_projection_response(&page.envelope, page.next_after)
+}
+
+/// `GET /work-contexts/:id/work-event-runs` — the context's distinct
+/// recorded run keys (the read-model rebuild enumeration), in
+/// first-appearance seq order. Typed kinds never merge equal strings.
+pub async fn list_work_event_runs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<UserIdentityQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {e}")))?;
+    let db = service.get_db().clone();
+    let keys =
+        crate::work::soma_projection::recorded_run_keys(&db, &id).map_err(map_projection_error)?;
+    let value = serde_json::Value::Array(
+        keys.iter()
+            .map(|key| {
+                serde_json::json!({
+                    "kind": key.kind.as_wire(),
+                    "id": key.id,
+                })
+            })
+            .collect(),
+    );
+    let bytes: Vec<u8> = crate::workflow::soma::canonical::try_canonical_bytes(&value)
+        .map_err(|e| ApiError::Internal(format!("run keys cannot be canonicalized: {e}")))?;
+    let digest = crate::workflow::soma::canonical::try_canonical_digest(&value)
+        .map_err(|e| ApiError::Internal(format!("run keys digest unavailable: {e}")))?;
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ETAG, format!("\"{digest}\""))
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
+}
+
+/// `GET /work-contexts/:id/work-event-runs/:kind/:run_id` — the
+/// causally-closed `WorkEventBatch` for one recorded run identity.
+/// `:kind` is the wire spelling of the TYPED `RunKey`
+/// (`work-run`/`graph-run`/`request`): equal id strings under different
+/// kinds are different resources.
+pub async fn get_work_event_run_batch(
+    State(state): State<Arc<AppState>>,
+    Path((id, kind, run_id)): Path<(String, String, String)>,
+    Query(query): Query<UserIdentityQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let kind = crate::work::soma_projection::RunKeyKind::from_wire(&kind).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "unknown run kind {kind:?} — allowed kinds: work-run, graph-run, request"
+        ))
+    })?;
+    get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {e}")))?;
+    let db = service.get_db().clone();
+    let run_key = crate::work::soma_projection::RunKey { kind, id: run_id };
+    let envelope = crate::work::soma_projection::project_run_work_event_batch(&db, &id, &run_key)
+        .map_err(map_projection_error)?;
+    canonical_projection_response(&envelope, None)
+}
+
 /// Request to create a new WorkContext
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkContextRequest {
@@ -213,6 +388,12 @@ pub enum ApiError {
     BadRequest(String),
     Forbidden(String),
     Conflict(String),
+    /// The request is well-formed and the journal is readable, but the
+    /// record cannot be honestly projected (legacy row, unmapped event
+    /// type, `HumanDecision` execution class, stored legacy `system`
+    /// producer). 422 — Slice 2's honest distinction between "not
+    /// found" and "present but unprojectable".
+    Unprocessable(String),
 }
 
 impl IntoResponse for ApiError {
@@ -223,6 +404,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            ApiError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }

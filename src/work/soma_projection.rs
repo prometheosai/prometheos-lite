@@ -47,6 +47,11 @@ pub enum ProjectionError {
     /// class, a stored legacy `system` producer, or (run batches) an
     /// unresolvable causal parent / ancestor cycle.
     Unsupported { event_id: String, reason: String },
+    /// The requested run key has no recorded events — an honest absence
+    /// (the projection never invents an empty run). Distinct from the
+    /// `Unsupported` refusals so transports can map it to a not-found
+    /// rather than unprocessable-content.
+    UnknownRun { run_key: String },
     /// The projected batch failed the vendored `WorkEventBatch::audit`.
     /// A batch is never emitted dirty.
     Audit(Vec<Diagnostic>),
@@ -58,6 +63,9 @@ impl std::fmt::Display for ProjectionError {
             ProjectionError::Journal(e) => write!(f, "journal read failed: {e:#}"),
             ProjectionError::Unsupported { event_id, reason } => {
                 write!(f, "event {event_id} cannot be projected: {reason}")
+            }
+            ProjectionError::UnknownRun { run_key } => {
+                write!(f, "no recorded events for run key {run_key:?}")
             }
             ProjectionError::Audit(diags) => {
                 write!(f, "projected batch failed the SOMA audit: {diags:?}")
@@ -417,6 +425,29 @@ pub enum RunKeyKind {
     Request,
 }
 
+impl RunKeyKind {
+    /// The wire spelling of the kind (URL segments, error text):
+    /// `work-run` / `graph-run` / `request`.
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            RunKeyKind::WorkRun => "work-run",
+            RunKeyKind::GraphRun => "graph-run",
+            RunKeyKind::Request => "request",
+        }
+    }
+
+    /// Parse the wire spelling; anything else is rejected (the caller
+    /// surfaces the allowed kinds).
+    pub fn from_wire(text: &str) -> Option<Self> {
+        match text {
+            "work-run" => Some(RunKeyKind::WorkRun),
+            "graph-run" => Some(RunKeyKind::GraphRun),
+            "request" => Some(RunKeyKind::Request),
+            _ => None,
+        }
+    }
+}
+
 /// A real recorded run identity: kind + id. Derives ONLY from the
 /// envelope's `RunIdentity` — never from the work-context container.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -523,12 +554,8 @@ pub fn project_run_work_event_batch(
         }
     }
     if own.is_empty() {
-        return Err(ProjectionError::Unsupported {
-            event_id: context_id.to_string(),
-            reason: format!(
-                "no recorded events for run key {run_key:?} — the projection never \
-                 invents an empty run"
-            ),
+        return Err(ProjectionError::UnknownRun {
+            run_key: format!("{}:{}", run_key.kind.as_wire(), run_key.id),
         });
     }
 
