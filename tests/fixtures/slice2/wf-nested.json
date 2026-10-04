@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "wf-nested",
+  "name": "Nested",
+  "kind": "atomic",
+  "inputPorts": [
+    { "name": "order", "direction": "input", "type": "Order", "cardinality": "single", "requiredness": "required" }
+  ],
+  "outputPorts": [
+    { "name": "shipment", "direction": "output", "type": "Shipment", "cardinality": "single", "requiredness": "required" }
+  ],
+  "body": [
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "prep",
+      "executionClass": "deterministic",
+      "inputs": [
+        { "name": "order", "type": "Order", "acceptedOutcomes": ["Produced"] }
+      ],
+      "outputs": [
+        { "name": "staged", "type": "Order", "emits": ["Produced"] }
+      ],
+      "authority": ["ship"],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "flow",
+      "inputPorts": [
+        { "name": "staged", "direction": "input", "type": "Order", "cardinality": "single", "requiredness": "required" }
+      ],
+      "outputPorts": [
+        { "name": "ready", "direction": "output", "type": "Shipment", "cardinality": "single", "requiredness": "required" }
+      ],
+      "body": [
+        {
+          "schemaVersion": "1.1.0",
+          "version": "1.1.0",
+          "id": "inner",
+          "inputPorts": [
+            { "name": "staged", "direction": "input", "type": "Order", "cardinality": "single", "requiredness": "required" }
+          ],
+          "outputPorts": [
+            { "name": "ready", "direction": "output", "type": "Shipment", "cardinality": "single", "requiredness": "required" }
+          ],
+          "body": [
+            {
+              "schemaVersion": "1.1.0",
+              "version": "1.1.0",
+              "id": "leaf",
+              "executionClass": "deterministic",
+              "inputs": [
+                { "name": "staged", "type": "Order", "acceptedOutcomes": ["Produced"] }
+              ],
+              "outputs": [
+                { "name": "ready", "type": "Shipment", "emits": ["Produced"] }
+              ],
+              "effects": [],
+              "uses": [],
+              "secrets": [],
+              "context": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "audit",
+      "executionClass": "deterministic",
+      "inputs": [
+        { "name": "staged", "type": "Order", "acceptedOutcomes": ["Produced"] },
+        { "name": "ready", "type": "Shipment", "acceptedOutcomes": ["Produced"] }
+      ],
+      "outputs": [
+        { "name": "shipment", "type": "Shipment", "emits": ["Produced"] }
+      ],
+      "authority": ["ship"],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    }
+  ],
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "tools": { "ship": ["ship.v1"] },
+    "readableScopes": ["orders"],
+    "writableScopes": ["shipping"],
+    "networkPolicy": { "default": "deny" },
+    "providerPolicy": { "allowlist": ["provider-1"] },
+    "secrets": [ { "name": "cred", "scopes": ["shipping"] } ]
+  }
+}

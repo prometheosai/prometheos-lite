@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::workflow::governance_compiler::workflow_digest_of;
 use crate::workflow::soma::Diagnostic;
-use crate::workflow::soma::contracts::{AuthorityProfile, SecretGrant, WorkflowDefinition};
+use crate::workflow::soma::contracts::{
+    AuthorityProfile, BodyItem, SecretGrant, WorkflowDefinition,
+};
 use crate::workflow::soma::types::MutationMode;
 
 /// Schema version of this Lite-owned structure (semantically versioned;
@@ -33,9 +35,16 @@ pub const EXECUTION_GRAPH_SCHEMA_VERSION: &str = "lite.execution-graph.v1";
 /// fails closed with a diagnostic instead of trusting that invariant at
 /// every call site.
 pub(crate) fn topological_order(wf: &WorkflowDefinition) -> Option<Vec<usize>> {
+    // Spec §2.4: nested composites make the execution ordering fail closed.
+    if wf.contains_composite_body_item() {
+        return None;
+    }
     let n = wf.body.len();
     let mut producers: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, u) in wf.body.iter().enumerate() {
+        let BodyItem::Operation(u) = u else {
+            continue;
+        };
         for o in &u.outputs {
             producers.entry(o.name.as_str()).or_default().push(i);
         }
@@ -43,6 +52,9 @@ pub(crate) fn topological_order(wf: &WorkflowDefinition) -> Option<Vec<usize>> {
     let mut indegree = vec![0usize; n];
     let mut edges = vec![Vec::<usize>::new(); n];
     for (i, u) in wf.body.iter().enumerate() {
+        let BodyItem::Operation(u) = u else {
+            continue;
+        };
         let mut deps: Vec<usize> = Vec::new();
         for inp in &u.inputs {
             if let Some(producers_of_name) = producers.get(inp.name.as_str()) {
@@ -129,6 +141,12 @@ pub fn compile_execution_graph(
             format!("schema violation: {e}"),
         )]
     })?;
+    if model.contains_composite_body_item() {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0001",
+            "workflow body contains a nested composite; the execution graph supports atomic units only",
+        )]);
+    }
     let workflow_digest = workflow_digest_of(&model)?;
     let Some(order) = topological_order(&model) else {
         return Err(vec![Diagnostic::new(
@@ -139,6 +157,9 @@ pub fn compile_execution_graph(
 
     let mut producers: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, unit) in model.body.iter().enumerate() {
+        let BodyItem::Operation(unit) = unit else {
+            continue;
+        };
         for output in &unit.outputs {
             producers.entry(output.name.as_str()).or_default().push(i);
         }
@@ -146,14 +167,16 @@ pub fn compile_execution_graph(
 
     let mut steps = Vec::with_capacity(order.len());
     for (position, &body_idx) in order.iter().enumerate() {
-        let unit = &model.body[body_idx];
+        let BodyItem::Operation(unit) = &model.body[body_idx] else {
+            continue;
+        };
         let granted = reduce_unit_authority(&model, body_idx)?;
         let mut dependencies: BTreeSet<&str> = BTreeSet::new();
         for input in &unit.inputs {
             if let Some(producers_of_name) = producers.get(input.name.as_str()) {
                 for &producer_idx in producers_of_name {
                     if producer_idx != body_idx {
-                        dependencies.insert(model.body[producer_idx].id.as_str());
+                        dependencies.insert(model.body[producer_idx].id());
                     }
                 }
             }
@@ -187,7 +210,12 @@ fn reduce_unit_authority(
     workflow: &WorkflowDefinition,
     unit_index: usize,
 ) -> Result<AuthorityProfile, Vec<Diagnostic>> {
-    let unit = &workflow.body[unit_index];
+    let BodyItem::Operation(unit) = &workflow.body[unit_index] else {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0001",
+            "authority reduction supports atomic units only",
+        )]);
+    };
     let ceiling = &workflow.authority;
     let mut diagnostics: Vec<(&'static str, String)> = Vec::new();
     let mut caps: BTreeSet<String> = BTreeSet::new();

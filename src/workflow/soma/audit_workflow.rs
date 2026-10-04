@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::contracts::{
-    ConstraintKind, GovernanceConstraint, OperationDefinition, WorkflowDefinition,
+    BodyItem, ConstraintKind, GovernanceConstraint, OperationDefinition, WorkflowDefinition,
 };
 use super::types::{FAILURE_VARIANTS, OutcomeVariant, SUCCESS_VARIANT, type_in_vocabulary};
 use super::{Diagnostic, SupportedVersion};
@@ -16,13 +16,41 @@ impl WorkflowDefinition {
     }
 
     fn op_ids(&self) -> Vec<&str> {
-        self.body.iter().map(|u| u.id.as_str()).collect()
+        self.body
+            .iter()
+            .filter_map(BodyItem::as_operation)
+            .map(|u| u.id.as_str())
+            .collect()
     }
 
     /// Full semantic audit. Returns diagnostics in stable (sorted) order;
     /// empty means the workflow satisfies every check.
     pub fn audit(&self, supported: &SupportedVersion) -> Vec<Diagnostic> {
         let mut out: Vec<Diagnostic> = Vec::new();
+
+        // E4/X07 Slice 2, Task 1: nested composites are refused fail-closed before
+        // any per-unit check. One diagnostic per composite body item (index in the
+        // message keeps them distinct through the dedup below). Task 2 replaces
+        // this block with recursive per-scope auditing.
+        if self.contains_composite_body_item() {
+            for (i, item) in self.body.iter().enumerate() {
+                if matches!(item, BodyItem::Composite(_)) {
+                    out.push(
+                        Diagnostic::related(
+                            "SOMA-CMP-0003",
+                            format!(
+                                "nested composite body item at /body/{i} is not supported by this validation pass"
+                            ),
+                            item.id().to_string(),
+                        )
+                        .with_source(format!("/body/{i}"), Some(item.id().to_string())),
+                    );
+                }
+            }
+            out.sort_by(|a, b| (&a.code, &a.message).cmp(&(&b.code, &b.message)));
+            out.dedup_by(|a, b| a.code == b.code && a.message == b.message);
+            return out;
+        }
 
         // SOMA-CMP-0001: unsupported versions.
         for v in [&self.schema_version, &self.version] {
@@ -88,6 +116,9 @@ impl WorkflowDefinition {
         let secret_names: BTreeSet<&str> = authority.declared_secret_names().into_iter().collect();
 
         for (body_index, unit) in self.body.iter().enumerate() {
+            let BodyItem::Operation(unit) = unit else {
+                continue;
+            };
             let ptr = format!("/body/{body_index}");
             audit_unit_authority(
                 self, unit, body_index, &tool_keys, &readable, &writable, &mut out,
@@ -247,6 +278,9 @@ impl WorkflowDefinition {
             .map(|p| (p.name.as_str(), p.ty.as_str()))
             .collect();
         for (body_index, unit) in self.body.iter().enumerate() {
+            let BodyItem::Operation(unit) = unit else {
+                continue;
+            };
             let ptr = format!("/body/{body_index}");
             for inp in &unit.inputs {
                 if let Some(t) = in_types.get(inp.name.as_str())
@@ -285,11 +319,13 @@ impl WorkflowDefinition {
             .chain(
                 self.body
                     .iter()
+                    .filter_map(BodyItem::as_operation)
                     .flat_map(|u| u.inputs.iter().map(|i| &i.ty)),
             )
             .chain(
                 self.body
                     .iter()
+                    .filter_map(BodyItem::as_operation)
                     .flat_map(|u| u.outputs.iter().map(|o| &o.ty)),
             )
         {
@@ -325,7 +361,7 @@ impl WorkflowDefinition {
 
         // Dependency graph helpers
         let mut producers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for unit in &self.body {
+        for unit in self.body.iter().filter_map(BodyItem::as_operation) {
             for o in &unit.outputs {
                 producers
                     .entry(o.name.as_str())
@@ -336,6 +372,7 @@ impl WorkflowDefinition {
         let consumed: BTreeSet<&str> = self
             .body
             .iter()
+            .filter_map(BodyItem::as_operation)
             .flat_map(|u| u.inputs.iter().map(|i| i.name.as_str()))
             .collect();
         let boundary_out: BTreeSet<&str> =
@@ -360,6 +397,9 @@ impl WorkflowDefinition {
 
         // SOMA-EXP-0005: dead inputs
         for (body_index, unit) in self.body.iter().enumerate() {
+            let BodyItem::Operation(unit) = unit else {
+                continue;
+            };
             let ptr = format!("/body/{body_index}");
             for inp in &unit.inputs {
                 if !producers.contains_key(inp.name.as_str())
@@ -380,6 +420,9 @@ impl WorkflowDefinition {
 
         // SOMA-EXP-0004: orphan operations
         for (body_index, unit) in self.body.iter().enumerate() {
+            let BodyItem::Operation(unit) = unit else {
+                continue;
+            };
             if unit.inputs.is_empty() {
                 let produced: BTreeSet<&str> =
                     unit.outputs.iter().map(|o| o.name.as_str()).collect();
@@ -403,6 +446,9 @@ impl WorkflowDefinition {
 
         // SOMA-OUT-0001 / 0002
         for (body_index, unit) in self.body.iter().enumerate() {
+            let BodyItem::Operation(unit) = unit else {
+                continue;
+            };
             let ptr = format!("/body/{body_index}");
             for inp in &unit.inputs {
                 let accepted: BTreeSet<OutcomeVariant> =
@@ -410,6 +456,7 @@ impl WorkflowDefinition {
                 let emitted: BTreeSet<OutcomeVariant> = self
                     .body
                     .iter()
+                    .filter_map(BodyItem::as_operation)
                     .flat_map(|src| src.outputs.iter())
                     .filter(|o| o.name == inp.name)
                     .flat_map(|o| o.emits.iter().flatten())
@@ -524,18 +571,21 @@ fn audit_unit_authority(
     }
 }
 
-fn has_cycle(body: &[OperationDefinition], producers: &BTreeMap<&str, BTreeSet<&str>>) -> bool {
+fn has_cycle(body: &[BodyItem], producers: &BTreeMap<&str, BTreeSet<&str>>) -> bool {
     // Kahn's algorithm over INDEX-keyed dependency edges so id-sharing units
     // never collapse into one node.
     let n = body.len();
     let mut indegree = vec![0usize; n];
     let mut edges: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
     for (i, unit) in body.iter().enumerate() {
+        let BodyItem::Operation(unit) = unit else {
+            continue;
+        };
         let mut deps: BTreeSet<usize> = BTreeSet::new();
         for inp in &unit.inputs {
             if let Some(producers_of_name) = producers.get(inp.name.as_str()) {
                 for (j, other) in body.iter().enumerate() {
-                    if producers_of_name.contains(&other.id.as_str()) {
+                    if producers_of_name.contains(&other.id()) {
                         deps.insert(j);
                     }
                 }

@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::workflow::soma::contracts::{AuthorityProfile, OperationDefinition, WorkflowDefinition};
+use crate::workflow::soma::contracts::{
+    AuthorityProfile, BodyItem, OperationDefinition, WorkflowDefinition,
+};
 use crate::workflow::soma::profile::authority_widened;
 use crate::workflow::soma::{Diagnostic, SupportedVersion};
 
@@ -99,6 +101,7 @@ pub fn compile_authority(workflow_json: &Value) -> Result<CompiledAuthorityGraph
     let operations = model
         .body
         .iter()
+        .filter_map(BodyItem::as_operation)
         .map(|u| CompiledOperationAuthority {
             op_id: u.id.clone(),
             effective: model.authority.clone(),
@@ -110,7 +113,12 @@ pub fn compile_authority(workflow_json: &Value) -> Result<CompiledAuthorityGraph
         workflow_authority: model.authority.clone(),
         operations,
         constraints: model.constraints.clone(),
-        body: model.body.clone(),
+        body: model
+            .body
+            .iter()
+            .filter_map(BodyItem::as_operation)
+            .cloned()
+            .collect(),
     })
 }
 

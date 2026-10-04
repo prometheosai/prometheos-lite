@@ -187,8 +187,8 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
         .iter()
         .enumerate()
         .map(|(i, &body_idx)| PlanStep {
-            key: format!("s{i:04}:{}", model.body[body_idx].id),
-            operation_id: model.body[body_idx].id.clone(),
+            key: format!("s{i:04}:{}", model.body[body_idx].id()),
+            operation_id: model.body[body_idx].id().to_string(),
         })
         .collect();
     seal_plan(workflow_digest, steps)

@@ -640,7 +640,11 @@ fn raw_number_lexeme_fails_closed_on_read() {
     // test puts one in the AST: `retry.maxAttempts: 2` (the audit has no
     // retry rule, so the gate stays honest).
     let mut wf = base_wf();
-    wf.body[0].retry = Some(RetryPolicy {
+    let prometheos_lite::workflow::soma::contracts::BodyItem::Operation(op) = &mut wf.body[0]
+    else {
+        panic!("base fixture body[0] is an operation");
+    };
+    op.retry = Some(RetryPolicy {
         max_attempts: 2,
         backoff: None,
     });
@@ -762,4 +766,225 @@ fn forged_schema_version_fails_human_against_source() {
     let err = verify_human_against_source(&env, &wf, None)
         .expect_err("forged schemaVersion must fail against the source");
     assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — Task 1: flat-fixture pins captured at main@84d44e4
+// ---------------------------------------------------------------------------
+
+const FLAT_PINS: [(&str, &str, &str); 3] = [
+    (
+        "fixtures/valid/wf-valid-base.json",
+        "0d4e039e5d750307f52790068e687d879d5e4d124beffdeb06becd5abe39fd6d",
+        "709bcd249f8977d7316c73d52834f209d1b4f78eb7f9a644f451ba7c07f5ae54",
+    ),
+    (
+        "fixtures/valid/wf-valid-composite.json",
+        "10190c09684303f6286ee86d8f4e7bea62b4bafeecbbf3c19790d46d6aeb87cf",
+        "85c23e8c7bfa9044dd8f37dbeed4f0f25ad4ad9ee889a8668030d6ba1cd92974",
+    ),
+    (
+        "fixtures/valid/wf-valid-gov.json",
+        "bf337338252c7022282647bc20b9bb331f5b7997c5633ff8f012f329a8e3f1ee",
+        "709b1ab15dcd1ad178c1ad05df69e33e3ee589be0f8ba5142d498025f1be44ac",
+    ),
+];
+
+#[test]
+fn flat_workflow_digests_remain_pinned() {
+    for (rel, digest, _) in FLAT_PINS {
+        let text = fixture(rel);
+        let plan = compile_workflow_text(&text).unwrap_or_else(|e| panic!("{rel}: {e:?}"));
+        assert_eq!(
+            plan.workflow_digest, digest,
+            "workflow digest drifted for {rel}"
+        );
+    }
+}
+
+#[test]
+fn flat_canonical_bytes_unchanged() {
+    for (rel, _, bytes_sha) in FLAT_PINS {
+        let wf: WorkflowDefinition =
+            serde_json::from_str(&fixture(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let env =
+            project_canonical_json(&wf).unwrap_or_else(|e| panic!("{rel} must project: {e:?}"));
+        let bytes = env
+            .canonical_bytes()
+            .unwrap_or_else(|e| panic!("{rel}: {e:?}"));
+        assert_eq!(
+            sha256_hex(&bytes),
+            bytes_sha,
+            "canonical envelope bytes drifted for {rel}"
+        );
+        let back = verify_canonical_projection_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("{rel} bytes must round-trip: {e:?}"));
+        let again = back.canonical_bytes().expect("re-render");
+        assert_eq!(
+            sha256_hex(&again),
+            bytes_sha,
+            "round-trip bytes differ for {rel}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — Tasks 1-2: nested composite contract + fail-closed surfaces
+// ---------------------------------------------------------------------------
+
+const NESTED_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/slice2/wf-nested.json"
+);
+
+fn nested_text() -> String {
+    std::fs::read_to_string(NESTED_FIXTURE).expect("wf-nested fixture reads")
+}
+
+fn nested_wf() -> WorkflowDefinition {
+    serde_json::from_str(&nested_text()).expect("wf-nested parses")
+}
+
+/// Spec §12 item 3 — RED at main@84d44e4 (nested body items fail to parse),
+/// GREEN after Task 1. Uses only types that exist at base so the RED is a
+/// runtime failure, not a compile failure; depth is proven through `Value`.
+#[test]
+fn nested_composite_document_parses() {
+    let wf: WorkflowDefinition =
+        serde_json::from_str(&nested_text()).expect("nested composite document must parse");
+    assert_eq!(wf.id, "wf-nested");
+    assert_eq!(wf.body.len(), 3);
+    let v: Value = serde_json::from_str(&nested_text()).expect("fixture is valid JSON");
+    assert_eq!(v["body"][1]["id"], "flow");
+    assert_eq!(v["body"][1]["body"][0]["id"], "inner");
+    assert_eq!(v["body"][1]["body"][0]["body"][0]["id"], "leaf");
+}
+
+/// Spec §12 item 4 — parse negatives. Each rejection must carry the BodyItem
+/// oneOf refusal phrasing (base emits plain serde "unknown field"/"missing
+/// field" errors, so this assertion is RED at main@84d44e4).
+#[test]
+fn body_item_one_of_negatives() {
+    let base: Value = serde_json::from_str(&nested_text()).expect("fixture is valid JSON");
+
+    let mut collision = base["body"][0].clone();
+    collision["inputPorts"] = serde_json::json!([]);
+    collision["outputPorts"] = serde_json::json!([]);
+    collision["body"] = serde_json::json!([]);
+
+    let mut no_exec = base["body"][0].clone();
+    no_exec
+        .as_object_mut()
+        .expect("operation object")
+        .remove("executionClass");
+
+    let mut no_ports = base["body"][1].clone();
+    {
+        let obj = no_ports.as_object_mut().expect("composite object");
+        obj.remove("inputPorts");
+        obj.remove("body");
+    }
+
+    let mut malformed = base["body"][1].clone();
+    malformed["body"] = serde_json::json!([{ "notA": "bodyItem" }]);
+
+    for (name, item) in [
+        ("discriminator-collision", collision),
+        ("missing-executionClass", no_exec),
+        ("missing-inputPorts-body", no_ports),
+        ("malformed-nesting", malformed),
+    ] {
+        let mut doc = base.clone();
+        doc["body"] = serde_json::json!([item]);
+        let err = serde_json::from_str::<WorkflowDefinition>(&doc.to_string())
+            .expect_err(name)
+            .to_string();
+        assert!(
+            err.contains("body-item"),
+            "{name}: expected a BodyItem oneOf refusal, got: {err}"
+        );
+    }
+}
+
+/// Spec §12 item 5, Task 1 staging — nested document parses but the audit
+/// refuses fail-closed with SOMA-CMP-0003 and no projection succeeds.
+/// Task 2 replaces this body with the exact per-fault codes (RED against
+/// this state) once recursive per-scope auditing lands.
+#[test]
+fn recursive_audit_rejects_nested_faults() {
+    let wf = nested_wf();
+    let diags = wf.audit(&prometheos_lite::workflow::soma::supported_version());
+    assert!(
+        !diags.is_empty(),
+        "nested document must not audit clean in Task 1"
+    );
+    assert!(
+        diags.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected the Task 1 fail-closed composite refusal, got {diags:?}"
+    );
+    assert!(
+        prometheos_lite::workflow::projection::project_canonical_json(&wf).is_err(),
+        "no projection while the audit refuses"
+    );
+}
+
+/// Spec §2.4 consumer fail-closed matrix. Task 1 form: exact codes where this
+/// task pins them; `is_err()` where Task 2 upgrades the assertion (comments
+/// mark each upgrade point — Task 2 rewrites this test to its final form).
+#[test]
+fn nested_surfaces_fail_closed_matrix() {
+    let text = nested_text();
+
+    // Task 1: topo-None refusal (SOMA-EXP-0002) keeps this Err.
+    // Task 2 upgrade: exact SOMA-CMP-0003 via the explicit nested-composite scan.
+    assert!(
+        compile_workflow_text(&text).is_err(),
+        "plan compilation must refuse nested composites"
+    );
+
+    // compile_authority runs the audit (governance.rs:95), so this cell is
+    // audit-sourced SOMA-CMP-0003 and stays stable Task 1 → Task 2.
+    let v: Value = serde_json::from_str(&text).expect("nested parses");
+    let err = prometheos_lite::workflow::governance::compile_authority(&v)
+        .expect_err("authority compilation must refuse nested composites");
+    assert!(
+        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected SOMA-CMP-0003 from compile_authority, got {err:?}"
+    );
+
+    // permit chains compile_workflow_text first (governance_permit.rs:39).
+    // Task 1: Err (EXP-0002 from the plan compiler). Task 2 upgrade: exact
+    // SOMA-CMP-0003 propagated from the scan.
+    assert!(
+        prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
+            &text,
+            "reviewed-identity"
+        )
+        .is_err(),
+        "permit issuance must refuse nested composites"
+    );
+
+    // Execution surface: explicit PROJ-0001 scan (this task). Before the
+    // scan this cell observes SOMA-EXP-0002 (topo-None) — that mismatch is
+    // the intended Task 1 RED.
+    let err =
+        prometheos_lite::workflow::execution_graph::compile_execution_graph(&text, &"0".repeat(64))
+            .expect_err("execution graph must refuse nested composites");
+    assert!(
+        err.iter().any(|d| d.code == "PROJ-0001"),
+        "expected PROJ-0001 from compile_execution_graph, got {err:?}"
+    );
+
+    // Canonical + human are audit-gated (validated_source) — Err at Task 1.
+    // Task 2 upgrades: canonical flips to Ok (nested bytes project), human
+    // pins PROJ-0001 with a message containing "composite".
+    let wf = nested_wf();
+    assert!(
+        project_canonical_json(&wf).is_err(),
+        "canonical projection must refuse while the audit refuses"
+    );
+    assert!(
+        project_human_plan(&wf, None).is_err(),
+        "human projection must refuse nested composites"
+    );
 }
