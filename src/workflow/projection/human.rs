@@ -20,6 +20,12 @@ pub(crate) fn render_plan_body(
     wf: &WorkflowDefinition,
     source_digest: &str,
 ) -> Result<String, Vec<Diagnostic>> {
+    if wf.contains_composite_body_item() {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0001",
+            "workflow body contains a nested composite; human projection refused",
+        )]);
+    }
     let order = topological_order(wf).ok_or_else(|| {
         vec![Diagnostic::new(
             "PROJ-0001",

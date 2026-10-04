@@ -93,6 +93,12 @@ pub fn compile_authority(workflow_json: &Value) -> Result<CompiledAuthorityGraph
             format!("schema violation: {e}"),
         )]
     })?;
+    if model.contains_composite_body_item() {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0003",
+            "workflow body contains a nested composite; authority graphs support atomic units only",
+        )]);
+    }
     let supported: SupportedVersion = crate::workflow::soma::supported_version();
     let diags = model.audit(&supported);
     if !diags.is_empty() {

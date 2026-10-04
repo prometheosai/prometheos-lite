@@ -906,44 +906,66 @@ fn body_item_one_of_negatives() {
     }
 }
 
-/// Spec §12 item 5, Task 1 staging — nested document parses but the audit
-/// refuses fail-closed with SOMA-CMP-0003 and no projection succeeds.
-/// Task 2 replaces this body with the exact per-fault codes (RED against
-/// this state) once recursive per-scope auditing lands.
+/// Spec §12 item 5 (final form, Task 2): the shared fixture audits clean,
+/// each nested fault fails the gate with its exact code, and no projection
+/// succeeds for any fault. RED against the Task 1 state (audit returns the
+/// blanket SOMA-CMP-0003 refusal).
 #[test]
 fn recursive_audit_rejects_nested_faults() {
-    let wf = nested_wf();
-    let diags = wf.audit(&prometheos_lite::workflow::soma::supported_version());
+    let supported = prometheos_lite::workflow::soma::supported_version();
+
+    let clean = nested_wf();
     assert!(
-        !diags.is_empty(),
-        "nested document must not audit clean in Task 1"
+        clean.audit(&supported).is_empty(),
+        "wf-nested must audit clean once recursion lands: {:?}",
+        clean.audit(&supported)
     );
-    assert!(
-        diags.iter().any(|d| d.code == "SOMA-CMP-0003"),
-        "expected the Task 1 fail-closed composite refusal, got {diags:?}"
-    );
-    assert!(
-        prometheos_lite::workflow::projection::project_canonical_json(&wf).is_err(),
-        "no projection while the audit refuses"
-    );
+
+    #[allow(clippy::type_complexity)]
+    let faults: [(&str, fn(&mut Value)); 3] = [
+        ("duplicate-across-scopes", |v| {
+            v["body"][1]["body"][0]["body"][0]["id"] = serde_json::json!("inner");
+        }),
+        ("unfed-nested-input", |v| {
+            v["body"][1]["body"][0]["body"][0]["inputs"][0]["name"] = serde_json::json!("stray");
+        }),
+        ("nested-authority-import", |v| {
+            v["body"][1]["body"][0]["body"][0]["authority"] = serde_json::json!(["ship"]);
+        }),
+    ];
+    let expected: [&str; 3] = ["SOMA-EXP-0003", "SOMA-EXP-0005", "SOMA-AUTH-0002"];
+
+    for ((name, mutate), code) in faults.into_iter().zip(expected) {
+        let mut v: Value = serde_json::from_str(&nested_text()).expect("fixture is valid JSON");
+        mutate(&mut v);
+        let wf: WorkflowDefinition =
+            serde_json::from_value(v).expect("mutated fixture still parses");
+        let diags = wf.audit(&supported);
+        assert!(
+            diags.iter().any(|d| d.code == code),
+            "{name}: expected {code}, got {diags:?}"
+        );
+        assert!(
+            project_canonical_json(&wf).is_err(),
+            "{name}: projection must be refused by the gate"
+        );
+    }
 }
 
-/// Spec §2.4 consumer fail-closed matrix. Task 1 form: exact codes where this
-/// task pins them; `is_err()` where Task 2 upgrades the assertion (comments
-/// mark each upgrade point — Task 2 rewrites this test to its final form).
+/// Spec §2.4 consumer fail-closed matrix (final form, Task 2).
 #[test]
 fn nested_surfaces_fail_closed_matrix() {
     let text = nested_text();
 
-    // Task 1: topo-None refusal (SOMA-EXP-0002) keeps this Err.
-    // Task 2 upgrade: exact SOMA-CMP-0003 via the explicit nested-composite scan.
+    // Governance plan compiler: exact SOMA-CMP-0003 via the explicit scan.
+    let err =
+        compile_workflow_text(&text).expect_err("plan compilation must refuse nested composites");
     assert!(
-        compile_workflow_text(&text).is_err(),
-        "plan compilation must refuse nested composites"
+        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected SOMA-CMP-0003 from compile_workflow_text, got {err:?}"
     );
 
-    // compile_authority runs the audit (governance.rs:95), so this cell is
-    // audit-sourced SOMA-CMP-0003 and stays stable Task 1 → Task 2.
+    // Authority compiler: audit-sourced (scan after parse) — stable since Task 1.
     let v: Value = serde_json::from_str(&text).expect("nested parses");
     let err = prometheos_lite::workflow::governance::compile_authority(&v)
         .expect_err("authority compilation must refuse nested composites");
@@ -952,21 +974,18 @@ fn nested_surfaces_fail_closed_matrix() {
         "expected SOMA-CMP-0003 from compile_authority, got {err:?}"
     );
 
-    // permit chains compile_workflow_text first (governance_permit.rs:39).
-    // Task 1: Err (EXP-0002 from the plan compiler). Task 2 upgrade: exact
-    // SOMA-CMP-0003 propagated from the scan.
+    // Permit chains compile_workflow_text first — inherits SOMA-CMP-0003.
+    let err = prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
+        &text,
+        "reviewed-identity",
+    )
+    .expect_err("permit issuance must refuse nested composites");
     assert!(
-        prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
-            &text,
-            "reviewed-identity"
-        )
-        .is_err(),
-        "permit issuance must refuse nested composites"
+        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected SOMA-CMP-0003 from GovernancePermit::issue, got {err:?}"
     );
 
-    // Execution surface: explicit PROJ-0001 scan (this task). Before the
-    // scan this cell observes SOMA-EXP-0002 (topo-None) — that mismatch is
-    // the intended Task 1 RED.
+    // Execution surface: explicit PROJ-0001 scan (lands Task 1, unchanged).
     let err =
         prometheos_lite::workflow::execution_graph::compile_execution_graph(&text, &"0".repeat(64))
             .expect_err("execution graph must refuse nested composites");
@@ -975,16 +994,30 @@ fn nested_surfaces_fail_closed_matrix() {
         "expected PROJ-0001 from compile_execution_graph, got {err:?}"
     );
 
-    // Canonical + human are audit-gated (validated_source) — Err at Task 1.
-    // Task 2 upgrades: canonical flips to Ok (nested bytes project), human
-    // pins PROJ-0001 with a message containing "composite".
+    // Canonical projection: nested ASTs now parse AND audit clean, so the
+    // canonical view succeeds (Slice-1 behavior for anything that parses).
     let wf = nested_wf();
+    let env = project_canonical_json(&wf)
+        .expect("canonical projection accepts nested documents after Task 2");
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let text = String::from_utf8(bytes).expect("canonical bytes are UTF-8");
+    assert!(text.contains("inner") && text.contains("leaf"));
+
+    // Human projection: PROJ-0001 with a composite-specific message (never
+    // the cycle wording — that is a distinct failure mode).
+    let err =
+        project_human_plan(&wf, None).expect_err("human projection must refuse nested composites");
+    let proj: Vec<&str> = err
+        .iter()
+        .filter(|d| d.code == "PROJ-0001")
+        .map(|d| d.message.as_str())
+        .collect();
     assert!(
-        project_canonical_json(&wf).is_err(),
-        "canonical projection must refuse while the audit refuses"
+        !proj.is_empty(),
+        "expected PROJ-0001 from human projection, got {err:?}"
     );
     assert!(
-        project_human_plan(&wf, None).is_err(),
-        "human projection must refuse nested composites"
+        proj.iter().any(|m| m.contains("composite")),
+        "human refusal must say 'composite', got {proj:?}"
     );
 }
