@@ -1,47 +1,57 @@
 # Handoff
 
-_Last updated: October 2, 2026, after PR #233 (#232 residual provenance) merged as `c7feab8`, and PR #234 (e4-x07 projections) merged as `84d44e4`._
+_Last updated: October 4, 2026, after PR #236 (#132 Slice 1B SOMA WorkEvent projection) merged as `4348475`; PR #233 (#232) as `c7feab8`; PR #234 (e4-x07 projections) as `84d44e4`._
 
 ## Authority state
 
-- `main` = `c7feab8` — includes PR #233 (Slice 1A provenance hardening, closes #232) at reviewed head `9231316`, and PR #234 (e4-x07 projections slice 1, governance compiler + execution graph + human projection + golden conformance).
-- Tally: **29 issues closed · 54 total merges · 51 independently approved**.
-- Branches pruned; working tree clean. On merged main: 36 provenance enforcement tests, 6 envelope unit tests, 135 work-module tests, 1052 lib tests all green.
+- `main` = `4348475` — PR #236 (Slice 1B, head `9e14015`) on top of PR #233 (Slice 1A provenance hardening, closes #232) and PR #234 (e4-x07 projections slice 1).
+- Tally: **29 issues closed · 55 total merges · 52 independently approved**.
+- Branches pruned; working tree clean. On merged main: 23 Slice 1B conformance tests, 13 mapping unit tests, 36 provenance enforcement tests, 150 work-module tests, 1067 lib tests all green.
 
-## PR #233 evidence record (authoritative)
+## PR #236 evidence record (authoritative)
 
-Reviewed head `9231316` (full: `92313160b4bff757191c441b9e02b574acb6ab4a`). Exact evidence digests, single passes:
+Reviewed head `9e14015` (full: `9e1401594b45e0a5cbf5e676b372094d8453058e`). Exact evidence digests, single passes:
 
 | Suite | Result | SHA-256 |
 |---|---|---|
-| core | 11/11 | `c988a130cc0021472ad98cd81ebde344866df4cd35f92fbbe67e1b8c5b493a64` |
-| platform | 8/8 | `047b687f52ab4c91b0628043eebda62e434a6772d55f9d3aa84457b6949d42f8` |
-| smoke | 9/9 | `5f61cec8671b94a13a04901ac49818d842b36bf50c49caf9ba1b14c704c5d98a` |
+| core | 11/11 | `938145a72000af7e9bcb41ed629c26aa3bc06fcc41f0c3550798b2ae8d4fff3e` |
+| platform | 8/8 | `f216db5164b9733a42c8b35e29e958aa3595e5bb3f74f45927b05f66c1be2ae9` |
+| smoke | 9/9 | `3b1a75ffe61d3f8ceb6501039945f82278ee05978bd035cdf99460fe8a3aece1` |
 
-## Provenance enforcement contract (authoritative after #232)
+Scope exception: +2,220/−1 across 9 files (~72% tests/fixtures) — explicitly approved at merge authorization (do-not-split).
 
-**Write boundary** (`record_event_conn`): SOMA canonical renderer (byte fixpoint: serialize → parse → re-serialize = identical bytes); semantic invariants (never-widen across execution class + autonomy + approval policy); source digest over the complete canonical source event (id, context, type, data, created_at, provenance_json).
+## Provenance enforcement contract (authoritative after #232/#233)
 
-**Database trigger** (`provenance-trigger-v3`): `json_valid` + `json_extract` typed-path checks (schemaVersion, producer identity, correlation ID, request ID); GLOB hex digest check; flat/envelope column equality via COALESCE; principal-null semantics. Version marker is the sole upgrade criterion. `PRAGMA schema_version` (SQLite's documented DDL counter) proves the trigger is untouched on reopen.
+**Write boundary** (`record_event_conn`): SOMA canonical renderer (byte fixpoint); semantic invariants (never-widen across execution class + autonomy + approval policy); source digest over the complete canonical source event. **Correction 3 (from Slice 1B)**: `internal_system` records `Harness` (the process IS the harness; the absent principal is the honest distinction); `ProducerKind::System` is parse-only for stored envelopes.
 
-**Read verification**: source digest re-verified; flat columns revalidated against the parsed envelope; canonical byte equality; mixed legacy/provenance state refused; legacy rows surface as `LegacyUnverified`.
+**Database trigger** (`provenance-trigger-v3`): `json_valid` + `json_extract` typed-path checks; GLOB hex digest check; flat/envelope column equality via COALESCE; principal-null semantics. Version marker is the sole upgrade criterion. `PRAGMA schema_version` proves the trigger is untouched on reopen.
 
-**Cancellation signal**: `cancel_context` returns the exact event ID → `fire_with_cancellation` → `CancellationToken.cancel_with` (payload before flag, documented SeqCst contract). Every orchestrator observation path prefers the token payload; the durable lookup is only the cross-process fallback. Regression: orchestrator produces correct evidence even when the durable lookup is deliberately broken.
+**Read verification**: source digest re-verified; flat columns revalidated against the parsed envelope; canonical byte equality; mixed state refused; legacy rows surface as `LegacyUnverified`. **The read gate binds semantics; the Slice 1B projection binds raw bytes** (review-P1 division of labor — complementary by design).
 
-**Repository binding** (`detect_repo_binding`, pub): `git rev-parse --git-dir` (linked worktrees, subdirectories). `Bound` / `Dirty { digest_policy: "soma-canonical-json-v1" }` / `Unbound` — fails closed. Corrupted-index test rejects `Ok(Unbound)` (silent lie about a detected repo).
+**Cancellation signal**: `cancel_context` returns the exact event ID → `fire_with_cancellation` → `CancellationToken.cancel_with` (payload before flag, documented SeqCst contract). Orchestrator observation paths prefer the token payload; the durable lookup is the cross-process fallback only.
 
-**Git fixtures**: `git_cmd` helper asserts success + sets explicit author/committer identity.
+**Repository binding** (`detect_repo_binding`, pub): `Bound` / `Dirty { digest_policy: "soma-canonical-json-v1" }` / `Unbound` — fails closed; corrupted-index test rejects `Ok(Unbound)`.
+
+## SOMA WorkEvent projection contract (authoritative after Slice 1B, #132)
+
+- **Consumes verified records only** (`ProvenanceState::Verified`); legacy/mixed/tampered states refuse — never fabricate. Read-gate precedence: the verified read always fails BEFORE mapping.
+- **Mapping** (`src/work/soma_projection.rs`): 10 pinned journal→SPEC-006 event-type rows; unmapped types, `HumanDecision` execution class, and stored `system` producers all fail closed. `Unbound→""` repoRevision. `payload`/`evidence`/`implementation`/`replay`/`conflict`: documented honest omissions. SPEC 006 `semanticDigest` computed over projected content (≠ the journal source digest).
+- **Raw-byte binding**: the envelope `sourceDigest` binds the complete stored record — raw `data` TEXT, raw `created_at` TEXT (`Z` vs `+00:00` bind differently), the row's own digest, the derived columns. Projected timestamps ARE the stored representation.
+- **Typed run identity** (`RunKey {kind, id}`): work-run/graph-run/request kinds never merge equal strings. `project_run_work_event_batch` emits `runId` from the real recorded identity; cross-run causal ancestors included verbatim; full `WorkEventBatch::audit` gate (never emitted dirty).
+- **Stream pages** (`WorkEventStreamPage`): seq-cursor segments, provably not batches (both wire directions); `recorded_run_keys` enumerates the rebuild.
+- **Vendored SPEC 006 fixtures**: 15 pinned event fixtures consumed; canonical-content digest lock; exact-set diagnostics parity with the soma-native verifier. `vendored/soma/**` is `-text`.
+- **Golden**: `cancelled-work-run.batch.canonical.json` byte-locked (+ `.sha256`, `provenance.md`); regeneration requires explicit review.
 
 ## Open follow-ups (operator-approved order)
 
-1. **#132 Slice 1B** — pure fail-closed SOMA projection. Implementation plan to be posted for review before code lands. Depends on trustworthy provenance records (now closed by #232/#233).
-2. **#132 Slice 2** — portable observation endpoint.
-3. **#132 Slice 3** — SPEC 007 compatibility.
-4. **#217** — Dependabot bump: requires explicit operator approval.
+1. **#132 Slice 2** — portable observation endpoint over the Slice 1B projections (reconnectable wire cursors; consumes `project_page`/`project_run_work_event_batch`). Plan review before implementation; implementation plan to be posted to #132.
+2. **#132 Slice 3** — SPEC 007 capability negotiation (`CompatibilityDecision` read/control projections; capability is never authority).
+3. **#217** — Dependabot bump: requires explicit operator approval.
+4. **Change record** for Slice 1B posted at `specs/loop-engineering/changes/2026-10-04-e6i03-slice1b-soma-projection.md` (in this PR).
 
 ## Verification baseline
 
-- fmt/clippy: clean at `9231316` per core evidence; covers merged main.
-- `cargo test --lib`: 1052 total (1 ignored); plus 36 enforcement + 6 envelope unit tests.
-- Any new PR: run the three local suites at the exact head, record digests, request independent fresh-context review before merge authorization.
-- Host note: builds/temp routed to D:; C: near capacity; Norton AV intermittently races git-object writes under parallel test load (documented flake since #214).
+- fmt/clippy: clean at `9e14015` per core evidence; covers merged main `4348475`.
+- `cargo test --lib`: 1067 total (1 ignored); plus 23 Slice 1B conformance + 13 mapping units + 36 enforcement.
+- Any new PR: run the three local suites at the exact head, record digests, request independent fresh-context review before merge authorization. No subsequent merge without a fresh local-evidence review cycle.
+- Host note: builds/temp routed to D:; C: near capacity; Norton AV intermittently races git-object writes under parallel test load (documented flake since #214 — rotating victims, green in isolation).
