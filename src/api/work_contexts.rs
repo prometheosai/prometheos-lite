@@ -151,36 +151,76 @@ fn map_projection_error(err: crate::work::soma_projection::ProjectionError) -> A
     }
 }
 
-/// Build the canonical-bytes response for a projection envelope
-/// (review P1a: the ETag identifies the COMPLETE response
-/// representation — the sha256 of the exact canonical bytes served,
-/// not the payload-only `projectionDigest`, so any body change —
-/// including a `sourceDigest` change with an identical semantic
-/// payload — changes the ETag). Handles HTTP conditional
-/// revalidation: a matching `If-None-Match` (exact quoted value or
-/// `*`) yields 304 with the ETag set and no body.
+/// Parse an `If-None-Match` header per RFC 9110: a comma-separated
+/// list of entity tags, each optionally weak (`W/"…"`); `*` matches any
+/// current representation. Weak tags compare by opaque value for
+/// revalidation purposes.
+fn if_none_match_matches(header: &str, etag: &str) -> bool {
+    let header = header.trim();
+    if header == "*" {
+        return true;
+    }
+    header.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        let candidate = candidate.strip_prefix("W/").unwrap_or(candidate);
+        candidate == etag
+    })
+}
+
+/// The ETag input for one response representation. For stream pages the
+/// validator is BOUND TO THE PAGING METADATA as well as the body
+/// (review P1, cache/paging interaction): a newly appended event beyond
+/// a full page leaves the body byte-identical but flips
+/// `X-More-Available` — the ETag must flip with it, or a revalidating
+/// client would keep stale exhaustion metadata and never drain the new
+/// event. Non-paged resources (run batches, run keys) bind the body
+/// alone.
+fn representation_etag(bytes: &[u8], paging: Option<(i64, bool)>) -> Result<String, ApiError> {
+    let body_sha = crate::workflow::soma::canonical::sha256_hex(bytes);
+    let binding = match paging {
+        Some((next_cursor, more_available)) => serde_json::json!({
+            "body": body_sha,
+            "nextCursor": next_cursor,
+            "moreAvailable": more_available,
+        }),
+        None => serde_json::json!({ "body": body_sha }),
+    };
+    let digest = crate::workflow::soma::canonical::try_canonical_digest(&binding)
+        .map_err(|e| ApiError::Internal(format!("representation digest unavailable: {e}")))?;
+    Ok(format!("\"{digest}\""))
+}
+
+/// Build the canonical-bytes response for a projection envelope: the
+/// body IS `canonical_bytes()`, the ETag is the complete-representation
+/// validator (see [`representation_etag`]), and a matching
+/// `If-None-Match` yields 304. Stream 304s carry BOTH paging headers so
+/// no intermediary or client can lose the reconnect metadata.
 fn canonical_projection_response(
     envelope: &crate::workflow::projection::VersionedProjectionEnvelope<impl serde::Serialize>,
-    next_cursor: Option<i64>,
-    more_available: bool,
+    paging: Option<(i64, bool)>,
     if_none_match: Option<&str>,
 ) -> Result<axum::response::Response, ApiError> {
     let bytes = envelope.canonical_bytes().map_err(|diags| {
         ApiError::Internal(format!("projection cannot be canonicalized: {diags:?}"))
     })?;
-    let etag = format!(
-        "\"{}\"",
-        crate::workflow::soma::canonical::sha256_hex(&bytes)
-    );
-    if let Some(header_value) = if_none_match {
-        let requested = header_value.trim();
-        if requested == etag || requested == "*" {
-            return axum::http::Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header(axum::http::header::ETAG, etag)
-                .body(axum::body::Body::empty())
-                .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
+    let etag = representation_etag(&bytes, paging)?;
+    if if_none_match.is_some_and(|header| if_none_match_matches(header, &etag)) {
+        let mut builder = axum::http::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(axum::http::header::ETAG, etag);
+        if let Some((next_cursor, more_available)) = paging {
+            // Both paging headers ride on the 304 too — the client's
+            // cached metadata is confirmed current (never stale).
+            builder = builder
+                .header("x-next-cursor", next_cursor.to_string())
+                .header(
+                    "x-more-available",
+                    if more_available { "true" } else { "false" },
+                );
         }
+        return builder
+            .body(axum::body::Body::empty())
+            .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
     }
     let mut builder = axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -189,13 +229,14 @@ fn canonical_projection_response(
     // Review P1b: the continuation cursor is ALWAYS present (last
     // returned seq, or the request's cursor for an empty page);
     // "more currently available" is represented separately.
-    if let Some(next) = next_cursor {
-        builder = builder.header("x-next-cursor", next.to_string());
+    if let Some((next_cursor, more_available)) = paging {
+        builder = builder
+            .header("x-next-cursor", next_cursor.to_string())
+            .header(
+                "x-more-available",
+                if more_available { "true" } else { "false" },
+            );
     }
-    builder = builder.header(
-        "x-more-available",
-        if more_available { "true" } else { "false" },
-    );
     builder
         .body(axum::body::Body::from(bytes))
         .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
@@ -235,8 +276,7 @@ pub async fn get_work_event_stream(
         .map_err(map_projection_error)?;
     canonical_projection_response(
         &page.envelope,
-        Some(page.next_after),
-        page.more_available,
+        Some((page.next_after, page.more_available)),
         headers
             .get(axum::http::header::IF_NONE_MATCH)
             .and_then(|value| value.to_str().ok()),
@@ -277,25 +317,19 @@ pub async fn list_work_event_runs(
     );
     let bytes: Vec<u8> = crate::workflow::soma::canonical::try_canonical_bytes(&value)
         .map_err(|e| ApiError::Internal(format!("run keys cannot be canonicalized: {e}")))?;
-    // The ETag identifies the complete representation: the sha256 of
-    // the exact bytes served (identical to the canonical content
-    // digest for this endpoint's body).
-    let etag = format!(
-        "\"{}\"",
-        crate::workflow::soma::canonical::sha256_hex(&bytes)
-    );
+    // Non-paged resource: the ETag binds the body alone (the same
+    // complete-representation validator, without paging metadata).
+    let etag = representation_etag(&bytes, None)?;
     if let Some(header_value) = headers
         .get(axum::http::header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
+        && if_none_match_matches(header_value, &etag)
     {
-        let requested = header_value.trim();
-        if requested == etag || requested == "*" {
-            return axum::http::Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header(axum::http::header::ETAG, etag)
-                .body(axum::body::Body::empty())
-                .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
-        }
+        return axum::http::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(axum::http::header::ETAG, etag)
+            .body(axum::body::Body::empty())
+            .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
     }
     axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -336,7 +370,6 @@ pub async fn get_work_event_run_batch(
     canonical_projection_response(
         &envelope,
         None,
-        false,
         headers
             .get(axum::http::header::IF_NONE_MATCH)
             .and_then(|value| value.to_str().ok()),

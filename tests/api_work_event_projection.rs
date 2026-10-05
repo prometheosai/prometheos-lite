@@ -403,16 +403,30 @@ async fn etag_identifies_the_complete_response_representation() {
         .and_then(|v| v.to_str().ok())
         .expect("ETag present")
         .to_string();
+    let first_cursor = first
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .expect("cursor present")
+        .to_string();
     let first_body = body_bytes(first).await;
 
-    // The ETag is the sha256 of the EXACT body bytes (the complete
-    // representation), not the payload-only projectionDigest.
+    // The ETag is the COMPLETE-REPRESENTATION validator: the canonical
+    // digest of {body digest, nextCursor, moreAvailable} — bound to the
+    // paging metadata, not the payload-only projectionDigest and not
+    // the body alone (see the cache/paging regression below).
+    let binding = serde_json::json!({
+        "body": prometheos_lite::workflow::soma::canonical::sha256_hex(&first_body),
+        "nextCursor": first_cursor.parse::<i64>().unwrap(),
+        "moreAvailable": false,
+    });
     assert_eq!(
         first_etag,
         format!(
             "\"{}\"",
-            prometheos_lite::workflow::soma::canonical::sha256_hex(&first_body)
-        )
+            prometheos_lite::workflow::soma::canonical::try_canonical_digest(&binding).unwrap()
+        ),
+        "the stream ETag binds body + paging metadata"
     );
 
     // Review P1a regression: a LEXICAL source-row change (same parsed
@@ -498,6 +512,144 @@ async fn if_none_match_revalidates() {
     // representation.
     let resp = get_with_header(&app, &uri, "if-none-match", "*").await;
     assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+async fn if_none_match_parses_weak_and_multi_tags() {
+    let (state, _db_path, _dir) = test_app_state();
+    let app = test_router(&state);
+    let id = driven_context(&app, "owner").await;
+    let uri = format!("/work-contexts/{id}/work-events?user_id=owner");
+
+    let resp = get(&app, &uri).await;
+    let etag = resp
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag present")
+        .to_string();
+    drop(resp);
+
+    // A WEAK tag matches (RFC 9110 list syntax, W/ prefix stripped).
+    let weak = format!("W/{etag}");
+    let resp = get_with_header(&app, &uri, "if-none-match", &weak).await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+    // A comma-separated list: any matching entry revalidates.
+    let stale = format!("\"{}\"", "0".repeat(64));
+    let list = format!("{stale}, {etag}");
+    let resp = get_with_header(&app, &uri, "if-none-match", &list).await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+    // A list with NO matching entry yields the full representation.
+    let list = format!("{stale}, W/{stale}");
+    let resp = get_with_header(&app, &uri, "if-none-match", &list).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn revalidation_never_preserves_stale_exhaustion() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = test_router(&state);
+    let id = driven_context(&app, "owner").await; // 2 events (seq 1..2)
+
+    // A FULL page that exhausts the stream at cursor 2: body B,
+    // more=false, ETag T. (after=1, limit=1 -> exactly the last event.)
+    let uri = format!("/work-contexts/{id}/work-events?user_id=owner&after=1&limit=1");
+    let resp = get(&app, &uri).await;
+    let etag = resp
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag present")
+        .to_string();
+    assert_eq!(
+        resp.headers()
+            .get("x-more-available")
+            .and_then(|v| v.to_str().ok())
+            .unwrap(),
+        "false"
+    );
+    let exhausted_body = body_bytes(resp).await;
+
+    // A NEW event arrives BEYOND the page. The page's BODY is
+    // byte-identical (after=1, limit=1 still returns the same single
+    // event) — only the paging metadata flips more=false -> true.
+    let db = Db::new(&db_path).unwrap();
+    let journal =
+        JournalContext::internal_system(format!("req-{}", uuid::Uuid::new_v4()), authority());
+    record_direct(
+        &db,
+        &id,
+        "ev-late",
+        "status_changed",
+        &journal.event_envelope(None),
+        "2026-10-04T12:00:00+00:00",
+    );
+    drop(db);
+
+    // Revalidating the SAME URI with the cached ETag: the ETag is
+    // bound to the paging metadata, so it CHANGED — the response MUST
+    // be a full 200 carrying more=true, never a 304 that would let
+    // the client keep the stale more=false.
+    let resp = get_with_header(&app, &uri, "if-none-match", &etag).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a paging-metadata change must invalidate the cached representation"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-more-available")
+            .and_then(|v| v.to_str().ok())
+            .expect("header present"),
+        "true",
+        "the client must discover the newly available page"
+    );
+    let new_etag = resp
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let new_cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    // Same body bytes — the difference is purely the metadata.
+    assert_eq!(exhausted_body, body_bytes(resp).await);
+    assert_ne!(etag, new_etag);
+
+    // The client drains the newly available page.
+    let resp = get(
+        &app,
+        &format!("/work-contexts/{id}/work-events?user_id=owner&after={new_cursor}&limit=1"),
+    )
+    .await;
+    let envelope: VersionedProjectionEnvelope<WorkEventStreamPage> =
+        serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(envelope.payload.events.len(), 1);
+    assert_eq!(envelope.payload.events[0].id, "ev-late");
+
+    // Revalidating AGAIN with the CURRENT etag yields a 304 — and the
+    // 304 carries BOTH paging headers so no intermediary can strip
+    // the reconnect metadata.
+    let resp = get_with_header(&app, &uri, "if-none-match", &new_etag).await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    assert!(
+        resp.headers()
+            .get("x-next-cursor")
+            .and_then(|v| v.to_str().ok())
+            .is_some()
+    );
+    assert!(
+        resp.headers()
+            .get("x-more-available")
+            .and_then(|v| v.to_str().ok())
+            .is_some()
+    );
 }
 
 #[tokio::test]
