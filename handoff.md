@@ -10,7 +10,7 @@ _Last updated: October 4, 2026, after PR #237 (#132 Slice 2 observation endpoint
 
 ## PR #237 evidence record (authoritative)
 
-Reviewed head `dc6ac7f` (full: `dc6ac7f2cd3ff465b1fdc3e7ece3d34be43f9af8`). Single-pass digests: core `ca7349ff…`, platform `d38b3325…`, smoke `981c40ab…` (exact values in the change record and the PR evidence comments). Scope: +1,515/−27, accepted. #214 host-flake disclosure: markedly worse AV-vs-`.git/objects` interference this session — rotating git-fixture victims across attempts, each green in isolation; all published evidence is single-pass at the exact heads.
+Reviewed head `dc6ac7f` (full: `dc6ac7f2cd3ff465b1fdc3e7ece3d34be43f9af8`). Exact single-pass evidence digests recorded AT that head: core 11/11 `ca7349ffe36c93e4325b815ed88ad197f61aa1a90e2b1b7ceaebffc669aa1d05`, platform 8/8 `d38b33259a440bf9add73896083036039ab7850bdba738f7ec83c3d67dbe5c15`, smoke 9/9 `981c40ab954542ab136cd12e42dbce008482fa4fd0a069c57b1123347ee53694` — 3-file verify PASS. Scope: +1,515/−27, accepted. #214 host-flake disclosure: markedly worse AV-vs-`.git/objects` interference this session — rotating git-fixture victims across attempts, each green in isolation; all published evidence is single-pass at the exact heads.
 
 ## SOMA projection + observation contract (authoritative after Slice 2)
 
