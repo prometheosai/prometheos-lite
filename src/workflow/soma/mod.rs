@@ -17,6 +17,7 @@
 pub mod adapters;
 pub mod audit_workflow;
 pub mod canonical;
+pub mod capability;
 pub mod contracts;
 pub mod event;
 pub mod profile;
