@@ -1,0 +1,194 @@
+{
+  "$id": "/schemas/CompatibilityDecision.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CompatibilityDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "schemaVersion",
+    "version",
+    "requirementsDigest",
+    "capabilitySetDigest",
+    "evaluatedAt",
+    "status",
+    "authority"
+  ],
+  "properties": {
+    "id": {"type": "string"},
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "requirementsDigest": {
+      "description": "Canonical SHA-256 of the WorkRequirements this decision resolves.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "capabilitySetDigest": {
+      "description": "Canonical SHA-256 of the RuntimeCapabilitySet this decision resolves.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "evaluatedAt": {"format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", "type": "string"},
+    "status": {"enum": ["compatible", "compatible_with_degradation", "incompatible"]},
+    "selectedSpecVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "selectedAdapters": {
+      "description": "Harness/workspace adapters selected explicitly by identity and revision.",
+      "items": {"$ref": "#/$defs/AdapterSelection"},
+      "type": "array"
+    },
+    "declaredSpecVersions": {
+      "description": "Snapshot of the capability set's supported bundle versions at decision time.",
+      "items": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+      "type": "array"
+    },
+    "requiredCapabilities": {"items": {"type": "string"}, "type": "array"},
+    "capabilitiesCovered": {
+      "description": "Effect classes the runtime actually covers for this work.",
+      "items": {"type": "string"},
+      "type": "array"
+    },
+    "optionalCapabilities": {"items": {"type": "string"}, "type": "array"},
+    "omissions": {
+      "description": "Optional capabilities omitted under an explicitly permitted degradation.",
+      "items": {"type": "string"},
+      "type": "array"
+    },
+    "workspaceRequired": {"$ref": "#/$defs/Boundaries"},
+    "workspaceDeclared": {"$ref": "#/$defs/Boundaries"},
+    "freshness": {"$ref": "#/$defs/FreshnessSnapshot"},
+    "declarations": {
+      "description": "Provenance evidence for every declaration used; enables handoff/resume to explain acceptance.",
+      "items": {"$ref": "#/$defs/DeclarationRef"},
+      "type": "array"
+    },
+    "substitutions": {
+      "items": {"$ref": "#/$defs/Substitution"},
+      "type": "array"
+    },
+    "substitutionPermitted": {"type": "boolean"},
+    "degradationPermitted": {"type": "boolean"},
+    "authority": {"$ref": "#/$defs/AuthorityPair"},
+    "requirementConstraints": {
+      "description": "Snapshot of the work's continuity/evidence/hard-limit/locality constraints used by the resolution.",
+      "$ref": "#/$defs/RequirementConstraints"
+    },
+    "capabilitySupport": {
+      "description": "Snapshot of the runtime's continuity/evidence/locality/budget support used by the resolution.",
+      "$ref": "#/$defs/CapabilitySupport"
+    },
+    "diagnostics": {
+      "items": {"$ref": "Diagnostic.schema.json"},
+      "type": "array"
+    }
+  },
+  "$defs": {
+    "AdapterSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {"type": "string"},
+        "name": {"type": "string"},
+        "revision": {"type": "string"}
+      },
+      "required": ["family", "name", "revision"],
+      "type": "object"
+    },
+    "AuthorityPair": {
+      "additionalProperties": false,
+      "properties": {
+        "declared": {"$ref": "AuthorityProfile.schema.json"},
+        "effective": {"$ref": "AuthorityProfile.schema.json"}
+      },
+      "required": ["declared", "effective"],
+      "type": "object"
+    },
+    "Boundaries": {
+      "additionalProperties": false,
+      "properties": {
+        "filesystem": {"enum": ["none", "read", "write"]},
+        "git": {"enum": ["none", "read", "write"]},
+        "network": {"enum": ["none", "allow", "deny"]},
+        "process": {"enum": ["none", "allow", "deny"]},
+        "secret": {"enum": ["none", "read"]},
+        "workspace": {"enum": ["none", "read", "write"]}
+      },
+      "type": "object"
+    },
+    "DeclarationRef": {
+      "additionalProperties": false,
+      "properties": {
+        "declaredAt": {"format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", "type": "string"},
+        "digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "source": {"type": "string"}
+      },
+      "required": ["digest", "source", "declaredAt"],
+      "type": "object"
+    },
+    "FreshnessSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "notAfter": {"format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", "type": "string"},
+        "trustedSources": {"items": {"type": "string"}, "type": "array"}
+      },
+      "required": ["notAfter"],
+      "type": "object"
+    },
+    "RequirementConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "continuity": {
+          "additionalProperties": false,
+          "properties": {
+            "checkpointExport": {"type": "boolean"},
+            "checkpointImport": {"type": "boolean"},
+            "resume": {"type": "boolean"}
+          },
+          "type": "object"
+        },
+        "privacy": {"description": "Privacy classes this work demands of the runtime.", "items": {"type": "string"}, "type": "array"},
+        "requireEvidence": {"type": "boolean"},
+        "adapterRequirements": {
+          "items": {"$ref": "#/$defs/AdapterRequirement"},
+          "type": "array"
+        },
+        "hardLimits": {"$ref": "#/$defs/Budgets"},
+        "allowedExecution": {
+          "items": {"enum": ["local", "remote", "hybrid"]},
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "AdapterRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {"type": "string"},
+        "minRevision": {"type": "string"}
+      },
+      "required": ["family", "minRevision"],
+      "type": "object"
+    },
+    "CapabilitySupport": {
+      "additionalProperties": false,
+      "properties": {
+        "resumeSupport": {"type": "boolean"},
+        "checkpointImport": {"type": "boolean"},
+        "checkpointExport": {"type": "boolean"},
+        "evidenceAttachment": {"type": "boolean"},
+        "locality": {"enum": ["local", "remote", "hybrid"]},
+        "privacyClasses": {"items": {"type": "string"}, "type": "array"},
+        "budgetCeilings": {"$ref": "#/$defs/Budgets"}
+      },
+      "type": "object"
+    },
+    "Substitution": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {"type": "string"},
+        "reason": {"type": "string"},
+        "to": {"type": "string"}
+      },
+      "required": ["from", "to"],
+      "type": "object"
+    }
+  }
+}

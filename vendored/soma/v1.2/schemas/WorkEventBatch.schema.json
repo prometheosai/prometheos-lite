@@ -1,0 +1,20 @@
+{
+  "$id": "/schemas/WorkEventBatch.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkEventBatch",
+  "description": "Typed container for a causally-ordered batch/log of WorkEvent envelopes. Causality (missing or cyclic parents) and per-event invariants are validated across the contained envelopes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "version", "runId", "events"],
+  "properties": {
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "runId": {"type": "string", "minLength": 1},
+    "compatibility": {"$ref": "WorkEvent.schema.json#/$defs/Compatibility"},
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "WorkEvent.schema.json"}
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "ev-l",
+  "eventType": "context",
+  "actor": {
+    "kind": "agent",
+    "identity": "agent-a",
+    "implementation": {
+      "name": "soma",
+      "revision": "r1"
+    }
+  },
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "readableScopes": [
+      "s1"
+    ]
+  },
+  "effectiveAuthority": {
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "readableScopes": [
+      "s1",
+      "s2"
+    ]
+  },
+  "sequence": 0,
+  "timestamp": "2026-01-01T00:00:00Z",
+  "idempotencyKey": "idem-1",
+  "correlationId": "corr-1",
+  "repoRevision": "abc123",
+  "compatibility": {
+    "schemaVersion": "1.1.0",
+    "minReaderVersion": "1.0.0"
+  },
+  "parents": [],
+  "semanticDigest": "9177a275de55d38a869cb5de4da276e56c0beba23a42109a896290cb9fa941bd"
+}

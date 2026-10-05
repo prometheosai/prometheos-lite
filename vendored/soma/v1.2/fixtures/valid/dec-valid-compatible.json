@@ -1,0 +1,29 @@
+{
+  "id": "dec-compatible-1",
+  "schemaVersion": "1.2.0",
+  "version": "1.0.0",
+  "requirementsDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capabilitySetDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evaluatedAt": "2026-06-01T00:00:00Z",
+  "status": "compatible",
+  "selectedSpecVersion": "1.2.0",
+  "declaredSpecVersions": ["1.0.0", "1.1.0", "1.2.0"],
+  "requiredCapabilities": ["file.read"],
+  "capabilitiesCovered": ["file.read", "file.write"],
+  "optionalCapabilities": [],
+  "omissions": [],
+  "workspaceRequired": {},
+  "workspaceDeclared": {},
+  "freshness": {"notAfter": "2027-01-01T00:00:00Z"},
+  "declarations": [
+    {"digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source": "registry", "declaredAt": "2026-01-01T00:00:00Z"}
+  ],
+  "substitutions": [],
+  "substitutionPermitted": true,
+  "degradationPermitted": false,
+  "authority": {
+    "declared": {"executionClass": "deterministic", "mutation": "none"},
+    "effective": {"executionClass": "deterministic", "mutation": "none"}
+  },
+  "diagnostics": []
+}
