@@ -26,38 +26,47 @@ use crate::workflow::soma::types::MutationMode;
 /// never confused with the SOMA plan's `schemaVersion`).
 pub const EXECUTION_GRAPH_SCHEMA_VERSION: &str = "lite.execution-graph.v1";
 
-/// Deterministic topological order over workflow-body indices.
-///
-/// An edge `producer -> consumer` exists when a consumer input name matches
-/// a producer output name (the reference compiler's dataflow rule). Returns
-/// `None` when the graph contains a cycle — the reference compiler
-/// `debug_assert`s acyclicity because its audit gate guarantees it; Lite
-/// fails closed with a diagnostic instead of trusting that invariant at
-/// every call site.
-pub(crate) fn topological_order(wf: &WorkflowDefinition) -> Option<Vec<usize>> {
-    // Spec §2.4: nested composites make the execution ordering fail closed.
-    if wf.contains_composite_body_item() {
-        return None;
+/// Output channel names a body item produces in its scope: operation
+/// outputs, or a container's declared output ports.
+fn producer_names(item: &BodyItem) -> Vec<&str> {
+    match item {
+        BodyItem::Operation(op) => op.outputs.iter().map(|o| o.name.as_str()).collect(),
+        BodyItem::Composite(c) => c.output_ports.iter().map(|p| p.name.as_str()).collect(),
     }
-    let n = wf.body.len();
+}
+
+/// Input channel names a body item consumes in its scope: operation
+/// inputs, or a container's declared input ports.
+fn consumer_names(item: &BodyItem) -> Vec<&str> {
+    match item {
+        BodyItem::Operation(op) => op.inputs.iter().map(|i| i.name.as_str()).collect(),
+        BodyItem::Composite(c) => c.input_ports.iter().map(|p| p.name.as_str()).collect(),
+    }
+}
+
+/// Deterministic topological order over one scope's body items.
+///
+/// Within a scope an edge `producer -> consumer` exists when a consumer
+/// input name matches a producer output name (the reference compiler's
+/// dataflow rule, extended to container boundary ports — spec §7.1/R8).
+/// Among ready units the smallest declaration ordinal wins, so renaming
+/// an internal identifier never reorders independent units. Returns
+/// `None` on a cycle: the gate refuses with `SOMA-EXP-0002`, graph
+/// construction fails closed with `PROJ-0001`.
+pub(crate) fn topological_order_body(items: &[BodyItem]) -> Option<Vec<usize>> {
+    let n = items.len();
     let mut producers: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (i, u) in wf.body.iter().enumerate() {
-        let BodyItem::Operation(u) = u else {
-            continue;
-        };
-        for o in &u.outputs {
-            producers.entry(o.name.as_str()).or_default().push(i);
+    for (i, item) in items.iter().enumerate() {
+        for name in producer_names(item) {
+            producers.entry(name).or_default().push(i);
         }
     }
     let mut indegree = vec![0usize; n];
     let mut edges = vec![Vec::<usize>::new(); n];
-    for (i, u) in wf.body.iter().enumerate() {
-        let BodyItem::Operation(u) = u else {
-            continue;
-        };
+    for (i, item) in items.iter().enumerate() {
         let mut deps: Vec<usize> = Vec::new();
-        for inp in &u.inputs {
-            if let Some(producers_of_name) = producers.get(inp.name.as_str()) {
+        for name in consumer_names(item) {
+            if let Some(producers_of_name) = producers.get(name) {
                 for j in producers_of_name {
                     if *j != i {
                         deps.push(*j);
@@ -86,6 +95,18 @@ pub(crate) fn topological_order(wf: &WorkflowDefinition) -> Option<Vec<usize>> {
         }
     }
     (order.len() == n).then_some(order)
+}
+
+/// Deterministic topological order over the root workflow body.
+///
+/// Spec §2.4: any root composite makes execution ordering fail closed —
+/// every existing caller (`projection::human`, `compile_execution_graph`)
+/// then refuses (`PROJ-0001` / `SOMA-EXP-0002` at their own scans).
+pub(crate) fn topological_order(wf: &WorkflowDefinition) -> Option<Vec<usize>> {
+    if wf.contains_composite_body_item() {
+        return None;
+    }
+    topological_order_body(&wf.body)
 }
 
 /// A compiled, versioned execution graph — topology, dependency, and
@@ -341,4 +362,73 @@ fn reduce_unit_authority(
         budgets: None,
         content_restrictions: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::topological_order_body;
+    use crate::workflow::soma::contracts::BodyItem;
+
+    fn op(id: &str, inputs: &[&str], outputs: &[&str]) -> BodyItem {
+        let value = serde_json::json!({
+            "schemaVersion": "1.1.0",
+            "version": "1.1.0",
+            "id": id,
+            "executionClass": "deterministic",
+            "inputs": inputs.iter().map(|name| serde_json::json!({
+                "name": name, "type": "Order", "acceptedOutcomes": ["Produced"]
+            })).collect::<Vec<_>>(),
+            "outputs": outputs.iter().map(|name| serde_json::json!({
+                "name": name, "type": "Order", "emits": ["Produced"]
+            })).collect::<Vec<_>>(),
+            "effects": []
+        });
+        serde_json::from_value(value).expect("operation parses")
+    }
+
+    fn composite(id: &str, inputs: &[&str], outputs: &[&str]) -> BodyItem {
+        let value = serde_json::json!({
+            "schemaVersion": "1.1.0",
+            "version": "1.1.0",
+            "id": id,
+            "inputPorts": inputs.iter().map(|name| serde_json::json!({
+                "name": name, "direction": "input", "type": "Order",
+                "cardinality": "single", "requiredness": "required"
+            })).collect::<Vec<_>>(),
+            "outputPorts": outputs.iter().map(|name| serde_json::json!({
+                "name": name, "direction": "output", "type": "Order",
+                "cardinality": "single", "requiredness": "required"
+            })).collect::<Vec<_>>(),
+            "body": []
+        });
+        serde_json::from_value(value).expect("composite parses")
+    }
+
+    #[test]
+    fn ops_only_scope_keeps_reference_kahn_order() {
+        let items = vec![
+            op("a", &[], &["x"]),
+            op("b", &["x"], &[]),
+            op("c", &[], &[]),
+        ];
+        assert_eq!(topological_order_body(&items), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn containers_participate_through_boundary_ports() {
+        // `c` is declared first but consumes what `a` produces and feeds
+        // `b`: dataflow order [a, c, b] proves container channels count.
+        let items = vec![
+            composite("c", &["x"], &["y"]),
+            op("a", &[], &["x"]),
+            op("b", &["y"], &[]),
+        ];
+        assert_eq!(topological_order_body(&items), Some(vec![1, 0, 2]));
+    }
+
+    #[test]
+    fn cycle_returns_none() {
+        let items = vec![op("b", &["x"], &["y"]), composite("c", &["y"], &["x"])];
+        assert_eq!(topological_order_body(&items), None);
+    }
 }

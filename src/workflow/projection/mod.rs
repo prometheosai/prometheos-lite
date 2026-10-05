@@ -4,10 +4,13 @@
 //! project + verify path, the non-normative human plan project + verify
 //! path, and the redaction/disclosure policy applied to human plans.
 
+pub mod disclosure;
 pub mod envelope;
+pub mod graph;
 pub mod human;
 pub mod redaction;
 
+pub use disclosure::GraphDisclosurePolicy;
 pub use envelope::{
     ALLOWED_PROJECTION_VERSIONS, PROJECTION_VERSION_V1, VersionedProjectionEnvelope,
 };
