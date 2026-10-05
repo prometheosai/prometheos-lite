@@ -25,9 +25,9 @@ use crate::api::work_contexts::{
     cancel_work_context, continue_work_context, create_work_context, decide_graph_run,
     get_harness_completion, get_harness_evidence, get_harness_patches, get_harness_review,
     get_harness_risk, get_harness_validation, get_trace_by_run, get_work_context,
-    get_work_context_artifacts, get_work_context_events, get_work_cost, get_work_quality,
-    list_work_contexts, list_work_traces, run_harness, run_until_complete, submit_intent,
-    update_work_context_status,
+    get_work_context_artifacts, get_work_context_events, get_work_cost, get_work_event_run_batch,
+    get_work_event_stream, get_work_quality, list_work_contexts, list_work_event_runs,
+    list_work_traces, run_harness, run_until_complete, submit_intent, update_work_context_status,
 };
 
 async fn count_requests_middleware(
@@ -80,6 +80,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(get_work_context_artifacts),
         )
         .route("/work-contexts/:id/events", get(get_work_context_events))
+        .route("/work-contexts/:id/work-events", get(get_work_event_stream))
+        .route(
+            "/work-contexts/:id/work-event-runs",
+            get(list_work_event_runs),
+        )
+        .route(
+            "/work-contexts/:id/work-event-runs/:kind/:run_id",
+            get(get_work_event_run_batch),
+        )
         .route("/work-contexts/:id/continue", post(continue_work_context))
         .route(
             "/work-contexts/:id/run-until-complete",

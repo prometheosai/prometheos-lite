@@ -47,6 +47,11 @@ pub enum ProjectionError {
     /// class, a stored legacy `system` producer, or (run batches) an
     /// unresolvable causal parent / ancestor cycle.
     Unsupported { event_id: String, reason: String },
+    /// The requested run key has no recorded events — an honest absence
+    /// (the projection never invents an empty run). Distinct from the
+    /// `Unsupported` refusals so transports can map it to a not-found
+    /// rather than unprocessable-content.
+    UnknownRun { run_key: String },
     /// The projected batch failed the vendored `WorkEventBatch::audit`.
     /// A batch is never emitted dirty.
     Audit(Vec<Diagnostic>),
@@ -58,6 +63,9 @@ impl std::fmt::Display for ProjectionError {
             ProjectionError::Journal(e) => write!(f, "journal read failed: {e:#}"),
             ProjectionError::Unsupported { event_id, reason } => {
                 write!(f, "event {event_id} cannot be projected: {reason}")
+            }
+            ProjectionError::UnknownRun { run_key } => {
+                write!(f, "no recorded events for run key {run_key:?}")
             }
             ProjectionError::Audit(diags) => {
                 write!(f, "projected batch failed the SOMA audit: {diags:?}")
@@ -261,14 +269,23 @@ pub struct WorkEventStreamPage {
 }
 
 /// One projected page: the versioned envelope wrapping a stream segment,
-/// plus the durable cursor for reconnecting without gaps or duplication.
+/// plus the transport-independent reconnect contract.
 #[derive(Debug, Clone)]
 pub struct ProjectionPage {
     pub envelope: crate::workflow::projection::VersionedProjectionEnvelope<WorkEventStreamPage>,
-    /// The `after_seq` cursor for the next page (`None` = exhausted).
+    /// The CONTINUATION cursor — ALWAYS present (review P1b: a final
+    /// page must never lose the reconnect position). It is the last
+    /// returned record's durable `seq`, or the request's `after_seq`
+    /// for an empty page — so a client that follows the contract can
+    /// resume later when NEW events arrive after an exhausted poll.
     /// `seq` is the journal's `INTEGER PRIMARY KEY AUTOINCREMENT`:
     /// monotonic, never reused, stable across VACUUM/rebuilds.
-    pub next_after: Option<i64>,
+    pub next_after: i64,
+    /// Whether MORE events are currently available beyond this page
+    /// (the limit+1 lookahead). The continuation cursor is
+    /// independent: polling again with `after = next_after` returns
+    /// exactly the events written since — possibly none.
+    pub more_available: bool,
 }
 
 /// The complete-record source-digest input for one verified record
@@ -387,15 +404,20 @@ pub fn project_page(
             .map(complete_record_source_value)
             .collect(),
     );
+    // Review P1b: the continuation cursor is ALWAYS present — the last
+    // returned seq (non-empty page) or the request's cursor (empty
+    // page) — so an exhausted poll never loses the reconnect position.
     let next_after = page_records
         .last()
-        .filter(|_| !exhausted)
-        .map(|record| record.seq);
+        .map(|record| record.seq)
+        .unwrap_or(after_seq);
+    let more_available = !exhausted;
     let envelope = projection_envelope(&source, WorkEventStreamPage { events })?;
 
     Ok(ProjectionPage {
         envelope,
         next_after,
+        more_available,
     })
 }
 
@@ -415,6 +437,29 @@ pub enum RunKeyKind {
     WorkRun,
     GraphRun,
     Request,
+}
+
+impl RunKeyKind {
+    /// The wire spelling of the kind (URL segments, error text):
+    /// `work-run` / `graph-run` / `request`.
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            RunKeyKind::WorkRun => "work-run",
+            RunKeyKind::GraphRun => "graph-run",
+            RunKeyKind::Request => "request",
+        }
+    }
+
+    /// Parse the wire spelling; anything else is rejected (the caller
+    /// surfaces the allowed kinds).
+    pub fn from_wire(text: &str) -> Option<Self> {
+        match text {
+            "work-run" => Some(RunKeyKind::WorkRun),
+            "graph-run" => Some(RunKeyKind::GraphRun),
+            "request" => Some(RunKeyKind::Request),
+            _ => None,
+        }
+    }
 }
 
 /// A real recorded run identity: kind + id. Derives ONLY from the
@@ -523,12 +568,8 @@ pub fn project_run_work_event_batch(
         }
     }
     if own.is_empty() {
-        return Err(ProjectionError::Unsupported {
-            event_id: context_id.to_string(),
-            reason: format!(
-                "no recorded events for run key {run_key:?} — the projection never \
-                 invents an empty run"
-            ),
+        return Err(ProjectionError::UnknownRun {
+            run_key: format!("{}:{}", run_key.kind.as_wire(), run_key.id),
         });
     }
 
