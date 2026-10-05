@@ -4,9 +4,9 @@ _Last updated: October 4, 2026, after PR #237 (#132 Slice 2 observation endpoint
 
 ## Authority state
 
-- `main` = `65dff3c` — Slice 2 (observation endpoint, reviewed head `dc6ac7f`, guarded expected-head merge) on top of Slice 1B (`4348475`) and the Slice 1A hardening lineage.
+- `main` = `65dff3c` — the SQUASH COMMIT that merged PR #237 (#132 Slice 2). The REVIEWED HEAD was `dc6ac7f2cd3ff465b1fdc3e7ece3d34be43f9af8` (verified immediately before the merge by the immutable expected-head guard; all evidence digests below were recorded AT that reviewed head, not at the squash commit).
+- **Post-merge verification, actually run on merged main `65dff3c`** (not merely projected): 24 API observation tests, 23 Slice 1B conformance tests, 36 provenance enforcement tests, 1067 lib tests — all green on the checked-out merged main immediately after the merge; branch pruned; working tree clean.
 - Tally: **29 issues closed · 57 total merges · 54 independently approved**.
-- Branches pruned; working tree clean. On merged main: 24 API observation tests, 23 Slice 1B conformance tests, 36 provenance enforcement tests, 1067 lib tests all green.
 
 ## PR #237 evidence record (authoritative)
 
