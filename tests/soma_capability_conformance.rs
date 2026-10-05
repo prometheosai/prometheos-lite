@@ -887,7 +887,302 @@ async fn compatible_simulation_grants_nothing() {
 #[tokio::test]
 async fn simulate_route_is_post_only() {
     let (state, _db_path, _dir) = test_app_state();
-    let app = create_router(state.clone());
+    let app = create_router(state);
     let resp = get(&app, "/runtime/compatibility/simulate", &[]).await;
     assert_eq!(resp.status(), 405);
+}
+
+// ---------------------------------------------------------------------------
+// Review round-1 P1 regressions. Each was first run against the
+// pre-fix implementation and DEMONSTRABLY FAILED (the negative
+// controls recorded in the commit message); the fixed implementation
+// must pass every one.
+// ---------------------------------------------------------------------------
+
+fn synthetic_caps(
+    workspace: Option<serde_json::Value>,
+    ceilings: Option<serde_json::Value>,
+) -> RuntimeCapabilitySet {
+    let mut json = serde_json::json!({
+        "id": "capset-matrix",
+        "schemaVersion": "1.2.0",
+        "version": "1.0.0",
+        "identity": {"name": "runtime-matrix", "revision": "r1"},
+        "declaredAt": "2026-01-01T00:00:00Z",
+        "specVersions": ["1.2.0"],
+    });
+    if let Some(ws) = workspace {
+        json["workspace"] = ws;
+    }
+    if let Some(c) = ceilings {
+        json["budgetCeilings"] = c;
+    }
+    serde_json::from_value(json).expect("synthetic capability set parses")
+}
+
+fn reqs_with(
+    workspace: Option<serde_json::Value>,
+    hard_limits: Option<serde_json::Value>,
+) -> WorkRequirements {
+    let mut json = serde_json::json!({
+        "id": "reqs-matrix",
+        "schemaVersion": "1.2.0",
+        "version": "1.0.0",
+        "requiredSpecVersion": "1.2.0",
+        "degradationPermitted": false,
+        "forbidSubstitution": true,
+    });
+    if let Some(ws) = workspace {
+        json["workspace"] = ws;
+    }
+    if let Some(l) = hard_limits {
+        json["hardLimits"] = l;
+    }
+    serde_json::from_value(json).expect("synthetic requirements parse")
+}
+
+fn resolve_pair(caps: &RuntimeCapabilitySet, reqs: &WorkRequirements) -> CompatibilityDecision {
+    let authority = neutral_authority_value();
+    let declared: prometheos_lite::workflow::soma::contracts::AuthorityProfile =
+        serde_json::from_value(authority.clone()).unwrap();
+    resolve(&NegotiationInputs {
+        id: "dec-matrix".to_string(),
+        requirements: reqs,
+        capabilities: caps,
+        authority_declared: &declared,
+        authority_effective: &declared,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    })
+    .expect("synthetic resolution succeeds")
+}
+
+fn has_cap0005(decision: &CompatibilityDecision, dim: &str) -> bool {
+    decision
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "SOMA-CAP-0005" && d.message.contains(dim))
+}
+
+/// P1-1: the process/network boundary ordering is `none < allow < deny`
+/// (SPEC 007 section 5 step 5 — "never exceeds"). The exhaustive matrix:
+/// CAP-0005 fires exactly when the REQUIRED rank exceeds the DECLARED
+/// rank, for every (required, declared) combination.
+#[test]
+fn process_boundary_ordering_matrix_is_none_allow_deny() {
+    use std::collections::HashMap;
+    // rank: none(0) < allow(1) < deny(2); an absent dimension is `none`.
+    let rank: HashMap<&str, u8> = [("", 0), ("none", 0), ("allow", 1), ("deny", 2)]
+        .into_iter()
+        .collect();
+
+    for (req_mode, req_rank) in [("", 0u8), ("none", 0), ("allow", 1), ("deny", 2)] {
+        for (dec_mode, dec_rank) in [("", 0u8), ("none", 0), ("allow", 1), ("deny", 2)] {
+            let mut ws_req = serde_json::json!({});
+            if !req_mode.is_empty() {
+                ws_req["process"] = serde_json::Value::String(req_mode.to_string());
+            }
+            let mut ws_dec = serde_json::json!({});
+            if !dec_mode.is_empty() {
+                ws_dec["process"] = serde_json::Value::String(dec_mode.to_string());
+            }
+            let caps = synthetic_caps(Some(ws_dec), None);
+            let reqs = reqs_with(Some(ws_req), None);
+            let decision = resolve_pair(&caps, &reqs);
+            let fires = has_cap0005(&decision, "process");
+            assert_eq!(
+                fires,
+                req_rank > dec_rank,
+                "process required={req_mode:?} declared={dec_mode:?}: SOMA-CAP-0005 must fire iff required rank exceeds declared"
+            );
+            // The same ordering holds for the network dimension.
+            let mut ws_req = serde_json::json!({});
+            if !req_mode.is_empty() {
+                ws_req["network"] = serde_json::Value::String(req_mode.to_string());
+            }
+            let mut ws_dec = serde_json::json!({});
+            if !dec_mode.is_empty() {
+                ws_dec["network"] = serde_json::Value::String(dec_mode.to_string());
+            }
+            let caps = synthetic_caps(Some(ws_dec), None);
+            let reqs = reqs_with(Some(ws_req), None);
+            let decision = resolve_pair(&caps, &reqs);
+            assert_eq!(
+                has_cap0005(&decision, "network"),
+                req_rank > dec_rank,
+                "network required={req_mode:?} declared={dec_mode:?}"
+            );
+            let _ = &rank; // the pinned rank table, kept adjacent to the matrix
+        }
+    }
+}
+
+/// P1-2: integral budget comparison is EXACT, not f64. Integers beyond
+/// 2^53 collapse in float space; a hard limit one unit above its ceiling
+/// must still fire SOMA-AUTH-0009, and one unit below must not.
+#[test]
+fn budget_comparison_is_exact_beyond_f53() {
+    let two53: u64 = 1 << 53; // 9007199254740992 — the last exact f64 integer
+
+    // THE COLLAPSING PAIR (the reviewer's scenario): hard limit 2^53+1
+    // vs ceiling 2^53. Exact math: the limit EXCEEDS the ceiling by one
+    // unit -> SOMA-AUTH-0009 must fire. In f64 both collapse to
+    // 9007199254740992.0 -> "equal" -> the defect.
+    let ceiling = serde_json::json!({ "tokens": two53 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let collapsing_limit = serde_json::json!({ "tokens": two53 + 1 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(collapsing_limit)));
+    assert!(
+        decision
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SOMA-AUTH-0009"),
+        "hard limit 2^53+1 vs ceiling 2^53 must exceed EXACTLY: {:?}",
+        decision.diagnostics
+    );
+
+    // A hard limit EQUAL to the ceiling does not fire.
+    let equal = serde_json::json!({ "tokens": two53 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(equal)));
+    assert!(
+        !decision
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SOMA-AUTH-0009"),
+        "an equal hard limit never exceeds the ceiling: {:?}",
+        decision.diagnostics
+    );
+
+    // One unit BELOW does not fire (both exactly representable anyway).
+    let below = serde_json::json!({ "tokens": two53 - 1 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(below)));
+    assert!(
+        !decision
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SOMA-AUTH-0009"),
+        "2^53-1 <= 2^53: {:?}",
+        decision.diagnostics
+    );
+
+    // u64 extremes stay exact: u64::MAX-1 (beyond f64 resolution) is
+    // below the u64::MAX ceiling and must not fire.
+    let ceiling = serde_json::json!({ "tokens": u64::MAX });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let over = serde_json::json!({ "tokens": u64::MAX - 1 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(over)));
+    assert!(
+        !decision
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SOMA-AUTH-0009"),
+        "u64::MAX-1 <= u64::MAX exactly: {:?}",
+        decision.diagnostics
+    );
+    // And the reverse: a limit of u64::MAX against a u64::MAX-1 ceiling
+    // must fire exactly.
+    let ceiling = serde_json::json!({ "tokens": u64::MAX - 1 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let over = serde_json::json!({ "tokens": u64::MAX });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(over)));
+    assert!(
+        decision
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SOMA-AUTH-0009"),
+        "u64::MAX > u64::MAX-1 exactly: {:?}",
+        decision.diagnostics
+    );
+}
+
+/// P1-3: the collection bound is enforced RECURSIVELY — every
+/// caller-controlled array and object in the simulation request is
+/// bounded by the 64-entry limit, including nested paths.
+#[tokio::test]
+async fn simulation_collection_bounds_are_recursive() {
+    let (state, _db_path, _dir) = test_app_state();
+    let app = create_router(state);
+
+    // freshness.trustedSources (nested two levels inside requirements).
+    let oversized_trusted: Vec<serde_json::Value> = (0..65)
+        .map(|i| serde_json::Value::String(format!("src-{i}")))
+        .collect();
+    let mut reqs = minimal_requirements("1.2.0");
+    reqs["freshness"] = serde_json::json!({
+        "notAfter": "2030-01-01T00:00:00Z",
+        "trustedSources": oversized_trusted,
+    });
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(simulation_body(reqs)),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "nested freshness.trustedSources must be bounded"
+    );
+    let msg: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(
+        msg["error"].as_str().unwrap().contains("trustedSources"),
+        "the 400 names the violating path: {msg}"
+    );
+
+    // authority.declared.readableScopes (inside the authority pair).
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["authority"]["declared"]["readableScopes"] = serde_json::Value::Array(
+        (0..65)
+            .map(|i| serde_json::Value::String(format!("scope-{i}")))
+            .collect(),
+    );
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(body.to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "authority readableScopes must be bounded"
+    );
+    let msg: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(
+        msg["error"].as_str().unwrap().contains("readableScopes"),
+        "{msg}"
+    );
+
+    // authority.declared.tools — an oversized MAP (key count).
+    let mut tools = serde_json::Map::new();
+    for i in 0..65 {
+        tools.insert(format!("tool-{i}"), serde_json::json!(["perm"]));
+    }
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["authority"]["declared"]["tools"] = serde_json::Value::Object(tools);
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(body.to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "an oversized tools map must be bounded");
+    let msg: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(msg["error"].as_str().unwrap().contains("tools"), "{msg}");
+
+    // A 64-entry collection is still accepted (the bound, not a ban).
+    let mut reqs = minimal_requirements("1.2.0");
+    reqs["freshness"] = serde_json::json!({
+        "notAfter": "2030-01-01T00:00:00Z",
+        "trustedSources": (0..64).map(|i| serde_json::Value::String(format!("src-{i}"))).collect::<Vec<_>>(),
+    });
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(simulation_body(reqs)),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "exactly 64 entries is within the bound");
 }

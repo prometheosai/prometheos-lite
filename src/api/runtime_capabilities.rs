@@ -16,7 +16,7 @@
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::api::state::AppState;
@@ -204,8 +204,10 @@ pub async fn get_runtime_capabilities(
 
 /// The simulation request: caller-supplied (explicitly hypothetical)
 /// requirements + authority pair, and optional proposed substitutions.
-/// Structurally strict (`deny_unknown_fields` all the way down).
-#[derive(Debug, Deserialize)]
+/// Structurally strict (`deny_unknown_fields` all the way down);
+/// serializable so the recursive bound walker can inspect every
+/// caller-controlled collection.
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimulationRequest {
     pub requirements: WorkRequirements,
@@ -215,28 +217,46 @@ pub struct SimulationRequest {
 }
 
 fn check_collection_bounds(req: &SimulationRequest) -> Result<(), String> {
-    for (field, len) in [
-        (
-            "requirements.requiredCapabilities",
-            req.requirements.required_capabilities.len(),
-        ),
-        (
-            "requirements.optionalCapabilities",
-            req.requirements.optional_capabilities.len(),
-        ),
-        (
-            "requirements.adapterRequirements",
-            req.requirements.adapter_requirements.len(),
-        ),
-        ("substitutions", req.substitutions.len()),
-    ] {
-        if len > SIMULATION_COLLECTION_LIMIT {
-            return Err(format!(
-                "{field} carries {len} entries; the simulation bound is {SIMULATION_COLLECTION_LIMIT}"
-            ));
-        }
+    // The bound is RECURSIVE: every caller-controlled collection in the
+    // request — arrays AND object key sets, at any depth — is limited to
+    // SIMULATION_COLLECTION_LIMIT entries. This covers the top-level
+    // arrays AND the nested ones the caller controls inside freshness
+    // (trustedSources), locality (allowedExecution, privacy), both
+    // authority profiles (readableScopes, writableScopes, tools maps,
+    // network/provider allowlists, secrets scopes, contentRestrictions)
+    // — anything the strict parse accepts.
+    let value = serde_json::to_value(req)
+        .map_err(|e| format!("request cannot be inspected for bounds: {e}"))?;
+    match find_oversized_collection(&value, "$") {
+        Some(path) => Err(format!(
+            "{path} exceeds the simulation collection bound of {SIMULATION_COLLECTION_LIMIT}"
+        )),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// Recursively locate the first caller-controlled collection exceeding
+/// the bound, reporting its path for the 400 response.
+fn find_oversized_collection(value: &serde_json::Value, path: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Array(items) => {
+            if items.len() > SIMULATION_COLLECTION_LIMIT {
+                return Some(format!("{path} ({}) entries", items.len()));
+            }
+            items
+                .iter()
+                .enumerate()
+                .find_map(|(i, item)| find_oversized_collection(item, &format!("{path}[{i}]")))
+        }
+        serde_json::Value::Object(map) => {
+            if map.len() > SIMULATION_COLLECTION_LIMIT {
+                return Some(format!("{path} ({}) keys", map.len()));
+            }
+            map.iter()
+                .find_map(|(key, child)| find_oversized_collection(child, &format!("{path}.{key}")))
+        }
+        _ => None,
+    }
 }
 
 /// `POST /runtime/compatibility/simulate` — the bounded advisory

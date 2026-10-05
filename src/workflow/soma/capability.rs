@@ -35,9 +35,12 @@ fn supported_capability_semver() -> SemVer {
     SemVer::parse(SUPPORTED_CAPABILITY_SCHEMA_VERSION).expect("constant is valid")
 }
 
-/// Three-way comparison of JSON numbers (the reference's
-/// `numeric::number_cmp`): finite values compare normally; anything
-/// non-finite is `Cmp::Incomparable` (fail closed).
+/// Three-way comparison of JSON numbers. INTEGRAL values (u64/i64 — the
+/// canonical DecimalV2 integers) compare EXACTLY via i128, so integers
+/// beyond f64 resolution (2^53) never collapse to equality; a hard limit
+/// one unit above its ceiling still compares Greater. Non-integral
+/// decimals fall back to f64 (both must be finite); anything else is
+/// `Cmp::Incomparable` (fail closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmp {
     NotGreater,
@@ -45,10 +48,23 @@ pub enum Cmp {
     Incomparable,
 }
 
+fn exact_integer(n: &Number) -> Option<i128> {
+    if let Some(u) = n.as_u64() {
+        return Some(i128::from(u));
+    }
+    if let Some(i) = n.as_i64() {
+        return Some(i128::from(i));
+    }
+    None
+}
+
 fn number_cmp(a: &Number, b: &Number) -> Cmp {
+    if let (Some(x), Some(y)) = (exact_integer(a), exact_integer(b)) {
+        return if x > y { Cmp::Greater } else { Cmp::NotGreater };
+    }
     match (a.as_f64(), b.as_f64()) {
-        (Some(a), Some(b)) if a.is_finite() && b.is_finite() => {
-            if a > b {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
+            if x > y {
                 Cmp::Greater
             } else {
                 Cmp::NotGreater
@@ -474,9 +490,13 @@ fn rank_boundary(b: Option<Boundary>) -> u8 {
 }
 
 fn rank_process(p: Option<ProcessBoundary>) -> u8 {
+    // SPEC 007 section 5 step 5: process/network boundaries rank
+    // `none < allow < deny` (an absent dimension is `none`). Mapping
+    // deny below allow would REVERSE compatibility decisions.
     match p {
+        None | Some(ProcessBoundary::None) => 0,
         Some(ProcessBoundary::Allow) => 1,
-        _ => 0,
+        Some(ProcessBoundary::Deny) => 2,
     }
 }
 
