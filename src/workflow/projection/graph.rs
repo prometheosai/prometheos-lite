@@ -1,8 +1,10 @@
-//! Private machinery for the graph projection (E4/X07 Slice 2): the
-//! document-wide node registry, the §4 payload/node/edge view structs,
-//! and the §8 digest preimages/bottom-up driver. The public projector
-//! (`project_graph_json`) lands in Task 4 on top of these pieces; this
-//! module deliberately emits no payload and changes no conformance test.
+//! Machinery for the graph projection (E4/X07 Slice 2): the document-wide
+//! node registry, the §4 payload/node/edge view structs, the §8 digest
+//! preimages/bottom-up driver, and the disclosure-aware payload renderer
+//! that assembles `project_graph_json` envelopes (`GraphPayload` plus the
+//! disclosure state per boundary). Verification helpers
+//! (`verify_graph_projection_bytes`, `verify_graph_against_source`) live
+//! here as well.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -194,7 +196,7 @@ impl<'a> GraphRegistry<'a> {
 }
 
 /// Payload root (§4); assembled and enveloped by `project_graph_json`
-/// (Task 4) — defined here so the payload shape lives with the views.
+/// — defined here so the payload shape lives with the views.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphPayload {
@@ -241,7 +243,8 @@ pub struct GraphOpOutputView {
 }
 
 /// Withheld-boundary disclosure block (§4). `hiddenNodes`/`hiddenEdges`
-/// appear only under count authorization (Task 4 decides presence).
+/// appear only under count authorization (presence is decided by the
+/// disclosure state at payload-render time).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphDisclosureView {
@@ -283,9 +286,9 @@ pub struct GraphEdgeView {
 
 /// A body item's node view (§4), `kind`-discriminated. `children`/
 /// `internalEdges` are present iff revealed and `disclosure` iff
-/// withheld — Task 4 attaches exactly one state; this renderer leaves
-/// all three `None`. Snake→camel field names are explicit so the
-/// intent does not depend on enum-level `rename_all` semantics.
+/// withheld — the payload renderer attaches exactly one state; this
+/// builder leaves all three `None`. Snake→camel field names are explicit
+/// so the intent does not depend on enum-level `rename_all` semantics.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum GraphNodeView {
@@ -324,8 +327,8 @@ pub fn port_view(port: &PortDefinition) -> GraphPortView {
 }
 
 /// Render one body item as its node view WITHOUT `children`,
-/// `internalEdges`, or `disclosure` (Task 4 attaches scope children,
-/// edges, and the disclosure state). For a composite the
+/// `internalEdges`, or `disclosure` (the payload renderer attaches scope
+/// children, edges, and the disclosure state). For a composite the
 /// `childSubgraphDigest` must already exist in `child_digests`
 /// (computed bottom-up, §8.1); a miss fails closed with `PROJ-0001`.
 pub fn render_node(
@@ -1509,7 +1512,7 @@ fn recompute_child_subgraph_digests(
 
 /// §11 step 7 comparison: every embedded `childSubgraphDigest` in the
 /// envelope payload against the value recomputed from the source (hidden
-/// boundaries carry no embedded value in the bytes and cannot be forged).
+/// boundaries carry no subtree content in the bytes and cannot be forged).
 fn compare_child_subgraph_digests(
     nodes: &[serde_json::Value],
     fresh: &BTreeMap<String, String>,

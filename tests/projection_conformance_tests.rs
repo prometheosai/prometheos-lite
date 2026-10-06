@@ -1022,9 +1022,10 @@ fn nested_surfaces_fail_closed_matrix() {
     );
 }
 // ---------------------------------------------------------------------------
-// E4/X07 Slice 2 — Task 4: graph projection with disclosure boundaries
-// (spec §12 tests 6-21, 23, 24; tests 22, 26-28 arrive with the verifiers
-// in Task 5, test 29 with Task 6)
+// E4/X07 Slice 2 — graph projection with disclosure boundaries (spec §12
+// tests 6-21, 23, 24); the verifier-backed tests 22 and 26-28 are sectioned
+// further down, and spec §12 test 29 (`human_and_canonical_regressions`) is
+// the whole-suite regression gate rather than a case in this file.
 // ---------------------------------------------------------------------------
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1485,9 +1486,11 @@ fn nested_digest_construction_acyclic_and_deterministic() {
     );
 }
 
-/// Spec §12 test 17 — every vendored flat `wf-*` valid fixture projects
-/// cleanly and byte-deterministically (§7.4 parity guard). Task 5 extends
-/// this body with `verify_graph_projection_bytes` + against-source calls.
+/// Spec §12 test 17 — every vendored `wf-*` valid fixture (flat,
+/// composite, and governance flavors) projects cleanly and
+/// byte-deterministically (§7.4 parity guard), then verifies honestly on
+/// both paths: `verify_graph_projection_bytes` over the canonical bytes and
+/// `verify_graph_against_source` against the parsed workflow definition.
 #[test]
 fn all_vendored_valid_fixtures_project() {
     let dir = format!("{VENDORED}/fixtures/valid");
@@ -1517,6 +1520,10 @@ fn all_vendored_valid_fixtures_project() {
             again.canonical_bytes().expect("canonical bytes"),
             "{path:?} is not byte-stable"
         );
+        let parsed = verify_graph_projection_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("{path:?} must verify as honest bytes: {e:?}"));
+        verify_graph_against_source(&parsed, &wf, None)
+            .unwrap_or_else(|e| panic!("{path:?} must verify honestly against source: {e:?}"));
     }
 }
 
