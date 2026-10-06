@@ -35,17 +35,32 @@ fn supported_capability_semver() -> SemVer {
     SemVer::parse(SUPPORTED_CAPABILITY_SCHEMA_VERSION).expect("constant is valid")
 }
 
-/// Three-way comparison of JSON numbers. INTEGRAL values (u64/i64 — the
-/// canonical DecimalV2 integers) compare EXACTLY via i128, so integers
-/// beyond f64 resolution (2^53) never collapse to equality; a hard limit
-/// one unit above its ceiling still compares Greater. Non-integral
-/// decimals fall back to f64 (both must be finite); anything else is
-/// `Cmp::Incomparable` (fail closed).
+/// Three-way comparison of JSON numbers that is EXACT for every pair
+/// the SOMA schemas can express. The invariant: an INTEGER operand
+/// (u64/i64) is NEVER converted through f64 — integers beyond 2^53
+/// would collapse there, so a hard limit one unit above its ceiling
+/// must still compare Greater. A finite DECIMAL operand that is itself
+/// integral converts to i128 exactly; a non-integral one (necessarily
+/// of magnitude < 2^52) is compared against small integers through a
+/// lossless f64 cast and against large ones by magnitude. When exact
+/// ordering cannot be established (an integral decimal beyond i128's
+/// exact range, or a non-finite value the parser should never emit),
+/// the result is `Cmp::Incomparable` and callers fail closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmp {
     NotGreater,
     Greater,
     Incomparable,
+}
+
+/// One operand reduced to an exactly comparable form.
+enum Exact {
+    /// An exact integer: a u64/i64 lexeme, or a finite f64 lexeme that
+    /// is integral and within i128's exact conversion range.
+    Int(i128),
+    /// A finite NON-integral f64 (magnitude < 2^52 by f64 spacing, so
+    /// the value is exactly representable).
+    Frac(f64),
 }
 
 fn exact_integer(n: &Number) -> Option<i128> {
@@ -58,19 +73,75 @@ fn exact_integer(n: &Number) -> Option<i128> {
     None
 }
 
-fn number_cmp(a: &Number, b: &Number) -> Cmp {
-    if let (Some(x), Some(y)) = (exact_integer(a), exact_integer(b)) {
-        return if x > y { Cmp::Greater } else { Cmp::NotGreater };
+fn exact_operand(n: &Number) -> Option<Exact> {
+    if let Some(x) = exact_integer(n) {
+        return Some(Exact::Int(x));
     }
-    match (a.as_f64(), b.as_f64()) {
-        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
-            if x > y {
+    let f = n.as_f64()?;
+    if !f.is_finite() {
+        return None;
+    }
+    if f.fract() == 0.0 {
+        // Integral decimal lexeme: the cast is exact while |f| < 2^127
+        // (at that magnitude f64 spacing is 2^74, so every integral
+        // f64 below 2^127 is an integer i128 can hold). Beyond it the
+        // cast would saturate — fail closed instead of comparing a
+        // corrupted value.
+        if f.abs() < 2.0f64.powi(127) {
+            return Some(Exact::Int(f as i128));
+        }
+        return None;
+    }
+    Some(Exact::Frac(f))
+}
+
+/// An exact integer vs a non-integral decimal (magnitude < 2^52).
+fn int_vs_frac(i: i128, f: f64) -> Cmp {
+    if i > TWO_POW_53 {
+        // i >= 2^53+1 > 2^52 > f
+        Cmp::Greater
+    } else if i < -TWO_POW_53 {
+        // i <= -(2^53+1) < -2^52 <= f
+        Cmp::NotGreater
+    } else {
+        // |i| <= 2^53: every such integer is exactly representable in
+        // f64, so this cast is lossless and the comparison exact.
+        if (i as f64) > f {
+            Cmp::Greater
+        } else {
+            Cmp::NotGreater
+        }
+    }
+}
+
+const TWO_POW_53: i128 = 1 << 53;
+
+fn number_cmp(a: &Number, b: &Number) -> Cmp {
+    let (x, y) = match (exact_operand(a), exact_operand(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Cmp::Incomparable,
+    };
+    match (x, y) {
+        (Exact::Int(i), Exact::Int(j)) => {
+            if i > j {
                 Cmp::Greater
             } else {
                 Cmp::NotGreater
             }
         }
-        _ => Cmp::Incomparable,
+        (Exact::Frac(i), Exact::Frac(j)) => {
+            if i > j {
+                Cmp::Greater
+            } else {
+                Cmp::NotGreater
+            }
+        }
+        (Exact::Int(i), Exact::Frac(f)) => int_vs_frac(i, f),
+        (Exact::Frac(f), Exact::Int(i)) => match int_vs_frac(i, f) {
+            Cmp::Greater => Cmp::NotGreater,
+            Cmp::NotGreater => Cmp::Greater,
+            Cmp::Incomparable => Cmp::Incomparable,
+        },
     }
 }
 

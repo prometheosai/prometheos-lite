@@ -1186,3 +1186,139 @@ async fn simulation_collection_bounds_are_recursive() {
     .await;
     assert_eq!(resp.status(), 200, "exactly 64 entries is within the bound");
 }
+
+/// Review round 2, the P1-2 REMAINDER: MIXED integer/decimal budget
+/// comparisons are exact — the integer operand is never routed through
+/// lossy f64. Schema-valid DecimalV2 budgets may carry a fractional
+/// lexeme on either side, so an integral decimal operand converts to
+/// i128 exactly instead. Both operand orders are pinned around 2^53,
+/// plus the non-integral paths and the fail-closed contract.
+#[test]
+fn budget_mixed_int_decimal_comparison_is_exact_beyond_f53() {
+    let two53: u64 = 1 << 53; // 9007199254740992 — the last exact f64 integer
+    let fires =
+        |d: &CompatibilityDecision| d.diagnostics.iter().any(|x| x.code == "SOMA-AUTH-0009");
+
+    // THE REVIEWER'S PAIR, forward order: hard limit is the INTEGER
+    // 2^53+1, ceiling the DECIMAL 2^53 (f64-exact). Exact math: the
+    // limit exceeds the ceiling -> SOMA-AUTH-0009 must fire. The old
+    // f64 fallback converted the limit to 9007199254740992.0, compared
+    // it EQUAL against the ceiling, and silently accepted the workspace
+    // (the demonstrated false compatible).
+    let ceiling = serde_json::json!({ "tokens": 9007199254740992.0 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": two53 + 1 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        fires(&decision),
+        "int limit 2^53+1 vs decimal ceiling 2^53.0 must exceed EXACTLY: {:?}",
+        decision.diagnostics
+    );
+
+    // Reverse operand order, genuine LESS: decimal limit 2^53.0 vs
+    // integer ceiling 2^53+1. The exact comparison says NOT greater ->
+    // no diagnostic. (A blanket fail-closed for mixed pairs would
+    // wrongly reject this compatible workspace, so the repair must be
+    // exact, not merely conservative.)
+    let ceiling = serde_json::json!({ "tokens": two53 + 1 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": 9007199254740992.0 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        !fires(&decision),
+        "decimal limit 2^53.0 <= int ceiling 2^53+1 EXACTLY: {:?}",
+        decision.diagnostics
+    );
+
+    // Reverse operand order, genuine GREATER: decimal limit 2^53+2
+    // (f64-exact at that magnitude) vs integer ceiling 2^53+1 -> fires.
+    let ceiling = serde_json::json!({ "tokens": two53 + 1 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": 9007199254740994.0 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        fires(&decision),
+        "decimal limit 2^53+2 > int ceiling 2^53+1 EXACTLY: {:?}",
+        decision.diagnostics
+    );
+
+    // Mixed genuine EQUALITY at the boundary: integer 2^53 vs decimal
+    // 2^53.0 -> equal -> no diagnostic (exactness must not over-fire).
+    let ceiling = serde_json::json!({ "tokens": 9007199254740992.0 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": two53 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        !fires(&decision),
+        "int limit 2^53 == decimal ceiling 2^53.0: {:?}",
+        decision.diagnostics
+    );
+
+    // Small non-integral decimals compare exactly, in both orders.
+    let ceiling = serde_json::json!({ "tokens": 100.5 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    for (limit, expect) in [(101u64, true), (100u64, false)] {
+        let limit = serde_json::json!({ "tokens": limit });
+        let decision = resolve_pair(&caps, &reqs_with(None, Some(limit.clone())));
+        assert_eq!(
+            fires(&decision),
+            expect,
+            "int limit {limit} vs decimal ceiling 100.5: {:?}",
+            decision.diagnostics
+        );
+    }
+    let ceiling = serde_json::json!({ "tokens": 101 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": 100.5 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        !fires(&decision),
+        "decimal limit 100.5 <= int ceiling 101: {:?}",
+        decision.diagnostics
+    );
+    let ceiling = serde_json::json!({ "tokens": 100 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": 100.5 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        fires(&decision),
+        "decimal limit 100.5 > int ceiling 100: {:?}",
+        decision.diagnostics
+    );
+
+    // A huge integer vs a small non-integral decimal: magnitude decides
+    // exactly with no conversion of the integer.
+    let two54: u64 = 1 << 54;
+    let ceiling = serde_json::json!({ "tokens": 0.5 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": two54 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        fires(&decision),
+        "int limit 2^54 > decimal ceiling 0.5: {:?}",
+        decision.diagnostics
+    );
+    let ceiling = serde_json::json!({ "tokens": two54 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": 0.5 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        !fires(&decision),
+        "decimal limit 0.5 <= int ceiling 2^54: {:?}",
+        decision.diagnostics
+    );
+
+    // Fail closed: an integral decimal beyond i128's exact conversion
+    // range (here 1e40, held by the parser as f64) cannot be compared
+    // exactly, so the comparison is Incomparable and the budget check
+    // fails closed — it fires rather than guessing.
+    let ceiling = serde_json::json!({ "tokens": 1e40 });
+    let caps = synthetic_caps(None, Some(ceiling));
+    let limit = serde_json::json!({ "tokens": two53 + 1 });
+    let decision = resolve_pair(&caps, &reqs_with(None, Some(limit)));
+    assert!(
+        fires(&decision),
+        "mixed comparison beyond exact i128 range must fail closed: {:?}",
+        decision.diagnostics
+    );
+}
