@@ -103,6 +103,279 @@ pub async fn get_work_context_events(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// #132 Slice 2: portable observation endpoints over the Slice 1B SOMA
+// WorkEvent projections. READ-ONLY, GET-only, experimental-router-only.
+// Every response body IS the projection envelope's canonical bytes —
+// byte-deterministic, digest-locked, rebuildable; the cursor rides in
+// the `X-Next-Cursor` header so the artifact stays pure.
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the projected stream endpoint. `after` is the
+/// durable `seq` cursor from the previous page's `X-Next-Cursor`
+/// header; `limit` is clamped to 1..=500.
+#[derive(Debug, Deserialize)]
+pub struct WorkEventStreamQuery {
+    pub user_id: String,
+    #[serde(default)]
+    pub after: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Map a Slice 1B projection refusal to the HTTP surface (the approved
+/// plan's fail-closed table). The gate/precedence order is Slice 1B's:
+/// journal read-gate failures surface as 500 with the gate's own
+/// detection text (integrity failures are server-state problems);
+/// unprojectable records surface as 422 naming the event; the honest
+/// absence of a run key surfaces as 404; audit-gated batches are never
+/// emitted dirty (500 with the diagnostic codes).
+fn map_projection_error(err: crate::work::soma_projection::ProjectionError) -> ApiError {
+    use crate::work::soma_projection::ProjectionError;
+    match err {
+        ProjectionError::Journal(e) => ApiError::Internal(format!("{e:#}")),
+        ProjectionError::Unsupported { event_id, reason } => {
+            ApiError::Unprocessable(format!("event {event_id}: {reason}"))
+        }
+        ProjectionError::UnknownRun { run_key } => {
+            ApiError::NotFound(format!("no recorded events for run key {run_key}"))
+        }
+        ProjectionError::Audit(diags) => ApiError::Internal(format!(
+            "projected batch failed the SOMA audit: {}",
+            diags
+                .iter()
+                .map(|d| d.code.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Parse an `If-None-Match` header per RFC 9110: a comma-separated
+/// list of entity tags, each optionally weak (`W/"…"`); `*` matches any
+/// current representation. Weak tags compare by opaque value for
+/// revalidation purposes.
+fn if_none_match_matches(header: &str, etag: &str) -> bool {
+    let header = header.trim();
+    if header == "*" {
+        return true;
+    }
+    header.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        let candidate = candidate.strip_prefix("W/").unwrap_or(candidate);
+        candidate == etag
+    })
+}
+
+/// The ETag input for one response representation. For stream pages the
+/// validator is BOUND TO THE PAGING METADATA as well as the body
+/// (review P1, cache/paging interaction): a newly appended event beyond
+/// a full page leaves the body byte-identical but flips
+/// `X-More-Available` — the ETag must flip with it, or a revalidating
+/// client would keep stale exhaustion metadata and never drain the new
+/// event. Non-paged resources (run batches, run keys) bind the body
+/// alone.
+fn representation_etag(bytes: &[u8], paging: Option<(i64, bool)>) -> Result<String, ApiError> {
+    let body_sha = crate::workflow::soma::canonical::sha256_hex(bytes);
+    let binding = match paging {
+        Some((next_cursor, more_available)) => serde_json::json!({
+            "body": body_sha,
+            "nextCursor": next_cursor,
+            "moreAvailable": more_available,
+        }),
+        None => serde_json::json!({ "body": body_sha }),
+    };
+    let digest = crate::workflow::soma::canonical::try_canonical_digest(&binding)
+        .map_err(|e| ApiError::Internal(format!("representation digest unavailable: {e}")))?;
+    Ok(format!("\"{digest}\""))
+}
+
+/// Build the canonical-bytes response for a projection envelope: the
+/// body IS `canonical_bytes()`, the ETag is the complete-representation
+/// validator (see [`representation_etag`]), and a matching
+/// `If-None-Match` yields 304. Stream 304s carry BOTH paging headers so
+/// no intermediary or client can lose the reconnect metadata.
+fn canonical_projection_response(
+    envelope: &crate::workflow::projection::VersionedProjectionEnvelope<impl serde::Serialize>,
+    paging: Option<(i64, bool)>,
+    if_none_match: Option<&str>,
+) -> Result<axum::response::Response, ApiError> {
+    let bytes = envelope.canonical_bytes().map_err(|diags| {
+        ApiError::Internal(format!("projection cannot be canonicalized: {diags:?}"))
+    })?;
+    let etag = representation_etag(&bytes, paging)?;
+    if if_none_match.is_some_and(|header| if_none_match_matches(header, &etag)) {
+        let mut builder = axum::http::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(axum::http::header::ETAG, etag);
+        if let Some((next_cursor, more_available)) = paging {
+            // Both paging headers ride on the 304 too — the client's
+            // cached metadata is confirmed current (never stale).
+            builder = builder
+                .header("x-next-cursor", next_cursor.to_string())
+                .header(
+                    "x-more-available",
+                    if more_available { "true" } else { "false" },
+                );
+        }
+        return builder
+            .body(axum::body::Body::empty())
+            .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
+    }
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ETAG, etag);
+    // Review P1b: the continuation cursor is ALWAYS present (last
+    // returned seq, or the request's cursor for an empty page);
+    // "more currently available" is represented separately.
+    if let Some((next_cursor, more_available)) = paging {
+        builder = builder
+            .header("x-next-cursor", next_cursor.to_string())
+            .header(
+                "x-more-available",
+                if more_available { "true" } else { "false" },
+            );
+    }
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
+}
+
+/// `GET /work-contexts/:id/work-events` — one reconnectable stream
+/// segment of the projected SOMA `WorkEvent` stream. Byte-deterministic;
+/// resume with `?after=<X-Next-Cursor>` (always present — the final
+/// page carries the position to resume from when NEW events arrive);
+/// no gaps, no duplication. `X-More-Available` reports whether more
+/// events currently exist beyond this page.
+pub async fn get_work_event_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<WorkEventStreamQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let after = query.after.unwrap_or(0);
+    if after < 0 {
+        return Err(ApiError::BadRequest(
+            "after cursor must be >= 0".to_string(),
+        ));
+    }
+    // Ownership scoping: the same rule every other read on this router
+    // applies (404 unknown, 403 wrong user).
+    get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {e}")))?;
+    let db = service.get_db().clone();
+    let limit = query.limit.unwrap_or(50);
+    let page = crate::work::soma_projection::project_page(&db, &id, after, limit)
+        .map_err(map_projection_error)?;
+    canonical_projection_response(
+        &page.envelope,
+        Some((page.next_after, page.more_available)),
+        headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+/// `GET /work-contexts/:id/work-event-runs` — the context's distinct
+/// recorded run keys (the read-model rebuild enumeration), in
+/// first-appearance seq order. Typed kinds never merge equal strings.
+/// The ETag is the sha256 of the exact canonical bytes served (the
+/// complete representation), with `If-None-Match` revalidation.
+pub async fn list_work_event_runs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<UserIdentityQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {e}")))?;
+    let db = service.get_db().clone();
+    let keys =
+        crate::work::soma_projection::recorded_run_keys(&db, &id).map_err(map_projection_error)?;
+    let value = serde_json::Value::Array(
+        keys.iter()
+            .map(|key| {
+                serde_json::json!({
+                    "kind": key.kind.as_wire(),
+                    "id": key.id,
+                })
+            })
+            .collect(),
+    );
+    let bytes: Vec<u8> = crate::workflow::soma::canonical::try_canonical_bytes(&value)
+        .map_err(|e| ApiError::Internal(format!("run keys cannot be canonicalized: {e}")))?;
+    // Non-paged resource: the ETag binds the body alone (the same
+    // complete-representation validator, without paging metadata).
+    let etag = representation_etag(&bytes, None)?;
+    if let Some(header_value) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        && if_none_match_matches(header_value, &etag)
+    {
+        return axum::http::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(axum::http::header::ETAG, etag)
+            .body(axum::body::Body::empty())
+            .map_err(|e| ApiError::Internal(format!("response build failed: {e}")));
+    }
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ETAG, etag)
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ApiError::Internal(format!("response build failed: {e}")))
+}
+
+/// `GET /work-contexts/:id/work-event-runs/:kind/:run_id` — the
+/// causally-closed `WorkEventBatch` for one recorded run identity.
+/// `:kind` is the wire spelling of the TYPED `RunKey`
+/// (`work-run`/`graph-run`/`request`): equal id strings under different
+/// kinds are different resources.
+pub async fn get_work_event_run_batch(
+    State(state): State<Arc<AppState>>,
+    Path((id, kind, run_id)): Path<(String, String, String)>,
+    Query(query): Query<UserIdentityQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    if query.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id is required".to_string()));
+    }
+    let kind = crate::work::soma_projection::RunKeyKind::from_wire(&kind).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "unknown run kind {kind:?} — allowed kinds: work-run, graph-run, request"
+        ))
+    })?;
+    get_context_for_user_or_404(&state, &id, &query.user_id).await?;
+
+    let service = state
+        .create_work_context_service()
+        .map_err(|e| ApiError::Internal(format!("Failed to create service: {e}")))?;
+    let db = service.get_db().clone();
+    let run_key = crate::work::soma_projection::RunKey { kind, id: run_id };
+    let envelope = crate::work::soma_projection::project_run_work_event_batch(&db, &id, &run_key)
+        .map_err(map_projection_error)?;
+    canonical_projection_response(
+        &envelope,
+        None,
+        headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
 /// Request to create a new WorkContext
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkContextRequest {
@@ -213,6 +486,12 @@ pub enum ApiError {
     BadRequest(String),
     Forbidden(String),
     Conflict(String),
+    /// The request is well-formed and the journal is readable, but the
+    /// record cannot be honestly projected (legacy row, unmapped event
+    /// type, `HumanDecision` execution class, stored legacy `system`
+    /// producer). 422 — Slice 2's honest distinction between "not
+    /// found" and "present but unprojectable".
+    Unprocessable(String),
 }
 
 impl IntoResponse for ApiError {
@@ -223,6 +502,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            ApiError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
@@ -328,49 +608,103 @@ fn work_run_journal_for(
 /// with uncommitted changes (deterministic workspace digest computed
 /// from the dirty state); Unbound = no git repo or git unavailable.
 /// Never a hardcoded value.
-fn detect_repo_binding(repo_root: &std::path::Path) -> crate::work::provenance::RepoBinding {
+/// #232 P1: detect the actual repository binding from the repo root.
+/// Public so integration tests exercise the real implementation (not a
+/// copy that can drift). Uses `git rev-parse --git-dir` instead of
+/// checking `.git` existence so linked worktrees and subdirectories are
+/// correctly detected. FAILS CLOSED when a repo is detected but
+/// inspection fails.
+pub fn detect_repo_binding(
+    repo_root: &std::path::Path,
+) -> anyhow::Result<crate::work::provenance::RepoBinding> {
     use crate::work::provenance::RepoBinding;
-    let git_dir = repo_root.join(".git");
-    if !git_dir.exists() {
-        return RepoBinding::Unbound;
+
+    // #232 P1: use git itself to detect the repo — handles linked
+    // worktrees (.git is a FILE not a directory) and subdirectories
+    // (no .git at all, but git walks up to find the repo root).
+    let git_dir_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("--git-dir")
+        .output()
+        .map_err(|e| anyhow::anyhow!("git inspection failed at {}: {e}", repo_root.display()))?;
+
+    // Exit code 128 = "not a git repository" — the honest Unbound state.
+    if !git_dir_out.status.success() {
+        let stderr = String::from_utf8_lossy(&git_dir_out.stderr);
+        if stderr.contains("not a git repository") || git_dir_out.status.code() == Some(128) {
+            return Ok(RepoBinding::Unbound);
+        }
+        anyhow::bail!(
+            "git rev-parse --git-dir failed at {} (exit {:?}): a path claiming a binding must be inspectable",
+            repo_root.display(),
+            git_dir_out.status.code()
+        );
     }
-    let revision = std::process::Command::new("git")
+
+    // Get the HEAD revision — fail closed if unavailable.
+    let rev_out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("rev-parse")
         .arg("HEAD")
         .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-    let Some(revision) = revision else {
-        return RepoBinding::Unbound;
-    };
-    let status_output = std::process::Command::new("git")
+        .map_err(|e| anyhow::anyhow!("repo inspection failed at {}: {e}", repo_root.display()))?;
+    if !rev_out.status.success() {
+        anyhow::bail!(
+            "git rev-parse HEAD failed at {} (exit {:?}): a repo-backed path claiming a binding must yield a revision",
+            repo_root.display(),
+            rev_out.status.code()
+        );
+    }
+    let revision = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+    if revision.is_empty() {
+        anyhow::bail!(
+            "git rev-parse returned empty HEAD at {}: a repo-backed path claiming a binding must yield a revision",
+            repo_root.display()
+        );
+    }
+
+    let status_out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("status")
         .arg("--porcelain")
         .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-        .unwrap_or_default();
-    if status_output.trim().is_empty() {
-        RepoBinding::Bound { revision }
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "repo status inspection failed at {}: {e}",
+                repo_root.display()
+            )
+        })?;
+    if !status_out.status.success() {
+        anyhow::bail!(
+            "git status failed at {}: a repo-backed path claiming a binding must be inspectable",
+            repo_root.display()
+        );
+    }
+    let status_text = String::from_utf8_lossy(&status_out.stdout).to_string();
+    if status_text.trim().is_empty() {
+        Ok(RepoBinding::Bound { revision })
     } else {
+        // #232 P1: the dirty digest carries its POLICY VERSION —
+        // consumers know how to interpret the digest. Fails closed
+        // on computation failure — never a silent "unavailable".
         let digest = crate::workflow::soma::try_canonical_digest(
-            &serde_json::json!({"porcelain": status_output}),
+            &serde_json::json!({"porcelain": status_text, "digestPolicy": "soma-canonical-json-v1"}),
         )
-        .unwrap_or_else(|_| "unavailable".to_string());
-        RepoBinding::Dirty {
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "dirty-workspace digest failed at {}: {e} — fail closed",
+                repo_root.display()
+            )
+        })?;
+        Ok(RepoBinding::Dirty {
             revision,
             workspace_digest: digest,
-        }
+            digest_policy: "soma-canonical-json-v1".to_string(),
+        })
     }
 }
 
@@ -445,8 +779,11 @@ pub async fn update_work_context_status(
         }
     };
 
+    // #232 finding 3: the status handler has the loaded context — derive
+    // the authority from it, not from a hardcoded default.
+    let journal = request_journal_for(user_id, &context);
     work_context_service
-        .update_status(&mut context, new_status, &request_journal(user_id))
+        .update_status(&mut context, new_status, &journal)
         .map_err(|e| ApiError::Internal(format!("Failed to update status: {}", e)))?;
 
     Ok(Json(WorkContextResponse::from(context)))
@@ -624,8 +961,9 @@ async fn execute_decide_transaction(
         }
         // graph_decision event still lands in the same transaction — with
         // complete Slice 1A provenance (graph-run identity preserved via
-        // graph_run_envelope; the requesting user is the principal).
-        let journal = request_journal(user_id);
+        // graph_run_envelope; the requesting user is the principal; the
+        // authority derives from the loaded context — #232 finding 3).
+        let journal = request_journal_for(user_id, &context);
         let envelope = journal.graph_run_envelope(graph_run_id.to_string(), None);
         let decision_event = crate::work::event::WorkContextEvent::new(
             uuid::Uuid::new_v4().to_string(),
@@ -688,7 +1026,7 @@ pub async fn cancel_work_context(
         .map_err(|e| ApiError::Internal(format!("Failed to create service: {}", e)))?;
 
     let journal = request_journal_for(user_id, &context);
-    work_context_service
+    let cancellation_event_id = work_context_service
         .cancel_context(&mut context, &req.reason, &journal)
         .map_err(|e| {
             let msg = e.to_string();
@@ -703,9 +1041,12 @@ pub async fn cancel_work_context(
 
     // #222: the durable flip has committed — wake any in-flight run
     // registered for this context so it stops at its next cancellation
-    // checkpoint. No registered run (or an already-fired token) is a
-    // no-op; this never retroactively changes the durable outcome.
-    let fired = state.run_cancels.fire(&id);
+    // checkpoint. #232 finding 2: the EXACT cancellation event ID from
+    // cancel_context's return is carried through the signal — the
+    // observer extracts it from the token, never from a database lookup.
+    let fired = state
+        .run_cancels
+        .fire_with_cancellation(&id, cancellation_event_id.as_deref());
     if fired > 0 {
         tracing::debug!("cancelled work context {id}: signalled {fired} in-flight run(s)");
     }
@@ -765,7 +1106,7 @@ pub async fn continue_work_context(
     let orchestrator = state
         .create_work_orchestrator()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let journal = std::sync::Arc::new(request_journal(user_id));
+    let journal = std::sync::Arc::new(work_run_journal_for(user_id, &context));
     let context = orchestrator
         .continue_context(id, journal)
         .await
@@ -853,8 +1194,9 @@ pub async fn run_harness(
     // the actual authority derived from the context, and the ACTUAL
     // repository binding (Bound/Dirty/Unbound based on the repo_root's
     // git state — never a hardcoded Unbound).
-    let harness_journal = work_run_journal_for(user_id, &context)
-        .with_repo_binding(detect_repo_binding(&req.repo_root));
+    let repo_binding = detect_repo_binding(&req.repo_root)
+        .map_err(|e| ApiError::Internal(format!("repository provenance inspection failed: {e}")))?;
+    let harness_journal = work_run_journal_for(user_id, &context).with_repo_binding(repo_binding);
     let service =
         HarnessWorkContextService::with_journal(work_context_service, Some(harness_journal));
     let mut edits = req.proposed_edits;

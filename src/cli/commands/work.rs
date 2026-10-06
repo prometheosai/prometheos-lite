@@ -537,7 +537,15 @@ impl WorkCommand {
                     _ => return Err(anyhow::anyhow!("Invalid status: {}", status)),
                 };
 
-                work_context_service.update_status(&mut context, new_status, &cli_journal())?;
+                // #232 finding 3: the CLI status command has the loaded
+                // context — derive the authority from it, not a hardcoded
+                // default.
+                let journal = JournalContext::for_request(
+                    "cli-user",
+                    format!("cli-{}", uuid::Uuid::new_v4()),
+                    JournalContext::work_authority(context.autonomy_level, context.approval_policy),
+                );
+                work_context_service.update_status(&mut context, new_status, &journal)?;
 
                 println!("Updated WorkContext status to {:?}", new_status);
             }
