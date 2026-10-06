@@ -14,6 +14,7 @@ pub use disclosure::GraphDisclosurePolicy;
 pub use envelope::{
     ALLOWED_PROJECTION_VERSIONS, PROJECTION_VERSION_V1, VersionedProjectionEnvelope,
 };
+pub use graph::project_graph_json;
 pub use human::project_human_plan;
 pub use redaction::RedactionPolicy;
 
@@ -50,6 +51,23 @@ fn digest_of(value: &serde_json::Value) -> Result<String, Vec<Diagnostic>> {
             format!("projection digest cannot be computed ({e})"),
         )]
     })
+}
+
+/// Source digest of the AST under the Slice-1 rule: the root serialization
+/// minus `contentDigest` (same rule as `governance_compiler::workflow_digest_of`
+/// and the canonical project path).
+pub(crate) fn source_digest_of(wf: &WorkflowDefinition) -> Result<String, Vec<Diagnostic>> {
+    let value = serde_json::to_value(wf).map_err(|e| {
+        vec![Diagnostic::new(
+            "PROJ-0001",
+            format!("workflow cannot be serialized for projection ({e})"),
+        )]
+    })?;
+    let mut source_value = value;
+    if let Some(obj) = source_value.as_object_mut() {
+        obj.remove("contentDigest");
+    }
+    digest_of(&source_value)
 }
 
 /// Byte-deterministic canonical JSON projection of the validated AST.
