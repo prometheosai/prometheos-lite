@@ -732,16 +732,15 @@ fn two_connection_cancel_race_under_sqlite_busy() {
     a_tx.execute(
         "INSERT INTO work_context_events
              (id, work_context_id, event_type, data, created_at,
-              provenance_json, source_digest, run_id, correlation_id)
-         VALUES (?1, ?2, 'lock_probe', '\"probe\"', ?3, ?4, ?5, ?6, ?7)",
+              provenance_json, source_digest, run_id, principal_id, correlation_id)
+         VALUES (?1, ?2, 'lock_probe', '\"probe\"', ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             uuid::Uuid::new_v4().to_string(),
             ctx.id,
             chrono::Utc::now().to_rfc3339(),
-            // Slice 1A: raw journal inserts must satisfy the database's
-            // provenance enforcement, exactly as any writer would.
             "{\"schemaVersion\":\"1.0.0\",\"producer\":{\"kind\":\"human\",\"identity\":\"probe\"},\"principal\":{\"human\":{\"identity\":\"probe\"}},\"causation\":{\"correlationId\":\"probe\"},\"authority\":{\"declared\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"},\"effective\":{\"autonomy\":\"Review\",\"approvalPolicy\":\"Auto\",\"executionClass\":\"deterministic\"}},\"repoBinding\":\"unbound\",\"run\":{\"requestId\":\"probe\"}}",
             "0000000000000000000000000000000000000000000000000000000000000000",
+            "probe",
             "probe",
             "probe",
         ],

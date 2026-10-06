@@ -30,6 +30,12 @@ pub const PROVENANCE_SCHEMA_VERSION: &str = "1.0.0";
 /// Who or what produced the event. `Human` is a valid producer: a human
 /// acting directly (e.g. canceling a context by request) is recorded as
 /// the producer, not laundered through a system identity.
+///
+/// `System` is a LEGACY WRITE-TIME VOCABULARY member only: nothing
+/// constructs it anymore (the runtime process records itself as
+/// `Harness`), but already-stored envelopes must keep parsing. The
+/// Slice 1B projection fails closed on any stored `system` producer —
+/// it has no honest SOMA `ActorKind` representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum ProducerKind {
@@ -122,6 +128,12 @@ pub enum RepoBinding {
         revision: String,
         #[serde(rename = "workspaceDigest")]
         workspace_digest: String,
+        /// #232 P1: the digest-policy version — a first-class envelope
+        /// field (not merely an input to the digest computation) so
+        /// consumers know how to interpret `workspace_digest` without
+        /// re-deriving the policy from the digest bytes.
+        #[serde(rename = "digestPolicy")]
+        digest_policy: String,
     },
     Unbound,
 }
@@ -156,15 +168,19 @@ pub struct ProvenanceEnvelope {
 }
 
 impl ProvenanceEnvelope {
-    /// Serialize to canonical JSON bytes, validated against the SOMA
-    /// number policy at the boundary. The typed structures contain only
-    /// strings and enum names, but the byte validation still runs: an
-    /// envelope that fails canonical byte rules can never be stored.
+    /// #232 finding 1: serialize through the DESIGNATED SOMA canonical
+    /// renderer — not serde's default. The SOMA renderer produces a
+    /// specific byte form (sorted keys, no whitespace, canonical number
+    /// representations). On read, the parsed envelope's re-rendered
+    /// bytes must equal the stored bytes exactly — any divergence means
+    /// the stored bytes are not canonical and the read fails closed.
     pub fn to_canonical_json_string(&self) -> Result<String> {
-        let text = serde_json::to_string(self).context("serializing provenance envelope")?;
-        canonical::validate_number_lexemes(text.as_bytes())
+        let value = serde_json::to_value(self).context("serializing provenance envelope")?;
+        let bytes = canonical::try_canonical_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("provenance envelope canonical render failed: {e}"))?;
+        canonical::validate_number_lexemes(&bytes)
             .map_err(|e| anyhow::anyhow!("provenance envelope byte validation failed: {e}"))?;
-        Ok(text)
+        String::from_utf8(bytes).context("canonical bytes are not valid UTF-8")
     }
 
     /// P1 gap 1 repair: enforce the canonical-BYTES fixpoint — not just
@@ -190,20 +206,50 @@ impl ProvenanceEnvelope {
         if self.run.request_id.is_empty() {
             anyhow::bail!("provenance request id must be non-empty");
         }
-        // Effective execution class must not widen declared.
-        let declared_class = &self.authority.declared.execution_class;
-        let effective_class = &self.authority.effective.execution_class;
-        let rank = |c: &ExecutionClass| match c {
+        // #232 finding 4: FULL authority partial order — effective must
+        // never widen declared across ALL three dimensions: execution
+        // class, autonomy level, and approval policy.
+        let declared = &self.authority.declared;
+        let effective = &self.authority.effective;
+
+        let rank_execution = |c: &ExecutionClass| match c {
             ExecutionClass::Deterministic => 0,
             ExecutionClass::ConstrainedModel => 1,
             ExecutionClass::ScopedAgent => 2,
             ExecutionClass::HumanDecision => 3,
         };
-        if rank(effective_class) > rank(declared_class) {
+        let rank_autonomy = |a: &AutonomyLevel| match a {
+            AutonomyLevel::Chat => 0,
+            AutonomyLevel::Review => 1,
+            AutonomyLevel::Autonomous => 2,
+        };
+        let rank_approval = |p: &ApprovalPolicy| match p {
+            ApprovalPolicy::ManualAll => 0,
+            ApprovalPolicy::RequireForUntrusted => 1,
+            ApprovalPolicy::RequireForSideEffects => 2,
+            ApprovalPolicy::RequireForTools => 3,
+            ApprovalPolicy::Auto => 4,
+        };
+
+        if rank_execution(&effective.execution_class) > rank_execution(&declared.execution_class) {
             anyhow::bail!(
                 "provenance effective execution class {:?} widens declared {:?}",
-                effective_class,
-                declared_class
+                effective.execution_class,
+                declared.execution_class
+            );
+        }
+        if rank_autonomy(&effective.autonomy) > rank_autonomy(&declared.autonomy) {
+            anyhow::bail!(
+                "provenance effective autonomy {:?} widens declared {:?}",
+                effective.autonomy,
+                declared.autonomy
+            );
+        }
+        if rank_approval(&effective.approval_policy) > rank_approval(&declared.approval_policy) {
+            anyhow::bail!(
+                "provenance effective approval policy {:?} widens declared {:?}",
+                effective.approval_policy,
+                declared.approval_policy
             );
         }
         // Canonical-BYTES fixpoint: serialize → parse → re-serialize must
@@ -226,6 +272,10 @@ impl ProvenanceEnvelope {
 
     /// Parse strictly: unknown fields, a wrong schema version, or a
     /// number-policy violation in the stored bytes is refused.
+    /// #232 finding 1: the stored bytes must BE canonical — re-rendering
+    /// the parsed envelope through the designated SOMA canonical
+    /// renderer must produce byte-identical output. Any divergence
+    /// (reordered keys, extra whitespace, non-canonical numbers) fails.
     pub fn parse_canonical(text: &str) -> Result<Self> {
         canonical::validate_number_lexemes(text.as_bytes())?;
         let envelope: ProvenanceEnvelope = serde_json::from_str(text)
@@ -234,6 +284,14 @@ impl ProvenanceEnvelope {
             anyhow::bail!(
                 "unsupported provenance schema version: {} (supported: {PROVENANCE_SCHEMA_VERSION})",
                 envelope.schema_version
+            );
+        }
+        // The stored bytes must be canonical: re-render through the
+        // designated SOMA renderer and require byte equality.
+        let canonical_bytes = envelope.to_canonical_json_string()?;
+        if canonical_bytes != text {
+            anyhow::bail!(
+                "provenance envelope bytes are not canonical: stored bytes differ from the designated renderer's output (reordered keys, whitespace, or non-canonical representation)"
             );
         }
         Ok(envelope)
@@ -363,10 +421,20 @@ impl JournalContext {
     /// Internal-system context: for invocations with no initiating human
     /// (internal maintenance, test harnesses). The principal absence is
     /// the honest recorded state — never a fabricated identity.
+    ///
+    /// #132 Slice 1B correction 3: the producer is recorded as `Harness`
+    /// at write time. The Lite runtime process producing maintenance
+    /// events IS the harness — SOMA's closed `ActorKind` vocabulary has
+    /// no `system`, and projecting a stored `system` producer would be a
+    /// semantic collapse. The meaningful distinction of these invocations
+    /// is the ABSENT PRINCIPAL, which is recorded honestly and unchanged.
+    /// `ProducerKind::System` remains in the vocabulary solely so
+    /// already-stored envelopes keep parsing; the Slice 1B projection
+    /// fails closed on any such row.
     pub fn internal_system(request_id: String, authority: AuthorityRecord) -> Self {
         Self {
             producer: Producer {
-                kind: ProducerKind::System,
+                kind: ProducerKind::Harness,
                 identity: "prometheos-lite".to_string(),
                 implementation: Some(Implementation {
                     name: "prometheos-lite".to_string(),
@@ -495,6 +563,42 @@ mod tests {
         assert!(text.contains("\"schemaVersion\":\"1.0.0\""));
         let parsed = ProvenanceEnvelope::parse_canonical(&text).unwrap();
         assert_eq!(parsed, envelope);
+    }
+
+    /// #132 Slice 1B correction 3: internal invocations record the
+    /// runtime process as `Harness` at write time — never `System`.
+    #[test]
+    fn internal_system_records_harness_producer() {
+        let ctx = JournalContext::internal_system(
+            "req-sys".to_string(),
+            JournalContext::work_authority(AutonomyLevel::Chat, ApprovalPolicy::ManualAll),
+        );
+        assert_eq!(ctx.producer.kind, ProducerKind::Harness);
+        assert_eq!(ctx.producer.identity, "prometheos-lite");
+        // The meaningful distinction is the honest absent principal.
+        assert!(matches!(ctx.principal, PrincipalRef::Absent));
+        let envelope = ctx.event_envelope(None);
+        assert_eq!(envelope.producer.kind, ProducerKind::Harness);
+        assert!(text_of(envelope).contains("\"kind\":\"harness\""));
+    }
+
+    /// #132 Slice 1B correction 3: `System` remains parseable from
+    /// already-stored envelopes (backward read compatibility) — but
+    /// nothing writes it anymore.
+    #[test]
+    fn system_kind_still_parses_from_stored_envelopes() {
+        let ctx = JournalContext::internal_system(
+            "req-old".to_string(),
+            JournalContext::work_authority(AutonomyLevel::Chat, ApprovalPolicy::ManualAll),
+        );
+        let text = text_of(ctx.event_envelope(None));
+        let legacy = text.replace("\"kind\":\"harness\"", "\"kind\":\"system\"");
+        let parsed = ProvenanceEnvelope::parse_canonical(&legacy).unwrap();
+        assert_eq!(parsed.producer.kind, ProducerKind::System);
+    }
+
+    fn text_of(envelope: ProvenanceEnvelope) -> String {
+        envelope.to_canonical_json_string().unwrap()
     }
 
     #[test]
