@@ -20,6 +20,7 @@ pub mod provenance;
 pub mod run_cancellation;
 pub mod service;
 pub mod skill_kernel;
+pub mod soma_projection;
 pub mod template_loader;
 pub mod templates;
 pub mod types;
