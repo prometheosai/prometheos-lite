@@ -14,7 +14,7 @@ pub use disclosure::GraphDisclosurePolicy;
 pub use envelope::{
     ALLOWED_PROJECTION_VERSIONS, PROJECTION_VERSION_V1, VersionedProjectionEnvelope,
 };
-pub use graph::project_graph_json;
+pub use graph::{project_graph_json, verify_graph_against_source, verify_graph_projection_bytes};
 pub use human::project_human_plan;
 pub use redaction::RedactionPolicy;
 

@@ -1880,3 +1880,305 @@ fn matched_without_emits_fails_unused_output_passes() {
         "declared-but-unused outputs are legal (R7)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — Task 5: verification paths (spec §12 tests 22, 26-28)
+// ---------------------------------------------------------------------------
+
+use prometheos_lite::workflow::projection::{
+    verify_graph_against_source, verify_graph_projection_bytes,
+};
+
+/// Spec §12 test 22 — external edges terminate at container ports: parent
+/// edges reach composites only through declared boundary ports, revealed
+/// internal edges stay inside {container, direct children}, and crafted
+/// cross-boundary or dangling endpoints in canonical bytes fail closed with
+/// `PROJ-0001` (the byte path's endpoint-visibility check runs before its
+/// digest check, so the assertion isolates the shape error as the cause).
+#[test]
+fn external_edges_terminate_at_ports() {
+    let wf = nested_wf();
+    let env = project_graph_json(&wf, Some(&graph_policy(&["s0001:flow"], &[])))
+        .expect("authorized view projects");
+    let root_ids = ["s0000:prep", "s0001:flow", "s0002:audit"];
+    let flow_ports = ["staged", "ready"];
+    let edges = env.payload["edges"].as_array().expect("root edges");
+    assert_eq!(edges.len(), 3, "prep->flow, prep->audit, flow->audit");
+    let mut saw_outcome = 0usize;
+    let mut saw_boundary = 0usize;
+    for edge in edges {
+        for endpoint in [&edge["from"], &edge["to"]] {
+            let node = endpoint["node"].as_str().expect("node id");
+            assert!(
+                root_ids.contains(&node),
+                "root edge escapes the root scope: {node}"
+            );
+            if node == "s0001:flow" {
+                let port = endpoint["port"].as_str().expect("port");
+                assert!(
+                    flow_ports.contains(&port),
+                    "parent edge must target a declared flow port, got {port}"
+                );
+            }
+        }
+        match edge["kind"].as_str() {
+            Some("outcome") => saw_outcome += 1,
+            Some("boundary-value") => saw_boundary += 1,
+            other => panic!("unexpected edge kind {other:?}"),
+        }
+    }
+    assert_eq!(
+        (saw_outcome, saw_boundary),
+        (1, 2),
+        "outcome + boundary edges"
+    );
+
+    // Revealed flow: internal edges terminate at the container's own ports
+    // or at its direct children — never deeper.
+    let flow = &env.payload["nodes"][1];
+    let mut allowed: BTreeSet<&str> = BTreeSet::new();
+    allowed.insert("s0001:flow");
+    for child in flow["children"].as_array().expect("flow children") {
+        allowed.insert(child["id"].as_str().expect("child id"));
+    }
+    let internal = flow["internalEdges"].as_array().expect("internalEdges");
+    assert_eq!(internal.len(), 2, "R1 supply edge + R2 pass-through edge");
+    for edge in internal {
+        for endpoint in [&edge["from"], &edge["to"]] {
+            let node = endpoint["node"].as_str().expect("node id");
+            assert!(
+                allowed.contains(node),
+                "internal edge escapes its scope: {node}"
+            );
+        }
+    }
+
+    // Crafted bytes: a root edge pointing at a hidden child (cross-boundary
+    // internal reference) or at a nonexistent node (dangling endpoint)
+    // fails closed with PROJ-0001. projectionDigest is recomputed so the
+    // only possible failure is the endpoint-reference shape error.
+    let env = project_graph_json(&wf, None).expect("default view projects");
+    let base = serde_json::to_value(&env).expect("envelope serializes");
+    for dangling in ["s0000:leaf", "s9999:ghost"] {
+        let mut value = base.clone();
+        value["payload"]["edges"]
+            .as_array_mut()
+            .expect("edges array")
+            .push(serde_json::json!({
+                "kind": "outcome",
+                "from": { "node": "s0000:prep", "port": "staged" },
+                "to": { "node": dangling, "port": "staged" },
+                "label": ["Produced"],
+            }));
+        value["projectionDigest"] =
+            Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+        let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+        let err = verify_graph_projection_bytes(&bytes)
+            .expect_err("cross-boundary/dangling endpoint must fail closed");
+        assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+        assert!(
+            err[0].message.contains("not visible"),
+            "unexpected message: {}",
+            err[0].message
+        );
+    }
+}
+
+/// Spec §12 test 26 — honest round trips: project -> canonical bytes ->
+/// byte verify -> verify against source, for every disclosure flavor
+/// (default, partially authorized, deeply authorized + counts).
+#[test]
+fn graph_honest_round_trips() {
+    let wf = nested_wf();
+    let policies = [
+        None,
+        Some(graph_policy(&["s0001:flow"], &[])),
+        Some(graph_policy(
+            &["s0001:flow", "s0000:inner"],
+            &["s0001:flow"],
+        )),
+    ];
+    for policy in &policies {
+        let env = project_graph_json(&wf, policy.as_ref()).expect("honest projection");
+        let bytes = env.canonical_bytes().expect("canonical bytes");
+        let parsed = verify_graph_projection_bytes(&bytes).expect("honest bytes verify");
+        verify_graph_against_source(&parsed, &wf, policy.as_ref())
+            .expect("honest projection verifies against source");
+    }
+}
+
+/// Spec §12 test 27 — forged envelope metadata fails with the same codes
+/// as Slice 1, on both the byte path and the against-source verifier.
+#[test]
+fn graph_forged_envelope_metadata_fails() {
+    let wf = nested_wf();
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.projection_version = "projection.v99".to_string();
+    let err = verify_graph_against_source(&env, &wf, None)
+        .expect_err("forged projectionVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let err = verify_graph_against_source(&env, &wf, None)
+        .expect_err("forged schemaVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.projection_digest = "f".repeat(64);
+    let err = verify_graph_against_source(&env, &wf, None)
+        .expect_err("forged projectionDigest must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // Byte path: the version forgeries fail on read with Slice-1 codes.
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let err = verify_graph_projection_bytes(&bytes)
+        .expect_err("forged schemaVersion must fail closed on read");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.projection_version = "projection.v99".to_string();
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let err = verify_graph_projection_bytes(&bytes)
+        .expect_err("forged projectionVersion must fail closed on read");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// Spec §12 test 28 — semantic forgery rejected by source verification:
+/// (a) the graphSchemaVersion allow-list fires before digests; (b) a stale
+/// projectionDigest (not a shape error) is the cause of the byte-path
+/// refusal; (c) derived-digest forgeries pass the byte path by design and
+/// fail §11 steps 6/7 with SOMA-CMP-0004; (d) structurally valid
+/// content/disclosure edits with valid derived digests pass steps 6-7 and
+/// fail the fresh-render comparison at step 8 with PROJ-0002.
+#[test]
+fn graph_semantic_forgery_rejected_by_source_verification() {
+    let wf = nested_wf();
+
+    // (a) edited graphSchemaVersion + recomputed projectionDigest.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["graphSchemaVersion"] = Value::String("lite.graph-projection.v9".to_string());
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    let err = verify_graph_projection_bytes(&bytes)
+        .expect_err("allow-list must reject before the digest check");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    // (b) structurally valid payload edit WITHOUT recomputing
+    // projectionDigest => byte path SOMA-CMP-0004. Cause proof: the
+    // identical edit WITH a recomputed digest passes the byte path, and
+    // the against-source verifier then rejects it at step 8.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["inputPorts"][0]["type"] = Value::String("Forged".to_string());
+    let stale = try_canonical_bytes(&value).expect("canonical bytes");
+    let err =
+        verify_graph_projection_bytes(&stale).expect_err("stale projectionDigest must fail closed");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let reserialized = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&reserialized)
+        .expect("the same edit is structurally valid (shape is not the cause)");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, None)
+        .expect_err("forged content must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+
+    // (c1) forged policyDigest + recomputed projectionDigest: byte path
+    // passes by design (the normalized policy is not embedded); §11 step 6
+    // reports SOMA-CMP-0004.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["policyDigest"] = Value::String("a".repeat(64));
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes)
+        .expect("byte path cannot recompute the policy digest (shape only)");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, None)
+        .expect_err("forged policyDigest must fail §11 step 6");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // (c2) forged childSubgraphDigest + recomputed projectionDigest: byte
+    // path passes (shape only — the hidden subtree is absent from the
+    // bytes); §11 step 7 reports SOMA-CMP-0004.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["nodes"][1]["childSubgraphDigest"] = Value::String("b".repeat(64));
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("byte path checks the digest shape only (§8.1)");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, None)
+        .expect_err("forged childSubgraphDigest must fail §11 step 7");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // (d1) disclosure count edit (count-authorized view): unchanged
+    // derived digests + recomputed projectionDigest => byte path and steps
+    // 6-7 pass; step 8 (fresh render) fails with PROJ-0002.
+    let count_policy = graph_policy(&[], &["s0001:flow"]);
+    let env = project_graph_json(&wf, Some(&count_policy)).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    assert_eq!(
+        value["payload"]["nodes"][1]["disclosure"]["hiddenNodes"],
+        serde_json::json!(2),
+        "flow hides exactly two nodes (inner + leaf)"
+    );
+    value["payload"]["nodes"][1]["disclosure"]["hiddenNodes"] = serde_json::json!(99);
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("disclosure counts are shape-only");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, Some(&count_policy))
+        .expect_err("disclosure edit must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+
+    // (d2) revealed internalEdges edit (authorized view): same contract.
+    let auth_policy = graph_policy(&["s0001:flow"], &[]);
+    let env = project_graph_json(&wf, Some(&auth_policy)).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["nodes"][1]["internalEdges"]
+        .as_array_mut()
+        .expect("internalEdges array")
+        .remove(0);
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("edge removal is structurally valid");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, Some(&auth_policy))
+        .expect_err("internalEdges edit must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+
+    // (d3) revealed deep-child content edit (flow + inner authorized):
+    // embedded digests stay valid (recomputed from the SOURCE at step 7,
+    // never from payload bytes) => steps 6-7 pass, step 8 reports PROJ-0002.
+    let deep_policy = graph_policy(&["s0001:flow", "s0000:inner"], &[]);
+    let env = project_graph_json(&wf, Some(&deep_policy)).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["nodes"][1]["children"][0]["children"][0]["inputs"][0]["acceptedOutcomes"] =
+        serde_json::json!(["Blocked"]);
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("outcome-list edit is structurally valid");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, Some(&deep_policy))
+        .expect_err("child-content edit must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+}

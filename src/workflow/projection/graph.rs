@@ -14,6 +14,7 @@ use crate::workflow::soma::contracts::{BodyItem, PortDefinition, WorkflowDefinit
 use crate::workflow::soma::types::{Cardinality, OutcomeVariant, Requiredness};
 
 use super::disclosure::{GraphDisclosurePolicy, normalize_policy, policy_digest_preimage};
+use super::envelope::{parse_envelope_bytes, verify_envelope_metadata};
 use super::{
     PROJECTION_VERSION_V1, VersionedProjectionEnvelope, digest_of, source_digest_of,
     validated_source,
@@ -21,6 +22,10 @@ use super::{
 
 /// Lite-owned graph schema version (§4; §8.3 closed allow-list value).
 pub const GRAPH_SCHEMA_VERSION: &str = "lite.graph-projection.v1";
+
+/// Closed allow-list of graph schema versions (§8.3). Fail closed on
+/// anything else — unknown/absent/mistyped ⇒ `SOMA-CMP-0001`.
+pub const ALLOWED_GRAPH_SCHEMA_VERSIONS: [&str; 1] = [GRAPH_SCHEMA_VERSION];
 
 /// One node's registration record (§2.4/§4).
 #[derive(Debug)]
@@ -1036,6 +1041,589 @@ pub fn project_graph_json(
         projection_digest,
         payload: payload_value,
     })
+}
+
+/// Lowercase-64-hex digest shape (§8.3 and the payload digest fields of §4).
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Node id grammar (§4): `s{NNNN}:{operation_id}` — checked byte-wise; no
+/// regex (dependency policy).
+fn node_id_grammar_ok(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() > 6 && b[0] == b's' && b[1..5].iter().all(u8::is_ascii_digit) && b[5] == b':'
+}
+
+/// Every byte-path structural refusal is `PROJ-0001` (§9: policy-independent
+/// shape errors, dangling/cross-boundary endpoints, non-canonical bytes).
+fn shape_err(message: String) -> Vec<Diagnostic> {
+    vec![Diagnostic::new("PROJ-0001", message)]
+}
+
+/// One visible node's declared port names, for endpoint-reference checks.
+struct ScopeNodePorts {
+    composite: bool,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+}
+
+/// One scope's edge array: kinds, endpoint shapes, endpoint references
+/// visible in this scope (root `edges` ⇒ root nodes; `internalEdges` ⇒
+/// {container, direct children}), ports declared on the endpoint node
+/// (atomic: direction-typed; composite: either side), non-empty labels.
+fn validate_scope_edges(
+    edges: &serde_json::Value,
+    index: &BTreeMap<String, ScopeNodePorts>,
+    owner: Option<(&str, &ScopeNodePorts)>,
+) -> Result<(), Vec<Diagnostic>> {
+    let list = edges
+        .as_array()
+        .ok_or_else(|| shape_err("scope edges must be an array".to_string()))?;
+    for edge in list {
+        let obj = edge
+            .as_object()
+            .ok_or_else(|| shape_err("edge must be an object".to_string()))?;
+        match obj.get("kind").and_then(serde_json::Value::as_str) {
+            Some("outcome") | Some("boundary-value") => {}
+            other => return Err(shape_err(format!("edge with unknown kind {other:?}"))),
+        }
+        for field in ["from", "to"] {
+            let endpoint = obj
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| shape_err(format!("edge {field} must be an object")))?;
+            let node = endpoint
+                .get("node")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| shape_err(format!("edge {field} endpoint without a node")))?;
+            let port = endpoint
+                .get("port")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| shape_err(format!("edge {field} endpoint without a port")))?;
+            let ports: &ScopeNodePorts = if let Some(p) = index.get(node) {
+                p
+            } else if let Some((owner_id, owner_ports)) = owner {
+                if owner_id == node {
+                    owner_ports
+                } else {
+                    return Err(shape_err(format!(
+                        "edge endpoint {node} is not visible in its scope"
+                    )));
+                }
+            } else {
+                return Err(shape_err(format!(
+                    "edge endpoint {node} is not visible in its scope"
+                )));
+            };
+            let declared = if ports.composite {
+                ports
+                    .inputs
+                    .iter()
+                    .chain(ports.outputs.iter())
+                    .any(|p| p.as_str() == port)
+            } else if field == "from" {
+                ports.outputs.iter().any(|p| p.as_str() == port)
+            } else {
+                ports.inputs.iter().any(|p| p.as_str() == port)
+            };
+            if !declared {
+                return Err(shape_err(format!(
+                    "edge endpoint {node} does not declare port {port}"
+                )));
+            }
+        }
+        match obj.get("label").and_then(serde_json::Value::as_array) {
+            Some(labels)
+                if !labels.is_empty()
+                    && labels
+                        .iter()
+                        .all(|l| matches!(l.as_str(), Some(s) if !s.is_empty())) => {}
+            _ => {
+                return Err(shape_err(
+                    "edge label must be a non-empty array of strings".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One scope's nodes under the byte path: id grammar, document-wide
+/// uniqueness, kind-specific required fields, withheld/revealed
+/// exclusivity, port shapes — then its edges, then (for revealed
+/// containers) recursion into each child scope.
+fn validate_scope(
+    nodes: &[serde_json::Value],
+    owner: Option<(&str, &ScopeNodePorts)>,
+    edges: &serde_json::Value,
+    seen_ids: &mut BTreeSet<String>,
+) -> Result<(), Vec<Diagnostic>> {
+    let mut index: BTreeMap<String, ScopeNodePorts> = BTreeMap::new();
+    let mut revealed: Vec<(&str, &Vec<serde_json::Value>, &serde_json::Value)> = Vec::new();
+    for node in nodes {
+        let obj = node
+            .as_object()
+            .ok_or_else(|| shape_err("node must be an object".to_string()))?;
+        let id = obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if !node_id_grammar_ok(id) {
+            return Err(shape_err(format!(
+                "node id {id:?} does not match s{{NNNN}}:<operation_id>"
+            )));
+        }
+        if !seen_ids.insert(id.to_string()) {
+            return Err(shape_err(format!("duplicate node id {id}")));
+        }
+        let composite = match obj.get("kind").and_then(serde_json::Value::as_str) {
+            Some("atomic") => false,
+            Some("composite") => true,
+            other => return Err(shape_err(format!("node {id}: unknown kind {other:?}"))),
+        };
+        if !composite {
+            for forbidden in [
+                "childSubgraphDigest",
+                "children",
+                "internalEdges",
+                "disclosure",
+            ] {
+                if obj.contains_key(forbidden) {
+                    return Err(shape_err(format!(
+                        "{id}: atomic node must not carry {forbidden}"
+                    )));
+                }
+            }
+        }
+        let inputs = obj
+            .get("inputs")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| shape_err(format!("{id}: inputs must be an array")))?;
+        let outputs = obj
+            .get("outputs")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| shape_err(format!("{id}: outputs must be an array")))?;
+        let mut input_names = Vec::with_capacity(inputs.len());
+        for port in inputs {
+            let port_obj = port
+                .as_object()
+                .ok_or_else(|| shape_err(format!("{id}: input port must be an object")))?;
+            let name = port_obj
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| shape_err(format!("{id}: input port without a name")))?;
+            if port_obj
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            {
+                return Err(shape_err(format!("{id}: input {name} without a type")));
+            }
+            if composite {
+                for field in ["cardinality", "requiredness"] {
+                    if port_obj
+                        .get(field)
+                        .and_then(serde_json::Value::as_str)
+                        .is_none()
+                    {
+                        return Err(shape_err(format!(
+                            "{id}: boundary port {name} without {field}"
+                        )));
+                    }
+                }
+            } else {
+                let accepted_ok = port_obj
+                    .get("acceptedOutcomes")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|values| values.iter().all(serde_json::Value::is_string));
+                if !accepted_ok {
+                    return Err(shape_err(format!(
+                        "{id}: input {name} needs a string acceptedOutcomes array"
+                    )));
+                }
+            }
+            input_names.push(name.to_string());
+        }
+        let mut output_names = Vec::with_capacity(outputs.len());
+        for port in outputs {
+            let port_obj = port
+                .as_object()
+                .ok_or_else(|| shape_err(format!("{id}: output port must be an object")))?;
+            let name = port_obj
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| shape_err(format!("{id}: output port without a name")))?;
+            if port_obj
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            {
+                return Err(shape_err(format!("{id}: output {name} without a type")));
+            }
+            if composite {
+                for field in ["cardinality", "requiredness"] {
+                    if port_obj
+                        .get(field)
+                        .and_then(serde_json::Value::as_str)
+                        .is_none()
+                    {
+                        return Err(shape_err(format!(
+                            "{id}: boundary port {name} without {field}"
+                        )));
+                    }
+                }
+            } else {
+                let emits_ok = match port_obj.get("emits") {
+                    None => true,
+                    Some(v) => v
+                        .as_array()
+                        .is_some_and(|values| values.iter().all(serde_json::Value::is_string)),
+                };
+                if !emits_ok {
+                    return Err(shape_err(format!(
+                        "{id}: output {name} emits must be an array of strings"
+                    )));
+                }
+            }
+            output_names.push(name.to_string());
+        }
+        if composite {
+            let digest = obj
+                .get("childSubgraphDigest")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !is_hex64(digest) {
+                return Err(shape_err(format!(
+                    "{id}: childSubgraphDigest is not a lowercase 64-hex digest"
+                )));
+            }
+            match (
+                obj.get("children"),
+                obj.get("internalEdges"),
+                obj.get("disclosure"),
+            ) {
+                (Some(children), Some(internal_edges), None) => {
+                    let children = children
+                        .as_array()
+                        .ok_or_else(|| shape_err(format!("{id}: children must be an array")))?;
+                    internal_edges.as_array().ok_or_else(|| {
+                        shape_err(format!("{id}: internalEdges must be an array"))
+                    })?;
+                    revealed.push((id, children, internal_edges));
+                }
+                (None, None, Some(disclosure)) => {
+                    let d = disclosure
+                        .as_object()
+                        .ok_or_else(|| shape_err(format!("{id}: disclosure must be an object")))?;
+                    if d.get("withheld").and_then(serde_json::Value::as_bool) != Some(true) {
+                        return Err(shape_err(format!("{id}: disclosure.withheld must be true")));
+                    }
+                    for field in ["reason", "category"] {
+                        if d.get(field).and_then(serde_json::Value::as_str).is_none() {
+                            return Err(shape_err(format!(
+                                "{id}: disclosure without a string {field}"
+                            )));
+                        }
+                    }
+                    for field in ["hiddenNodes", "hiddenEdges"] {
+                        match d.get(field) {
+                            None => {}
+                            Some(v) if v.as_u64().is_some() => {}
+                            Some(_) => {
+                                return Err(shape_err(format!(
+                                    "{id}: disclosure.{field} must be a non-negative integer"
+                                )));
+                            }
+                        }
+                    }
+                }
+                (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                    return Err(shape_err(format!(
+                        "{id}: withheld composite must not carry children/internalEdges"
+                    )));
+                }
+                (Some(_), None, None) => {
+                    return Err(shape_err(format!(
+                        "{id}: revealed composite requires internalEdges alongside children"
+                    )));
+                }
+                (None, Some(_), None) => {
+                    return Err(shape_err(format!(
+                        "{id}: revealed composite requires children alongside internalEdges"
+                    )));
+                }
+                (None, None, None) => {
+                    return Err(shape_err(format!(
+                        "{id}: composite requires children and internalEdges or a disclosure block"
+                    )));
+                }
+            }
+        }
+        index.insert(
+            id.to_string(),
+            ScopeNodePorts {
+                composite,
+                inputs: input_names,
+                outputs: output_names,
+            },
+        );
+    }
+    validate_scope_edges(edges, &index, owner)?;
+    for (child_owner, children, internal_edges) in revealed {
+        let ports = index.get(child_owner).ok_or_else(|| {
+            shape_err(format!(
+                "{child_owner}: port table missing after registration"
+            ))
+        })?;
+        validate_scope(
+            children,
+            Some((child_owner, ports)),
+            internal_edges,
+            seen_ids,
+        )?;
+    }
+    Ok(())
+}
+
+/// §11 byte-path payload structural validation: required payload fields,
+/// `policyDigest` shape, boundary-port shapes, and the full per-scope walk
+/// (id grammar, kind-specific fields, exclusivity, endpoint visibility).
+fn validate_graph_payload_structure(payload: &serde_json::Value) -> Result<(), Vec<Diagnostic>> {
+    let root = payload
+        .as_object()
+        .ok_or_else(|| shape_err("graph payload must be an object".to_string()))?;
+    for key in [
+        "policyDigest",
+        "inputPorts",
+        "outputPorts",
+        "nodes",
+        "edges",
+    ] {
+        if !root.contains_key(key) {
+            return Err(shape_err(format!("graph payload is missing {key}")));
+        }
+    }
+    match root["policyDigest"].as_str() {
+        Some(d) if is_hex64(d) => {}
+        _ => {
+            return Err(shape_err(
+                "policyDigest is not a lowercase 64-hex digest".to_string(),
+            ));
+        }
+    }
+    for key in ["inputPorts", "outputPorts"] {
+        let ports = root[key]
+            .as_array()
+            .ok_or_else(|| shape_err(format!("{key} must be an array")))?;
+        for port in ports {
+            let port_obj = port
+                .as_object()
+                .ok_or_else(|| shape_err(format!("{key} port must be an object")))?;
+            for field in ["name", "type", "cardinality", "requiredness"] {
+                if port_obj
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                {
+                    return Err(shape_err(format!("{key} port without a string {field}")));
+                }
+            }
+        }
+    }
+    let root_nodes = root["nodes"]
+        .as_array()
+        .ok_or_else(|| shape_err("nodes must be an array".to_string()))?;
+    let mut seen_ids = BTreeSet::new();
+    validate_scope(root_nodes, None, &root["edges"], &mut seen_ids)
+}
+
+/// §11 byte path: envelope parse (duplicate keys -> shape -> envelope
+/// metadata -> canonical re-render) -> graphSchemaVersion allow-list ->
+/// payload structural validation -> payload digest check. Establishes byte
+/// integrity, versions, structure, visible references, and
+/// `projectionDigest` only; `policyDigest` and withheld boundary digests
+/// are shape-checked here and recomputed exclusively by
+/// `verify_graph_against_source` steps 6-7 (§8.1/§8.2).
+pub fn verify_graph_projection_bytes(
+    raw: &[u8],
+) -> Result<VersionedProjectionEnvelope<serde_json::Value>, Vec<Diagnostic>> {
+    let env = parse_envelope_bytes::<serde_json::Value>(raw)?;
+    match env
+        .payload
+        .get("graphSchemaVersion")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(v) if ALLOWED_GRAPH_SCHEMA_VERSIONS.contains(&v) => {}
+        other => {
+            return Err(vec![Diagnostic::new(
+                "SOMA-CMP-0001",
+                format!("unsupported graphSchemaVersion {other:?}"),
+            )]);
+        }
+    }
+    validate_graph_payload_structure(&env.payload)?;
+    let expected = digest_of(&env.payload)?;
+    if expected != env.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "graph projection digest does not verify",
+        )]);
+    }
+    Ok(env)
+}
+
+/// §11 step 7: recompute every `childSubgraphDigest` from the source via
+/// the §8.1 acyclic construction (same registry, scope edges, and
+/// bottom-up driver `project_graph_json` uses).
+fn recompute_child_subgraph_digests(
+    root: &WorkflowDefinition,
+    source_digest: &str,
+) -> Result<BTreeMap<String, String>, Vec<Diagnostic>> {
+    let registry = GraphRegistry::build(root)?;
+    let mut scope_edge_sets: Vec<Vec<GraphEdgeView>> = Vec::with_capacity(registry.scopes.len());
+    for i in 0..registry.scopes.len() {
+        scope_edge_sets.push(scope_edges(&registry, root, i)?);
+    }
+    let mut render_error: Option<Vec<Diagnostic>> = None;
+    let postorder = registry.composite_postorder();
+    let child_digests =
+        compute_child_subgraph_digests(source_digest, &postorder, |boundary_id, done| {
+            match unwithheld_content(&registry, &scope_edge_sets, boundary_id, done) {
+                Ok(value) => value,
+                Err(diags) => {
+                    if render_error.is_none() {
+                        render_error = Some(diags);
+                    }
+                    serde_json::json!({})
+                }
+            }
+        });
+    if let Some(diags) = render_error {
+        return Err(diags);
+    }
+    Ok(child_digests)
+}
+
+/// §11 step 7 comparison: every embedded `childSubgraphDigest` in the
+/// envelope payload against the value recomputed from the source (hidden
+/// boundaries carry no embedded value in the bytes and cannot be forged).
+fn compare_child_subgraph_digests(
+    nodes: &[serde_json::Value],
+    fresh: &BTreeMap<String, String>,
+) -> Result<(), Vec<Diagnostic>> {
+    for node in nodes {
+        if node.get("kind").and_then(serde_json::Value::as_str) != Some("composite") {
+            continue;
+        }
+        let id = node
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let embedded = node
+            .get("childSubgraphDigest")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        match fresh.get(id) {
+            Some(expected) if expected.as_str() == embedded => {}
+            _ => {
+                return Err(vec![Diagnostic::new(
+                    "SOMA-CMP-0004",
+                    format!("childSubgraphDigest for {id} does not verify against the source AST"),
+                )]);
+            }
+        }
+        if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+            compare_child_subgraph_digests(children, fresh)?;
+        }
+    }
+    Ok(())
+}
+
+/// §11 against-source path (B2 pattern): ordered, self-contained, no
+/// prior byte verification required. Steps 6-7 deliberately precede the
+/// wholesale comparison so derived-digest mismatches report
+/// `SOMA-CMP-0004`, never `PROJ-0002`:
+/// 1 source audit + envelope metadata; 2 graphSchemaVersion allow-list;
+/// 3 envelope payload digest; 4 envelope/root schema binding;
+/// 5 policy validation/normalization (`PROJ-0003`);
+/// 6 policyDigest recomputation; 7 childSubgraphDigest recomputation;
+/// 8 fresh `project_graph_json` identity — `sourceDigest` + full payload
+/// equality (`PROJ-0002`).
+pub fn verify_graph_against_source(
+    envelope: &VersionedProjectionEnvelope<serde_json::Value>,
+    root: &WorkflowDefinition,
+    policy: Option<&GraphDisclosurePolicy>,
+) -> Result<(), Vec<Diagnostic>> {
+    // Step 1: source audit gate, then envelope metadata (Slice-1 codes).
+    validated_source(root)?;
+    verify_envelope_metadata(envelope)?;
+    // Step 2: graphSchemaVersion allow-list (§8.3).
+    match envelope
+        .payload
+        .get("graphSchemaVersion")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(v) if ALLOWED_GRAPH_SCHEMA_VERSIONS.contains(&v) => {}
+        other => {
+            return Err(vec![Diagnostic::new(
+                "SOMA-CMP-0001",
+                format!("unsupported graphSchemaVersion {other:?}"),
+            )]);
+        }
+    }
+    // Step 3: envelope payload digest.
+    let expected_payload = digest_of(&envelope.payload)?;
+    if expected_payload != envelope.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "graph projection digest does not verify",
+        )]);
+    }
+    // Step 4: envelope/root schema binding.
+    if envelope.schema_version != root.schema_version {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "schemaVersion does not match the source AST",
+        )]);
+    }
+    // Step 5: policy validation and normalization (§6, PROJ-0003).
+    let registry = GraphRegistry::build(root)?;
+    let normalized = normalize_policy(&registry, policy)?;
+    // Step 6: policyDigest recomputed from the SOURCE root digest (§8.2).
+    let source_digest = source_digest_of(root)?;
+    let expected_policy = digest_of(&policy_digest_preimage(&source_digest, &normalized))?;
+    if envelope
+        .payload
+        .get("policyDigest")
+        .and_then(serde_json::Value::as_str)
+        != Some(expected_policy.as_str())
+    {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "policyDigest does not verify against the source AST",
+        )]);
+    }
+    // Step 7: childSubgraphDigest recomputation (§8.1).
+    let fresh_child_digests = recompute_child_subgraph_digests(root, &source_digest)?;
+    if let Some(nodes) = envelope
+        .payload
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        compare_child_subgraph_digests(nodes, &fresh_child_digests)?;
+    }
+    // Step 8: fresh-render identity.
+    let fresh = project_graph_json(root, policy)?;
+    if fresh.source_digest != envelope.source_digest || fresh.payload != envelope.payload {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "graph projection does not match a fresh render of the source AST",
+        )]);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
