@@ -1554,3 +1554,121 @@ fn public_resolver_rejects_schema_invalid_inputs() {
         decision
     );
 }
+
+/// Review round 4, positive controls for JSON Schema `integer`
+/// semantics: a mathematically integral decimal (`1.0`, `0.0`) is a
+/// VALID integer for `retries`/`concurrency`, and must resolve — the
+/// early round-4 implementation wrongly rejected fractional-notated
+/// integers with a false 400 (the defect these controls pinned against
+/// the pre-fix head).
+#[tokio::test]
+async fn integral_decimal_budget_notation_is_accepted_over_http() {
+    let (state, _db_path, _dir) = test_app_state();
+    let app = create_router(state);
+
+    // Requirements side: {"retries": 1.0, "concurrency": 0.0}.
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["requirements"]["hardLimits"] = serde_json::json!({ "retries": 1.0, "concurrency": 0.0 });
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(body.to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "integral decimal notation on integer-only dimensions is valid"
+    );
+
+    // Authority side: integral decimal budgets in declared AND
+    // effective resolve normally.
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["authority"]["declared"]["budgets"] =
+        serde_json::json!({ "retries": 1.0, "concurrency": 0.0 });
+    body["authority"]["effective"]["budgets"] =
+        serde_json::json!({ "retries": 1.0, "concurrency": 0.0 });
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(body.to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "integral decimal notation on authority budgets is valid"
+    );
+
+    // The fractional rejection is unchanged: 1.5 still 400s (the
+    // integer-only guard must not be diluted by the fix).
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["requirements"]["hardLimits"] = serde_json::json!({ "retries": 1.5 });
+    let resp = post_body(
+        &app,
+        "/runtime/compatibility/simulate",
+        axum::body::Body::from(body.to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "1.5 retries stays rejected");
+}
+
+/// The same positive control on the public resolver: integral decimal
+/// budgets resolve; fractional on integer-only dims still Errs.
+#[test]
+fn public_resolver_accepts_integral_decimal_budgets() {
+    let caps = caps_valid();
+    let authority = empty_authority();
+
+    // Integral decimal retries/concurrency on the requirements side.
+    let mut reqs = reqs_valid();
+    reqs.hard_limits = Some(prometheos_lite::workflow::soma::contracts::Budgets {
+        tokens: None,
+        cost: None,
+        duration: None,
+        retries: serde_json::Number::from_f64(1.0),
+        concurrency: serde_json::Number::from_f64(0.0),
+    });
+    let decision = resolve(&NegotiationInputs {
+        id: "dec-integral-decimal".to_string(),
+        requirements: &reqs,
+        capabilities: &caps,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    });
+    assert!(
+        decision.is_ok(),
+        "integral decimal notation is a valid JSON Schema integer: {:?}",
+        decision
+    );
+
+    // And on the authority side (declared + effective).
+    let mut auth = empty_authority();
+    auth.budgets = Some(prometheos_lite::workflow::soma::contracts::Budgets {
+        tokens: None,
+        cost: None,
+        duration: None,
+        retries: serde_json::Number::from_f64(1.0),
+        concurrency: serde_json::Number::from_f64(0.0),
+    });
+    let reqs = reqs_valid();
+    let decision = resolve(&NegotiationInputs {
+        id: "dec-integral-decimal-auth".to_string(),
+        requirements: &reqs,
+        capabilities: &caps,
+        authority_declared: &auth,
+        authority_effective: &auth,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    });
+    assert!(
+        decision.is_ok(),
+        "integral decimal authority budgets resolve: {:?}",
+        decision
+    );
+}

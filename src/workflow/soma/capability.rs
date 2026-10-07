@@ -449,8 +449,11 @@ fn is_semver_shaped(s: &str) -> bool {
 
 /// Budget value constraints from the vendored `Budgets` definitions:
 /// every dimension is `minimum: 0`, and `retries`/`concurrency` are
-/// `type: integer` (fractional lexemes are schema-invalid even though
-/// the Rust shape accepts any JSON number).
+/// `type: integer`. JSON Schema integer semantics: a mathematically
+/// integral value is valid in ANY notation — `1.0` and `0.0` are valid
+/// integers while `1.5` is not — so the integer check is
+/// `fract() == 0.0` on the finite value (large integral decimals and
+/// u64/i64 integers alike), not the parser's storage representation.
 fn validate_budgets(label: &str, budgets: Option<&Budgets>) -> Result<(), String> {
     let Some(b) = budgets else {
         return Ok(());
@@ -467,8 +470,7 @@ fn validate_budgets(label: &str, budgets: Option<&Budgets>) -> Result<(), String
                 "{label}.{dim} must be nonnegative (minimum 0), got {n}"
             ));
         }
-        if matches!(dim, "retries" | "concurrency") && n.as_i64().is_none() && n.as_u64().is_none()
-        {
+        if matches!(dim, "retries" | "concurrency") && f.fract() != 0.0 {
             return Err(format!(
                 "{label}.{dim} must be an integer (type integer), got {n}"
             ));
