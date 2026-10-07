@@ -42,7 +42,7 @@ Reconnaissance against `main@66d3362` (slice-1 spec §1 basis, slice-2 spec §1 
 
 | Source concept | Existing authoritative type/contract (path) | Slice-3 projected representation | Disclosure rule | Digest/identity binding |
 |---|---|---|---|---|
-| Versioned envelope wrapper | `VersionedProjectionEnvelope<V>` (`src/workflow/projection/envelope.rs:18`) | direct reuse for Slice-3 payloads (`lite.review-report.v1`, `lite.evidence-timeline.v1` `payload` values) | n/a (envelope itself carries non-negotiable bindings) | envelope `sourceDigest` = `source_digest_of(wf)` (`projection/mod.rs:59`); `projectionDigest` = canonical digest of payload |
+| Versioned envelope wrapper | `VersionedProjectionEnvelope<V>` (`src/workflow/projection/envelope.rs:18`) | direct reuse for Slice-3 payloads; envelope retains the SOMA schema version contract (`verify_envelope_metadata`/`parse_envelope_bytes`) — Slice-3 payload identity rides in the payload structs | n/a (envelope itself carries non-negotiable bindings) | envelope `sourceDigest` = `source_digest_of(wf)` (`projection/mod.rs:59`); `projectionDigest` = canonical digest of payload
 | Canonical AST identity | `governance_compiler::workflow_digest_of` (`src/workflow/governance_compiler.rs`), alias `source_digest_of` (projection/mod.rs:59) | envelope `sourceDigest` (unchanged) | n/a | bound to canonical `WorkflowDefinition` minus `contentDigest` |
 | Human plan projection | `render_plan_body` / `project_human_plan` (`projection/human.rs`) | unchanged | optional `RedactionPolicy` | payload digest = `sha256_hex(text bytes)` |
 | Canonical JSON projection | `project_canonical_json` (`projection/mod.rs`), `verify_canonical_projection_bytes` | unchanged | n/a (complete artifact) | `digest_of(canonical_value)` |
@@ -55,6 +55,8 @@ Reconnaissance against `main@66d3362` (slice-1 spec §1 basis, slice-2 spec §1 
 | Journal record | `JournalRecord`, `StoredColumns`, `ProvenanceState` (`src/db/repository/work_context_events.rs`) | source-of-truth rows projected into events | provenance state `LegacyUnverified` is surfaced as a first-class status, never silently upgraded | stored `sourceDigest`/`data`/`createdAt` bind as stored bytes |
 | WorkEvent semantic identity | `WorkEvent` (`schema_version, version, id, event_type, actor, authority, effective_authority, sequence, timestamp, idempotency_key, correlation_id, repo_revision, compatibility, semantic_digest, parents, evidence, payload, ...`) (`src/workflow/soma/event.rs`) | timeline event derived fields; `sequence`, `semantic_digest`, `id`, `event_type` mapping categories (`context/evidence/decision/lifecycle`) per §6.x of issue context (`work/soma_projection.rs:82`) | event payload families (`EventPayload` variants) disclosed by category | `WorkEvent.semantic_digest` is the authoritative event digest — no new field is invented |
 | Run/grouping binding | `WorkEventBatch`, `RunKey`, `RunKeyKind` (`src/work/soma_projection.rs`) | timeline `scope` carries exactly one `RunKey`; grouping/canonical ordering per run | scope metadata is mandatory; no cross-run merge without explicit policy | `RunKey` typed id/kind wire spelling per existing binding |
+| Runtime review-fact input | `ReviewFacts<'a>` (§4.0) referencing `ReviewReport`, `HumanDecisionRecordV1[]`, `EvidenceBundle[]` | same input passed to render AND against-source verify | inherited per-field | each fact's hash bound via stored digest / canonical re-render (§3.6-a–c) |
+| Runtime timeline input | `TimelineProjectionSource<'a>` (§5.0): `WorkEventBatch` + optional `ProvenanceState` map + optional `ProjectionPageMeta` + `RunKey` | same input passed to render AND against-source verify | same disclosure semantics; completeness data sourced, not invented | event-stream digest + policy digest per §3.4 |
 | Diagnostic vocabulary | `Diagnostic` (`src/workflow/soma/mod.rs:42`), families `SOMA-CMP-*`, `SOMA-AUTH-*`, `SOMA-EVT-*`, `PROJ-*` | prose: enumeration over the same type with minimal new codes (§7) | n/a (diagnostics are only emitted, never transformed) | n/a |
 | Typed outcome vocabulary | `OutcomeVariant` (`Produced|Skipped|Blocked|Failed|Cancelled|ReviewRequired`) (`src/workflow/soma/types.rs:163`); `SUCCESS_VARIANT`, `FAILURE_VARIANTS` | used verbatim for review disposition categories where applicable | never treated as auth | n/a |
 | Timeline lineage | legacy `TimelineEvent` lives in `src/flow/tracing.rs` — explicitly NOT the projection (kept out of scope as source-of-truth) | Slice-3 timeline sources from `WorkEventBatch`/`JournalRecord` only | n/a | n/a |
@@ -70,8 +72,9 @@ Reconnaissance against `main@66d3362` (slice-1 spec §1 basis, slice-2 spec §1 
 
 Both projections produce `VersionedProjectionEnvelope<V>` (envelope.rs:18) with:
 
-- `projectionVersion` = `"projection.v1"` — same allow-list as Slice 1/2; no new envelope-semantics value.
-- `schemaVersion` = `"lite.review-report.v1"` or `"lite.evidence-timeline.v1"` respectively (see §4/§5). Existing `SOMA-CMP-0001` → unsupported version semantics carry over unchanged.
+- `projectionVersion` = `"projection.v1"` — the existing envelope contract; same allow-list as Slice 1/2; no fork.
+- `schemaVersion` = the existing supported SOMA schema version binding (currently `"1.1.0"`), exactly as `verify_envelope_metadata` / `parse_envelope_bytes` already enforce. `lite.review-report.v1` / `lite.evidence-timeline.v1` are **never** placed in this envelope field.
+- Slice-3 payload identity rides on the payload structs only: `ReviewProjectionPayload.reviewSchemaVersion` (default/allow-listed `"lite.review-report.v1"`) and `TimelineProjectionPayload.timelineSchemaVersion` (default/allow-listed `"lite.evidence-timeline.v1"`). Each payload defines its own narrow allow-list at the use site for its projection-specific verifier; the envelope parser itself stays bound to the SOMA SemVer contract.
 - `sourceDigest` = `projections::mod::source_digest_of(wf)` identity — not overloaded or redefined.
 - `projectionDigest` = `digest_of(payload)` where payload serializes with the existing canonical-JSON rules (§3.4). Human-style `sha256_hex(payload bytes)` used for envelopes applies only where the payload payload is `String`; for JSON payloads, `digest_of` is retained (Slice 1/2/consistent).
 - Envelope JSON is rendered via `envelope::canonical_bytes()` (to_value + `try_canonical_bytes`); bytes MUST round-trip through `parse_envelope_bytes` (duplicate-key scan, strict metadata bounds, canonical-render equality). Unknown keys / duplicates / non-canonical render ⇒ parse failure — no special branch in Slice 3.
@@ -85,30 +88,94 @@ Both projections produce `VersionedProjectionEnvelope<V>` (envelope.rs:18) with:
 
 - Projection reading MUST NOT manufacture: review authority, gate decisions, findings, sources of evidence, timestamps, or principals. All fields come from source material. In particular, `decision: "approved"` MUST NOT imply an absent `HumanDecisionRecordV1` claim; `passed: true` requires a present source `passed` field; otherwise the corresponding section is rendered `withheld`/`unavailable` with explicit `category` and `reason`.
 
-### 3.4 Exact digest domains (Slice-3 new preimage domains; no collision with existing)
+### 3.4 Exact digest domains (Slice-3 new preimage domains; no collision; dependency graph strictly acyclic)
 
-| Preimage domain label | Used by | Preimage material |
+Dependency order (no loops):
+
+```text
+normalized policy + root source identity
+    → disclosurePolicyDigest                      (§3.4.1)
+
+authoritative source facts
+    → derived content digests
+        (reportReferenceDigest / eventStreamDigest) (§3.4.2)
+
+payload
+    → envelope projectionDigest                   (§3.1)
+```
+
+#### 3.4.1 Policy digests (each projection has its own acyclic preimage; each preimage excludes its own output digest)
+
+| Output digest | Domain label (preimage `domain`) |
+|---|---|
+| `disclosurePolicyDigest` (review) | `"projection.review-report.policy.v1"` |
+| `disclosurePolicyDigest` (timeline) | `"projection.evidence-timeline.policy.v1"` |
+
+Preimage material: `digest_of( {"domain": <label>, "schemaVersion": "lite.<review-report|evidence-timeline>.v1", "rootSourceDigest": source_digest_of(wf), "policy": <normalized Review|Timeline DisclosurePolicy>} )`.
+
+Normalization = Slice-2's convention (`projection/disclosure.rs: normalize_policy`): sorted, deduped, validated lists; `disclosurePolicyDigest` is NEVER inside its own preimage.
+
+#### 3.4.2 Derived content digests (separate from the policy digest)
+
+| Derived digest | Domain label | Derives from |
 |---|---|---|
-| `"projection.review-report.v1"` | review-report envelope | `{domain, schemaVersion, rootSourceDigest, disclosurePolicyDigest, reportCancellations:[], reviewReferenceDigest}` — normalized |
-| `"projection.evidence-timeline.v1"` | evidence-timeline envelope | `{domain, schemaVersion, rootSourceDigest, disclosurePolicyDigest, scope{runKey}, eventStreamDigest}` |
+| `reportReferenceDigest` (review) | `"projection.review-report.facts.v1"` | `{domain, rootSourceDigest, reviewSchemaVersion, facts: <normalized summary of the authoritative ReviewFacts used to render (presence flags + gate-id/evidence-ref-id sets, sorted)>}` |
+| `eventStreamDigest` (timeline) | `"projection.evidence-timeline.events.v1"` | `{domain, rootSourceDigest, timelineSchemaVersion, runKey, events:[WorkEvent.semantic_digest …] in the (sequence, semanticDigest) rendering order}` |
+
+`digest_of(value) = try_canonical_digest(value)` (projection/mod.rs:47; failure → `SOMA-CMP-0004`). Every preimage above excludes its own output digest and excludes the envelope-level digests. The envelope's `projectionDigest` depends on the rendered payload only; the policy digest depends on normalized policy + root AST identity; neither mentions the other.
 
 ### 3.5 Unknown fields, duplicate keys, unsupported versions, malformed bytes
 
 - Unknown top-level envelope fields ⇒ `deny_unknown_fields` rejection (PROJ-0001 structural path).
 - Duplicate JSON keys ⇒ byte-level `find_duplicate_key` scan in `parse_envelope_bytes` fails ⇒ PROJ-0001.
-- `projectionVersion` outside `ALLOWED_PROJECTION_VERSIONS` ⇒ `SOMA-CMP-0001`.
-- `schemaVersion` outside the two Slice-3 allow-lists ⇒ `SOMA-CMP-0001` with code `UnsupportedSchemaVersion` detail.
+- Envelope `projectionVersion` outside `ALLOWED_PROJECTION_VERSIONS` ⇒ `SOMA-CMP-0001`.
+- Envelope `schemaVersion` ≠ the supported SOMA schema version (currently `"1.1.0"`) ⇒ existing `SOMA-CMP-0001` semantics, reused verbatim.
+- Payload `reviewSchemaVersion` outside the review allow-list (`["lite.review-report.v1"]`) ⇒ `SOMA-CMP-0001`.
+- Payload `timelineSchemaVersion` outside the timeline allow-list (`["lite.evidence-timeline.v1"]`) ⇒ `SOMA-CMP-0001`.
 - Non-canonical envelope re-render ⇒ PROJ-0001.
 - Invalid payload schema (unknown key inside payload) ⇒ payload struct `deny_unknown_fields` rejection mapped to `SOMA-CMP-0003` (`schema violation`).
 
 ### 3.6 Runtime/evidence identity (not folded into AST identity)
 
 - The AST-level envelope `sourceDigest` remains canonical-workflow-semantic.
-- Runtime facts (review decisions, journal rows, work-event family, EvidenceBundle) are referenced, never restated. Each reference is either (a) a stored `semantic_digest` on a `WorkEvent`, (b) a stored `source_digest` on a `JournalRecord` row, or (c) a domain-labelled `digest_of(json_document)` computed over the source object's canonical re-render. The timeline payload's ordering/disclosure fields do NOT carry new identity fields — `timelineDigest` binds the whole rendered payload, one per envelope; individual events carry references, not synthesized ids.
+- Runtime facts (review decisions, journal rows, work-event family, EvidenceBundle) are referenced, never restated. Each reference is either (a) a stored `semantic_digest` on a `WorkEvent`, (b) a stored `source_digest` on a `JournalRecord` row, or (c) a domain-labelled `digest_of(json_document)` computed over the source object's canonical re-render. The timeline payload's ordering/disclosure fields do NOT carry new identity fields — a single `disclosurePolicyDigest`/`eventStreamDigest` pair binds the rendered payload, one per envelope; individual events carry references, not synthesized ids.
+- Every render/verify function takes the Slice-3 authoritative input contract explicitly (§4.0 `ReviewFacts`; §5.0 `TimelineProjectionSource`). `verify_*_against_source` must receive THE SAME authoritative input as its renderer; no against-source verifier is allowed to receive a reduced/synthesized facts object.
 
 ---
 
 ## 4. Review-Report Projection (`lite.review-report.v1`)
+
+### 4.0 Authoritative ReviewFacts (input contract)
+
+```rust
+/// Slice-3 authoritative input: references to EXISTING authoritative structs.
+/// Never a semantic copy, never a parallel evidence ontology.
+pub struct ReviewFacts<'a> {
+    pub report: Option<&'a ReviewReport>,          // src/harness/review.rs:41
+    pub gates: &'a [HumanDecisionRecordV1],        // src/workflow/graph_gates.rs:~100
+    pub evidence_bundles: &'a [EvidenceBundle],    // src/workflow/evaluate/evidence.rs:21
+    pub scope: ReviewScope<'a>,                    // report/run scope from the authoritative data
+}
+```
+
+Render and verify both consume the SAME `ReviewFacts`:
+
+```rust
+pub fn render_review_projection(
+    wf: &WorkflowDefinition,
+    facts: &ReviewFacts<'_>,
+    policy: Option<&ReviewDisclosurePolicy>,
+) -> Result<VersionedProjectionEnvelope<ReviewProjectionPayload>, Vec<Diagnostic>>;
+
+pub fn verify_review_against_source(
+    envelope: &VersionedProjectionEnvelope<serde_json::Value>,
+    wf: &WorkflowDefinition,
+    facts: &ReviewFacts<'_>,
+    policy: Option<&ReviewDisclosurePolicy>,
+) -> Result<(), Vec<Diagnostic>>;
+```
+
+The structural byte path `verify_review_projection_bytes(raw: &[u8])` is source-independent (envelope checks + digest shape checks): it MUST NOT require the authoritative facts. The against-source path fresh-renders from the same `wf, facts, policy` the caller used to produce the candidate and compares; any substitution — issue data changed, gate verdict flipped, evidence reference altered, disposition fact replaced — produces a different fresh render and fails closed.
 
 ### 4.1 Payload type
 
@@ -117,7 +184,7 @@ Both projections produce `VersionedProjectionEnvelope<V>` (envelope.rs:18) with:
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ReviewProjectionPayload {
     pub review_schema_version: String,        // "lite.review-report.v1"
-    pub disclosure_policy_digest: String,     // domain "projection.review-report.v1" preimage
+    pub disclosure_policy_digest: String,     // domain "projection.review-report.policy.v1" preimage (§3.4.1)
     pub source: ReviewSourceIdentity,         // workflow identity + report scope
     pub authority: ReviewAuthoritySummary,    // derived, never widened
     pub gates: Vec<ReviewGateView>,           // deterministic order (see §4.3)
@@ -182,14 +249,48 @@ The report MUST NOT claim or imply any of:
 
 ## 5. Evidence-Timeline Projection (`lite.evidence-timeline.v1`)
 
+### 5.0 Authoritative TimelineProjectionSource (input contract)
+
+```rust
+/// Slice-3 authoritative timeline input: borrows of EXISTING authoritative data.
+pub struct TimelineProjectionSource<'a> {
+    pub batch: &'a WorkEventBatch,                  // src/workflow/soma/event.rs:362
+    pub provenance: Option<&'a [(String, ProvenanceState)]>, // row provenance from JournalRecord.provenance (db/repository/work_context_events.rs:49) keyed by event id
+    pub page: Option<&'a ProjectionPageMeta>,       // mirrors ProjectionPage {next_after, more_available} (work/soma_projection.rs:274)
+    pub scope: &'a RunKey,                          // from src/work/soma_projection.rs:468
+}
+
+/// ProjectionPageMeta borrows the authoritative page result fields;
+/// NEVER inferred from event count.
+pub struct ProjectionPageMeta {
+    pub next_after: i64,
+    pub more_available: bool,
+}
+```
+
+`CompletenessView` surfaces `next_after`/`more_available` FROM this authoritative boundary; it MUST NOT fabricate them. `ProvenanceState::LegacyUnverified` is authoritative-forwarded through the provenance slice (§5.3/§5.5).
+
+```rust
+pub fn render_timeline_projection(
+    source: &TimelineProjectionSource<'_>,
+    policy: Option<&TimelineDisclosurePolicy>,
+) -> Result<VersionedProjectionEnvelope<TimelineProjectionPayload>, Vec<Diagnostic>>;
+
+pub fn verify_timeline_against_source(
+    envelope: &VersionedProjectionEnvelope<serde_json::Value>,
+    source: &TimelineProjectionSource<'_>,
+    policy: Option<&TimelineDisclosurePolicy>,
+) -> Result<(), Vec<Diagnostic>>;
+```
+
 ### 5.1 Payload type
 
 ```rust
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TimelineProjectionPayload {
-    pub timeline_schema_version: String,     // "lite.evidence-timeline.v1"
-    pub disclosure_policy_digest: String,
+    pub timeline_schema_version: String,     // "lite.evidence-timeline.v1" (compare §3.5)
+    pub disclosure_policy_digest: String,    // domain "projection.evidence-timeline.policy.v1" preimage (§3.4.1)
     pub scope: TimelineScope,                // run identity — mandatory or unavailable
     pub events: Vec<TimelineEventView>,      // deterministic total order (§5.4)
     pub omissions: Vec<OmissionView>,        // same vocabulary as review
@@ -231,7 +332,7 @@ TimelineEventView {
 - Event order key: `(sequence: u64, semanticDigest: Hex64)` compared as `(u64, lowercase hex string)` lexicographic tuple. `sequence` is the authoritative journal order for that run; `semantic_digest` is a stable fallback only when a run records duplicates.
 - Same `(sequence, semanticDigest)` appearing more than once ⇒ duplicate identity diagnostic (`SOMA-CMP-0011`); the projection fails closed, never emits ambiguous order.
 - Timestamps NEVER define order. `WorkEvent.timestamp` is recorded as metadata only (byte-exact as stored); equal timestamps on distinct events DO NOT require a secondary reorder — the sequence order decides.
-- Cycles/self-parent pointer paths in `parents` MUST NOT induce recursion — parents are validated only as identifier references (`Vec<String>` membership in the page), never followed; inconsistent parent (missing from open run) ⇒ SOMA-CMP-0010 (invalid reference) pair with disclosure that the timeline is *incomplete* by page boundary (`moreAvailable` handles that case distinction).
+- Cycles/self-parent pointer paths in `parents` MUST NOT induce recursion — parents are validated only as identifier references (`Vec<String>` membership in the page), never followed; inconsistent parent (missing from open run) ⇒ `SOMA-EVT-0002` (causal-chain integrity) plus the timeline is disclosed *incomplete by page boundary* (`moreAvailable` handles that case distinction).
 - Map/struct ordering of payload fields is irrelevant to bytes — canonical JSON rules already fix the renderer.
 
 ### 5.5 MUST NOT claims (timeline)
@@ -267,37 +368,46 @@ TimelineEventView {
 
 ## 7. Diagnostics / Failure Taxonomy
 
-Reuse existing families whenever an existing code means the required fault. New codes introduced ONLY in parentheses where no current code matches:
+Reuse existing families whenever an existing code means the required fault. New codes introduced ONLY in parentheses where no current code matches.
 
-| Family / code (existing where possible) | Raised when |
-|---|---|
-| `PROJ-0001` | payload-byte parse failure; duplicate key; non-canonical re-render; envelope-level serde failure |
-| `PROJ-0002` | identity/equality failure: `sourceDigest`/`projectionDigest` shape/render mismatch on fresh-render identity check |
-| `SOMA-CMP-0001` | unsupported `projectionVersion`/`schemaVersion`/`graphSchemaVersion` |
-| `SOMA-CMP-0003` | payload schema violation (unknown field in payload struct) |
-| `SOMA-CMP-0004` | projectionDigest/sourceDigest/child-policy digest mismatch |
-| (new) `SOMA-CMP-0010`  | invalid ordering/reference: cycle in parents, parent id missing from disclosed run scope, non-monotonic event sequence within a run |
-| (new) `SOMA-CMP-0011`  | duplicate identity: same `(sequence, semanticDigest)` or duplicate findings entries |
-| (new) `PROJ-0010` | disclosure/policy authorization expansion attempt (policy lists targeting unauthorized categories) |
-| (new) `PROJ-0011` | invalid disclosure request (unknown target category; mix of counts authorized/not ordered behavior) |
-| (new) `PROJ-0012` | review/evidence reference inconsistency: evidence_references with dangling event digest pair, gate basis pointer referencing undisclosed source |
+**Explicit Slice-3 fault mapping (reconciled against the existing taxonomy — Decision 4 outcome of review):**
 
-All new codes must land in `diagnostics.json` category derivation first (matching SOMA `Diagnostic.category_for` convention) before being emitted. No new enum kinds around `Diagnostic`.
+| Slice-3 fault | Existing code | New code | Rationale |
+|---|---|---|---|
+| envelope parse failure / duplicate key / non-canonical re-render | `PROJ-0001` | — | already covers envelope structural failures |
+| identity/equality mismatch (fresh-render ≠ supplied envelope) | `PROJ-0002` | — | already covers renderer equality violations |
+| unsupported `projectionVersion` | `SOMA-CMP-0001` | — | existing envelopeSemantics |
+| unsupported envelope `schemaVersion` | `SOMA-CMP-0001` | — | already required by `verify_envelope_metadata` |
+| unsupported payload `*SchemaVersion` | `SOMA-CMP-0001` | — | Same fault family |
+| payload unknown fields / schema violation | `SOMA-CMP-0003` | — | schema violation |
+| digest/canonicalization mismatch (envelope vs authoritative render) | `SOMA-CMP-0004` | — | digest-domain verdict |
+| unknown / unrecognized port-type vocabulary token | `SOMA-CMP-0006` | — | existing type-vocabulary fault family |
+| missing/cyclic causal parent links | `SOMA-EVT-0002` | — | causal-chain integrity diagnostic already exists |
+| unknown disclosure target category | `PROJ-0003` | — | disclosure policy refusals |
+| dangling evidence reference (eventDigest not in source run) | `SOMA-CMP-0004` | — | referenced digest ≠ any source digest |
+| duplicate `(sequence, semanticDigest)` event identity in one run | `SOMA-CMP-0011` | PROPOSED NEW | no existing code names this exact condition — exhaustive of this one-class addition |
+| rest (disclosure semantics invalid detail, kind mix) | existing shape already expressible via `PROJ-0003` | — | folded into existing prefix |
+
+Proposed addition permitted by plan review: at most **one** new code, `SOMA-CMP-0011` (`duplicate event identity`). Every other fault maps to an existing code. Old entries `SOMA-CMP-0010`, `PROJ-0010`, `PROJ-0011`, `PROJ-0012` are REMOVED from the proposal.
+
+Any residual new code (only `SOMA-CMP-0011`) must land in `diagnostics.json` category derivation first (matching SOMA `Diagnostic.category_for` convention) before being emitted. No new enum kinds around `Diagnostic`.
 
 Verifiers per projection, both with exact ordered steps mirroring the graph pattern (§11 of Slice 2):
 
-`verify_review_projection_bytes(raw)` steps: (1) find_duplicate_key scan; (2) serde parse to envelope; (3) allow-list (projectionVersion, schemaVersion); (4) metadata checks (digest shape per `verify_envelope_metadata`); (5) validate payload structure (deny_unknown_fields + enum values per §4.1); (6) shape-check of derived values: `disclosurePolicyDigest` shape, `source` fields non-empty/hex64 shape, digest shape of envelope projectionDigest; derived digests are shape-checked only. (7) `canonical_bytes` re-render equality of envelope. Failures: §7 table.
+`verify_review_projection_bytes(raw)` steps: (1) find_duplicate_key scan; (2) serde parse to envelope; (3) allow-list (envelope projectionVersion/schemaVersion per existing contract; payload `reviewSchemaVersion` per §3.5); (4) metadata checks (digest shape per `verify_envelope_metadata`); (5) validate payload structure (deny_unknown_fields + enum values per §4.1); (6) shape-check of derived values: `disclosurePolicyDigest` shape, `reportReferenceDigest` shape, `source` fields non-empty/hex64 shape, digest shape of envelope projectionDigest; derived digests are shape-checked only. (7) `canonical_bytes` re-render equality of envelope. Failures: §7 table.
 
-`verify_review_against_source(envelope, wf, policy)` steps: 1 envelope parse; 2 metadata bounds; 3 fresh-render of `CWF{policy}` via `render_review_projection(wf, policy)`; 4 `sourceDigest` equality vs `source_digest_of(wf)`; 5 `disclosurePolicyDigest` equality vs policy preimage digest; 6 derived-values compare: any `policyDigest` mismatch ⇒ `SOMA-CMP-0004` (NOT `PROJ-0002`); 7 fresh-render identity: envelope bytes from source material must equal envelope bytes supplied ⇒ `PROJ-0002`; 8 exhaustive: unknown policies fail validations above. **No remote/network/time-dependent steps.**
+`verify_review_against_source(envelope, wf, facts, policy)` steps: 1 envelope parse; 2 metadata bounds; 3 fresh-render via `render_review_projection(wf, facts, policy)` with the SAME authoritative inputs the caller used; 4 `sourceDigest` equality vs `source_digest_of(wf)`; 5 `disclosurePolicyDigest` equality vs policy-re-normalized digest; 6 derived-values compare: any `policyDigest`/`reportReferenceDigest` mismatch ⇒ `SOMA-CMP-0004` (NOT `PROJ-0002`); 7 fresh-render identity: envelope bytes from source material must equal envelope bytes supplied ⇒ `PROJ-0002`; 8 exhaustive: unknown payload schema/version ⇒ `SOMA-CMP-0001`/`-0003` as applicable. **No remote/network/time-dependent steps.**
 
-`verify_timeline_projection_bytes` / `verify_timeline_against_source` structurally identical, with step 6 comparing `disclosurePolicyDigest` + `eventStreamDigest`-derived values and step 7 re-rendering via `render_timeline_projection(batch, policy, scope)`.
+`verify_timeline_projection_bytes` is source-independent: (1) find_duplicate_key scan; (2) strict envelope parse; (3) version allow-lists (envelope projectionVersion/schemaVersion per existing semantics; payload `timelineSchemaVersion` allow-list per §3.5); (4) metadata shape checks per `verify_envelope_metadata`; (5) payload structural validation; (6) derived-value shape checks per the §3.4.2 table; (7) canonical re-render equality.
+
+`verify_timeline_against_source(envelope, source, policy)` mirrors review: fresh render via `render_timeline_projection(source, policy)` from THE SAME `TimelineProjectionSource` (batch + provenance + page + scope), compare from-the-fresh-render against the supplied envelope step-by-step (envelope parse → sourceDigest equality → disclosurePolicyDigest equality → eventStreamDigest-derived compare ⇒ `SOMA-CMP-0004` ⇒ fresh-render equality ⇒ `PROJ-0002`). No remote/network/time-dependent steps.
 
 ---
 
 ## 8. Review Data Model (acceptance-class constraints)
 
 Sliced into runtime decisions:
-- Report rendering MUST be a pure function of `(WorkflowDefinition, ReviewReport|None, GateRecords|None, EvidenceBundle|None, policy)`. No HashMap iteration in any enumerated path (all `BTreeMap`, `Vec` sorted).
+- Report rendering MUST be a pure function of `(WorkflowDefinition, ReviewFacts, policy)`. No HashMap iteration in any enumerated path (all `BTreeMap`, `Vec` sorted).
 - Disposition: if no verdict record ⇒ `DispositionView.status = "unavailable"` + omission marker. If any `HumanVerdict::Rejected` among effective gates ⇒ `"reject"`; else if any `ChangesRequested` ⇒ `"changes_required"`; else if all available ⇒ `"approve"`; otherwise `"unavailable"`. Policy application does not override verdicts — in particular, withholding rendered gate entries requires that the final disposition block truthfully captures them, never *deriving* an apparent consent.
 - Fail-closed on unknown source categories: a `FailureClass::Evidence` mapped gate renders as `gateKind` derived verbatim from the category string with its own label; no new "unknown category → success" branch.
 
@@ -306,14 +416,14 @@ Sliced into runtime decisions:
 - `ReviewReport.passed` from `src/harness/review.rs` is a required field; only its absence (no passed report at all) triggers `unavailable`.
 - `EvidenceBundle.final_state` text is authoritative; the report/timeline MUST NOT synthesize a `final_state` for a run missing a bundle — use `unavailable`.
 - `WorkEvent.timestamp` raw-byte exact `created_at_text`; timeline must preserve raw rather than parsing it (back-compat with `WorkContextEvent.cursor`).
-- `ProvenanceState::LegacyUnverified` is preserved as enum value `legacy-unverified`; upgrade attempt fails `§7 SOMA-CMP-0010`.
-- `OutcomeVariant::ReviewRequired` correctly routes to `disposition.reviewRequired = true`; SUPER-influence: it never maps to `status: "approve"` at the report level.
+- `ProvenanceState::LegacyUnverified` is preserved as enum value `legacy-unverified`; no upgrade-path exists — an opposing render is refactor mismatch caught by `SOMA-CMP-0004`/`PROJ-0002` on against-source verification.
+- `OutcomeVariant::ReviewRequired` correctly routes to `disposition.reviewRequired = true`; it never maps to `status: "approve"` at the report level.
 
 ---
 
 ## 10. RED → GREEN Acceptance Matrix (Slice 3)
 
-Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slice-2 matrix items 1-18 wherever conceptually applicable, plus the timeline-specific items. Implementation may reorder but MUST NOT silently drop any "required" row. Items 1-18 below are the normalized implementation matrix.
+Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slice-2 matrix items 1-18 wherever conceptually applicable, plus the timeline-specific items. Implementation may reorder but MUST NOT silently drop any "required" row. Rows 1-18 below are the normalized directive-minimum matrix; rows 19-24 are Slice-3-required extras.
 
 | # | Acceptance row | Expected evidence | Target test |
 |---|---|---|---|
@@ -323,14 +433,14 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 4 | deterministic timeline ordering under equal timestamps | events same timestamp, distinct sequences | `timeline_orders_by_sequence_then_digest_not_timestamp` |
 | 5 | semantic source change alters the expected digests | changed workflow def changes `sourceDigest`; changed report payload changes `projectionDigest`; changed policy changes `disclosurePolicyDigest` | `digest_domain_separation_is_respected`, `policy_digest_shape_check` |
 | 6 | projection tampering fails closed | flip a payload byte / envelope metadata byte | `verify_review_projection_bytes_rejects_tampering`, `verify_timeline_projection_bytes_rejects_tampering` |
-| 7 | unsupported versions fail closed | `projectionVersion`/`schemaVersion` outside allow-list | `unsupported_projection_schema_version_fails`, `unsupported_projection_version_fails` |
+| 7 | unsupported versions fail closed | envelope `projectionVersion`/`schemaVersion` value outside existing contract; payload `reviewSchemaVersion`/`timelineSchemaVersion` outside allow-list | `unsupported_projection_schema_version_fails`, `unsupported_projection_version_fails`, `unsupported_review_schema_version_fails`, `unsupported_timeline_schema_version_fails` |
 | 8 | unknown fields / duplicate keys fail closed | dup key in envelope, unknown top key, unknown payload key | existing envelope semantics: `parse_envelope_bytes_rejects_*`; payload-level `deny_unknown_fields` rejection |
 | 9 | projection cannot add authority | renderer ignores an invented `verdict: "approved"` source extension | `projection_cannot_widen_authority_or_invent_verdicts` |
 | 10 | withheld information uninferable through authorized fields | disclosure applied; no removed bytes leak keys | `policy_drawn_report_carries_no_withheld_issue_content`, `timeline_payload_no_leak_of_withheld_payload_details` |
 | 11 | withheld ≠ absent | withheld item produces OmissionView; absent source produces `unavailable` | `omissions_distinguish_withheld_unavailable_outOfScope` |
 | 12 | composite/private boundaries preserved | finding inside withheld composite → parent scope only | `private_boundary_findings_are_generalized` |
 | 13 | review findings reference evidence deterministically | same evidence_reference list through policy-equal render | `review_findings_evidence_references_sorted_and_stable` |
-| 14 | dangling/inconsistent evidence references fail | evidence_references refers to a non-present event digest | `review_against_source_fails_on_dangling_evidence_reference` (SOMA-CMP-0004/PROJ-0012) |
+| 14 | dangling/inconsistent evidence references fail | evidence_references refers to a non-present event digest | `review_against_source_fails_on_dangling_evidence_reference` (`SOMA-CMP-0004`) |
 | 15 | structural verifier behavior pinned per projection | fixed valid envelope bytes parse, fixed invalid bytes reject | `verify_review_projection_bytes_*` / `verify_timeline_projection_bytes_*` |
 | 16 | against-source recomputation pinned per projection | fresh render identity vs supplied envelope | `verify_review_against_source_*` / `verify_timeline_against_source_*` |
 | 17 | projection editing cannot mutate canonical/runtime authority | no public warp path from envelope to AST/DB mutation; public surface has no edit functions | compile-level: no exported function name matches *mutate*/save/persist; test pin |
@@ -339,6 +449,8 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 20 | occurrence check: same `(sequence, semantic_digest)` in one run ⇒ SOMA-CMP-0011 | crafted duplicate document fails | `duplicate_event_identity_is_hard_error` |
 | 21 | `LegacyUnverified` provenance renders literally as `legacy-unverified` | feed provenance state variant | `legacy_provenance_state_is_preserved` |
 | 22 | unknown gate verdict never upgraded | gate absent source; check rendering of `unavailable` | `unavailable_verdict_is_distinguishable_from_approved` |
+| 23 | against-source catches substituted authoritative ReviewFacts | modified `ReviewIssue` data / flipped gate verdict / swapped evidence reference / changed disposition-affecting raw value must flip the fresh render and fail | `verify_review_against_source_fails_on_issue_substitution`, `..._on_gate_verdict_substitution`, `..._on_evidence_ref_substitution`, `..._on_disposition_substitution` |
+| 24 | against-source catches substituted TimelineProjectionSource | modified `page.more_available`/`page.next_after`, altered `ProvenanceState` slice, or swapped out `WorkEventBatch` must flip the fresh render and fail | `verify_timeline_against_source_fails_on_page_meta_substitution`, `..._on_provenance_substitution`, `..._on_batch_substitution` |
 
 ## 11. Implementation Task Plan (TDD)
 
@@ -356,7 +468,7 @@ Invariant: no accessor/writer for downstream edit surfaces exists here.
 Deps: A
 Files: `src/workflow/projection/review.rs`; no model changes elsewhere.
 RED: `render_review_projection_produces_deterministic_byte_layout`
-GREEN min: `render_review_projection(wf: &WorkflowDefinition, facts: ReviewFacts, policy: Option<&ReviewDisclosurePolicy>) -> Result<VersionedProjectionEnvelope<ReviewProjectionPayload>, Vec<Diagnostic>>` with §4.3 total ordering; omission markers per §4.5; summary inheritance vs unavailability per §4.4.
+GREEN min: `render_review_projection(wf: &WorkflowDefinition, facts: &ReviewFacts<'_>, policy: Option<&ReviewDisclosurePolicy>) -> Result<VersionedProjectionEnvelope<ReviewProjectionPayload>, Vec<Diagnostic>>` with §4.3 total ordering; omission markers per §4.5; summary inheritance vs unavailability per §4.4.
 Negative tests: tie-ordering of issues merge-sort; `passed: null` for absent summary; disposition=unavailable when no verdict records; gate order (nodeId, verdict, failureClass, basisEvidenceDigest); every `OmissionView` category exercises `withheld` vs `unavailable` vs `outOfScope`.
 Invariant: pure function; input order cannot leak into output.
 
@@ -364,7 +476,7 @@ Invariant: pure function; input order cannot leak into output.
 Deps: B
 Files: `src/workflow/projection/review.rs`; wiring in `projection/mod.rs`.
 RED: `verify_review_projection_bytes` / `verify_review_against_source` — functions absent.
-GREEN min: `verify_review_projection_bytes(raw: &[u8])` steps per §7 (duplicate-key scan → strict envelope parse → version allow-lists → metadata shape checks only for derived values); `verify_review_against_source(envelope, wf, policy)` 8-step flow per §7.
+GREEN min: `verify_review_projection_bytes(raw: &[u8])` steps per §7 (duplicate-key scan → strict envelope parse → version allow-lists → metadata shape checks only for derived values); `verify_review_against_source(envelope, wf, facts: &ReviewFacts<'_>, policy)" 8-step flow per §7.
 Negative tests: tampered envelope byte footers teardown; wrong `sourceDigest` namespace compare; wrong `disclosurePolicyDigest` ⇒ `SOMA-CMP-0004`; unsupported schema version; non-canonical bytes; appended whitespace; missing `sourceDigest` field; extra envelope key.
 Invariant: derived digest fields are shape-checked only on the bytes path; recompute applies only on the against-source path (steps 6–7).
 
@@ -380,22 +492,22 @@ Invariant: `TimelineEventView` holds no synthesized `id` — values read-through
 Deps: D
 Files: `src/workflow/projection/timeline.rs`.
 RED: `render_timeline_projection_orders_by_sequence_then_semantic_digest_not_timestamp`.
-GREEN min: `render_timeline_projection(batch: &WorkEventBatch, scope: &RunKey, policy: Option<&TimelineDisclosurePolicy>) -> Result<VersionedProjectionEnvelope<TimelineProjectionPayload>, Vec<Diagnostic>>`; page/page-boundary `CompletenessView` population; tie-break rules; duplicate identity; LegacyUnverified passthrough; group ordering stable.
-Negative tests: same timestamp different sequences → sequence decides; reversed input event order yields same bytes; `parents` cycle does not hang; parent id missing ⇒ SOMA-CMP-0010; duplicate `(sequence, semanticDigest)` ⇒ SOMA-CMP-0011; crossing-run inclusion only within `scope: TimelineScope`.
+GREEN min: `render_timeline_projection(source: &TimelineProjectionSource<'_>, policy: Option<&TimelineDisclosurePolicy>) -> Result<VersionedProjectionEnvelope<TimelineProjectionPayload>, Vec<Diagnostic>>`; page/page-boundary `CompletenessView` population; tie-break rules; duplicate identity; LegacyUnverified passthrough; group ordering stable.
+Negative tests: same timestamp different sequences → sequence decides; reversed input event order yields same bytes; `parents` cycle does not hang; parent id missing ⇒ SOMA-EVT-0002; duplicate `(sequence, semanticDigest)` ⇒ SOMA-CMP-0011; crossing-run inclusion only within `scope: TimelineScope`.
 Invariant: no recursion over `parents`; no `Instant::now` / `SystemTime::now`; no `HashMap` iteration over fields in any rendering loop.
 
 ### Task F — Timeline structural + against-source verifiers
 Deps: E
 Files: `src/workflow/projection/timeline.rs`; wiring in `projection/mod.rs`.
 RED: following verifier identities absent.
-GREEN min: `verify_timeline_projection_bytes` / `verify_timeline_against_source` mirror Slice-2 graph verifier structure; derived `disclosurePolicyDigest`/`eventStreamDigest` shape-checked on bytes path; rebased `..._against_source` recomputes them (§7/§3.4); identity/re-render path pins fresh-render equals supplied envelope.
+GREEN min: `verify_timeline_projection_bytes` / `verify_timeline_against_source` mirror Slice-2 graph verifier structure; derived `disclosurePolicyDigest`/`eventStreamDigest` shape-checked on bytes path; the against-source path fresh-renders from the SAME `TimelineProjectionSource` the caller supplied and bytewise compares the fresh render to the candidate (identity/re-render path pins fresh-render equals supplied envelope).
 Negative tests: envelope byte flip ⇒ PROJ-0001/SOMA-CMP-0004 split correctly; rewired `sourceDigest` namespace ⇒ PROJ-0002; policy-mismatched render ⇒ SOMA-CMP-0004; nonce/random salt path absent.
 
 ### Task G — Diagnostics registration + invalid-fixture set
 Deps: C, F
-Files: `vendored/soma/v1.1/diagnostics.json` (add `SOMA-CMP-0010`, `SOMA-CMP-0011`, `PROJ-0010/0011/0012` entries matching the categories+messages; `Diagnostic::category_for` must resolve each); new `tests/fixtures/slice3/*` invalid envelopes + valid goldens.
-RED: diagnostic category resolution for the proposed code list fails; fixture parse expected-fail mismatch.
-GREEN min: minimal schema for each new code; goldens: `valid/review-report*.json`, `valid/timeline*.json` (matching canonical renders), `invalid/*` cases per §10.
+Files: `vendored/soma/v1.1/diagnostics.json` (add only `SOMA-CMP-0011` `duplicate event identity` — the sole proposed new code; existing criterion codes remain resolved via their category fallbacks); new `tests/fixtures/slice3/*` invalid envelopes + valid goldens.
+RED: diagnostic category resolution for `SOMA-CMP-0011` fails until registered; fixture parse expected-fail mismatch.
+GREEN min: minimal schema for `SOMA-CMP-0011` only; goldens: `valid/review-report*.json`, `valid/timeline*.json` (matching canonical renders), `invalid/*` cases per §10.
 Negative tests: unknown code family in fixtures ⇒ no diagnostic; invalid category mapping ⇒ conservative fallback; goldens byte-locked per golden files semantics for Slice 2 (referenced).
 Invariant: every new code appears in diagnostics.json and resolves via `category_for`; no uncategorized SOMA-CMP/PROJ codes.
 
@@ -441,7 +553,11 @@ Invariant: not part of the implementation GREEN gate; docs PR separate, same ope
 - No graph/private-boundary regression: boundaries are generalized/non-cascading via §6.3/§6.4 ✅.
 - No compiled-plan scope creep ✅; no #132/#217 scope creep ✅; no model-native ✅.
 - No nondeterministic/timestamp-only ordering: §5.4 pins `(sequence, semanticDigest)` and forbids timestamp-as-key ✅.
-- No ambiguous recompute contract: derived digest shape-check vs source-based recompute is strictly split (§3/§7/§16 matrix) ✅.
+- No ambiguous recompute contract: derived digest shape-check vs source-based recompute is strictly split (§3/§7/§10 matrix) ✅.
+- Envelope `schemaVersion` remains the supported SOMA SemVer (no `lite.*` value ever placed in that slot; payload-level identifiers live on the payload structs) ✅.
+- Policy digest preimages are acyclic — each preimage is normalized policy + root source identity and never contains its own digest; envelope projectionDigest applies to the payload, policy digest is independent (§3.4) ✅.
+- `verify_*_against_source` always receives THE SAME authoritative inputs as the renderer (`ReviewFacts` / `TimelineProjectionSource`), never a reduced or synthesized facts object (§4.0/§5.0) ✅.
+- Diagnostic additions limited to unmapped codes (only `SOMA-CMP-0011`); every other fault is resolved through the existing taxonomy per §7 ✅.
 - No placeholder tasks in §11; every task has dependencies/files/RED/GREEN/negatives/invariants ✅ (Doc task J noted as docs-state only).
 - Type/field names internally consistent throughout ✅ (deterministic ordering keys, field casings verified against recon findings).
 
@@ -450,19 +566,22 @@ Invariant: not part of the implementation GREEN gate; docs PR separate, same ope
 1. `ReviewProjectionPayload` sources `ReviewReport` + `gate` records only for **existing authoritative data** and declares the rest unavailable. If downstream consumers expect review projections to include AST-derived "gate checks evaluation" fields that don't yet exist, follow-up scope (separate issue), not this slice.
 2. Timeline event identity maps `WorkEvent.event_type` strings (open lowercase) — mapping categories `context/evidence/decision/lifecycle` from `src/work/soma_projection.rs:82` reused as-is; no new event categories introduced.
 3. `ProvenanceEnvelope` is copied by reference summary only (principals → abstract) until a disclosure policy authorizes breakdown.
-4. Diagnostic additions (`SOMA-CMP-0010/0011`, `PROJ-0010/0011/0012`) are proposals pending plan approval; if existing families suffice, they fold without new codes.
+4. Diagnostic additions — RECONCILED after review rejection of the original enumeration: every planned fault is mapped to an existing code (§7 table); only `SOMA-CMP-0011` (`duplicate event identity`, where `(sequence, semanticDigest)` duplicates occur inside one run) is proposed as new. `SOMA-CMP-0010`, `PROJ-0010`, `PROJ-0011`, `PROJ-0012` from the earlier enumeration are dropped.
 5. The `DispositionView` role list (`approve/changes_required/reject/unavailable`) deliberately excludes `approved`, matching Slice-2's point-in-name discipline; canonical "approved" string never invents consent.
 6. Timestamp: `WorkEvent.timestamp` retained byte-exact as stored; never parsed/re-rendered as identity. Tie-breaker is `(sequence, semanticDigest)`. Any true chronology projection would require explicit new authoritative evidence — not invented here.
+7. Envelope version semantics (approved repair): envelope carries the existing SOMA SemVer `schemaVersion`; Slice-3 payload identity lives on the payload structs (`reviewSchemaVersion`/`timelineSchemaVersion`).
+8. Digest domains (approved repair): policy digests have their own acyclic domains per projection (`projection.review-report.policy.v1`, `projection.evidence-timeline.policy.v1`) and never reference their own output; content/event digests are derived independently.
+9. Authoritative inputs (approved repair): `ReviewFacts` / `TimelineProjectionSource` are first-class inputs to BOTH render and against-source verify; no against-source verifier receives a reduced facts object.
 
 ## 15. Summary Return Block (requested by directive)
 
 - Exact baseline: `main@66d336212701a8e3ce89c3080bef94d71532db48` (post PR #242 merge #66d3362; local clone checked out on `docs/e4-x07-slice3-spec` branch from main tree).
 - Drafted spec path: `docs/architecture/e4-x07-slice-3-review-evidence-projections.md`.
 - Recon inventory: §2 table (source concept → type → projected → disclosure → digest binding).
-- Acceptance-matrix count: 22 rows (+4 beyond the 18-item directive minimum).
+- Acceptance-matrix count: 24 rows (+6 beyond the 18-item directive minimum).
 - Implementation-task count: 10 (Tasks A–J).
-- Design decisions requiring Human Step adjudication: §14 (6 items).
-- Diff/stat: docs-only; adds this single file. `git diff --stat` = 1 file created; `git status` will show only the new spec as untracked → will be committed on the docs branch.
+- Design decisions requiring Human Step adjudication: §14 (9 items — decisions 1/2/3/5/6 carried as approved-in-principle post-repair; decision 4 reconciled: only `SOMA-CMP-0011` proposed as new; items 7-9 newly added as approved-repair invariants).
+- Diff/stat: docs-only; adds exactly one new file, `docs/architecture/e4-x07-slice-3-review-evidence-projections.md`. `git status` clean after adoption on `docs/e4-x07-slice3-spec`; no production paths touched.
 - Clean-tree status: spec artifact is the only pending change; no production files modified.
 - Human-independent-review target: commit at `docs/e4-x07-slice3-spec` HEAD; review the whole doc for normative consistency. See the NEXT GRAPH EDGE in the directive for the review checklist.
 
