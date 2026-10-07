@@ -1322,3 +1322,235 @@ fn budget_mixed_int_decimal_comparison_is_exact_beyond_f53() {
         decision.diagnostics
     );
 }
+
+/// Review round 3, the transport/contract P1: deserialization enforces
+/// Rust shapes, but the VALUE constraints of the vendored SPEC 007
+/// schemas (nonnegative budgets, integer-only retries/concurrency,
+/// genuinely valid RFC 3339 timestamps, semver-shaped versions) must
+/// be validated BEFORE resolution — schema-invalid input must never
+/// reach the resolver and produce a normal 200 decision. Every
+/// rejection is handler-generated and carries the advisory marker.
+#[tokio::test]
+async fn schema_invalid_simulation_requests_are_400_advisory() {
+    let (state, _db_path, _dir) = test_app_state();
+    let app = create_router(state);
+
+    let post_json = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let resp = post_body(
+                &app,
+                "/runtime/compatibility/simulate",
+                axum::body::Body::from(body.to_string().into_bytes()),
+            )
+            .await;
+            (
+                resp.status(),
+                resp.headers()
+                    .get("x-advisory-simulation")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                serde_json::from_slice::<serde_json::Value>(&body_bytes(resp).await).unwrap(),
+            )
+        }
+    };
+
+    // Equal declared/effective NEGATIVE authority budgets: the declared
+    // and effective profiles agree (no widening question) — the pair is
+    // schema-invalid on its face, so it must be a 400, not a decision.
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["authority"]["declared"]["budgets"] = serde_json::json!({ "tokens": -5 });
+    body["authority"]["effective"]["budgets"] = serde_json::json!({ "tokens": -5 });
+    let (status, advisory, msg) = post_json(body).await;
+    assert_eq!(status, 400, "negative authority budgets: {msg}");
+    assert_eq!(advisory.as_deref(), Some("true"));
+    assert!(
+        msg["error"].as_str().unwrap().contains("budgets"),
+        "the 400 names the violating authority budgets: {msg}"
+    );
+
+    // Fractional value on an INTEGER-ONLY budget dimension (retries).
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["requirements"]["hardLimits"] = serde_json::json!({ "retries": 1.5 });
+    let (status, advisory, msg) = post_json(body).await;
+    assert_eq!(status, 400, "fractional retries: {msg}");
+    assert_eq!(advisory.as_deref(), Some("true"));
+    assert!(
+        msg["error"].as_str().unwrap().contains("retries"),
+        "the 400 names the integer-only dimension: {msg}"
+    );
+
+    // Fractional concurrency on the authority side (integer-only too).
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["authority"]["declared"]["budgets"] = serde_json::json!({ "concurrency": 2.5 });
+    body["authority"]["effective"]["budgets"] = serde_json::json!({ "concurrency": 2.5 });
+    let (status, _advisory, msg) = post_json(body).await;
+    assert_eq!(status, 400, "fractional authority concurrency: {msg}");
+    assert!(
+        msg["error"].as_str().unwrap().contains("concurrency"),
+        "the 400 names the integer-only dimension: {msg}"
+    );
+
+    // A NEGATIVE hard limit on the requirements side.
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["requirements"]["hardLimits"] = serde_json::json!({ "tokens": -1 });
+    let (status, _advisory, msg) = post_json(body).await;
+    assert_eq!(status, 400, "negative hard limit: {msg}");
+    assert!(
+        msg["error"].as_str().unwrap().contains("tokens"),
+        "the 400 names the negative budget: {msg}"
+    );
+
+    // An IMPOSSIBLE freshness timestamp: punctuation-shaped
+    // (`9999-99-99T99:99:99Z` matches the schema's regex shape) but not
+    // a real RFC 3339 instant — month 99, day 99, hour 99. Genuine
+    // calendar validation must reject it before resolution.
+    let mut reqs = minimal_requirements("1.2.0");
+    reqs["freshness"] = serde_json::json!({ "notAfter": "9999-99-99T99:99:99Z" });
+    let (status, _advisory, msg) =
+        post_json(serde_json::from_slice(&simulation_body(reqs)).unwrap()).await;
+    assert_eq!(status, 400, "impossible freshness timestamp: {msg}");
+    assert!(
+        msg["error"].as_str().unwrap().contains("notAfter"),
+        "the 400 names the impossible timestamp: {msg}"
+    );
+
+    // A semver-pattern violation on requiredSpecVersion (the schema
+    // pins `^\d+\.\d+\.\d+$`): "1.2" is not a valid version lexeme.
+    // (Well-formed but unsupported versions still yield 200
+    // incompatible decisions — pinned by the dedicated test below.)
+    let (status, _advisory, msg) =
+        post_json(serde_json::from_slice(&simulation_body(minimal_requirements("1.2"))).unwrap())
+            .await;
+    assert_eq!(status, 400, "malformed requiredSpecVersion: {msg}");
+    assert!(
+        msg["error"]
+            .as_str()
+            .unwrap()
+            .contains("requiredSpecVersion"),
+        "the 400 names the malformed version: {msg}"
+    );
+
+    // The bound, not a ban: a zero budget is nonnegative and stays
+    // acceptable, and a real (if far-future) timestamp still resolves.
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&simulation_body(minimal_requirements("1.2.0"))).unwrap();
+    body["requirements"]["hardLimits"] = serde_json::json!({ "tokens": 0 });
+    body["authority"]["declared"]["budgets"] = serde_json::json!({ "tokens": 0 });
+    body["authority"]["effective"]["budgets"] = serde_json::json!({ "tokens": 0 });
+    let mut reqs = minimal_requirements("1.2.0");
+    reqs["freshness"] = serde_json::json!({ "notAfter": "2030-01-01T00:00:00Z" });
+    let body2: serde_json::Value = serde_json::from_slice(&simulation_body(reqs)).unwrap();
+    let (status, ..) = post_json(body).await;
+    assert_eq!(status, 200, "zero budgets are nonnegative");
+    let (status, ..) = post_json(body2).await;
+    assert_eq!(status, 200, "a genuine far-future timestamp resolves");
+}
+
+/// Review round 3, the same P1 from the resolver side: the PUBLIC
+/// resolver must never emit a decision document built from
+/// schema-invalid inputs when called outside the HTTP handler — it
+/// fails closed with Err instead of producing a decision that embeds
+/// the invalid values (which would itself violate the
+/// CompatibilityDecision schema, since the decision snapshots
+/// freshness, the authority pair, and the hard limits verbatim).
+#[test]
+fn public_resolver_rejects_schema_invalid_inputs() {
+    let caps = caps_valid();
+    let authority = empty_authority();
+
+    // Impossible freshness timestamp -> Err, never a decision.
+    let mut reqs = reqs_valid();
+    reqs.freshness = Some(prometheos_lite::workflow::soma::capability::Freshness {
+        not_after: "9999-99-99T99:99:99Z".to_string(),
+        trusted_sources: None,
+    });
+    let decision = resolve(&NegotiationInputs {
+        id: "dec-invalid-freshness".to_string(),
+        requirements: &reqs,
+        capabilities: &caps,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    });
+    assert!(
+        decision.is_err(),
+        "an impossible freshness timestamp must fail closed, not resolve: {:?}",
+        decision
+    );
+
+    // Equal declared/effective negative authority budgets -> Err.
+    let mut negative = empty_authority();
+    negative.budgets = Some(prometheos_lite::workflow::soma::contracts::Budgets {
+        tokens: Some(serde_json::Number::from(-5i64)),
+        cost: None,
+        duration: None,
+        retries: None,
+        concurrency: None,
+    });
+    let reqs = reqs_valid();
+    let decision = resolve(&NegotiationInputs {
+        id: "dec-negative-budget".to_string(),
+        requirements: &reqs,
+        capabilities: &caps,
+        authority_declared: &negative,
+        authority_effective: &negative,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    });
+    assert!(
+        decision.is_err(),
+        "negative authority budgets must fail closed, not resolve: {:?}",
+        decision
+    );
+
+    // Fractional retries (integer-only dimension) -> Err.
+    let mut reqs = reqs_valid();
+    reqs.hard_limits = Some(prometheos_lite::workflow::soma::contracts::Budgets {
+        tokens: None,
+        cost: None,
+        duration: None,
+        retries: serde_json::Number::from_f64(1.5),
+        concurrency: None,
+    });
+    let decision = resolve(&NegotiationInputs {
+        id: "dec-fractional-retries".to_string(),
+        requirements: &reqs,
+        capabilities: &caps,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    });
+    assert!(
+        decision.is_err(),
+        "fractional retries must fail closed, not resolve: {:?}",
+        decision
+    );
+
+    // An impossible timestamp on the SERVER side (capability set
+    // declaredAt) must also fail closed — the decision snapshots
+    // declarations[0].declaredAt verbatim.
+    let mut caps = caps_valid();
+    caps.declared_at = "9999-99-99T99:99:99Z".to_string();
+    let reqs = reqs_valid();
+    let decision = resolve(&NegotiationInputs {
+        id: "dec-invalid-declared-at".to_string(),
+        requirements: &reqs,
+        capabilities: &caps,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        evaluated_at: "2026-10-05T12:00:00Z".to_string(),
+        substitutions: Vec::new(),
+    });
+    assert!(
+        decision.is_err(),
+        "an impossible declaredAt must fail closed, not resolve: {:?}",
+        decision
+    );
+}

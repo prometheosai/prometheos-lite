@@ -415,7 +415,10 @@ pub struct RequirementConstraints {
 
 /// Fail-closed RFC 3339 UTC-Z validation (the schema-enforced pattern):
 /// `YYYY-MM-DDTHH:MM:SSZ`. Lexicographic comparison is only well-defined
-/// for this normalized form.
+/// for this normalized form. The shape check below pins the lexeme; the
+/// chrono parse then verifies it is a GENUINE calendar instant — a
+/// punctuation-shaped impossibility like `9999-99-99T99:99:99Z` matches
+/// the schema's regex but is not a real date-time and must fail closed.
 fn is_rfc3339_z(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 20
@@ -429,6 +432,133 @@ fn is_rfc3339_z(s: &str) -> bool {
             4 | 7 | 10 | 13 | 16 | 19 => true,
             _ => c.is_ascii_digit(),
         })
+        && chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ").is_ok()
+}
+
+/// The vendored schemas pin version lexemes to `^\d+\.\d+\.\d+$`
+/// (digits-only, exactly three components). Compatibility is judged
+/// separately (SOMA-CMP-0001); this is pure lexeme validity.
+fn is_semver_shaped(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let all_digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(a), Some(b), Some(c), None) => all_digits(a) && all_digits(b) && all_digits(c),
+        _ => false,
+    }
+}
+
+/// Budget value constraints from the vendored `Budgets` definitions:
+/// every dimension is `minimum: 0`, and `retries`/`concurrency` are
+/// `type: integer` (fractional lexemes are schema-invalid even though
+/// the Rust shape accepts any JSON number).
+fn validate_budgets(label: &str, budgets: Option<&Budgets>) -> Result<(), String> {
+    let Some(b) = budgets else {
+        return Ok(());
+    };
+    for dim in Budgets::DIMENSIONS {
+        let Some(n) = b.get(dim) else {
+            continue;
+        };
+        let Some(f) = n.as_f64() else {
+            return Err(format!("{label}.{dim} is not a finite number"));
+        };
+        if f < 0.0 {
+            return Err(format!(
+                "{label}.{dim} must be nonnegative (minimum 0), got {n}"
+            ));
+        }
+        if matches!(dim, "retries" | "concurrency") && n.as_i64().is_none() && n.as_u64().is_none()
+        {
+            return Err(format!(
+                "{label}.{dim} must be an integer (type integer), got {n}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Value constraints the vendored WorkRequirements schema imposes
+/// beyond the Rust shapes: semver-shaped version lexemes, nonnegative
+/// (and integer-only where pinned) hard limits, and a genuinely valid
+/// RFC 3339 UTC-Z freshness instant.
+pub fn validate_work_requirements(reqs: &WorkRequirements) -> Result<(), String> {
+    for (label, v) in [
+        ("requirements.schemaVersion", &reqs.schema_version),
+        ("requirements.version", &reqs.version),
+        (
+            "requirements.requiredSpecVersion",
+            &reqs.required_spec_version,
+        ),
+    ] {
+        if !is_semver_shaped(v) {
+            return Err(format!(
+                "{label} {v:?} violates the ^\\d+\\.\\d+\\.\\d+$ version pattern"
+            ));
+        }
+    }
+    validate_budgets("requirements.hardLimits", reqs.hard_limits.as_ref())?;
+    if let Some(fr) = &reqs.freshness
+        && !is_rfc3339_z(&fr.not_after)
+    {
+        return Err(format!(
+            "requirements.freshness.notAfter {:?} is not a genuine RFC 3339 UTC-Z timestamp",
+            fr.not_after
+        ));
+    }
+    Ok(())
+}
+
+/// Value constraints the vendored AuthorityProfile schema imposes on
+/// the caller-supplied authority profiles (the Rust shape enforces the
+/// closed enum sets and deny_unknown_fields; budgets still carry the
+/// nonnegative/integer-only value constraints).
+pub fn validate_authority_profile(label: &str, auth: &AuthorityProfile) -> Result<(), String> {
+    validate_budgets(&format!("{label}.budgets"), auth.budgets.as_ref())
+}
+
+/// Value constraints the vendored RuntimeCapabilitySet schema imposes
+/// beyond the Rust shapes (semver-shaped versions, a genuine declaredAt
+/// instant, nonnegative integer-constrained ceilings, and nonnegative
+/// structured-input/output maxima).
+fn validate_capability_set(caps: &RuntimeCapabilitySet) -> Result<(), String> {
+    for (label, v) in [
+        ("capability set schemaVersion", &caps.schema_version),
+        ("capability set version", &caps.version),
+    ] {
+        if !is_semver_shaped(v) {
+            return Err(format!(
+                "{label} {v:?} violates the ^\\d+\\.\\d+\\.\\d+$ version pattern"
+            ));
+        }
+    }
+    for v in &caps.spec_versions {
+        if !is_semver_shaped(v) {
+            return Err(format!(
+                "capability set specVersions entry {v:?} violates the version pattern"
+            ));
+        }
+    }
+    if !is_rfc3339_z(&caps.declared_at) {
+        return Err(format!(
+            "capability set declaredAt {:?} is not a genuine RFC 3339 UTC-Z timestamp",
+            caps.declared_at
+        ));
+    }
+    validate_budgets(
+        "capability set budgetCeilings",
+        caps.budget_ceilings.as_ref(),
+    )?;
+    for (label, max) in [
+        ("maxStructuredInput", &caps.max_structured_input),
+        ("maxStructuredOutput", &caps.max_structured_output),
+    ] {
+        if let Some(n) = max
+            && n.as_f64().is_some_and(|f| f < 0.0)
+        {
+            return Err(format!("{label} must be nonnegative (minimum 0), got {n}"));
+        }
+    }
+    Ok(())
 }
 
 /// Snapshot of the runtime's support surface used by the resolution.
@@ -977,6 +1107,26 @@ pub fn resolve(inputs: &NegotiationInputs<'_>) -> Result<CompatibilityDecision, 
     let reqs = inputs.requirements;
     let caps = inputs.capabilities;
 
+    // SCHEMA-CONTRACT GATE — the value constraints of the vendored SPEC
+    // 007 schemas, not just the Rust shapes. A violation fails closed
+    // HERE, before any decision exists: the CompatibilityDecision schema
+    // snapshots freshness, the authority pair, the hard limits, and the
+    // declarations verbatim, so resolving schema-invalid inputs would
+    // EMIT a schema-invalid decision document (whether called from the
+    // HTTP handler or any other caller). No decision, no digest, no
+    // status — Err.
+    validate_work_requirements(reqs)
+        .and_then(|_| validate_capability_set(caps))
+        .and_then(|_| validate_authority_profile("authority.declared", inputs.authority_declared))
+        .and_then(|_| validate_authority_profile("authority.effective", inputs.authority_effective))
+        .map_err(|e| format!("schema-invalid negotiation input: {e}"))?;
+    if !is_rfc3339_z(&inputs.evaluated_at) {
+        return Err(format!(
+            "schema-invalid negotiation input: evaluatedAt {:?} is not a genuine RFC 3339 UTC-Z timestamp",
+            inputs.evaluated_at
+        ));
+    }
+
     // SPEC 007 section 5 step 1 — INPUT version gate. An artifact whose
     // container versions exceed the supported bundle fails closed BEFORE any
     // negotiation outcome is produced (never fail open on newer inputs).
@@ -1007,28 +1157,10 @@ pub fn resolve(inputs: &NegotiationInputs<'_>) -> Result<CompatibilityDecision, 
     let requirements_digest = reqs.canonical_digest()?;
     let capability_set_digest = caps.canonical_digest()?;
 
-    // Timestamps entering the lexicographic clock domain must be
-    // RFC 3339 UTC-Z normalized (the schema-enforced form); anything else
-    // is a schema violation and fails closed.
-    {
-        let mut ts_fail = |label: &str, v: &str| {
-            input_gate.push(Diagnostic::new(
-                "SOMA-CMP-0003",
-                format!("{label} {v:?} is not an RFC 3339 UTC-Z timestamp"),
-            ));
-        };
-        if !is_rfc3339_z(inputs.evaluated_at.as_str()) {
-            ts_fail("evaluatedAt", &inputs.evaluated_at);
-        }
-        if !is_rfc3339_z(&caps.declared_at) {
-            ts_fail("declaredAt", &caps.declared_at);
-        }
-        if let Some(fr) = &reqs.freshness
-            && !is_rfc3339_z(&fr.not_after)
-        {
-            ts_fail("notAfter", &fr.not_after);
-        }
-    }
+    // Timestamps entering the lexicographic clock domain are guaranteed
+    // genuine RFC 3339 UTC-Z instants by the schema-contract gate above
+    // (evaluatedAt, declaredAt, and freshness.notAfter all fail closed
+    // there); the decision audit re-verifies the embedded copies.
 
     // Covered = demanded classes present in the runtime's declared
     // effect classes. Missing REQUIRED classes remain uncovered and

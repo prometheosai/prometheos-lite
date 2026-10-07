@@ -24,7 +24,7 @@ use crate::api::work_contexts::{ApiError, if_none_match_matches, representation_
 use crate::workflow::soma::canonical::{sha256_hex, try_canonical_bytes, try_canonical_digest};
 use crate::workflow::soma::capability::{
     AuthorityPair, CompatibilityDecision, NegotiationInputs, RuntimeCapabilitySet, Substitution,
-    WorkRequirements, resolve,
+    WorkRequirements, resolve, validate_authority_profile, validate_work_requirements,
 };
 
 /// The maximum accepted simulation request body (the handler-enforced
@@ -291,6 +291,29 @@ pub async fn simulate_compatibility(
     };
     if let Err(message) = check_collection_bounds(&parsed) {
         return advisory_error(StatusCode::BAD_REQUEST, &message);
+    }
+
+    // Schema-contract gate: the VALUE constraints of the vendored SPEC
+    // 007 schemas (nonnegative budgets, integer-only retries and
+    // concurrency, genuinely valid RFC 3339 timestamps, semver-shaped
+    // versions) — everything the Rust shapes do not enforce. The same
+    // validators run inside `resolve` (the fail-closed backstop for
+    // non-HTTP callers); here they run first so invalid INPUT is a
+    // handler-generated 400 with the advisory marker, never a normal
+    // decision. The server-owned side (the frozen capability set and
+    // the injected evaluation instant) is only covered by the resolver's
+    // internal gate — a violation there is a server fault (500), not a
+    // client error.
+    if let Err(message) = validate_work_requirements(&parsed.requirements)
+        .and_then(|_| validate_authority_profile("authority.declared", &parsed.authority.declared))
+        .and_then(|_| {
+            validate_authority_profile("authority.effective", &parsed.authority.effective)
+        })
+    {
+        return advisory_error(
+            StatusCode::BAD_REQUEST,
+            &format!("simulation request is schema-invalid: {message}"),
+        );
     }
 
     // The server injects the evaluation instant (RFC 3339 UTC-Z, the
