@@ -640,7 +640,11 @@ fn raw_number_lexeme_fails_closed_on_read() {
     // test puts one in the AST: `retry.maxAttempts: 2` (the audit has no
     // retry rule, so the gate stays honest).
     let mut wf = base_wf();
-    wf.body[0].retry = Some(RetryPolicy {
+    let prometheos_lite::workflow::soma::contracts::BodyItem::Operation(op) = &mut wf.body[0]
+    else {
+        panic!("base fixture body[0] is an operation");
+    };
+    op.retry = Some(RetryPolicy {
         max_attempts: 2,
         backoff: None,
     });
@@ -762,4 +766,1426 @@ fn forged_schema_version_fails_human_against_source() {
     let err = verify_human_against_source(&env, &wf, None)
         .expect_err("forged schemaVersion must fail against the source");
     assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — Task 1: flat-fixture pins captured at main@84d44e4
+// ---------------------------------------------------------------------------
+
+const FLAT_PINS: [(&str, &str, &str); 3] = [
+    (
+        "fixtures/valid/wf-valid-base.json",
+        "0d4e039e5d750307f52790068e687d879d5e4d124beffdeb06becd5abe39fd6d",
+        "709bcd249f8977d7316c73d52834f209d1b4f78eb7f9a644f451ba7c07f5ae54",
+    ),
+    (
+        "fixtures/valid/wf-valid-composite.json",
+        "10190c09684303f6286ee86d8f4e7bea62b4bafeecbbf3c19790d46d6aeb87cf",
+        "85c23e8c7bfa9044dd8f37dbeed4f0f25ad4ad9ee889a8668030d6ba1cd92974",
+    ),
+    (
+        "fixtures/valid/wf-valid-gov.json",
+        "bf337338252c7022282647bc20b9bb331f5b7997c5633ff8f012f329a8e3f1ee",
+        "709b1ab15dcd1ad178c1ad05df69e33e3ee589be0f8ba5142d498025f1be44ac",
+    ),
+];
+
+#[test]
+fn flat_workflow_digests_remain_pinned() {
+    for (rel, digest, _) in FLAT_PINS {
+        let text = fixture(rel);
+        let plan = compile_workflow_text(&text).unwrap_or_else(|e| panic!("{rel}: {e:?}"));
+        assert_eq!(
+            plan.workflow_digest, digest,
+            "workflow digest drifted for {rel}"
+        );
+    }
+}
+
+#[test]
+fn flat_canonical_bytes_unchanged() {
+    for (rel, _, bytes_sha) in FLAT_PINS {
+        let wf: WorkflowDefinition =
+            serde_json::from_str(&fixture(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let env =
+            project_canonical_json(&wf).unwrap_or_else(|e| panic!("{rel} must project: {e:?}"));
+        let bytes = env
+            .canonical_bytes()
+            .unwrap_or_else(|e| panic!("{rel}: {e:?}"));
+        assert_eq!(
+            sha256_hex(&bytes),
+            bytes_sha,
+            "canonical envelope bytes drifted for {rel}"
+        );
+        let back = verify_canonical_projection_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("{rel} bytes must round-trip: {e:?}"));
+        let again = back.canonical_bytes().expect("re-render");
+        assert_eq!(
+            sha256_hex(&again),
+            bytes_sha,
+            "round-trip bytes differ for {rel}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — Tasks 1-2: nested composite contract + fail-closed surfaces
+// ---------------------------------------------------------------------------
+
+const NESTED_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/slice2/wf-nested.json"
+);
+
+fn nested_text() -> String {
+    std::fs::read_to_string(NESTED_FIXTURE).expect("wf-nested fixture reads")
+}
+
+fn nested_wf() -> WorkflowDefinition {
+    serde_json::from_str(&nested_text()).expect("wf-nested parses")
+}
+
+/// Spec §12 item 3 — RED at main@84d44e4 (nested body items fail to parse),
+/// GREEN after Task 1. Uses only types that exist at base so the RED is a
+/// runtime failure, not a compile failure; depth is proven through `Value`.
+#[test]
+fn nested_composite_document_parses() {
+    let wf: WorkflowDefinition =
+        serde_json::from_str(&nested_text()).expect("nested composite document must parse");
+    assert_eq!(wf.id, "wf-nested");
+    assert_eq!(wf.body.len(), 3);
+    let v: Value = serde_json::from_str(&nested_text()).expect("fixture is valid JSON");
+    assert_eq!(v["body"][1]["id"], "flow");
+    assert_eq!(v["body"][1]["body"][0]["id"], "inner");
+    assert_eq!(v["body"][1]["body"][0]["body"][0]["id"], "leaf");
+}
+
+/// Spec §12 item 4 — parse negatives. Each rejection must carry the BodyItem
+/// oneOf refusal phrasing (base emits plain serde "unknown field"/"missing
+/// field" errors, so this assertion is RED at main@84d44e4).
+#[test]
+fn body_item_one_of_negatives() {
+    let base: Value = serde_json::from_str(&nested_text()).expect("fixture is valid JSON");
+
+    let mut collision = base["body"][0].clone();
+    collision["inputPorts"] = serde_json::json!([]);
+    collision["outputPorts"] = serde_json::json!([]);
+    collision["body"] = serde_json::json!([]);
+
+    let mut no_exec = base["body"][0].clone();
+    no_exec
+        .as_object_mut()
+        .expect("operation object")
+        .remove("executionClass");
+
+    let mut no_ports = base["body"][1].clone();
+    {
+        let obj = no_ports.as_object_mut().expect("composite object");
+        obj.remove("inputPorts");
+        obj.remove("body");
+    }
+
+    let mut malformed = base["body"][1].clone();
+    malformed["body"] = serde_json::json!([{ "notA": "bodyItem" }]);
+
+    for (name, item) in [
+        ("discriminator-collision", collision),
+        ("missing-executionClass", no_exec),
+        ("missing-inputPorts-body", no_ports),
+        ("malformed-nesting", malformed),
+    ] {
+        let mut doc = base.clone();
+        doc["body"] = serde_json::json!([item]);
+        let err = serde_json::from_str::<WorkflowDefinition>(&doc.to_string())
+            .expect_err(name)
+            .to_string();
+        assert!(
+            err.contains("body-item"),
+            "{name}: expected a BodyItem oneOf refusal, got: {err}"
+        );
+    }
+}
+
+/// Spec §12 item 5 (final form, Task 2): the shared fixture audits clean,
+/// each nested fault fails the gate with its exact code, and no projection
+/// succeeds for any fault. RED against the Task 1 state (audit returns the
+/// blanket SOMA-CMP-0003 refusal).
+#[test]
+fn recursive_audit_rejects_nested_faults() {
+    let supported = prometheos_lite::workflow::soma::supported_version();
+
+    let clean = nested_wf();
+    assert!(
+        clean.audit(&supported).is_empty(),
+        "wf-nested must audit clean once recursion lands: {:?}",
+        clean.audit(&supported)
+    );
+
+    #[allow(clippy::type_complexity)]
+    let faults: [(&str, fn(&mut Value)); 3] = [
+        ("duplicate-across-scopes", |v| {
+            v["body"][1]["body"][0]["body"][0]["id"] = serde_json::json!("inner");
+        }),
+        ("unfed-nested-input", |v| {
+            v["body"][1]["body"][0]["body"][0]["inputs"][0]["name"] = serde_json::json!("stray");
+        }),
+        ("nested-authority-import", |v| {
+            v["body"][1]["body"][0]["body"][0]["authority"] = serde_json::json!(["ship"]);
+        }),
+    ];
+    let expected: [&str; 3] = ["SOMA-EXP-0003", "SOMA-EXP-0005", "SOMA-AUTH-0002"];
+
+    for ((name, mutate), code) in faults.into_iter().zip(expected) {
+        let mut v: Value = serde_json::from_str(&nested_text()).expect("fixture is valid JSON");
+        mutate(&mut v);
+        let wf: WorkflowDefinition =
+            serde_json::from_value(v).expect("mutated fixture still parses");
+        let diags = wf.audit(&supported);
+        assert!(
+            diags.iter().any(|d| d.code == code),
+            "{name}: expected {code}, got {diags:?}"
+        );
+        assert!(
+            project_canonical_json(&wf).is_err(),
+            "{name}: projection must be refused by the gate"
+        );
+    }
+}
+
+/// Spec §2.4 consumer fail-closed matrix (final form, Task 2).
+#[test]
+fn nested_surfaces_fail_closed_matrix() {
+    let text = nested_text();
+
+    // Governance plan compiler: exact SOMA-CMP-0003 via the explicit scan.
+    let err =
+        compile_workflow_text(&text).expect_err("plan compilation must refuse nested composites");
+    assert!(
+        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected SOMA-CMP-0003 from compile_workflow_text, got {err:?}"
+    );
+
+    // Authority compiler: audit-sourced (scan after parse) — stable since Task 1.
+    let v: Value = serde_json::from_str(&text).expect("nested parses");
+    let err = prometheos_lite::workflow::governance::compile_authority(&v)
+        .expect_err("authority compilation must refuse nested composites");
+    assert!(
+        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected SOMA-CMP-0003 from compile_authority, got {err:?}"
+    );
+
+    // Permit chains compile_workflow_text first — inherits SOMA-CMP-0003.
+    let err = prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
+        &text,
+        "reviewed-identity",
+    )
+    .expect_err("permit issuance must refuse nested composites");
+    assert!(
+        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "expected SOMA-CMP-0003 from GovernancePermit::issue, got {err:?}"
+    );
+
+    // Execution surface: explicit PROJ-0001 scan (lands Task 1, unchanged).
+    let err =
+        prometheos_lite::workflow::execution_graph::compile_execution_graph(&text, &"0".repeat(64))
+            .expect_err("execution graph must refuse nested composites");
+    assert!(
+        err.iter().any(|d| d.code == "PROJ-0001"),
+        "expected PROJ-0001 from compile_execution_graph, got {err:?}"
+    );
+
+    // Canonical projection: nested ASTs now parse AND audit clean, so the
+    // canonical view succeeds (Slice-1 behavior for anything that parses).
+    let wf = nested_wf();
+    let env = project_canonical_json(&wf)
+        .expect("canonical projection accepts nested documents after Task 2");
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let text = String::from_utf8(bytes).expect("canonical bytes are UTF-8");
+    assert!(text.contains("inner") && text.contains("leaf"));
+
+    // Human projection: PROJ-0001 with a composite-specific message (never
+    // the cycle wording — that is a distinct failure mode).
+    let err =
+        project_human_plan(&wf, None).expect_err("human projection must refuse nested composites");
+    let proj: Vec<&str> = err
+        .iter()
+        .filter(|d| d.code == "PROJ-0001")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        !proj.is_empty(),
+        "expected PROJ-0001 from human projection, got {err:?}"
+    );
+    assert!(
+        proj.iter().any(|m| m.contains("composite")),
+        "human refusal must say 'composite', got {proj:?}"
+    );
+}
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — graph projection with disclosure boundaries (spec §12
+// tests 6-21, 23, 24); the verifier-backed tests 22 and 26-28 are sectioned
+// further down, and spec §12 test 29 (`human_and_canonical_regressions`) is
+// the whole-suite regression gate rather than a case in this file.
+// ---------------------------------------------------------------------------
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use prometheos_lite::workflow::projection::graph::GRAPH_SCHEMA_VERSION;
+use prometheos_lite::workflow::projection::{GraphDisclosurePolicy, project_graph_json};
+
+/// Caller-side policy builder (§6 shape: rendered node ids only).
+fn graph_policy(authorized: &[&str], counts: &[&str]) -> GraphDisclosurePolicy {
+    GraphDisclosurePolicy {
+        authorized_boundaries: authorized.iter().map(|s| s.to_string()).collect(),
+        count_authorization: counts.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// wf-nested projected under an optional disclosure policy.
+fn nested_graph(policy: Option<GraphDisclosurePolicy>) -> VersionedProjectionEnvelope<Value> {
+    project_graph_json(&nested_wf(), policy.as_ref()).expect("wf-nested projects")
+}
+
+/// Repair `contentDigest` after a Value-level mutation: the audit's
+/// `SOMA-CMP-0004` gate hashes the *serialization* of the AST minus this
+/// field (audit_workflow.rs), and that serialization drops what the raw
+/// document still carries (the fixtures' empty `effects`/`uses`/`secrets`/
+/// `context` arrays), so hashing the raw `Value` disagrees with the pinned
+/// digests (raw `512c74f7…` vs pinned `0d4e039e…` for wf-valid-base).
+/// Parse first, digest the re-serialized value, then store — parity with
+/// the gate is then exact.
+fn parse_with_content_digest(value: &mut Value) -> WorkflowDefinition {
+    let parsed: WorkflowDefinition =
+        serde_json::from_value(value.clone()).expect("mutated fixture parses");
+    let mut hashed = serde_json::to_value(&parsed).expect("workflow serializes to an object");
+    if let Some(obj) = hashed.as_object_mut() {
+        obj.remove("contentDigest");
+    }
+    let digest = try_canonical_digest(&hashed).expect("canonical digest of mutated fixture");
+    value["contentDigest"] = Value::String(digest);
+    serde_json::from_value(value.clone()).expect("mutated fixture parses")
+}
+
+/// Spec §12 test 6 — default withholding: composites render as boundary
+/// nodes only; no child ids, no `children`/`internalEdges`, no counts.
+#[test]
+fn default_withholding() {
+    let env = nested_graph(None);
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let text = String::from_utf8(bytes).expect("bytes are UTF-8");
+    for leaked in [
+        "s0000:inner",
+        "s0000:leaf",
+        "\"inner\"",
+        "\"leaf\"",
+        "\"children\"",
+        "\"internalEdges\"",
+        "hiddenNodes",
+        "hiddenEdges",
+    ] {
+        assert!(!text.contains(leaked), "default view leaked {leaked:?}");
+    }
+    let nodes = env.payload["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes.len(), 3);
+    assert_eq!(env.payload["graphSchemaVersion"], GRAPH_SCHEMA_VERSION);
+    assert_eq!(nodes[0]["kind"], "atomic");
+    assert_eq!(nodes[2]["kind"], "atomic");
+    let flow = &nodes[1];
+    assert_eq!(flow["kind"], "composite");
+    assert_eq!(flow["id"], "s0001:flow");
+    assert!(flow.get("children").is_none());
+    assert!(flow.get("internalEdges").is_none());
+    assert_eq!(flow["disclosure"]["withheld"], serde_json::json!(true));
+    assert_eq!(flow["disclosure"]["reason"], "private-composite-default");
+    assert_eq!(flow["disclosure"]["category"], "composite-boundary");
+    assert!(flow["disclosure"].get("hiddenNodes").is_none());
+    assert!(flow["disclosure"].get("hiddenEdges").is_none());
+    let digest = flow["childSubgraphDigest"].as_str().expect("digest");
+    assert_eq!(digest.len(), 64);
+}
+
+/// Spec §12 test 7 — authorized selective reveal: direct contents render;
+/// each nested boundary keeps its own disclosure state.
+#[test]
+fn authorized_selective_reveal() {
+    let env = nested_graph(Some(graph_policy(&["s0001:flow"], &[])));
+    let nodes = env.payload["nodes"].as_array().expect("nodes");
+    let flow = &nodes[1];
+    assert!(
+        flow.get("disclosure").is_none(),
+        "an authorized boundary carries no disclosure block"
+    );
+    let children = flow["children"].as_array().expect("flow children render");
+    assert_eq!(children.len(), 1);
+    let inner = &children[0];
+    assert_eq!(inner["id"], "s0000:inner");
+    assert_eq!(inner["kind"], "composite");
+    assert_eq!(inner["disclosure"]["withheld"], serde_json::json!(true));
+    assert!(
+        inner.get("children").is_none(),
+        "non-cascading: inner keeps its own state"
+    );
+    assert!(inner.get("internalEdges").is_none());
+    assert!(inner["disclosure"].get("hiddenNodes").is_none());
+    let edges = flow["internalEdges"]
+        .as_array()
+        .expect("flow internalEdges");
+    assert_eq!(edges.len(), 2, "R1 supply edge + R2 pass-through edge");
+    assert_eq!(nodes.len(), 3, "parent structure untouched");
+}
+
+/// Spec §12 test 8 — non-cascading authorization: a parent entry never
+/// reveals descendants; every nested boundary needs its own entry.
+#[test]
+fn non_cascading_authorization() {
+    let parent_only = nested_graph(Some(graph_policy(&["s0001:flow"], &[])));
+    let inner = &parent_only.payload["nodes"][1]["children"][0];
+    assert_eq!(inner["disclosure"]["withheld"], serde_json::json!(true));
+    assert!(inner.get("children").is_none());
+    assert!(inner.get("internalEdges").is_none());
+
+    let both = nested_graph(Some(graph_policy(&["s0000:inner", "s0001:flow"], &[])));
+    let inner = &both.payload["nodes"][1]["children"][0];
+    assert!(inner.get("disclosure").is_none());
+    let leaf = inner["children"].as_array().expect("inner children render");
+    assert_eq!(leaf.len(), 1);
+    assert_eq!(leaf[0]["id"], "s0000:leaf");
+    assert_eq!(leaf[0]["kind"], "atomic");
+}
+
+/// Spec §12 test 9 — ancestry traversability (§6 rule 4): a descendant
+/// boundary without its ancestors is refused; full ancestry succeeds.
+#[test]
+fn ancestry_traversal_enforced() {
+    let wf = nested_wf();
+    let err = project_graph_json(&wf, Some(&graph_policy(&["s0000:inner"], &[])))
+        .expect_err("descendant without ancestry must be refused");
+    assert!(
+        err.iter()
+            .any(|d| d.code == "PROJ-0003" && d.message.contains("without its ancestor")),
+        "expected an ancestry refusal, got {err:?}"
+    );
+    assert!(
+        project_graph_json(
+            &wf,
+            Some(&graph_policy(&["s0001:flow", "s0000:inner"], &[]))
+        )
+        .is_ok()
+    );
+}
+
+/// Spec §12 test 10 — policy validation negatives (§6 rules 1–3).
+#[test]
+fn policy_validation_negatives() {
+    let wf = nested_wf();
+    let refuse =
+        |p: GraphDisclosurePolicy| project_graph_json(&wf, Some(&p)).expect_err("must refuse");
+
+    let unknown = refuse(graph_policy(&["s9999:ghost"], &[]));
+    assert!(
+        unknown
+            .iter()
+            .any(|d| d.code == "PROJ-0003" && d.message.contains("unknown node id")),
+        "{unknown:?}"
+    );
+
+    let atomic = refuse(graph_policy(&["s0000:prep"], &[]));
+    assert!(
+        atomic
+            .iter()
+            .any(|d| d.code == "PROJ-0003" && d.message.contains("non-composite")),
+        "{atomic:?}"
+    );
+
+    let dup = refuse(graph_policy(&["s0001:flow", "s0001:flow"], &[]));
+    assert!(
+        dup.iter()
+            .any(|d| d.code == "PROJ-0003"
+                && d.message.contains("duplicate id in authorizedBoundaries")),
+        "{dup:?}"
+    );
+}
+
+/// Spec §12 test 11 — counts are independent of content authorization:
+/// integers only, never content; content authorization never carries counts.
+#[test]
+fn count_authorization_independent() {
+    let counted = nested_graph(Some(graph_policy(&[], &["s0001:flow"])));
+    let flow = &counted.payload["nodes"][1];
+    assert_eq!(flow["disclosure"]["withheld"], serde_json::json!(true));
+    assert_eq!(flow["disclosure"]["hiddenNodes"], serde_json::json!(2));
+    assert_eq!(flow["disclosure"]["hiddenEdges"], serde_json::json!(4));
+    assert!(flow.get("children").is_none());
+    assert!(flow.get("internalEdges").is_none());
+    let text =
+        String::from_utf8(counted.canonical_bytes().expect("bytes")).expect("bytes are UTF-8");
+    assert!(
+        !text.contains("s0000:inner"),
+        "counts must never reveal content"
+    );
+    assert!(!text.contains("s0000:leaf"));
+    assert!(!text.contains("\"children\""));
+
+    // Same id in both arrays: content authorization wins its own node —
+    // a revealed boundary renders no disclosure block at all.
+    let both = nested_graph(Some(graph_policy(&["s0001:flow"], &["s0001:flow"])));
+    let flow = &both.payload["nodes"][1];
+    assert!(flow.get("children").is_some());
+    assert!(flow.get("disclosure").is_none());
+}
+
+/// Spec §12 test 12 — `None` and `Some(empty)` are byte-identical (§6).
+#[test]
+fn none_equals_empty_policy() {
+    let none = project_graph_json(&nested_wf(), None).expect("None projects");
+    let empty = project_graph_json(&nested_wf(), Some(&GraphDisclosurePolicy::default()))
+        .expect("empty projects");
+    assert_eq!(
+        none.canonical_bytes().expect("none bytes"),
+        empty.canonical_bytes().expect("empty bytes"),
+        "None and Some(empty) must be byte-identical"
+    );
+    assert_eq!(none.projection_digest, empty.projection_digest);
+    assert_eq!(none.source_digest, empty.source_digest);
+    assert_eq!(none.payload["policyDigest"], empty.payload["policyDigest"]);
+}
+
+/// Spec §12 test 13 — policy input order never changes output bytes.
+#[test]
+fn policy_order_irrelevant() {
+    let a = nested_graph(Some(graph_policy(&["s0001:flow", "s0000:inner"], &[])));
+    let b = nested_graph(Some(graph_policy(&["s0000:inner", "s0001:flow"], &[])));
+    assert_eq!(
+        a.canonical_bytes().expect("a"),
+        b.canonical_bytes().expect("b"),
+        "authorizedBoundaries order must not change bytes"
+    );
+
+    let c = nested_graph(Some(graph_policy(&[], &["s0001:flow", "s0000:inner"])));
+    let d = nested_graph(Some(graph_policy(&[], &["s0000:inner", "s0001:flow"])));
+    assert_eq!(
+        c.canonical_bytes().expect("c"),
+        d.canonical_bytes().expect("d"),
+        "countAuthorization order must not change bytes"
+    );
+    assert_eq!(
+        c.payload["nodes"][1]["disclosure"]["hiddenNodes"],
+        serde_json::json!(2)
+    );
+}
+
+/// Spec §12 test 14 — distinct disclosure views share `sourceDigest` and
+/// differ in `projectionDigest` (explicit).
+#[test]
+fn disclosure_views_share_source_digest() {
+    let default = nested_graph(None);
+    let revealed = nested_graph(Some(graph_policy(&["s0001:flow", "s0000:inner"], &[])));
+    assert_eq!(default.source_digest, revealed.source_digest);
+    assert_ne!(default.projection_digest, revealed.projection_digest);
+}
+
+/// Every path at which two JSON values differ (missing keys included).
+fn diff_paths(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
+    if a == b {
+        return;
+    }
+    match (a, b) {
+        (Value::Object(ma), Value::Object(mb)) => {
+            let mut keys: Vec<&String> = ma.keys().chain(mb.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                match (ma.get(k), mb.get(k)) {
+                    (Some(va), Some(vb)) => diff_paths(va, vb, &format!("{path}/{k}"), out),
+                    _ => out.push(format!("{path}/{k}")),
+                }
+            }
+        }
+        (Value::Array(aa), Value::Array(ab)) => {
+            if aa.len() != ab.len() {
+                out.push(format!("{path}: array length {} vs {}", aa.len(), ab.len()));
+                return;
+            }
+            for (i, (va, vb)) in aa.iter().zip(ab.iter()).enumerate() {
+                diff_paths(va, vb, &format!("{path}/{i}"), out);
+            }
+        }
+        _ => out.push(path.to_string()),
+    }
+}
+
+/// All `(node id, childSubgraphDigest)` pairs in a payload, document order.
+fn child_digests_in(payload: &Value) -> Vec<(String, String)> {
+    fn walk(node: &Value, out: &mut Vec<(String, String)>) {
+        if let Some(digest) = node.get("childSubgraphDigest").and_then(|v| v.as_str()) {
+            out.push((
+                node["id"].as_str().expect("node id").to_string(),
+                digest.to_string(),
+            ));
+        }
+        if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+            for child in children {
+                walk(child, out);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for node in payload["nodes"].as_array().expect("nodes") {
+        walk(node, &mut found);
+    }
+    found
+}
+
+/// Spec §12 test 15 — structural no-leakage diff: excluding exactly
+/// `{envelope.projectionDigest (payloads only), payload.policyDigest}`, the
+/// default and revealed views differ only inside the authorized region;
+/// `childSubgraphDigest` values are view-invariant across both views (§8.1).
+#[test]
+fn structural_no_leakage_diff() {
+    let default = nested_graph(None);
+    let revealed = nested_graph(Some(graph_policy(&["s0001:flow", "s0000:inner"], &[])));
+
+    // §8.1 view-invariance, compared before any exclusion.
+    let dd = child_digests_in(&default.payload);
+    let rd = child_digests_in(&revealed.payload);
+    assert_eq!(
+        dd.len(),
+        1,
+        "default view exposes the boundary commitment only"
+    );
+    assert_eq!(rd.len(), 2, "revealed view exposes both commitments");
+    assert_eq!(dd[0].0, "s0001:flow");
+    assert_eq!(rd[0].0, "s0001:flow");
+    assert_eq!(dd[0], rd[0], "childSubgraphDigest must be view-invariant");
+
+    // Comparing payloads (not envelopes) already excludes the envelope's
+    // projectionDigest; drop the payload's policyDigest explicitly.
+    let mut a = default.payload.clone();
+    let mut b = revealed.payload.clone();
+    a.as_object_mut()
+        .expect("payload object")
+        .remove("policyDigest");
+    b.as_object_mut()
+        .expect("payload object")
+        .remove("policyDigest");
+
+    let mut diffs = Vec::new();
+    diff_paths(&a, &b, "", &mut diffs);
+    assert!(!diffs.is_empty(), "the views must differ somewhere");
+    for path in &diffs {
+        assert!(
+            path.starts_with("/nodes/1"),
+            "diff outside the authorized region: {path}"
+        );
+    }
+}
+
+/// Spec §12 test 16 — byte determinism across seed-dependent map insertion
+/// orders (Slice-1 technique) and repeat projections of the nested fixture.
+#[test]
+fn graph_deterministic_across_seeds() {
+    let mut reference: Option<(Vec<u8>, String, String)> = None;
+    for seed in 0..10usize {
+        let env = project_graph_json(&seed_wf(seed), None)
+            .unwrap_or_else(|e| panic!("seed {seed} must project: {e:?}"));
+        let bytes = env.canonical_bytes().expect("canonical bytes");
+        match &reference {
+            None => {
+                reference = Some((
+                    bytes,
+                    env.source_digest.clone(),
+                    env.projection_digest.clone(),
+                ));
+            }
+            Some((rb, rs, rp)) => {
+                assert_eq!(&bytes, rb, "seed {seed} produced different envelope bytes");
+                assert_eq!(&env.source_digest, rs, "seed {seed} sourceDigest differs");
+                assert_eq!(
+                    &env.projection_digest, rp,
+                    "seed {seed} projectionDigest differs"
+                );
+            }
+        }
+    }
+    let x = nested_graph(None);
+    let y = nested_graph(None);
+    assert_eq!(
+        x.canonical_bytes().expect("x"),
+        y.canonical_bytes().expect("y"),
+        "the nested fixture must project byte-identically too"
+    );
+}
+
+/// Spec §12 test 16a — the §8.1 construction is acyclic, deterministic,
+/// and transitively bound: recompute from the public preimage, mutate a
+/// deep leaf, and watch every ancestor commitment move.
+#[test]
+fn nested_digest_construction_acyclic_and_deterministic() {
+    let policy = graph_policy(&["s0000:inner", "s0001:flow"], &[]);
+    let env = project_graph_json(&nested_wf(), Some(&policy)).expect("projects");
+    let again = project_graph_json(&nested_wf(), Some(&policy)).expect("projects again");
+    assert_eq!(env.payload, again.payload, "digests must be deterministic");
+    assert_eq!(env.projection_digest, again.projection_digest);
+
+    // The subject's own `childSubgraphDigest` field is excluded from its
+    // preimage; every other rendered field (incl. descendant digests) is
+    // embedded exactly as §8.1 specifies.
+    let strip = |node: &Value| {
+        let mut v = node.clone();
+        v.as_object_mut()
+            .expect("node is an object")
+            .remove("childSubgraphDigest");
+        v
+    };
+    let preimage = |boundary_id: &str, content: Value| {
+        serde_json::json!({
+            "domain": "projection.graph.child-subgraph.v1",
+            "graphSchemaVersion": env.payload["graphSchemaVersion"],
+            "rootSourceDigest": env.source_digest,
+            "boundaryId": boundary_id,
+            "content": content,
+        })
+    };
+
+    let flow_value = &env.payload["nodes"][1];
+    let inner_value = &flow_value["children"][0];
+    let inner_recomputed =
+        try_canonical_digest(&preimage("s0000:inner", strip(inner_value))).expect("preimage");
+    assert_eq!(
+        inner_value["childSubgraphDigest"], inner_recomputed,
+        "embedded inner digest must equal the public recomputation"
+    );
+    let flow_recomputed =
+        try_canonical_digest(&preimage("s0001:flow", strip(flow_value))).expect("preimage");
+    assert_eq!(
+        flow_value["childSubgraphDigest"], flow_recomputed,
+        "embedded flow digest must equal the public recomputation"
+    );
+
+    // Deep-leaf mutation (re-hashed so the gate stays honest): every
+    // ancestor commitment must move — transitive binding, no self-reference.
+    let mut raw: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    raw["body"][1]["body"][0]["body"][0]["outputs"]
+        .as_array_mut()
+        .expect("leaf outputs")
+        .push(serde_json::json!({
+            "name": "trace",
+            "type": "Order",
+            "emits": ["Produced"]
+        }));
+    let changed = parse_with_content_digest(&mut raw);
+    let mutated = project_graph_json(&changed, Some(&policy)).expect("mutated leaf projects");
+    let m_nodes = &mutated.payload["nodes"];
+    assert_ne!(
+        m_nodes[1]["childSubgraphDigest"], flow_value["childSubgraphDigest"],
+        "flow commitment must move when a deep leaf changes"
+    );
+    assert_ne!(
+        m_nodes[1]["children"][0]["childSubgraphDigest"], inner_value["childSubgraphDigest"],
+        "inner commitment must move when a deep leaf changes"
+    );
+}
+
+/// Spec §12 test 17 — every vendored `wf-*` valid fixture (flat,
+/// composite, and governance flavors) projects cleanly and
+/// byte-deterministically (§7.4 parity guard), then verifies honestly on
+/// both paths: `verify_graph_projection_bytes` over the canonical bytes and
+/// `verify_graph_against_source` against the parsed workflow definition.
+#[test]
+fn all_vendored_valid_fixtures_project() {
+    let dir = format!("{VENDORED}/fixtures/valid");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{dir}: {e}"))
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("wf-") && n.ends_with(".json"))
+        })
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 3, "expected the three wf-* valid fixtures");
+
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        let wf: WorkflowDefinition =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?} must parse: {e}"));
+        let env = project_graph_json(&wf, None)
+            .unwrap_or_else(|e| panic!("{path:?} must project: {e:?}"));
+        let bytes = env.canonical_bytes().expect("canonical bytes");
+        let again = project_graph_json(&wf, None).expect("second projection");
+        assert_eq!(
+            bytes,
+            again.canonical_bytes().expect("canonical bytes"),
+            "{path:?} is not byte-stable"
+        );
+        let parsed = verify_graph_projection_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("{path:?} must verify as honest bytes: {e:?}"));
+        verify_graph_against_source(&parsed, &wf, None)
+            .unwrap_or_else(|e| panic!("{path:?} must verify honestly against source: {e:?}"));
+    }
+}
+
+/// Spec §12 test 18 — authority expansion is impossible: every rendered
+/// id, port, type, outcome, label, and disclosure string traces back to an
+/// AST declaration or the fixed disclosure vocabulary.
+#[test]
+fn authority_expansion_impossible() {
+    fn scan(
+        item: &Value,
+        ids: &mut BTreeSet<String>,
+        ports: &mut BTreeSet<String>,
+        words: &mut BTreeSet<String>,
+    ) {
+        ids.insert(item["id"].as_str().expect("declared id").to_string());
+        for key in ["inputs", "outputs", "inputPorts", "outputPorts"] {
+            if let Some(list) = item.get(key).and_then(|v| v.as_array()) {
+                for p in list {
+                    ports.insert(p["name"].as_str().expect("port name").to_string());
+                    words.insert(p["type"].as_str().expect("port type").to_string());
+                    for outcomes in ["acceptedOutcomes", "emits"] {
+                        if let Some(list) = p.get(outcomes).and_then(|v| v.as_array()) {
+                            for o in list {
+                                words.insert(o.as_str().expect("outcome").to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(body) = item.get("body").and_then(|v| v.as_array()) {
+            for child in body {
+                scan(child, ids, ports, words);
+            }
+        }
+    }
+    let raw: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    let mut raw_ids = BTreeSet::new();
+    let mut port_names = BTreeSet::new();
+    let mut words = BTreeSet::new();
+    scan(&raw, &mut raw_ids, &mut port_names, &mut words);
+    for key in ["inputPorts", "outputPorts"] {
+        for p in raw[key].as_array().expect("root ports") {
+            port_names.insert(p["name"].as_str().expect("port name").to_string());
+            words.insert(p["type"].as_str().expect("port type").to_string());
+        }
+    }
+
+    fn node_ports(node: &Value) -> BTreeSet<String> {
+        let mut ports = BTreeSet::new();
+        for key in ["inputs", "outputs"] {
+            if let Some(list) = node.get(key).and_then(|v| v.as_array()) {
+                for p in list {
+                    ports.insert(p["name"].as_str().expect("port name").to_string());
+                }
+            }
+        }
+        ports
+    }
+
+    fn check_scope(
+        nodes: &[Value],
+        container: Option<&Value>,
+        edges: &Value,
+        raw_ids: &BTreeSet<String>,
+        port_names: &BTreeSet<String>,
+        words: &BTreeSet<String>,
+    ) {
+        let mut ports_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        if let Some(c) = container {
+            ports_of.insert(
+                c["id"].as_str().expect("container id").to_string(),
+                node_ports(c),
+            );
+        }
+        for node in nodes {
+            let id = node["id"].as_str().expect("node id").to_string();
+            let suffix = id.split(':').nth(1).expect("sNNNN:id grammar");
+            assert!(raw_ids.contains(suffix), "invented node id {id}");
+            match node["kind"].as_str().expect("kind") {
+                "atomic" => {
+                    assert!(
+                        node.get("children").is_none() && node.get("disclosure").is_none(),
+                        "{id}: atomic nodes carry no disclosure state"
+                    );
+                }
+                "composite" => {
+                    let digest = node["childSubgraphDigest"].as_str().expect("digest");
+                    assert_eq!(digest.len(), 64);
+                    assert!(
+                        digest
+                            .chars()
+                            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                        "childSubgraphDigest must be lowercase 64-hex"
+                    );
+                    let has_children = node.get("children").is_some();
+                    let has_disclosure = node.get("disclosure").is_some();
+                    assert!(
+                        has_children != has_disclosure,
+                        "{id}: exactly one disclosure state must render"
+                    );
+                    if let Some(d) = node.get("disclosure") {
+                        assert_eq!(d["withheld"], serde_json::json!(true));
+                        assert_eq!(d["reason"], "private-composite-default");
+                        assert_eq!(d["category"], "composite-boundary");
+                    }
+                }
+                other => panic!("unknown node kind {other}"),
+            }
+            for key in ["inputs", "outputs"] {
+                if let Some(list) = node.get(key).and_then(|v| v.as_array()) {
+                    for p in list {
+                        let name = p["name"].as_str().expect("port name");
+                        assert!(port_names.contains(name), "invented port {name}");
+                        let ty = p["type"].as_str().expect("port type");
+                        assert!(words.contains(ty), "invented type {ty}");
+                        for outcomes in ["acceptedOutcomes", "emits"] {
+                            if let Some(list) = p.get(outcomes).and_then(|v| v.as_array()) {
+                                for o in list {
+                                    let o = o.as_str().expect("outcome");
+                                    assert!(words.contains(o), "invented outcome {o}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ports_of.insert(id, node_ports(node));
+        }
+        for edge in edges.as_array().expect("edges") {
+            let label = edge["label"].as_array().expect("label");
+            assert!(!label.is_empty(), "edge labels are never empty");
+            for word in label {
+                let w = word.as_str().expect("label word");
+                assert!(words.contains(w), "invented label {w}");
+            }
+            for end in ["from", "to"] {
+                let owner = edge[end]["node"].as_str().expect("endpoint node");
+                let ports = ports_of
+                    .get(owner)
+                    .unwrap_or_else(|| panic!("endpoint {owner} is outside this scope"));
+                let port = edge[end]["port"].as_str().expect("endpoint port");
+                assert!(ports.contains(port), "{owner} declares no port {port}");
+            }
+        }
+        for node in nodes {
+            if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+                check_scope(
+                    children,
+                    Some(node),
+                    &node["internalEdges"],
+                    raw_ids,
+                    port_names,
+                    words,
+                );
+            }
+        }
+    }
+
+    let env = nested_graph(Some(graph_policy(&["s0000:inner", "s0001:flow"], &[])));
+    let nodes = env.payload["nodes"].as_array().expect("nodes");
+    check_scope(
+        nodes,
+        None,
+        &env.payload["edges"],
+        &raw_ids,
+        &port_names,
+        &words,
+    );
+    for key in ["inputPorts", "outputPorts"] {
+        for p in env.payload[key].as_array().expect("root ports") {
+            let name = p["name"].as_str().expect("port name");
+            assert!(port_names.contains(name), "invented root port {name}");
+            let ty = p["type"].as_str().expect("port type");
+            assert!(words.contains(ty), "invented root type {ty}");
+        }
+    }
+}
+
+/// Spec §12 test 19 — R1: a revealed container's input port supplies its
+/// children with a shared-type `boundary-value` edge; a type mismatch fails
+/// closed with `PROJ-0001`. The audit DOES compare boundary types per name
+/// (rule 2), so the brief's literal craft — mutating `inner`'s boundary
+/// input type — is refused as `SOMA-CMP-0005` before the builder runs.
+/// The same R1 mismatch is produced by a conflicting *producer* instead:
+/// an input-less operation supplies `staged` as `Shipment` while `inner`
+/// consumes it as `Order`. Entry point and assertions are unchanged.
+#[test]
+fn composite_input_supplies_child_inputs() {
+    let env = nested_graph(Some(graph_policy(&["s0001:flow"], &[])));
+    let edges = env.payload["nodes"][1]["internalEdges"]
+        .as_array()
+        .expect("flow internalEdges");
+    let r1 = edges
+        .iter()
+        .find(|e| e["to"]["node"] == "s0000:inner")
+        .expect("R1 supply edge renders");
+    assert_eq!(r1["kind"], "boundary-value");
+    assert_eq!(r1["from"]["node"], "s0001:flow");
+    assert_eq!(r1["from"]["port"], "staged");
+    assert_eq!(r1["to"]["port"], "staged");
+    assert_eq!(r1["label"], serde_json::json!(["Order"]));
+
+    let mut raw: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    raw["body"][1]["body"]
+        .as_array_mut()
+        .expect("flow body array")
+        .push(serde_json::json!({
+            "schemaVersion": "1.1.0",
+            "version": "1.1.0",
+            "id": "mix",
+            "executionClass": "deterministic",
+            "inputs": [],
+            "outputs": [
+                { "name": "staged", "type": "Shipment", "emits": ["Produced"] }
+            ],
+            "effects": [],
+            "uses": [],
+            "secrets": [],
+            "context": []
+        }));
+    let mismatch = parse_with_content_digest(&mut raw);
+    let err = project_graph_json(&mismatch, None)
+        .expect_err("incompatible boundary supply must be refused");
+    assert!(
+        err.iter()
+            .any(|d| d.code == "PROJ-0001" && d.message.contains("incompatible boundary supply")),
+        "expected an incompatible-boundary refusal, got {err:?}"
+    );
+}
+
+/// Spec §12 test 20 — R2: a child output passes through to the container's
+/// declared output port as the single-producer `boundary-value` edge.
+#[test]
+fn child_output_feeds_composite_output() {
+    let env = nested_graph(Some(graph_policy(&["s0001:flow"], &[])));
+    let edges = env.payload["nodes"][1]["internalEdges"]
+        .as_array()
+        .expect("flow internalEdges");
+    let r2 = edges
+        .iter()
+        .find(|e| e["to"]["node"] == "s0001:flow")
+        .expect("R2 pass-through edge renders");
+    assert_eq!(r2["kind"], "boundary-value");
+    assert_eq!(r2["from"]["node"], "s0000:inner");
+    assert_eq!(r2["from"]["port"], "ready");
+    assert_eq!(r2["to"]["port"], "ready");
+    assert_eq!(r2["label"], serde_json::json!(["Shipment"]));
+}
+
+/// Spec §12 test 21 — R2 is a single-producer rule: zero or two internal
+/// producers for a declared boundary output fail closed. Both crafts stay
+/// audit-green (OUT rules are operations-only), so the refusal must come
+/// from the graph builder.
+#[test]
+fn boundary_output_absent_or_ambiguous_fails() {
+    let mut zero: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    zero["body"][1]["body"][0]["outputPorts"][0]["name"] = serde_json::json!("prepared");
+    let zero = parse_with_content_digest(&mut zero);
+    let err = project_graph_json(&zero, None).expect_err("absent producer must be refused");
+    assert!(
+        err.iter().any(|d| d.code == "PROJ-0001"
+            && d.message
+                .contains("absent producer for declared boundary output")),
+        "expected an absent-producer refusal, got {err:?}"
+    );
+
+    let mut two: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    two["body"][1]["body"]
+        .as_array_mut()
+        .expect("flow body array")
+        .push(serde_json::json!({
+            "schemaVersion": "1.1.0",
+            "version": "1.1.0",
+            "id": "dup",
+            "executionClass": "deterministic",
+            "inputs": [
+                { "name": "staged", "type": "Order", "acceptedOutcomes": ["Produced"] }
+            ],
+            "outputs": [
+                { "name": "ready", "type": "Shipment", "emits": ["Produced"] }
+            ],
+            "effects": [],
+            "uses": [],
+            "secrets": [],
+            "context": []
+        }));
+    let two = parse_with_content_digest(&mut two);
+    let err = project_graph_json(&two, None).expect_err("ambiguous output must be refused");
+    assert!(
+        err.iter()
+            .any(|d| d.code == "PROJ-0001" && d.message.contains("ambiguous boundary output")),
+        "expected an ambiguous-output refusal, got {err:?}"
+    );
+}
+
+/// Spec §12 test 23 — withheld rendering never rewires: parent adjacency
+/// and any revealed container's internal edge set are disclosure-
+/// independent, and parent edges terminate at container ports only.
+#[test]
+fn withheld_no_rewiring() {
+    let default = nested_graph(None);
+    let partial = nested_graph(Some(graph_policy(&["s0001:flow"], &[])));
+    let full = nested_graph(Some(graph_policy(&["s0000:inner", "s0001:flow"], &[])));
+
+    assert_eq!(
+        default.payload["edges"], partial.payload["edges"],
+        "parent adjacency must not depend on disclosure"
+    );
+    assert_eq!(
+        default.payload["edges"], full.payload["edges"],
+        "parent adjacency must not depend on disclosure"
+    );
+    assert_eq!(
+        partial.payload["nodes"][1]["internalEdges"], full.payload["nodes"][1]["internalEdges"],
+        "revealing a descendant must not rewire its container"
+    );
+
+    for edge in default.payload["edges"].as_array().expect("edges") {
+        for end in ["from", "to"] {
+            let id = edge[end]["node"].as_str().expect("endpoint node");
+            assert!(
+                id == "s0000:prep" || id == "s0001:flow" || id == "s0002:audit",
+                "parent edge escaped to {id}"
+            );
+        }
+    }
+}
+
+/// Spec §12 test 24 — a matched connection without `emits` data fails
+/// closed ("rather than invent labels"); a declared-but-unused output is
+/// legal (R7).
+#[test]
+fn matched_without_emits_fails_unused_output_passes() {
+    let mut no_emits: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    no_emits["body"][0]["outputs"][0]
+        .as_object_mut()
+        .expect("output object")
+        .remove("emits");
+    let no_emits = parse_with_content_digest(&mut no_emits);
+    let err = project_graph_json(&no_emits, None)
+        .expect_err("matched output without emits must be refused");
+    assert!(
+        err.iter()
+            .any(|d| d.code == "PROJ-0001" && d.message.contains("no derivable outcome label")),
+        "expected a missing-label refusal, got {err:?}"
+    );
+
+    let mut unused: Value = serde_json::from_str(&nested_text()).expect("fixture");
+    unused["body"][0]["outputs"]
+        .as_array_mut()
+        .expect("prep outputs")
+        .push(serde_json::json!({
+            "name": "orph",
+            "type": "Order",
+            "emits": ["Produced"]
+        }));
+    let unused = parse_with_content_digest(&mut unused);
+    assert!(
+        project_graph_json(&unused, None).is_ok(),
+        "declared-but-unused outputs are legal (R7)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E4/X07 Slice 2 — Task 5: verification paths (spec §12 tests 22, 26-28)
+// ---------------------------------------------------------------------------
+
+use prometheos_lite::workflow::projection::{
+    verify_graph_against_source, verify_graph_projection_bytes,
+};
+
+/// Spec §12 test 22 — external edges terminate at container ports: parent
+/// edges reach composites only through declared boundary ports, revealed
+/// internal edges stay inside {container, direct children}, and crafted
+/// cross-boundary or dangling endpoints in canonical bytes fail closed with
+/// `PROJ-0001` (the byte path's endpoint-visibility check runs before its
+/// digest check, so the assertion isolates the shape error as the cause).
+#[test]
+fn external_edges_terminate_at_ports() {
+    let wf = nested_wf();
+    let env = project_graph_json(&wf, Some(&graph_policy(&["s0001:flow"], &[])))
+        .expect("authorized view projects");
+    let root_ids = ["s0000:prep", "s0001:flow", "s0002:audit"];
+    let flow_ports = ["staged", "ready"];
+    let edges = env.payload["edges"].as_array().expect("root edges");
+    assert_eq!(edges.len(), 3, "prep->flow, prep->audit, flow->audit");
+    let mut saw_outcome = 0usize;
+    let mut saw_boundary = 0usize;
+    for edge in edges {
+        for endpoint in [&edge["from"], &edge["to"]] {
+            let node = endpoint["node"].as_str().expect("node id");
+            assert!(
+                root_ids.contains(&node),
+                "root edge escapes the root scope: {node}"
+            );
+            if node == "s0001:flow" {
+                let port = endpoint["port"].as_str().expect("port");
+                assert!(
+                    flow_ports.contains(&port),
+                    "parent edge must target a declared flow port, got {port}"
+                );
+            }
+        }
+        match edge["kind"].as_str() {
+            Some("outcome") => saw_outcome += 1,
+            Some("boundary-value") => saw_boundary += 1,
+            other => panic!("unexpected edge kind {other:?}"),
+        }
+    }
+    assert_eq!(
+        (saw_outcome, saw_boundary),
+        (1, 2),
+        "outcome + boundary edges"
+    );
+
+    // Revealed flow: internal edges terminate at the container's own ports
+    // or at its direct children — never deeper.
+    let flow = &env.payload["nodes"][1];
+    let mut allowed: BTreeSet<&str> = BTreeSet::new();
+    allowed.insert("s0001:flow");
+    for child in flow["children"].as_array().expect("flow children") {
+        allowed.insert(child["id"].as_str().expect("child id"));
+    }
+    let internal = flow["internalEdges"].as_array().expect("internalEdges");
+    assert_eq!(internal.len(), 2, "R1 supply edge + R2 pass-through edge");
+    for edge in internal {
+        for endpoint in [&edge["from"], &edge["to"]] {
+            let node = endpoint["node"].as_str().expect("node id");
+            assert!(
+                allowed.contains(node),
+                "internal edge escapes its scope: {node}"
+            );
+        }
+    }
+
+    // Crafted bytes: a root edge pointing at a hidden child (cross-boundary
+    // internal reference) or at a nonexistent node (dangling endpoint)
+    // fails closed with PROJ-0001. projectionDigest is recomputed so the
+    // only possible failure is the endpoint-reference shape error.
+    let env = project_graph_json(&wf, None).expect("default view projects");
+    let base = serde_json::to_value(&env).expect("envelope serializes");
+    for dangling in ["s0000:leaf", "s9999:ghost"] {
+        let mut value = base.clone();
+        value["payload"]["edges"]
+            .as_array_mut()
+            .expect("edges array")
+            .push(serde_json::json!({
+                "kind": "outcome",
+                "from": { "node": "s0000:prep", "port": "staged" },
+                "to": { "node": dangling, "port": "staged" },
+                "label": ["Produced"],
+            }));
+        value["projectionDigest"] =
+            Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+        let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+        let err = verify_graph_projection_bytes(&bytes)
+            .expect_err("cross-boundary/dangling endpoint must fail closed");
+        assert_eq!(err[0].code, "PROJ-0001", "got {err:?}");
+        assert!(
+            err[0].message.contains("not visible"),
+            "unexpected message: {}",
+            err[0].message
+        );
+    }
+}
+
+/// Spec §12 test 26 — honest round trips: project -> canonical bytes ->
+/// byte verify -> verify against source, for every disclosure flavor
+/// (default, partially authorized, deeply authorized + counts).
+#[test]
+fn graph_honest_round_trips() {
+    let wf = nested_wf();
+    let policies = [
+        None,
+        Some(graph_policy(&["s0001:flow"], &[])),
+        Some(graph_policy(
+            &["s0001:flow", "s0000:inner"],
+            &["s0001:flow"],
+        )),
+    ];
+    for policy in &policies {
+        let env = project_graph_json(&wf, policy.as_ref()).expect("honest projection");
+        let bytes = env.canonical_bytes().expect("canonical bytes");
+        let parsed = verify_graph_projection_bytes(&bytes).expect("honest bytes verify");
+        verify_graph_against_source(&parsed, &wf, policy.as_ref())
+            .expect("honest projection verifies against source");
+    }
+}
+
+/// Spec §12 test 27 — forged envelope metadata fails with the same codes
+/// as Slice 1, on both the byte path and the against-source verifier.
+#[test]
+fn graph_forged_envelope_metadata_fails() {
+    let wf = nested_wf();
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.projection_version = "projection.v99".to_string();
+    let err = verify_graph_against_source(&env, &wf, None)
+        .expect_err("forged projectionVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let err = verify_graph_against_source(&env, &wf, None)
+        .expect_err("forged schemaVersion must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.projection_digest = "f".repeat(64);
+    let err = verify_graph_against_source(&env, &wf, None)
+        .expect_err("forged projectionDigest must fail against the source");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // Byte path: the version forgeries fail on read with Slice-1 codes.
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.schema_version = "9.9.9".to_string();
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let err = verify_graph_projection_bytes(&bytes)
+        .expect_err("forged schemaVersion must fail closed on read");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    let mut env = project_graph_json(&wf, None).expect("projects");
+    env.projection_version = "projection.v99".to_string();
+    let bytes = env.canonical_bytes().expect("canonical bytes");
+    let err = verify_graph_projection_bytes(&bytes)
+        .expect_err("forged projectionVersion must fail closed on read");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+}
+
+/// Spec §12 test 28 — semantic forgery rejected by source verification:
+/// (a) the graphSchemaVersion allow-list fires before digests; (b) a stale
+/// projectionDigest (not a shape error) is the cause of the byte-path
+/// refusal; (c) derived-digest forgeries pass the byte path by design and
+/// fail §11 steps 6/7 with SOMA-CMP-0004; (d) structurally valid
+/// content/disclosure edits with valid derived digests pass steps 6-7 and
+/// fail the fresh-render comparison at step 8 with PROJ-0002.
+#[test]
+fn graph_semantic_forgery_rejected_by_source_verification() {
+    let wf = nested_wf();
+
+    // (a) edited graphSchemaVersion + recomputed projectionDigest.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["graphSchemaVersion"] = Value::String("lite.graph-projection.v9".to_string());
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    let err = verify_graph_projection_bytes(&bytes)
+        .expect_err("allow-list must reject before the digest check");
+    assert_eq!(err[0].code, "SOMA-CMP-0001", "got {err:?}");
+
+    // (b) structurally valid payload edit WITHOUT recomputing
+    // projectionDigest => byte path SOMA-CMP-0004. Cause proof: the
+    // identical edit WITH a recomputed digest passes the byte path, and
+    // the against-source verifier then rejects it at step 8.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["inputPorts"][0]["type"] = Value::String("Forged".to_string());
+    let stale = try_canonical_bytes(&value).expect("canonical bytes");
+    let err =
+        verify_graph_projection_bytes(&stale).expect_err("stale projectionDigest must fail closed");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let reserialized = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&reserialized)
+        .expect("the same edit is structurally valid (shape is not the cause)");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, None)
+        .expect_err("forged content must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+
+    // (c1) forged policyDigest + recomputed projectionDigest: byte path
+    // passes by design (the normalized policy is not embedded); §11 step 6
+    // reports SOMA-CMP-0004.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["policyDigest"] = Value::String("a".repeat(64));
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes)
+        .expect("byte path cannot recompute the policy digest (shape only)");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, None)
+        .expect_err("forged policyDigest must fail §11 step 6");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // (c2) forged childSubgraphDigest + recomputed projectionDigest: byte
+    // path passes (shape only — the hidden subtree is absent from the
+    // bytes); §11 step 7 reports SOMA-CMP-0004.
+    let env = project_graph_json(&wf, None).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["nodes"][1]["childSubgraphDigest"] = Value::String("b".repeat(64));
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("byte path checks the digest shape only (§8.1)");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, None)
+        .expect_err("forged childSubgraphDigest must fail §11 step 7");
+    assert_eq!(err[0].code, "SOMA-CMP-0004", "got {err:?}");
+
+    // (d1) disclosure count edit (count-authorized view): unchanged
+    // derived digests + recomputed projectionDigest => byte path and steps
+    // 6-7 pass; step 8 (fresh render) fails with PROJ-0002.
+    let count_policy = graph_policy(&[], &["s0001:flow"]);
+    let env = project_graph_json(&wf, Some(&count_policy)).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    assert_eq!(
+        value["payload"]["nodes"][1]["disclosure"]["hiddenNodes"],
+        serde_json::json!(2),
+        "flow hides exactly two nodes (inner + leaf)"
+    );
+    value["payload"]["nodes"][1]["disclosure"]["hiddenNodes"] = serde_json::json!(99);
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("disclosure counts are shape-only");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, Some(&count_policy))
+        .expect_err("disclosure edit must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+
+    // (d2) revealed internalEdges edit (authorized view): same contract.
+    let auth_policy = graph_policy(&["s0001:flow"], &[]);
+    let env = project_graph_json(&wf, Some(&auth_policy)).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["nodes"][1]["internalEdges"]
+        .as_array_mut()
+        .expect("internalEdges array")
+        .remove(0);
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("edge removal is structurally valid");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, Some(&auth_policy))
+        .expect_err("internalEdges edit must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
+
+    // (d3) revealed deep-child content edit (flow + inner authorized):
+    // embedded digests stay valid (recomputed from the SOURCE at step 7,
+    // never from payload bytes) => steps 6-7 pass, step 8 reports PROJ-0002.
+    let deep_policy = graph_policy(&["s0001:flow", "s0000:inner"], &[]);
+    let env = project_graph_json(&wf, Some(&deep_policy)).expect("projects");
+    let mut value = serde_json::to_value(&env).expect("envelope serializes");
+    value["payload"]["nodes"][1]["children"][0]["children"][0]["inputs"][0]["acceptedOutcomes"] =
+        serde_json::json!(["Blocked"]);
+    value["projectionDigest"] =
+        Value::String(try_canonical_digest(&value["payload"]).expect("recomputed digest"));
+    let bytes = try_canonical_bytes(&value).expect("canonical bytes");
+    verify_graph_projection_bytes(&bytes).expect("outcome-list edit is structurally valid");
+    let forged: VersionedProjectionEnvelope<Value> =
+        serde_json::from_value(value).expect("envelope parses");
+    let err = verify_graph_against_source(&forged, &wf, Some(&deep_policy))
+        .expect_err("child-content edit must fail the fresh-render comparison");
+    assert_eq!(err[0].code, "PROJ-0002", "got {err:?}");
 }
