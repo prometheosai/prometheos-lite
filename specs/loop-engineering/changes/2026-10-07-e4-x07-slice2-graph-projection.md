@@ -13,7 +13,7 @@ Deliver the graph projection over canonical SOMA++ Workflows with **fail-closed 
 1. **Contract expansion (Slice 2):** recursive `BodyItem`/`CompositeDefinition`, exact `oneOf` discrimination, union-key collision and malformed-nesting rejects at document load.
 2. **Recursive nested-scope audit:** root-only/per-scope/document-wide check families recurse per scope with typed fault codes; every `.body` consumer fails closed until recursion lands (SOMA-CMP-0005 family).
 3. **Graph projection (`projection/graph.rs`):** per-scope topological order; document-wide node/edge registry; withheld-by-default composite boundaries; validated/sorted/non-cascading `GraphDisclosurePolicy` (PROJ-0003); §7 boundary-port dataflow with §7.4 outcome labels; hidden node/edge counts under count authorization; domain-separated `childSubgraphDigest` (acyclic bottom-up) and `policyDigest`.
-4. **Verification paths (spec §11):** `verify_graph_projection_bytes` (envelope parse → schema allow-list → structural validation → digest) and `verify_graph_against_source` (ordered steps 1–8; SOMA-CMP-0004 steps / PROJ-0002 step 8). Derived digests are shape-checked only by design.
+4. **Verification paths (spec §11):** `verify_graph_projection_bytes` (envelope parse → schema allow-list → structural validation → digest; derived `policyDigest`/`childSubgraphDigest` values are shape-checked only, by design) and `verify_graph_against_source` (ordered steps 1–8; steps 6–7 recompute and compare the derived `policyDigest` and `childSubgraphDigest` values, mismatches reporting `SOMA-CMP-0004`; fresh-render identity reports `PROJ-0002` at step 8).
 
 ## Verification (exact head `1af765d` — authoritative final pass; retries honestly disclosed)
 
