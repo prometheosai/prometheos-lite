@@ -37,6 +37,6 @@ Write boundary: canonical-bytes fixpoint, never-widen invariants, complete sourc
 ## Verification baseline
 
 - fmt/clippy: clean at `1af765d` per core evidence; covers merged main `d71cf0d`.
-- `cargo test --lib`: 1082 total (1 ignored); plus 64 Slice-2 graph-projection conformance tests, 24 API observation tests, 23 Slice 1B conformance tests, 36 enforcement tests. Full `--all-targets --all-features` sweep at `1af765d`: 105 groups, 2207 passed, 0 failed.
+- `cargo test --lib`: 1083 discovered (1082 passed, 0 failed, 1 ignored); plus 64 Slice-2 graph-projection conformance tests, 24 API observation tests, 23 Slice 1B conformance tests, 36 enforcement tests. Full `--all-targets --all-features` sweep at `1af765d`: 105 groups, 2207 passed, 0 failed.
 - Any new PR: three local suites at the exact head, digests recorded, independent fresh-context review before merge authorization; immutable expected-head guards at merge time. No merge without a fresh local-evidence review cycle.
 - Host note: builds/temp routed to D:; C: near capacity; the #214 Norton-AV-vs-`.git/objects` flake rotates victims under parallel load (severe this session — cooldowns and isolated victim reruns are the documented protocol).
