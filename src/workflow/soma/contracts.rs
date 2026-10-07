@@ -337,6 +337,101 @@ pub struct OperationDefinition {
     pub evidence_obligations: Vec<String>,
 }
 
+/// An inline composite body item (vendored `CompositeDefinition.schema.json`).
+/// Recursive: `body` may contain operations and further composites.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CompositeDefinition {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: String,
+    pub id: String,
+    pub version: String,
+    pub input_ports: Vec<PortDefinition>,
+    pub output_ports: Vec<PortDefinition>,
+    pub body: Vec<BodyItem>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "authorityImports"
+    )]
+    pub authority_imports: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<GovernanceConstraint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<WorkflowContext>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "effectExports"
+    )]
+    pub effect_exports: Option<Vec<EffectExport>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+}
+
+/// One entry of a workflow or composite body: exactly one of
+/// `OperationDefinition` / `CompositeDefinition` per §2.2 discrimination.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BodyItem {
+    Operation(OperationDefinition),
+    Composite(CompositeDefinition),
+}
+
+impl BodyItem {
+    pub fn as_operation(&self) -> Option<&OperationDefinition> {
+        match self {
+            Self::Operation(op) => Some(op),
+            Self::Composite(_) => None,
+        }
+    }
+
+    pub fn as_composite(&self) -> Option<&CompositeDefinition> {
+        match self {
+            Self::Operation(_) => None,
+            Self::Composite(c) => Some(c),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Operation(op) => &op.id,
+            Self::Composite(c) => &c.id,
+        }
+    }
+}
+
+impl serde::Serialize for BodyItem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Operation(op) => op.serialize(serializer),
+            Self::Composite(c) => c.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BodyItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if !value.is_object() {
+            return Err(serde::de::Error::custom(
+                "matches no body-item variant: body item must be a JSON object",
+            ));
+        }
+        let op = OperationDefinition::deserialize(&value);
+        let comp = CompositeDefinition::deserialize(&value);
+        match (op, comp) {
+            (Ok(op), Err(_)) => Ok(Self::Operation(op)),
+            (Err(_), Ok(comp)) => Ok(Self::Composite(comp)),
+            (Ok(_), Ok(_)) => Err(serde::de::Error::custom(
+                "ambiguous body item: matches both OperationDefinition and CompositeDefinition",
+            )),
+            (Err(e_op), Err(e_comp)) => Err(serde::de::Error::custom(format!(
+                "matches no body-item variant: operation: {e_op}; composite: {e_comp}"
+            ))),
+        }
+    }
+}
+
 /// A reference binding evidence to an artifact and event digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -425,7 +520,7 @@ pub struct WorkflowDefinition {
     pub input_ports: Vec<PortDefinition>,
     #[serde(rename = "outputPorts")]
     pub output_ports: Vec<PortDefinition>,
-    pub body: Vec<OperationDefinition>,
+    pub body: Vec<BodyItem>,
     pub authority: AuthorityProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<GovernanceConstraint>,
@@ -460,4 +555,15 @@ pub struct WorkflowDefinition {
         rename = "contentDigest"
     )]
     pub content_digest: Option<Hex64>,
+}
+
+impl WorkflowDefinition {
+    /// True when any root body item is a composite (a document that nests).
+    /// Sufficient for every fail-closed scan: nesting always starts at the
+    /// root body, and descendants live inside those items.
+    pub fn contains_composite_body_item(&self) -> bool {
+        self.body
+            .iter()
+            .any(|item| matches!(item, BodyItem::Composite(_)))
+    }
 }

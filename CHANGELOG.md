@@ -1,5 +1,23 @@
 ## Unreleased
 
+- #164 E4/X07 Slice 2 — graph projection with nested composite disclosure
+  boundaries: recursive inline `BodyItem` parsing with exact `oneOf`
+  discrimination (union-key collision, missing required fields, and
+  malformed nesting reject at load), recursive nested-scope audit with
+  root-only / per-scope / document-wide check families plus fail-closed
+  consumers on every `.body` surface, and the byte-stable graph
+  projection (`lite.graph-projection.v1`) — withheld-by-default composite
+  boundaries, `GraphDisclosurePolicy` (validated, sorted, non-cascading,
+  `PROJ-0003`), domain-separated `childSubgraphDigest` (acyclic
+  bottom-up) and `policyDigest`, the fail-closed boundary-port dataflow
+  algorithm (R1-R9, §7.4 outcome labels), hidden node/edge counts under
+  count authorization, and the two §11 verification paths (byte-path
+  structural contract; ordered against-source steps where derived-digest
+  mismatches report `SOMA-CMP-0004` and fresh-render identity reports
+  `PROJ-0002`). Flat-workflow projections stay byte-identical to
+  `main@84d44e4`; regressions cover parse negatives, per-fault nested
+  audit codes, structural no-leakage diff, seeded determinism,
+  cross-boundary endpoint crafts, and envelope/payload forgery.
 - #164 E4/X07 Slice 1 — deterministic projection identity plus canonical and
   human views: versioned projection envelope (`projection.v1`, nested payload,
   source + projection digests under the SOMA DecimalV2 canonical rules), the

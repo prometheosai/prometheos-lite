@@ -174,6 +174,15 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
     let model: WorkflowDefinition = serde_json::from_str(text)
         .map_err(|e| vec![input_refusal(format!("schema violation: {e}"))])?;
 
+    // E4/X07 Slice 2: nested composites are refused before any plan is sealed
+    // (spec §2.4 — catalogue-governed error, no plan or partial output).
+    if model.contains_composite_body_item() {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0003",
+            "workflow body contains a nested composite; governance plans support atomic units only",
+        )]);
+    }
+
     let workflow_digest = workflow_digest_of(&model)?;
     // Steps follow the published v1.1 topological ordering; a cycle here
     // means the audit gate was bypassed, so fail closed without a plan.
@@ -187,8 +196,8 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
         .iter()
         .enumerate()
         .map(|(i, &body_idx)| PlanStep {
-            key: format!("s{i:04}:{}", model.body[body_idx].id),
-            operation_id: model.body[body_idx].id.clone(),
+            key: format!("s{i:04}:{}", model.body[body_idx].id()),
+            operation_id: model.body[body_idx].id().to_string(),
         })
         .collect();
     seal_plan(workflow_digest, steps)

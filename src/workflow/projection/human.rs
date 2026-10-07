@@ -7,7 +7,7 @@
 use crate::workflow::execution_graph::topological_order;
 use crate::workflow::governance_compiler::workflow_digest_of;
 use crate::workflow::redaction::Redactor;
-use crate::workflow::soma::contracts::{OperationDefinition, WorkflowDefinition};
+use crate::workflow::soma::contracts::{BodyItem, OperationDefinition, WorkflowDefinition};
 use crate::workflow::soma::{Diagnostic, canonical::sha256_hex};
 
 use super::envelope::{PROJECTION_VERSION_V1, VersionedProjectionEnvelope};
@@ -20,6 +20,12 @@ pub(crate) fn render_plan_body(
     wf: &WorkflowDefinition,
     source_digest: &str,
 ) -> Result<String, Vec<Diagnostic>> {
+    if wf.contains_composite_body_item() {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0001",
+            "workflow body contains a nested composite; human projection refused",
+        )]);
+    }
     let order = topological_order(wf).ok_or_else(|| {
         vec![Diagnostic::new(
             "PROJ-0001",
@@ -81,7 +87,12 @@ pub(crate) fn render_plan_body(
         "ATOMIC"
     };
     for (pos, &idx) in order.iter().enumerate() {
-        let unit = &wf.body[idx];
+        let BodyItem::Operation(unit) = &wf.body[idx] else {
+            return Err(vec![Diagnostic::new(
+                "PROJ-0001",
+                "workflow body contains a nested composite; human projection refused",
+            )]);
+        };
         out.push_str(&format!("### s{pos:04}:{} [{marker}]\n", unit.id));
         out.push_str(&render_unit(unit));
     }
