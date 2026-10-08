@@ -452,7 +452,12 @@ fn cross_slice_envelope_verify_parity() {
         schema_version: "1.1.0".to_string(),
         version: "1.1.0".to_string(),
         run_id: rk.id.clone(),
-        events: vec![mk_event("e-parity", 1, "b".repeat(64).as_str(), "2026-10-05T00:00:00Z")],
+        events: vec![mk_event(
+            "e-parity",
+            1,
+            "b".repeat(64).as_str(),
+            "2026-10-05T00:00:00Z",
+        )],
         compatibility: None,
     };
     let source = TimelineProjectionSource {
