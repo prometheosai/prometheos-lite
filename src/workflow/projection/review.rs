@@ -446,7 +446,7 @@ fn push_omission(acc: &mut Vec<OmissionView>, section: &str, category: &str, rea
 }
 
 /// Applies the disclosure policy on top of schema-valid rendered output:
-/// disallowed targets become `Das NotSkip` markers with their content
+/// disallowed targets become `withheld` markers with their content
 /// dropped from the rendered view and a corresponding `OmissionView`.
 fn apply_policy(payload: &mut ReviewProjectionPayload, policy: &ReviewDisclosurePolicy) {
     let allow_principals = policy.authorized_targets.iter().any(|t| t == "principals");

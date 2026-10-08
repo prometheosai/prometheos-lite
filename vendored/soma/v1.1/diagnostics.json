@@ -121,12 +121,6 @@
       "severity": "error"
     },
     {
-      "category": "duplicate_identity",
-      "code": "SOMA-CMP-0011",
-      "message": "duplicate event identity within one run",
-      "severity": "error"
-    },
-    {
       "category": "cyclic_composition",
       "code": "SOMA-EXP-0001",
       "message": "transitive self-containment",

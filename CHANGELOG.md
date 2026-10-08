@@ -9,7 +9,11 @@
   Slice-2 acyclic policy-digest preimage design, structural bytes-path
   verifiers, and ordered against-source authenticators with Honest absence
   markers for unavailable sources. `SOMA-CMP-0011` is the sole new
-  diagnostic for duplicate event identity.
+  diagnostic for duplicate identity, pinned in the repository-owned
+  Lite diagnostic-extension registry (`src/workflow/soma/diagnostic_extensions.rs`)
+  — the upstream-vendored catalogues stay immutable per the #240
+  provenance/additivity lock (resolution: upstream catalogue first, then
+  the extension registry; cross-registry duplicates fail closed).
 - #164 E4/X07 Slice 2 — graph projection with nested composite disclosure
   boundaries: recursive inline `BodyItem` parsing with exact `oneOf`
   discrimination (union-key collision, missing required fields, and

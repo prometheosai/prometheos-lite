@@ -1,19 +1,29 @@
 //! Emitted-diagnostics conformance (plan T4, contract req3).
 //!
-//! Two invariants:
+//! Three invariants:
 //!
-//! 1. **Categories are catalogue-pinned.** Every code the vendored
+//! 1. **Categories are registry-pinned.** Every code the vendored
 //!    `diagnostics.json` defines reports exactly its published category —
 //!    never a family-generic stand-in derived from substring matching.
+//!    Codes Lite emits that upstream has NOT published are pinned in the
+//!    repository-owned extension registry
+//!    (`src/workflow/soma/diagnostic_extensions.rs`); the vendored
+//!    catalogues stay immutable (provenance-locked, see
+//!    `vendored/soma/v1.2/PROVENANCE.md`).
 //! 2. **Sources are document pointers.** `source.path` is an RFC 6901
 //!    JSON pointer into the offending document (`""` = whole document);
 //!    `source.subject` carries a stable element identifier (operation id,
 //!    workflow id, workflowDigest).
+//! 3. **The registries are disjoint and drift-visible.** No code may be
+//!    registered both upstream and in the Lite extension registry, the
+//!    v1.1→v1.2 catalogue additivity (#240) must hold, and the vendored
+//!    bytes must stay EOL-churn-free (`-text` byte stability).
 
 use prometheos_lite::workflow::governance_compiler::{compile_workflow_text, verify_reviewed_plan};
 use prometheos_lite::workflow::soma::Diagnostic;
 
 const VENDORED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendored/soma/v1.1");
+const VENDORED_V12: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendored/soma/v1.2");
 
 fn fixture(rel: &str) -> String {
     std::fs::read_to_string(format!("{VENDORED}/{rel}")).unwrap_or_else(|e| panic!("{rel}: {e}"))
@@ -66,9 +76,17 @@ const CATALOGUE: &[(&str, &str)] = &[
     ("SOMA-ADAPT-0001", "adapter_incompatible"),
 ];
 
+/// The Lite diagnostic-extension registry mirror — repository-owned
+/// codes pinned in `src/workflow/soma/diagnostic_extensions.rs` that are
+/// NOT published in the upstream-vendored catalogues. Keep this mirror
+/// and the live registry in sync: the conformance suite fails closed on
+/// drift.
+const EXTENSION: &[(&str, &str)] = &[("SOMA-CMP-0011", "duplicate_identity")];
+
 /// Every `SOMA-*` literal emitted anywhere in `src/`. Update this list
-/// (and `CATALOGUE` above, from the vendored catalogue) whenever a new
-/// code is introduced — the guard test fails until both are extended.
+/// (and `CATALOGUE` above, from the vendored catalogue, or `EXTENSION`
+/// for repository-owned codes) whenever a new code is introduced — the
+/// guard test fails until both are extended.
 const EMITTED: &[&str] = &[
     "SOMA-ADAPT-0001",
     "SOMA-AUTH-0001",
@@ -88,6 +106,7 @@ const EMITTED: &[&str] = &[
     "SOMA-CMP-0005",
     "SOMA-CMP-0006",
     "SOMA-CMP-0007",
+    "SOMA-CMP-0011",
     "SOMA-EVT-0001",
     "SOMA-EVT-0002",
     "SOMA-EVT-0003",
@@ -161,18 +180,22 @@ fn every_catalogue_code_reports_its_pinned_category() {
 }
 
 #[test]
-fn every_emitted_code_is_catalogue_registered_and_never_general() {
-    let registered: std::collections::HashSet<&str> =
+fn every_emitted_code_is_registered_and_never_general() {
+    let upstream: std::collections::HashSet<&str> =
         CATALOGUE.iter().map(|&(code, _)| code).collect();
+    let extension: std::collections::HashSet<&str> =
+        EXTENSION.iter().map(|&(code, _)| code).collect();
+    let registered: std::collections::HashSet<&str> = upstream.union(&extension).copied().collect();
     assert_eq!(
         registered.len(),
-        CATALOGUE.len(),
-        "catalogue rows are unique"
+        CATALOGUE.len() + EXTENSION.len(),
+        "catalogue and extension rows are unique across both registries"
     );
     for &code in EMITTED {
         assert!(
             registered.contains(code),
-            "{code} is emitted in src/ but absent from the vendored catalogue"
+            "{code} is emitted in src/ but registered in neither the vendored \
+             catalogue nor the Lite extension registry"
         );
         let category = Diagnostic::new(code, "category guard").category;
         assert_ne!(
@@ -180,6 +203,168 @@ fn every_emitted_code_is_catalogue_registered_and_never_general() {
             "{code} fell back to the general bucket"
         );
     }
+}
+
+/// The repository-owned extension registry resolves the Slice-3
+/// duplicate-identity diagnostic to its pinned category — through the
+/// same `category_for` path every emitted diagnostic takes.
+#[test]
+fn extension_code_somacmp_0011_resolves_to_duplicate_identity() {
+    let emitted = Diagnostic::new("SOMA-CMP-0011", "duplicate identity guard");
+    assert_eq!(
+        emitted.category, "duplicate_identity",
+        "SOMA-CMP-0011 must resolve through the Lite extension registry"
+    );
+}
+
+/// Fail-safe fallback: codes registered in NEITHER the upstream catalogue
+/// nor the Lite extension registry resolve to `"general"` — never a
+/// panic, never an invented category.
+#[test]
+fn unknown_codes_fall_back_fail_safely_to_general() {
+    assert_eq!(
+        Diagnostic::new("SOMA-CMP-9999", "guard").category,
+        "general"
+    );
+    assert_eq!(
+        Diagnostic::new("NOT-A-SOMA-CODE", "guard").category,
+        "general"
+    );
+}
+
+/// #240 catalogue additivity: every v1.1 diagnostic entry is present in
+/// the v1.2 bundle with an identical (category, message, severity), and
+/// the v1.2-only set is exactly the eight published `SOMA-CAP-*`
+/// capability codes — no silent loss, change, or addition.
+#[test]
+fn vendored_v11_catalogue_entries_are_unchanged_in_v12() {
+    let v11 = catalogue_entries(VENDORED);
+    let v12 = catalogue_entries(VENDORED_V12);
+    let v11_codes: std::collections::HashSet<&str> = v11.iter().map(|e| e.0.as_str()).collect();
+    let v12_codes: std::collections::HashSet<&str> = v12.iter().map(|e| e.0.as_str()).collect();
+    for entry in &v11 {
+        assert!(
+            v12.iter().any(|e| e == entry),
+            "v1.1 catalogue entry {} changed or disappeared in the v1.2 bundle",
+            entry.0
+        );
+    }
+    let mut only_v12: Vec<&str> = v12_codes.difference(&v11_codes).copied().collect();
+    only_v12.sort_unstable();
+    let expected_v12_only = [
+        "SOMA-CAP-0001",
+        "SOMA-CAP-0002",
+        "SOMA-CAP-0003",
+        "SOMA-CAP-0004",
+        "SOMA-CAP-0005",
+        "SOMA-CAP-0006",
+        "SOMA-CAP-0007",
+        "SOMA-CAP-0008",
+    ];
+    assert_eq!(
+        only_v12, expected_v12_only,
+        "the v1.2-only catalogue set must be exactly the SPEC 007 capability codes"
+    );
+}
+
+/// Byte stability: the vendored catalogues are upstream bytes under the
+/// `-text` gitattribute — LF-only. An EOL rewrite (the CRLF churn this
+/// repair reverted out of `vendored/soma/v1.1/diagnostics.json`) is a
+/// provenance violation and must fail here.
+#[test]
+fn vendored_diagnostics_catalogues_carry_no_eol_churn() {
+    for root in [VENDORED, VENDORED_V12] {
+        let bytes = std::fs::read(format!("{root}/diagnostics.json"))
+            .unwrap_or_else(|e| panic!("{root}/diagnostics.json: {e}"));
+        assert!(
+            !bytes.contains(&b'\r'),
+            "{root}/diagnostics.json carries CR bytes — vendored bytes are \
+             upstream-locked (-text) and must not be rewritten"
+        );
+    }
+}
+
+/// `(code, category, message, severity)` rows of one vendored catalogue.
+fn catalogue_entries(root: &str) -> Vec<(String, String, String, String)> {
+    let text = std::fs::read_to_string(format!("{root}/diagnostics.json"))
+        .unwrap_or_else(|e| panic!("{root}/diagnostics.json: {e}"));
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("catalogue parses");
+    parsed["codes"]
+        .as_array()
+        .expect("codes member is an array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["code"].as_str().expect("code").to_string(),
+                entry["category"].as_str().expect("category").to_string(),
+                entry["message"].as_str().expect("message").to_string(),
+                entry["severity"].as_str().expect("severity").to_string(),
+            )
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Lite diagnostic-extension registry (repository-owned, not upstream)
+// ---------------------------------------------------------------------------
+
+use prometheos_lite::workflow::soma::diagnostic_extensions::{
+    DIAGNOSTIC_EXTENSIONS, DiagnosticExtension, validate_registry,
+};
+
+/// A code registered in BOTH the extension registry and the upstream
+/// catalogue is rejected: the vendored catalogues stay normative and
+/// immutable, so an overlapping extension could silently re-categorize
+/// an upstream code.
+#[test]
+fn a_duplicate_extension_upstream_code_is_rejected() {
+    let upstream: Vec<&str> = CATALOGUE.iter().map(|&(code, _)| code).collect();
+    let colliding = [DiagnosticExtension {
+        code: "SOMA-CMP-0007",
+        category: "duplicate_key",
+    }];
+    assert!(
+        validate_registry(&colliding, &upstream).is_err(),
+        "an extension code already published upstream must be rejected"
+    );
+}
+
+/// A code registered twice inside the extension registry is rejected:
+/// the pinned category for a code must be unambiguous.
+#[test]
+fn a_duplicate_code_inside_the_extension_registry_is_rejected() {
+    let duplicated = [
+        DiagnosticExtension {
+            code: "SOMA-CMP-0011",
+            category: "duplicate_identity",
+        },
+        DiagnosticExtension {
+            code: "SOMA-CMP-0011",
+            category: "other_category",
+        },
+    ];
+    assert!(
+        validate_registry(&duplicated, &[]).is_err(),
+        "an internally duplicated extension code must be rejected"
+    );
+}
+
+/// The LIVE registry validates against the LIVE upstream catalogue
+/// (fail-closed init also enforces this at first `category_for` use)
+/// and matches this file's `EXTENSION` mirror exactly.
+#[test]
+fn live_extension_registry_is_disjoint_and_mirror_pinned() {
+    let upstream: Vec<&str> = CATALOGUE.iter().map(|&(code, _)| code).collect();
+    validate_registry(DIAGNOSTIC_EXTENSIONS, &upstream)
+        .expect("the live extension registry is disjoint from the upstream catalogue");
+    let live: Vec<(&str, &str)> = DIAGNOSTIC_EXTENSIONS
+        .iter()
+        .map(|entry| (entry.code, entry.category))
+        .collect();
+    assert_eq!(
+        live, EXTENSION,
+        "the live extension registry and this test's mirror must not drift"
+    );
 }
 
 #[test]

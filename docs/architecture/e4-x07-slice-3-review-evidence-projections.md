@@ -392,6 +392,8 @@ Proposed addition permitted by plan review: at most **one** new code, `SOMA-CMP-
 
 Any residual new code (only `SOMA-CMP-0011`) must land in `diagnostics.json` category derivation first (matching SOMA `Diagnostic.category_for` convention) before being emitted. No new enum kinds around `Diagnostic`.
 
+**Post-#240 repair (PR #245 reconvergence; supersedes the registration clause above).** The registration clause predates #240, which vendored the `v1.2` bundle with a provenance lock and a v1.1→v1.2 additivity contract — the upstream catalogues are immutable in this repository (`-text` byte-stable; any change requires a reviewed bundle upgrade). Editing `vendored/soma/v1.1/diagnostics.json` is therefore obsolete and was reverted; `SOMA-CMP-0011` is pinned in the repository-owned **Lite diagnostic-extension registry** (`src/workflow/soma/diagnostic_extensions.rs`). Category resolution consults the upstream catalogue first, then the extension registry; a code present in both registries fails closed; unknown codes keep the fail-safe `general` fallback; still no new enum kinds around `Diagnostic`.
+
 Verifiers per projection, both with exact ordered steps mirroring the graph pattern (§11 of Slice 2):
 
 `verify_review_projection_bytes(raw)` steps: (1) find_duplicate_key scan; (2) serde parse to envelope; (3) allow-list (envelope projectionVersion/schemaVersion per existing contract; payload `reviewSchemaVersion` per §3.5); (4) metadata checks (digest shape per `verify_envelope_metadata`); (5) validate payload structure (deny_unknown_fields + enum values per §4.1); (6) shape-check of derived values: `disclosurePolicyDigest` shape, `reportReferenceDigest` shape, `source` fields non-empty/hex64 shape, digest shape of envelope projectionDigest; derived digests are shape-checked only. (7) `canonical_bytes` re-render equality of envelope. Failures: §7 table.
@@ -505,11 +507,12 @@ Negative tests: envelope byte flip ⇒ PROJ-0001/SOMA-CMP-0004 split correctly; 
 
 ### Task G — Diagnostics registration + invalid-fixture set
 Deps: C, F
-Files: `vendored/soma/v1.1/diagnostics.json` (add only `SOMA-CMP-0011` `duplicate event identity` — the sole proposed new code; existing criterion codes remain resolved via their category fallbacks); new `tests/fixtures/slice3/*` invalid envelopes + valid goldens.
-RED: diagnostic category resolution for `SOMA-CMP-0011` fails until registered; fixture parse expected-fail mismatch.
-GREEN min: minimal schema for `SOMA-CMP-0011` only; goldens: `valid/review-report*.json`, `valid/timeline*.json` (matching canonical renders), `invalid/*` cases per §10.
-Negative tests: unknown code family in fixtures ⇒ no diagnostic; invalid category mapping ⇒ conservative fallback; goldens byte-locked per golden files semantics for Slice 2 (referenced).
-Invariant: every new code appears in diagnostics.json and resolves via `category_for`; no uncategorized SOMA-CMP/PROJ codes.
+**Post-#240 repair:** the original "add `SOMA-CMP-0011` to `vendored/soma/v1.1/diagnostics.json`" instruction is obsolete — #240 locked the vendored catalogues (provenance + v1.1→v1.2 additivity). The code is pinned in the repository-owned extension registry instead; the vendored trees stay byte-identical to upstream.
+Files: `src/workflow/soma/diagnostic_extensions.rs` (Lite-owned extension registry: pin `SOMA-CMP-0011 → duplicate_identity`; upstream-then-extension resolution order; fail-closed cross-registry duplicate rejection; fail-safe unknown-code fallback); wiring in `src/workflow/soma/mod.rs` (`category_for`); regressions in `tests/emitted_diagnostics_conformance.rs`; new `tests/fixtures/slice3/*` invalid envelopes + valid goldens.
+RED: diagnostic category resolution for `SOMA-CMP-0011` fails until the extension registry exists (falls back to `general`); fixture parse expected-fail mismatch.
+GREEN min: `SOMA-CMP-0011` resolves to `duplicate_identity` through `category_for`; the live registries are disjoint; goldens: `valid/review-report*.json`, `valid/timeline*.json` (matching canonical renders), `invalid/*` cases per §10.
+Negative tests: an extension code already published upstream is rejected; a code duplicated inside the extension registry is rejected; unknown codes fall back to `general`; the vendored v1.1/v1.2 catalogue additivity holds and the vendored bytes carry no EOL churn; goldens byte-locked per golden files semantics for Slice 2 (referenced).
+Invariant: every new code resolves via `category_for` (upstream catalogue first, then the Lite extension registry); no uncategorized SOMA-CMP/PROJ codes; no edits to `vendored/soma/**`.
 
 ### Task H — Review/Timeline fixtures + golden locks
 Deps: C, F, G

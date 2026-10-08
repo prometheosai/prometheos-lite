@@ -261,6 +261,54 @@ fn duplicate_event_identity_is_hard_error() {
     assert_eq!(err[0].code, "SOMA-CMP-0011");
 }
 
+/// Two identical review issues (same issueType/severity/file/line/
+/// ruleId/message) are a duplicate identity — the projection fails
+/// closed with the duplicate-identity diagnostic, never an ambiguous
+/// render.
+#[test]
+fn duplicate_review_issue_identity_is_hard_error() {
+    let wf = base_wf();
+    let mut report = synthetic_report();
+    report.issues.push(report.issues[0].clone());
+    let facts = ReviewFacts {
+        report: Some(&report),
+        gates: &synthetic_gates(),
+        evidence_bundles: &[],
+        scope: ReviewScope::default(),
+    };
+    let err = render_review_projection(&wf, &facts, None).expect_err("must fail");
+    assert_eq!(err[0].code, "SOMA-CMP-0011");
+}
+
+/// Two identical gate records (same nodeId/verdict/failureClass/
+/// basisEvidenceDigest) are a duplicate identity — fail closed, never a
+/// silently deduplicated render.
+#[test]
+fn duplicate_gate_record_identity_is_hard_error() {
+    let wf = base_wf();
+    let mut gates = synthetic_gates();
+    gates.push(
+        HumanDecisionRecordV1::author(
+            "intake.review",
+            HumanVerdict::Approved,
+            "alice",
+            ReviewChannel::CliInteractive,
+            "a".repeat(64),
+            "reviewed and accepted",
+            "2026-10-05T00:00:00Z",
+        )
+        .expect("author succeeds"),
+    );
+    let facts = ReviewFacts {
+        report: Some(&synthetic_report()),
+        gates: &gates,
+        evidence_bundles: &[],
+        scope: ReviewScope::default(),
+    };
+    let err = render_review_projection(&wf, &facts, None).expect_err("must fail");
+    assert_eq!(err[0].code, "SOMA-CMP-0011");
+}
+
 #[test]
 fn legacy_unverified_provenance_is_preserved_and_never_coerced() {
     let wf = base_wf();
