@@ -155,7 +155,7 @@ fn map_projection_error(err: crate::work::soma_projection::ProjectionError) -> A
 /// list of entity tags, each optionally weak (`W/"…"`); `*` matches any
 /// current representation. Weak tags compare by opaque value for
 /// revalidation purposes.
-fn if_none_match_matches(header: &str, etag: &str) -> bool {
+pub(crate) fn if_none_match_matches(header: &str, etag: &str) -> bool {
     let header = header.trim();
     if header == "*" {
         return true;
@@ -175,7 +175,10 @@ fn if_none_match_matches(header: &str, etag: &str) -> bool {
 /// client would keep stale exhaustion metadata and never drain the new
 /// event. Non-paged resources (run batches, run keys) bind the body
 /// alone.
-fn representation_etag(bytes: &[u8], paging: Option<(i64, bool)>) -> Result<String, ApiError> {
+pub(crate) fn representation_etag(
+    bytes: &[u8],
+    paging: Option<(i64, bool)>,
+) -> Result<String, ApiError> {
     let body_sha = crate::workflow::soma::canonical::sha256_hex(bytes);
     let binding = match paging {
         Some((next_cursor, more_available)) => serde_json::json!({

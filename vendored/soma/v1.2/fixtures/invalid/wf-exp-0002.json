@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "wf-exp-0002",
+  "name": "Base",
+  "kind": "atomic",
+  "inputPorts": [],
+  "outputPorts": [],
+  "body": [
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "a",
+      "executionClass": "deterministic",
+      "inputs": [
+        {
+          "name": "x",
+          "type": "T",
+          "acceptedOutcomes": [
+            "Produced"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "type": "T",
+          "emits": [
+            "Produced"
+          ]
+        }
+      ],
+      "authority": [],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "b",
+      "executionClass": "deterministic",
+      "inputs": [
+        {
+          "name": "y",
+          "type": "T",
+          "acceptedOutcomes": [
+            "Produced"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x",
+          "type": "T",
+          "emits": [
+            "Produced"
+          ]
+        }
+      ],
+      "authority": [],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    }
+  ],
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "tools": {
+      "ship": [
+        "ship.v1"
+      ]
+    },
+    "readableScopes": [
+      "orders"
+    ],
+    "writableScopes": [
+      "shipping"
+    ],
+    "networkPolicy": {
+      "default": "deny"
+    },
+    "providerPolicy": {
+      "allowlist": [
+        "provider-1"
+      ]
+    },
+    "secrets": [
+      {
+        "name": "cred",
+        "scopes": [
+          "shipping"
+        ]
+      }
+    ]
+  }
+}

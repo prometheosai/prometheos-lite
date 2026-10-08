@@ -1,0 +1,41 @@
+{
+  "id": "prof-budget-siblings",
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "harness": "harness://gvisor@1.0",
+  "declared": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "budgets": {
+      "tokens": 1000
+    }
+  },
+  "effective": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "budgets": {
+      "tokens": 1000
+    }
+  },
+  "units": [
+    {
+      "name": "u1",
+      "budgets": {
+        "tokens": 600
+      }
+    },
+    {
+      "name": "u2",
+      "budgets": {
+        "tokens": 600
+      }
+    }
+  ],
+  "limits": {
+    "tokens": 5000
+  }
+}

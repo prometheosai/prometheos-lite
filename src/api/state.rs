@@ -45,6 +45,13 @@ pub struct AppState {
     /// are observed through the durable status at the run loop's
     /// cancellation checkpoints.
     pub run_cancels: Arc<RunCancelRegistry>,
+    /// #132 Slice 3: the immutable runtime capability declaration, built
+    /// ONCE during THIS AppState's construction (never a global — each
+    /// instance binds its own; tests stay isolated; no first-request
+    /// race). Construction is fallible: an invalid or noncanonicalizable
+    /// declaration prevents application startup (the error propagates;
+    /// no panic, no partial state).
+    pub runtime_capabilities: Arc<crate::api::runtime_capabilities::RuntimeCapabilityDeclaration>,
 }
 
 impl AppState {
@@ -69,6 +76,14 @@ impl AppState {
             intent_classifier,
             request_count: Arc::new(AtomicU64::new(0)),
             run_cancels: Arc::new(RunCancelRegistry::default()),
+            // #132 Slice 3: fallible declaration construction — an
+            // invalid or noncanonicalizable declaration prevents startup.
+            runtime_capabilities: Arc::new(
+                crate::api::runtime_capabilities::RuntimeCapabilityDeclaration::build(
+                    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                )
+                .map_err(|e| format!("runtime capability declaration failed: {e}"))?,
+            ),
         })
     }
 

@@ -1,0 +1,17 @@
+{
+  "id": "reqs-1",
+  "schemaVersion": "9.9.9",
+  "version": "1.0.0",
+  "requiredSpecVersion": "1.2.0",
+  "adapterRequirements": [{"family": "cli", "minRevision": "2"}],
+  "requiredCapabilities": ["file.read"],
+  "optionalCapabilities": ["shell.exec"],
+  "degradationPermitted": true,
+  "forbidSubstitution": false,
+  "workspace": {"workspace": "write"},
+  "continuity": {"resume": true},
+  "evidenceObligations": {"requireEvidence": true},
+  "hardLimits": {"tokens": 50000},
+  "freshness": {"notAfter": "2027-01-01T00:00:00Z", "trustedSources": ["registry"]},
+  "locality": {"allowedExecution": ["local"]}
+}

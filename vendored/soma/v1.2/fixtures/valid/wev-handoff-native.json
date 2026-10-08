@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "ev-ho",
+  "eventType": "handoff",
+  "actor": {
+    "kind": "agent",
+    "identity": "agent-a",
+    "implementation": {
+      "name": "soma",
+      "revision": "r1"
+    }
+  },
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none"
+  },
+  "effectiveAuthority": {
+    "executionClass": "deterministic",
+    "mutation": "none"
+  },
+  "sequence": 0,
+  "timestamp": "2026-01-01T00:00:00Z",
+  "idempotencyKey": "idem-1",
+  "correlationId": "corr-1",
+  "repoRevision": "abc123",
+  "compatibility": {
+    "schemaVersion": "1.1.0",
+    "minReaderVersion": "1.0.0"
+  },
+  "parents": [
+    "ev-src"
+  ],
+  "payload": {
+    "handoff": {
+      "target": {
+        "kind": "agent",
+        "identity": "agent-b",
+        "implementation": {
+          "name": "soma",
+          "revision": "r1"
+        }
+      },
+      "semanticIdentity": "task-42",
+      "preservesCheckpoint": true
+    }
+  },
+  "semanticDigest": "422424b44bb5f1649d58f4653eb4088ea68c2f1b2ba4e9e56136ba8df8f606bc"
+}

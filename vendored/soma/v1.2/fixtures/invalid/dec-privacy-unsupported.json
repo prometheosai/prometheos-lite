@@ -1,0 +1,34 @@
+{
+  "id": "dec-privacy-unsupported-1",
+  "schemaVersion": "1.2.0",
+  "version": "1.0.0",
+  "requirementsDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capabilitySetDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evaluatedAt": "2026-06-01T00:00:00Z",
+  "status": "incompatible",
+  "selectedSpecVersion": "1.2.0",
+  "declaredSpecVersions": ["1.0.0", "1.1.0", "1.2.0"],
+  "requiredCapabilities": ["file.read"],
+  "capabilitiesCovered": ["file.read"],
+  "optionalCapabilities": [],
+  "omissions": [],
+  "workspaceRequired": {},
+  "workspaceDeclared": {},
+  "freshness": {"notAfter": "2027-01-01T00:00:00Z"},
+  "declarations": [
+    {"digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source": "runtime-a", "declaredAt": "2026-01-01T00:00:00Z"}
+  ],
+  "substitutions": [],
+  "substitutionPermitted": true,
+  "degradationPermitted": false,
+  "authority": {
+    "declared": {"executionClass": "deterministic", "mutation": "none"},
+    "effective": {"executionClass": "deterministic", "mutation": "none"}
+  },
+  "requirementConstraints": {
+    "privacy": ["phi"]
+  },
+  "diagnostics": [
+    {"code": "SOMA-CAP-0001", "severity": "error", "category": "negotiation_missing_capability", "message": "required privacy class phi is not declared by the runtime"}
+  ]
+}
