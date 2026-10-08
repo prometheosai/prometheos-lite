@@ -1,0 +1,110 @@
+{
+  "$id": "/schemas/ExecutionProfile.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionProfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schemaVersion", "version", "harness", "declared", "effective"],
+  "properties": {
+    "id": {"type": "string"},
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "harness": {"type": "string"},
+    "model": {"type": "string"},
+    "provider": {"type": "string"},
+    "declared": {"$ref": "#/$defs/Profile"},
+    "effective": {"$ref": "#/$defs/Profile"},
+    "units": {"type": "array", "items": {"$ref": "#/$defs/Unit"}},
+    "limits": {"$ref": "#/$defs/Budgets"},
+    "approvalRules": {"type": "array", "items": {"$ref": "#/$defs/ApprovalRule"}},
+    "evidence": {"$ref": "#/$defs/EvidencePolicy"},
+    "redaction": {"$ref": "#/$defs/RedactionPolicy"},
+    "retention": {"$ref": "#/$defs/RetentionPolicy"},
+    "validation": {"$ref": "#/$defs/ValidationPolicy"}
+  },
+  "$defs": {
+    "Profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority"],
+      "properties": {
+        "authority": {"$ref": "AuthorityProfile.schema.json"},
+        "boundaries": {"$ref": "#/$defs/Boundaries"},
+        "budgets": {"$ref": "#/$defs/Budgets"},
+        "capabilities": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "Unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string"},
+        "budgets": {"$ref": "#/$defs/Budgets"}
+      }
+    },
+    "Boundaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workspace": {"enum": ["none", "read", "write"]},
+        "filesystem": {"enum": ["none", "read", "write"]},
+        "git": {"enum": ["none", "read", "write"]},
+        "process": {"enum": ["none", "allow", "deny"]},
+        "network": {"enum": ["none", "allow", "deny"]},
+        "secret": {"enum": ["none", "read"]}
+      }
+    },
+    "Budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens": {"type": "number", "minimum": 0},
+        "cost": {"type": "number", "minimum": 0},
+        "duration": {"type": "number", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "concurrency": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ApprovalRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effect"],
+      "properties": {
+        "effect": {"type": "string"},
+        "escalation": {"type": "string"}
+      }
+    },
+    "EvidencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retain": {"type": "array", "items": {"type": "string"}},
+        "minRetentionDays": {"type": "integer", "minimum": 0}
+      }
+    },
+    "RedactionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protectedFields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "RetentionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"type": "string"},
+        "ttlDays": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ValidationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requireEvidence": {"type": "boolean"},
+        "failClosed": {"type": "boolean", "const": true}
+      }
+    }
+  }
+}

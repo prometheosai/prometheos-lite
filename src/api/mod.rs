@@ -11,6 +11,7 @@ pub mod messages;
 pub mod playbooks;
 pub mod projects;
 pub mod router;
+pub mod runtime_capabilities;
 pub mod server;
 pub mod state;
 pub mod validation;

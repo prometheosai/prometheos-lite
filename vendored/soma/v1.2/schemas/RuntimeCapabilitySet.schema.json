@@ -1,0 +1,90 @@
+{
+  "$id": "/schemas/RuntimeCapabilitySet.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RuntimeCapabilitySet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schemaVersion", "version", "identity", "declaredAt"],
+  "properties": {
+    "id": {"type": "string"},
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "identity": {"$ref": "#/$defs/Identity"},
+    "declaredAt": {"format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", "type": "string"},
+    "specVersions": {
+      "description": "SOMA/SOMA++ bundle versions this runtime can consume.",
+      "items": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+      "type": "array"
+    },
+    "adapterFamilies": {
+      "items": {"$ref": "#/$defs/AdapterFamily"},
+      "type": "array"
+    },
+    "effectClasses": {
+      "description": "Tool/effect classes this runtime can execute. Capability metadata, never authority.",
+      "items": {"type": "string"},
+      "type": "array"
+    },
+    "workspace": {"$ref": "#/$defs/Boundaries"},
+    "checkpointImport": {"type": "boolean"},
+    "checkpointExport": {"type": "boolean"},
+    "resumeSupport": {"type": "boolean"},
+    "eventStreaming": {"type": "boolean"},
+    "readProjection": {"type": "boolean"},
+    "locality": {"enum": ["local", "remote", "hybrid"]},
+    "privacyClasses": {
+      "description": "Privacy handling characteristics declared by this runtime.",
+      "items": {"type": "string"},
+      "type": "array"
+    },
+    "maxStructuredInput": {"minimum": 0, "type": "number"},
+    "maxStructuredOutput": {"minimum": 0, "type": "number"},
+    "budgetCeilings": {"$ref": "#/$defs/Budgets"},
+    "evidenceAttachment": {"type": "boolean"},
+    "validation": {"type": "boolean"},
+    "approvalEscalation": {"type": "boolean"}
+  },
+  "$defs": {
+    "Identity": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "revision": {"type": "string"}
+      },
+      "required": ["name", "revision"],
+      "type": "object"
+    },
+    "AdapterFamily": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {"type": "string"},
+        "revision": {"type": "string"}
+      },
+      "required": ["family", "revision"],
+      "type": "object"
+    },
+    "Boundaries": {
+      "additionalProperties": false,
+      "properties": {
+        "filesystem": {"enum": ["none", "read", "write"]},
+        "git": {"enum": ["none", "read", "write"]},
+        "network": {"enum": ["none", "allow", "deny"]},
+        "process": {"enum": ["none", "allow", "deny"]},
+        "secret": {"enum": ["none", "read"]},
+        "workspace": {"enum": ["none", "read", "write"]}
+      },
+      "type": "object"
+    },
+    "Budgets": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {"minimum": 0, "type": "integer"},
+        "cost": {"minimum": 0, "type": "number"},
+        "duration": {"minimum": 0, "type": "number"},
+        "retries": {"minimum": 0, "type": "integer"},
+        "tokens": {"minimum": 0, "type": "number"}
+      },
+      "type": "object"
+    }
+  }
+}

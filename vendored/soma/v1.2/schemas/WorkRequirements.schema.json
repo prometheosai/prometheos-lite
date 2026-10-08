@@ -1,0 +1,125 @@
+{
+  "$id": "/schemas/WorkRequirements.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkRequirements",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schemaVersion", "version", "requiredSpecVersion", "degradationPermitted", "forbidSubstitution"],
+  "properties": {
+    "id": {"type": "string"},
+    "schemaVersion": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "version": {"pattern": "^\\d+\\.\\d+\\.\\d+$", "type": "string"},
+    "requiredSpecVersion": {
+      "description": "Minimum SOMA/SOMA++ bundle contract version the work requires.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "type": "string"
+    },
+    "adapterRequirements": {
+      "items": {"$ref": "#/$defs/AdapterRequirement"},
+      "type": "array"
+    },
+    "requiredCapabilities": {
+      "description": "Effect classes that MUST be available; absence fails before dispatch.",
+      "items": {"type": "string"},
+      "type": "array"
+    },
+    "optionalCapabilities": {
+      "description": "Effect classes that may be absent only when degradationPermitted is true.",
+      "items": {"type": "string"},
+      "type": "array"
+    },
+    "degradationPermitted": {
+      "description": "Explicit permission for optional-capability degradation; never implied.",
+      "type": "boolean"
+    },
+    "forbidSubstitution": {
+      "description": "When true, no runtime/harness/workspace substitution is acceptable.",
+      "type": "boolean"
+    },
+    "workspace": {"$ref": "#/$defs/Boundaries"},
+    "continuity": {"$ref": "#/$defs/Continuity"},
+    "evidenceObligations": {"$ref": "#/$defs/EvidenceObligations"},
+    "hardLimits": {"$ref": "#/$defs/Budgets"},
+    "freshness": {"$ref": "#/$defs/Freshness"},
+    "locality": {"$ref": "#/$defs/LocalityConstraints"}
+  },
+  "$defs": {
+    "AdapterRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {"type": "string"},
+        "minRevision": {"type": "string"}
+      },
+      "required": ["family", "minRevision"],
+      "type": "object"
+    },
+    "Boundaries": {
+      "additionalProperties": false,
+      "properties": {
+        "filesystem": {"enum": ["none", "read", "write"]},
+        "git": {"enum": ["none", "read", "write"]},
+        "network": {"enum": ["none", "allow", "deny"]},
+        "process": {"enum": ["none", "allow", "deny"]},
+        "secret": {"enum": ["none", "read"]},
+        "workspace": {"enum": ["none", "read", "write"]}
+      },
+      "type": "object"
+    },
+    "Budgets": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {"minimum": 0, "type": "integer"},
+        "cost": {"minimum": 0, "type": "number"},
+        "duration": {"minimum": 0, "type": "number"},
+        "retries": {"minimum": 0, "type": "integer"},
+        "tokens": {"minimum": 0, "type": "number"}
+      },
+      "type": "object"
+    },
+    "Continuity": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpointExport": {"type": "boolean"},
+        "checkpointImport": {"type": "boolean"},
+        "resume": {"type": "boolean"}
+      },
+      "type": "object"
+    },
+    "EvidenceObligations": {
+      "additionalProperties": false,
+      "properties": {
+        "requireEvidence": {"type": "boolean"}
+      },
+      "type": "object"
+    },
+    "Freshness": {
+      "additionalProperties": false,
+      "properties": {
+        "notAfter": {
+          "description": "Capability declarations used for this decision must be declared at or before this instant (RFC 3339 UTC, Z-normalized).",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+          "type": "string"
+        },
+        "trustedSources": {
+          "description": "When present, declaration provenance sources must be members of this list.",
+          "items": {"type": "string"},
+          "type": "array"
+        }
+      },
+      "required": ["notAfter"],
+      "type": "object"
+    },
+    "LocalityConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedExecution": {
+          "items": {"enum": ["local", "remote", "hybrid"]},
+          "type": "array"
+        },
+        "privacy": {"items": {"type": "string"}, "type": "array"}
+      },
+      "type": "object"
+    }
+  }
+}

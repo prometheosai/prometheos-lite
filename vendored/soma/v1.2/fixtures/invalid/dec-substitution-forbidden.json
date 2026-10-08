@@ -1,0 +1,33 @@
+{
+  "id": "dec-substitution-forbidden-1",
+  "schemaVersion": "1.2.0",
+  "version": "1.0.0",
+  "requirementsDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capabilitySetDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evaluatedAt": "2026-06-01T00:00:00Z",
+  "status": "incompatible",
+  "selectedSpecVersion": "1.2.0",
+  "declaredSpecVersions": ["1.0.0", "1.1.0", "1.2.0"],
+  "requiredCapabilities": ["file.read"],
+  "capabilitiesCovered": ["file.read", "file.write"],
+  "optionalCapabilities": [],
+  "omissions": [],
+  "workspaceRequired": {},
+  "workspaceDeclared": {},
+  "freshness": {"notAfter": "2027-01-01T00:00:00Z"},
+  "declarations": [
+    {"digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source": "registry", "declaredAt": "2026-01-01T00:00:00Z"}
+  ],
+  "substitutions": [
+    {"from": "runtime-a", "to": "runtime-b"}
+  ],
+  "substitutionPermitted": false,
+  "degradationPermitted": false,
+  "authority": {
+    "declared": {"executionClass": "deterministic", "mutation": "none"},
+    "effective": {"executionClass": "deterministic", "mutation": "none"}
+  },
+  "diagnostics": [
+    {"code": "SOMA-CAP-0004", "severity": "error", "category": "negotiation_forbidden_substitution", "message": "substitution is forbidden by the work requirements"}
+  ]
+}

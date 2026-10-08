@@ -118,6 +118,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/work-contexts/:id/traces", get(list_work_traces))
         .route("/work-contexts/:id/traces/:run_id", get(get_trace_by_run))
         .nest("/control-panel", create_control_panel_router())
+        // #132 Slice 3: the capability-negotiation route family (the
+        // simulate route's DefaultBodyLimit::disable() lives with its
+        // handler — see runtime_capabilities::routes).
+        .merge(crate::api::runtime_capabilities::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             count_requests_middleware,

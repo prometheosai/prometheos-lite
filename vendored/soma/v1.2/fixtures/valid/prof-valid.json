@@ -1,0 +1,32 @@
+{
+  "declared": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "budgets": {
+      "concurrency": 4,
+      "cost": 1.0,
+      "duration": 60,
+      "retries": 2,
+      "tokens": 100
+    }
+  },
+  "effective": {
+    "authority": {
+      "executionClass": "deterministic",
+      "mutation": "none"
+    },
+    "budgets": {
+      "concurrency": 4,
+      "cost": 1.0,
+      "duration": 60,
+      "retries": 2,
+      "tokens": 100
+    }
+  },
+  "harness": "harness://gvisor@1.0",
+  "id": "prof-valid",
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0"
+}

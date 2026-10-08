@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "1.1.0",
+  "version": "1.1.0",
+  "id": "wf-exp-0005",
+  "name": "Base",
+  "kind": "atomic",
+  "inputPorts": [
+    {
+      "name": "order",
+      "direction": "input",
+      "type": "Order",
+      "cardinality": "single",
+      "requiredness": "required"
+    }
+  ],
+  "outputPorts": [
+    {
+      "name": "shipment",
+      "direction": "output",
+      "type": "Shipment",
+      "cardinality": "single",
+      "requiredness": "required"
+    }
+  ],
+  "body": [
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "op1",
+      "executionClass": "deterministic",
+      "inputs": [
+        {
+          "name": "order",
+          "type": "Order",
+          "acceptedOutcomes": [
+            "Produced"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "shipment",
+          "type": "Shipment",
+          "emits": [
+            "Produced"
+          ]
+        }
+      ],
+      "authority": [
+        "ship"
+      ],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    },
+    {
+      "schemaVersion": "1.1.0",
+      "version": "1.1.0",
+      "id": "dead-end",
+      "executionClass": "deterministic",
+      "inputs": [
+        {
+          "name": "unfed-input",
+          "type": "Order",
+          "acceptedOutcomes": [
+            "Produced"
+          ]
+        }
+      ],
+      "outputs": [],
+      "authority": [],
+      "effects": [],
+      "uses": [],
+      "secrets": [],
+      "context": []
+    }
+  ],
+  "authority": {
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "tools": {
+      "ship": [
+        "ship.v1"
+      ]
+    },
+    "readableScopes": [
+      "orders"
+    ],
+    "writableScopes": [
+      "shipping"
+    ],
+    "networkPolicy": {
+      "default": "deny"
+    },
+    "providerPolicy": {
+      "allowlist": [
+        "provider-1"
+      ]
+    },
+    "secrets": [
+      {
+        "name": "cred",
+        "scopes": [
+          "shipping"
+        ]
+      }
+    ]
+  }
+}
