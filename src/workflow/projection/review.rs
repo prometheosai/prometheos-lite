@@ -2,16 +2,20 @@
 //!
 //! Render is a pure function of `(WorkflowDefinition, ReviewFacts, policy)`.
 //! Against-source verification fresh-renders from THE SAME inputs and
-//! compares; the structural byte path checks envelope/schema shape only.
+//! compares; the structural byte path checks envelope/schema/digest shape
+//! only. Disclosure is a validated, fail-closed, non-cascading allow-list:
+//! nothing sensitive is exposed unless policy authorizes it, and counts are
+//! independently sensitive (§6.2).
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::harness::review::{ReviewIssueType, ReviewReport, ReviewSeverity};
 use crate::work::soma_projection::RunKey;
 use crate::workflow::evaluate::EvidenceBundle;
-use crate::workflow::graph_gates::{HumanDecisionRecordV1, HumanVerdict};
+use crate::workflow::graph_gates::{HumanDecisionRecordV1, HumanVerdict, ReviewChannel};
 use crate::workflow::projection::envelope;
+use crate::workflow::projection::graph::GraphRegistry;
 use crate::workflow::projection::{
     PROJECTION_VERSION_V1, VersionedProjectionEnvelope, digest_of, source_digest_of,
     validated_source,
@@ -22,6 +26,33 @@ use crate::workflow::soma::types::Hex64;
 
 pub const REVIEW_SCHEMA_VERSION: &str = "lite.review-report.v1";
 
+/// Domain label for the review facts digest (§3.4.2).
+pub const REVIEW_FACTS_DOMAIN: &str = "projection.review-report.facts.v1";
+/// Domain label for the review policy digest (§3.4.1).
+pub const REVIEW_POLICY_DOMAIN: &str = "projection.review-report.policy.v1";
+
+/// Closed vocabulary of review disclosure targets (§6.1). An unknown target
+/// fails closed with `PROJ-0003`.
+pub const REVIEW_DISCLOSURE_TARGETS: &[&str] = &[
+    "findings",
+    "files",
+    "lines",
+    "messages",
+    "rules",
+    "predicates",
+    "principals",
+    "evidenceReferences",
+];
+/// Closed vocabulary of review count-authorization targets (§6.2).
+pub const REVIEW_COUNT_TARGETS: &[&str] = &[
+    "totalIssues",
+    "byType",
+    "bySeverity",
+    "filesReviewed",
+    "filesWithIssues",
+    "passed",
+];
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ReviewDisclosurePolicy {
@@ -29,21 +60,78 @@ pub struct ReviewDisclosurePolicy {
     pub authorized_targets: Vec<String>,
     #[serde(default)]
     pub count_authorization: Vec<String>,
+    /// §6.3 composite boundaries whose internal finding paths may surface
+    /// verbatim (rendered composite node ids, mirroring Slice-2's
+    /// `authorizedBoundaries`). A finding under an unauthorized composite is
+    /// generalized to the composite's rendered id so no private path leaks.
+    #[serde(default)]
+    pub authorized_boundaries: Vec<String>,
 }
 
 impl ReviewDisclosurePolicy {
+    /// Sort + dedup only; validation is separate (`normalize_review_policy`).
     pub fn normalize(&self) -> Self {
         let mut a = self.authorized_targets.clone();
         let mut c = self.count_authorization.clone();
+        let mut b = self.authorized_boundaries.clone();
         a.sort();
         a.dedup();
         c.sort();
         c.dedup();
+        b.sort();
+        b.dedup();
         Self {
             authorized_targets: a,
             count_authorization: c,
+            authorized_boundaries: b,
         }
     }
+
+    fn has_target(&self, target: &str) -> bool {
+        self.authorized_targets.iter().any(|t| t == target)
+    }
+
+    fn has_count(&self, target: &str) -> bool {
+        self.count_authorization.iter().any(|t| t == target)
+    }
+}
+
+fn hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// §6.1: validate both target lists against the closed vocabularies, then
+/// normalize. Unknown target ⇒ `PROJ-0003`.
+pub fn normalize_review_policy(
+    policy: Option<&ReviewDisclosurePolicy>,
+) -> Result<ReviewDisclosurePolicy, Vec<Diagnostic>> {
+    let raw = policy.cloned().unwrap_or_default();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    for t in &raw.authorized_targets {
+        if !REVIEW_DISCLOSURE_TARGETS.contains(&t.as_str()) {
+            diags.push(Diagnostic::new(
+                "PROJ-0003",
+                format!("unknown review disclosure target: {t}"),
+            ));
+        }
+    }
+    for t in &raw.count_authorization {
+        if !REVIEW_COUNT_TARGETS.contains(&t.as_str()) {
+            diags.push(Diagnostic::new(
+                "PROJ-0003",
+                format!("unknown review count-authorization target: {t}"),
+            ));
+        }
+    }
+    if !diags.is_empty() {
+        diags.sort_by(|a, b| a.code.cmp(&b.code).then_with(|| a.message.cmp(&b.message)));
+        diags.dedup_by(|a, b| a.code == b.code && a.message == b.message);
+        return Err(diags);
+    }
+    Ok(raw.normalize())
 }
 
 /// Serializes `RunKey` via its typed wire spelling (RunKeyKind wire name);
@@ -80,6 +168,9 @@ pub struct ReviewFacts<'a> {
     pub report: Option<&'a ReviewReport>,
     pub gates: &'a [HumanDecisionRecordV1],
     pub evidence_bundles: &'a [EvidenceBundle],
+    /// Explicit borrowed authoritative evidence references (item 6: evidence
+    /// attribution comes from here, never from the workflow AST).
+    pub evidence_references: &'a [EvidenceReference],
     pub scope: ReviewScope,
 }
 
@@ -88,6 +179,7 @@ pub struct ReviewFacts<'a> {
 pub struct ReviewProjectionPayload {
     pub review_schema_version: String,
     pub disclosure_policy_digest: String,
+    pub report_reference_digest: String,
     pub source: ReviewSourceIdentity,
     pub authority: ReviewAuthoritySummary,
     pub gates: Vec<ReviewGateView>,
@@ -112,7 +204,11 @@ pub struct ReviewSourceIdentity {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ReviewAuthoritySummary {
     pub reviewer_principals: Vec<PrincipalView>,
+    /// The single distinct channel when uniform; `None` when absent or mixed.
     pub review_channel: Option<String>,
+    /// Every distinct channel label observed, sorted (item 6: heterogeneous
+    /// channels are represented, never silently collapsed to the first).
+    pub review_channels: Vec<String>,
     pub executor_class: Option<String>,
     pub repo_binding: Option<RepoBindingView>,
 }
@@ -236,6 +332,13 @@ fn gate_verdict_name(v: HumanVerdict) -> &'static str {
     }
 }
 
+fn channel_label(c: &ReviewChannel) -> String {
+    match c {
+        ReviewChannel::CliInteractive => "cli-interactive".to_string(),
+        ReviewChannel::ExternalSystem { system_id } => format!("external-system:{system_id}"),
+    }
+}
+
 fn render_issues(report: Option<&ReviewReport>) -> Result<Vec<ReviewIssueView>, Vec<Diagnostic>> {
     let Some(report) = report else {
         return Ok(Vec::new());
@@ -347,23 +450,29 @@ fn render_summary(report: Option<&ReviewReport>) -> ReviewSummaryView {
 
 fn render_authority(gates: &[HumanDecisionRecordV1]) -> ReviewAuthoritySummary {
     let mut seen: BTreeMap<String, PrincipalView> = BTreeMap::new();
+    let mut channels: BTreeSet<String> = BTreeSet::new();
     for g in gates {
         seen.entry(g.decided_by.clone()).or_insert(PrincipalView {
             kind: "human".to_string(),
             identity: Some(g.decided_by.clone()),
         });
+        channels.insert(channel_label(&g.channel));
     }
+    let review_channels: Vec<String> = channels.iter().cloned().collect();
+    // The single distinct channel, or `None` when absent or heterogeneous;
+    // `review_channels` always carries the complete set (item 6).
+    let review_channel = if review_channels.len() == 1 {
+        review_channels.first().cloned()
+    } else {
+        None
+    };
     ReviewAuthoritySummary {
         reviewer_principals: seen.into_values().collect(),
-        review_channel: gates.first().map(|g| match g.channel {
-            crate::workflow::graph_gates::ReviewChannel::CliInteractive => {
-                "cli-interactive".to_string()
-            }
-            crate::workflow::graph_gates::ReviewChannel::ExternalSystem { .. } => {
-                "external-system".to_string()
-            }
-        }),
-        executor_class: Some("human-decision".to_string()),
+        review_channel,
+        review_channels,
+        // No authoritative source field carries an executor class; never claim
+        // one (item 6: remove hardcoded authority claims).
+        executor_class: None,
         repo_binding: None,
     }
 }
@@ -382,59 +491,88 @@ fn render_evidence_references(refs: &[EvidenceReference]) -> Vec<EvidenceReferen
         .collect();
     out.sort_by(|a, b| {
         a.produced_at
-            .cmp(&b.produced_at)
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.produced_at.as_deref().unwrap_or(""))
             .then(a.event_digest.as_str().cmp(b.event_digest.as_str()))
             .then(a.artifact_digest.as_str().cmp(b.artifact_digest.as_str()))
     });
     out
 }
 
-fn render_disposition(
-    gates: &[HumanDecisionRecordV1],
-    bundles: &[EvidenceBundle],
-) -> Result<DispositionView, Vec<Diagnostic>> {
+/// Row 14 / item 6: a gate whose non-empty `basisEvidenceDigest` references no
+/// present authoritative evidence reference is a dangling reference and fails
+/// closed (`SOMA-CMP-0004`).
+fn validate_gate_basis(facts: &ReviewFacts<'_>) -> Result<(), Vec<Diagnostic>> {
+    let refs: BTreeSet<&str> = facts
+        .evidence_references
+        .iter()
+        .map(|r| r.event_digest.as_str())
+        .collect();
+    for g in facts.gates {
+        let basis = g.basis_evidence_digest.trim();
+        if !basis.is_empty() && !refs.contains(basis) {
+            return Err(vec![Diagnostic::new(
+                "SOMA-CMP-0004",
+                format!(
+                    "gate {} basis evidence digest does not reference a present evidence reference",
+                    g.gate_node_id
+                ),
+            )]);
+        }
+    }
+    Ok(())
+}
+
+/// `supportedByEvidence` is bound to the gate basis evidence: at least one
+/// gate must carry a non-empty `basisEvidenceDigest`, and every non-empty one
+/// must match an authoritative evidence reference `eventDigest`. An unrelated
+/// passing bundle never fabricates support (item 6).
+fn supported_by_gate_basis(facts: &ReviewFacts<'_>) -> bool {
+    let refs: BTreeSet<&str> = facts
+        .evidence_references
+        .iter()
+        .map(|r| r.event_digest.as_str())
+        .collect();
+    let mut any = false;
+    for g in facts.gates {
+        let basis = g.basis_evidence_digest.trim();
+        if basis.is_empty() {
+            continue;
+        }
+        any = true;
+        if !refs.contains(basis) {
+            return false;
+        }
+    }
+    any
+}
+
+fn render_disposition(gates: &[HumanDecisionRecordV1], supported: bool) -> DispositionView {
     if gates.is_empty() {
-        return Ok(DispositionView {
+        return DispositionView {
             status: "unavailable".to_string(),
             review_required: false,
             supported_by_evidence: false,
-        });
+        };
     }
-    let has_evidence = bundles.iter().any(|b| {
-        b.validation
-            .as_ref()
-            .map(|v| v.validation_passed)
-            .unwrap_or(false)
-    });
-    if gates.iter().any(|g| g.verdict == HumanVerdict::Rejected) {
-        return Ok(DispositionView {
-            status: "reject".to_string(),
-            review_required: false,
-            supported_by_evidence: has_evidence,
-        });
-    }
-    if gates
+    let status = if gates.iter().any(|g| g.verdict == HumanVerdict::Rejected) {
+        "reject"
+    } else if gates
         .iter()
         .any(|g| g.verdict == HumanVerdict::ChangesRequested)
     {
-        return Ok(DispositionView {
-            status: "changes_required".to_string(),
-            review_required: true,
-            supported_by_evidence: has_evidence,
-        });
+        "changes_required"
+    } else if gates.iter().all(|g| g.verdict == HumanVerdict::Approved) {
+        "approve"
+    } else {
+        "unavailable"
+    };
+    DispositionView {
+        status: status.to_string(),
+        review_required: status == "changes_required",
+        supported_by_evidence: supported,
     }
-    if gates.iter().all(|g| g.verdict == HumanVerdict::Approved) {
-        return Ok(DispositionView {
-            status: "approve".to_string(),
-            review_required: false,
-            supported_by_evidence: has_evidence,
-        });
-    }
-    Ok(DispositionView {
-        status: "unavailable".to_string(),
-        review_required: false,
-        supported_by_evidence: has_evidence,
-    })
 }
 
 fn push_omission(acc: &mut Vec<OmissionView>, section: &str, category: &str, reason: &str) {
@@ -445,81 +583,295 @@ fn push_omission(acc: &mut Vec<OmissionView>, section: &str, category: &str, rea
     });
 }
 
-/// Applies the disclosure policy on top of schema-valid rendered output:
-/// disallowed targets become `withheld` markers with their content
-/// dropped from the rendered view and a corresponding `OmissionView`.
-fn apply_policy(payload: &mut ReviewProjectionPayload, policy: &ReviewDisclosurePolicy) {
-    let allow_principals = policy.authorized_targets.iter().any(|t| t == "principals");
-    let mut omissions = std::mem::take(&mut payload.omissions);
-    if !allow_principals {
-        for principal in payload.authority.reviewer_principals.iter_mut() {
-            principal.identity = None;
-        }
-        push_omission(&mut omissions, "principals", "withheld", "disclosurePolicy");
-    }
+fn sort_omissions(omissions: &mut Vec<OmissionView>) {
     omissions.sort_by(|a, b| {
         a.section
             .cmp(&b.section)
             .then(a.category.cmp(&b.category))
             .then(a.reason.cmp(&b.reason))
     });
+    omissions.dedup();
+}
+
+fn collect_unavailable_omissions(facts: &ReviewFacts<'_>, acc: &mut Vec<OmissionView>) {
+    if facts.report.is_none() {
+        push_omission(acc, "issues", "unavailable", "noAuthoritativeSource");
+        push_omission(acc, "summary", "unavailable", "noAuthoritativeSource");
+    }
+    if facts.gates.is_empty() {
+        push_omission(acc, "gates", "unavailable", "noAuthoritativeSource");
+        push_omission(acc, "authority", "unavailable", "noAuthoritativeSource");
+    }
+    if facts.evidence_references.is_empty() {
+        push_omission(acc, "evidence", "unavailable", "noAuthoritativeSource");
+    }
+}
+
+/// Apply the normalized disclosure policy on top of the raw render: each
+/// withheld target has its content removed and an omission appended; counts
+/// are gated independently through `countAuthorization` (§6.2).
+fn apply_policy(payload: &mut ReviewProjectionPayload, policy: &ReviewDisclosurePolicy) {
+    let mut omissions = std::mem::take(&mut payload.omissions);
+
+    if !policy.has_target("findings") {
+        if !payload.issues.is_empty() {
+            payload.issues.clear();
+            push_omission(&mut omissions, "issues", "withheld", "disclosurePolicy");
+        }
+    } else {
+        let allow_files = policy.has_target("files");
+        let allow_lines = policy.has_target("lines");
+        let allow_messages = policy.has_target("messages");
+        let allow_rules = policy.has_target("rules");
+        let allow_predicates = policy.has_target("predicates");
+        let mut had_file = false;
+        let mut had_line = false;
+        let mut had_message = false;
+        let mut had_rule = false;
+        let mut had_predicate = false;
+        for issue in payload.issues.iter_mut() {
+            if !allow_files && issue.file.is_some() {
+                had_file = true;
+                issue.file = None;
+            }
+            if !allow_lines && issue.line.is_some() {
+                had_line = true;
+                issue.line = None;
+            }
+            if !allow_messages && (!issue.message.is_empty() || issue.suggestion.is_some()) {
+                had_message = true;
+                issue.message = String::new();
+                issue.suggestion = None;
+            }
+            if !allow_rules && !issue.rule_id.is_empty() {
+                had_rule = true;
+                issue.rule_id = String::new();
+            }
+            if !allow_predicates && (!issue.issue_type.is_empty() || !issue.severity.is_empty()) {
+                had_predicate = true;
+                issue.issue_type = String::new();
+                issue.severity = String::new();
+            }
+        }
+        if had_file {
+            push_omission(&mut omissions, "files", "withheld", "disclosurePolicy");
+        }
+        if had_line {
+            push_omission(&mut omissions, "lines", "withheld", "disclosurePolicy");
+        }
+        if had_message {
+            push_omission(&mut omissions, "messages", "withheld", "disclosurePolicy");
+        }
+        if had_rule {
+            push_omission(&mut omissions, "rules", "withheld", "disclosurePolicy");
+        }
+        if had_predicate {
+            push_omission(&mut omissions, "predicates", "withheld", "disclosurePolicy");
+        }
+    }
+
+    if !policy.has_target("principals") {
+        let mut had = false;
+        for principal in payload.authority.reviewer_principals.iter_mut() {
+            if principal.identity.is_some() {
+                had = true;
+                principal.identity = None;
+            }
+        }
+        if had {
+            push_omission(&mut omissions, "principals", "withheld", "disclosurePolicy");
+        }
+    }
+
+    if !policy.has_target("evidenceReferences") && !payload.evidence_references.is_empty() {
+        payload.evidence_references.clear();
+        push_omission(&mut omissions, "evidence", "withheld", "disclosurePolicy");
+    }
+
+    let mut counts_withheld = false;
+    if !policy.has_count("totalIssues") && payload.summary.total_issues.is_some() {
+        payload.summary.total_issues = None;
+        counts_withheld = true;
+    }
+    if !policy.has_count("byType") && !payload.summary.by_type.is_empty() {
+        payload.summary.by_type.clear();
+        counts_withheld = true;
+    }
+    if !policy.has_count("bySeverity") && !payload.summary.by_severity.is_empty() {
+        payload.summary.by_severity.clear();
+        counts_withheld = true;
+    }
+    if !policy.has_count("filesReviewed") && payload.summary.files_reviewed.is_some() {
+        payload.summary.files_reviewed = None;
+        counts_withheld = true;
+    }
+    if !policy.has_count("filesWithIssues") && payload.summary.files_with_issues.is_some() {
+        payload.summary.files_with_issues = None;
+        counts_withheld = true;
+    }
+    if !policy.has_count("passed") && payload.summary.passed.is_some() {
+        payload.summary.passed = None;
+        counts_withheld = true;
+    }
+    if counts_withheld {
+        push_omission(&mut omissions, "summary", "withheld", "disclosurePolicy");
+    }
+
+    sort_omissions(&mut omissions);
     payload.omissions = omissions;
 }
 
-fn collect_omissions(facts: &ReviewFacts<'_>) -> Vec<OmissionView> {
-    let mut out = Vec::new();
-    if facts.report.is_none() {
-        push_omission(&mut out, "issues", "unavailable", "noAuthoritativeSource");
-        push_omission(&mut out, "summary", "unavailable", "noAuthoritativeSource");
-    }
-    if facts.gates.is_empty() {
-        push_omission(&mut out, "gates", "unavailable", "noAuthoritativeSource");
-    }
-    if facts.evidence_bundles.is_empty() {
-        push_omission(&mut out, "evidence", "unavailable", "noAuthoritativeSource");
-    }
-    out.sort_by(|a, b| {
-        a.section
-            .cmp(&b.section)
-            .then(a.category.cmp(&b.category))
-            .then(a.reason.cmp(&b.reason))
-    });
-    out
-}
-
-fn build_payload(
+/// §3.4.2: `reportReferenceDigest` preimage over the authoritative facts.
+fn report_reference_digest(
     wf: &WorkflowDefinition,
     facts: &ReviewFacts<'_>,
-    disclosure: &ReviewDisclosurePolicy,
-) -> Result<ReviewProjectionPayload, Vec<Diagnostic>> {
-    let issue_renders = render_issues(facts.report)?;
-    let gates = render_gates(facts.gates)?;
-    let summary = render_summary(facts.report);
-    let authority = render_authority(facts.gates);
-    let evidence_references = render_evidence_references(&wf.evidence);
-    let omissions = collect_omissions(facts);
-    let disposition = render_disposition(facts.gates, facts.evidence_bundles)?;
-
-    let normalized = disclosure.normalize();
-    let disclosure_policy_digest_preimage = serde_json::json!({
-        "domain": "projection.review-report.policy.v1",
-        "schemaVersion": REVIEW_SCHEMA_VERSION,
+) -> Result<String, Vec<Diagnostic>> {
+    let mut gate_ids: Vec<String> = facts.gates.iter().map(|g| g.gate_node_id.clone()).collect();
+    gate_ids.sort();
+    gate_ids.dedup();
+    let mut evidence_ref_ids: Vec<String> = facts
+        .evidence_references
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    evidence_ref_ids.sort();
+    evidence_ref_ids.dedup();
+    let preimage = serde_json::json!({
+        "domain": REVIEW_FACTS_DOMAIN,
         "rootSourceDigest": source_digest_of(wf)?,
-        "policy": serde_json::to_value(&normalized).map_err(|e| {
+        "reviewSchemaVersion": REVIEW_SCHEMA_VERSION,
+        "facts": {
+            "report": facts.report.is_some(),
+            "gates": !facts.gates.is_empty(),
+            "evidence": !facts.evidence_references.is_empty(),
+            "gateIds": gate_ids,
+            "evidenceRefIds": evidence_ref_ids,
+        },
+    });
+    digest_of(&preimage)
+}
+
+fn policy_digest(
+    root_source_digest: &str,
+    policy: &ReviewDisclosurePolicy,
+) -> Result<String, Vec<Diagnostic>> {
+    let preimage = serde_json::json!({
+        "domain": REVIEW_POLICY_DOMAIN,
+        "schemaVersion": REVIEW_SCHEMA_VERSION,
+        "rootSourceDigest": root_source_digest,
+        "policy": serde_json::to_value(policy).map_err(|e| {
             vec![Diagnostic::new(
                 "PROJ-0001",
                 format!("disclosure policy cannot be serialized ({e})"),
             )]
         })?,
     });
-    let disclosure_policy_digest = digest_of(&disclosure_policy_digest_preimage)?;
+    digest_of(&preimage)
+}
+
+/// §6.3: validate authorized boundary ids against the workflow registry.
+fn validate_boundaries(
+    registry: &GraphRegistry<'_>,
+    boundaries: &[String],
+) -> Result<(), Vec<Diagnostic>> {
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    for id in boundaries {
+        match registry.entry(id) {
+            None => diags.push(Diagnostic::new(
+                "PROJ-0003",
+                format!("unknown boundary id in disclosure policy: {id}"),
+            )),
+            Some(e) if !e.is_composite() => diags.push(Diagnostic::new(
+                "PROJ-0003",
+                format!("disclosure boundary targets a non-composite node: {id}"),
+            )),
+            Some(_) => {}
+        }
+    }
+    if !diags.is_empty() {
+        diags.sort_by(|a, b| a.code.cmp(&b.code).then_with(|| a.message.cmp(&b.message)));
+        diags.dedup_by(|a, b| a.code == b.code && a.message == b.message);
+        return Err(diags);
+    }
+    Ok(())
+}
+
+/// `(raw item id, rendered id)` for every composite node, longest raw id
+/// first (deterministic deepest-match order).
+fn composite_boundaries(registry: &GraphRegistry<'_>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for scope in &registry.scopes {
+        for node in &scope.nodes {
+            if let crate::workflow::soma::contracts::BodyItem::Composite(c) = node.item {
+                out.push((c.id.clone(), node.node_id.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        b.0.len()
+            .cmp(&a.0.len())
+            .then(a.0.cmp(&b.0))
+            .then(a.1.cmp(&b.1))
+    });
+    out
+}
+
+/// Generalize a finding path under an unauthorized composite to the
+/// composite's rendered id (no private path leaks); `None` when the path is
+/// not under any unauthorized boundary.
+fn generalize_file(
+    file: &str,
+    boundaries: &[(String, String)],
+    authorized: &BTreeSet<String>,
+) -> Option<String> {
+    for (raw, rendered) in boundaries {
+        let under = file == raw || file.starts_with(&format!("{raw}/"));
+        if under && !authorized.contains(rendered) {
+            return Some(rendered.clone());
+        }
+    }
+    None
+}
+
+fn build_payload(
+    wf: &WorkflowDefinition,
+    facts: &ReviewFacts<'_>,
+    disclosure: &ReviewDisclosurePolicy,
+    boundaries: &[(String, String)],
+    authorized_boundaries: &BTreeSet<String>,
+) -> Result<ReviewProjectionPayload, Vec<Diagnostic>> {
+    let source_digest = source_digest_of(wf)?;
+    let mut issues = render_issues(facts.report)?;
+    let mut omissions = Vec::new();
+    if disclosure.has_target("files") {
+        let mut generalized = false;
+        for issue in issues.iter_mut() {
+            if let Some(file) = issue.file.clone()
+                && let Some(rendered) = generalize_file(&file, boundaries, authorized_boundaries)
+            {
+                issue.file = Some(rendered);
+                generalized = true;
+            }
+        }
+        if generalized {
+            push_omission(&mut omissions, "files", "outOfScope", "scopeExcluded");
+        }
+    }
+    let gates = render_gates(facts.gates)?;
+    let summary = render_summary(facts.report);
+    let authority = render_authority(facts.gates);
+    let evidence_references = render_evidence_references(facts.evidence_references);
+    collect_unavailable_omissions(facts, &mut omissions);
+    sort_omissions(&mut omissions);
+    let disposition = render_disposition(facts.gates, supported_by_gate_basis(facts));
 
     Ok(ReviewProjectionPayload {
         review_schema_version: REVIEW_SCHEMA_VERSION.to_string(),
-        disclosure_policy_digest,
+        disclosure_policy_digest: policy_digest(&source_digest, disclosure)?,
+        report_reference_digest: report_reference_digest(wf, facts)?,
         source: ReviewSourceIdentity {
             workflow_id: wf.id.clone(),
-            source_digest: source_digest_of(wf)?,
+            source_digest,
             schema_version: wf.schema_version.clone(),
             report_id: facts.scope.report_id.clone(),
             run_key: facts.scope.run_key.clone(),
@@ -527,37 +879,11 @@ fn build_payload(
         authority,
         gates,
         summary,
-        issues: issue_renders,
+        issues,
         omissions,
         disposition,
         evidence_references,
     })
-}
-
-fn validate_disclosure_policy(
-    payload: &ReviewProjectionPayload,
-    policy: Option<&ReviewDisclosurePolicy>,
-) -> Result<ReviewDisclosurePolicy, Vec<Diagnostic>> {
-    let normalized = policy.cloned().unwrap_or_default().normalize();
-    let expected_preimage = serde_json::json!({
-        "domain": "projection.review-report.policy.v1",
-        "schemaVersion": REVIEW_SCHEMA_VERSION,
-        "rootSourceDigest": payload.source.source_digest,
-        "policy": serde_json::to_value(&normalized).map_err(|e| {
-            vec![Diagnostic::new(
-                "PROJ-0001",
-                format!("disclosure policy cannot be serialized ({e})"),
-            )]
-        })?,
-    });
-    let expected = digest_of(&expected_preimage)?;
-    if expected != payload.disclosure_policy_digest {
-        return Err(vec![Diagnostic::new(
-            "SOMA-CMP-0004",
-            "disclosure policy digest does not verify".to_string(),
-        )]);
-    }
-    Ok(normalized)
 }
 
 /// §4: deterministic review-report renderer.
@@ -567,9 +893,15 @@ pub fn render_review_projection(
     policy: Option<&ReviewDisclosurePolicy>,
 ) -> Result<VersionedProjectionEnvelope<ReviewProjectionPayload>, Vec<Diagnostic>> {
     validated_source(wf)?;
+    validate_gate_basis(facts)?;
     let source_digest = source_digest_of(wf)?;
-    let normalized = policy.cloned().unwrap_or_default().normalize();
-    let mut payload = build_payload(wf, facts, &normalized)?;
+    let normalized = normalize_review_policy(policy)?;
+    let registry = GraphRegistry::build(wf)?;
+    validate_boundaries(&registry, &normalized.authorized_boundaries)?;
+    let boundaries = composite_boundaries(&registry);
+    let authorized_boundaries: BTreeSet<String> =
+        normalized.authorized_boundaries.iter().cloned().collect();
+    let mut payload = build_payload(wf, facts, &normalized, &boundaries, &authorized_boundaries)?;
     apply_policy(&mut payload, &normalized);
     let payload_value = serde_json::to_value(&payload).map_err(|e| {
         vec![Diagnostic::new(
@@ -602,6 +934,23 @@ pub fn verify_review_projection_bytes(
             ),
         )]);
     }
+    for (label, digest) in [
+        (
+            "disclosurePolicyDigest",
+            &env.payload.disclosure_policy_digest,
+        ),
+        (
+            "reportReferenceDigest",
+            &env.payload.report_reference_digest,
+        ),
+    ] {
+        if !hex64(digest) {
+            return Err(vec![Diagnostic::new(
+                "PROJ-0002",
+                format!("{label} is not a lowercase 64-hex digest"),
+            )]);
+        }
+    }
     let payload_value = serde_json::to_value(&env.payload).map_err(|e| {
         vec![Diagnostic::new(
             "PROJ-0001",
@@ -620,8 +969,9 @@ pub fn verify_review_projection_bytes(
 
 /// §7: against-source verifier. Fresh-renders with the SAME authoritative
 /// inputs the caller used to produce the candidate, then compares:
-/// metadata bounds → policy re-normalization → fresh render → byte-level
-/// identity. Any substituted fact flips the fresh render and fails closed.
+/// metadata bounds → sourceDigest → projectionDigest → policy digest →
+/// facts digest → fresh render. Any substituted fact flips the fresh render
+/// and fails closed.
 pub fn verify_review_against_source(
     envelope: &VersionedProjectionEnvelope<serde_json::Value>,
     wf: &WorkflowDefinition,
@@ -635,16 +985,7 @@ pub fn verify_review_against_source(
             "schemaVersion does not match the source AST".to_string(),
         )]);
     }
-    let mut source_value = serde_json::to_value(wf).map_err(|e| {
-        vec![Diagnostic::new(
-            "PROJ-0001",
-            format!("workflow cannot be serialized for verification ({e})"),
-        )]
-    })?;
-    if let Some(obj) = source_value.as_object_mut() {
-        obj.remove("contentDigest");
-    }
-    let expected_source = digest_of(&source_value)?;
+    let expected_source = source_digest_of(wf)?;
     if expected_source != envelope.source_digest {
         return Err(vec![Diagnostic::new(
             "PROJ-0002",
@@ -658,8 +999,6 @@ pub fn verify_review_against_source(
             "review projection digest does not verify".to_string(),
         )]);
     }
-    // Derived `disclosurePolicyDigest` and derived-structure shape is
-    // recomputed from the NORMALIZED policy under the §3.4.1 domain.
     let payload: ReviewProjectionPayload = serde_json::from_value(envelope.payload.clone())
         .map_err(|e| {
             vec![Diagnostic::new(
@@ -667,7 +1006,21 @@ pub fn verify_review_against_source(
                 format!("review payload fails structural validation ({e})"),
             )]
         })?;
-    let normalized = validate_disclosure_policy(&payload, policy)?;
+    let normalized = normalize_review_policy(policy)?;
+    let expected_policy = policy_digest(&expected_source, &normalized)?;
+    if expected_policy != payload.disclosure_policy_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "disclosure policy digest does not verify".to_string(),
+        )]);
+    }
+    let expected_facts = report_reference_digest(wf, facts)?;
+    if expected_facts != payload.report_reference_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "report reference digest does not verify".to_string(),
+        )]);
+    }
     let fresh = render_review_projection(wf, facts, Some(&normalized))?;
     let fresh_value = serde_json::to_value(&fresh.payload).map_err(|e| {
         vec![Diagnostic::new(

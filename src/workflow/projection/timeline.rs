@@ -2,6 +2,11 @@
 //!
 //! Render is pure over `(TimelineProjectionSource, policy)`;
 //! against-source verification fresh-renders from THE SAME source.
+//!
+//! Fail-closed: the authoritative `WorkEventBatch::audit` runs before any
+//! projection, the typed `RunKey` is bound to `batch.runId`, completeness is
+//! copied from recorded page state (never inferred), and disclosure is a
+//! validated allow-list.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,16 +16,26 @@ use crate::workflow::projection::envelope;
 use crate::workflow::projection::graph::GraphDisclosureView;
 use crate::workflow::projection::review::{OmissionView, RunKeyView};
 use crate::workflow::projection::{
-    PROJECTION_VERSION_V1, VersionedProjectionEnvelope, digest_of, validated_source,
+    PROJECTION_VERSION_V1, VersionedProjectionEnvelope, digest_of, source_digest_of,
+    validated_source,
 };
-use crate::workflow::soma::Diagnostic;
 use crate::workflow::soma::contracts::WorkflowDefinition;
 use crate::workflow::soma::event::{WorkEvent, WorkEventBatch};
 use crate::workflow::soma::types::{Hex64, OutcomeVariant};
-
-const TIMELINE_DISCLOSURE_DOMAIN: &str = "projection.evidence-timeline.policy.v1";
+use crate::workflow::soma::{Diagnostic, supported_version};
 
 pub const TIMELINE_SCHEMA_VERSION: &str = "lite.evidence-timeline.v1";
+
+/// Domain label for the timeline policy digest (§3.4.1).
+pub const TIMELINE_POLICY_DOMAIN: &str = "projection.evidence-timeline.policy.v1";
+/// Domain label for the timeline event-stream digest (§3.4.2).
+pub const TIMELINE_EVENTS_DOMAIN: &str = "projection.evidence-timeline.events.v1";
+
+/// Closed vocabulary of timeline disclosure targets (§6.1).
+pub const TIMELINE_DISCLOSURE_TARGETS: &[&str] =
+    &["payloadDetails", "actorIdentity", "referenceDigest"];
+/// Closed vocabulary of timeline count-authorization targets (§6.2).
+pub const TIMELINE_COUNT_TARGETS: &[&str] = &["events"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -44,6 +59,47 @@ impl TimelineDisclosurePolicy {
             count_authorization: c,
         }
     }
+
+    fn has_target(&self, target: &str) -> bool {
+        self.authorized_targets.iter().any(|t| t == target)
+    }
+}
+
+fn hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// §6.1: validate both target lists, then normalize. Unknown ⇒ `PROJ-0003`.
+pub fn normalize_timeline_policy(
+    policy: Option<&TimelineDisclosurePolicy>,
+) -> Result<TimelineDisclosurePolicy, Vec<Diagnostic>> {
+    let raw = policy.cloned().unwrap_or_default();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    for t in &raw.authorized_targets {
+        if !TIMELINE_DISCLOSURE_TARGETS.contains(&t.as_str()) {
+            diags.push(Diagnostic::new(
+                "PROJ-0003",
+                format!("unknown timeline disclosure target: {t}"),
+            ));
+        }
+    }
+    for t in &raw.count_authorization {
+        if !TIMELINE_COUNT_TARGETS.contains(&t.as_str()) {
+            diags.push(Diagnostic::new(
+                "PROJ-0003",
+                format!("unknown timeline count-authorization target: {t}"),
+            ));
+        }
+    }
+    if !diags.is_empty() {
+        diags.sort_by(|a, b| a.code.cmp(&b.code).then_with(|| a.message.cmp(&b.message)));
+        diags.dedup_by(|a, b| a.code == b.code && a.message == b.message);
+        return Err(diags);
+    }
+    Ok(raw.normalize())
 }
 
 /// ProjectionPageMeta borrows the authoritative page result fields;
@@ -74,10 +130,14 @@ pub struct TimelineScope {
     pub projected: Option<ProjectionPageMeta>,
 }
 
+/// §4.1/§5.5 — honest completeness. `available` is `false` when no
+/// authoritative page state was recorded; `moreAvailable`/`nextAfter` are
+/// then `None` — never an invented paging fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CompletenessView {
-    pub more_available: bool,
+    pub available: bool,
+    pub more_available: Option<bool>,
     pub next_after: Option<i64>,
 }
 
@@ -123,6 +183,7 @@ pub struct TimelineEventView {
 pub struct TimelineProjectionPayload {
     pub timeline_schema_version: String,
     pub disclosure_policy_digest: String,
+    pub event_stream_digest: String,
     pub scope: TimelineScope,
     pub events: Vec<TimelineEventView>,
     pub omissions: Vec<OmissionView>,
@@ -246,28 +307,25 @@ fn evidence_view(
         .collect();
     out.sort_by(|a, b| {
         a.produced_at
-            .cmp(&b.produced_at)
-            .then(a.artifact_kind.cmp(&b.artifact_kind))
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.produced_at.as_deref().unwrap_or(""))
+            .then(a.artifact_digest.as_str().cmp(b.artifact_digest.as_str()))
             .then(a.id.cmp(&b.id))
     });
     out
 }
 
-/// Render one event into its projected view with the disclosure-driven
-/// encryption marker (withheld nodes carry a stable `withheld: true` +
-/// `hidden_*` counts = 0, matching GraphDisclosureView semantics).
+fn withheld_digest() -> Hex64 {
+    Hex64::parse(&"0".repeat(64)).expect("zero digest is valid")
+}
+
+/// Render one event into its projected view (raw, pre-disclosure).
 fn render_event(
     event: &WorkEvent,
     provenance: Option<&[(String, ProvenanceState)]>,
-) -> Result<TimelineEventView, Vec<Diagnostic>> {
-    let disclosure = GraphDisclosureView {
-        withheld: false,
-        reason: "scope-visible".to_string(),
-        category: "visible".to_string(),
-        hidden_nodes: None,
-        hidden_edges: None,
-    };
-    Ok(TimelineEventView {
+) -> TimelineEventView {
+    TimelineEventView {
         event_id: event.id.clone(),
         event_type: event.event_type.clone(),
         actor_kind: actor_kind_label(&event.actor.kind).to_string(),
@@ -282,10 +340,18 @@ fn render_event(
         provenance: provenance_for_event(provenance, &event.id),
         outcomes: event_outcomes(event),
         status: event_status_label(event),
-        disclosure,
-    })
+        disclosure: GraphDisclosureView {
+            withheld: false,
+            reason: "scope-visible".to_string(),
+            category: "visible".to_string(),
+            hidden_nodes: None,
+            hidden_edges: None,
+        },
+    }
 }
 
+/// §5.4: deterministic total order by `(sequence, semanticDigest)`; exact
+/// duplicate identity fails closed (`SOMA-CMP-0011`).
 fn total_order_event_list(batch: &WorkEventBatch) -> Result<Vec<&WorkEvent>, Vec<Diagnostic>> {
     let mut events: Vec<&WorkEvent> = batch.events.iter().collect();
     events.sort_by(|a, b| {
@@ -309,14 +375,48 @@ fn total_order_event_list(batch: &WorkEventBatch) -> Result<Vec<&WorkEvent>, Vec
     Ok(events)
 }
 
+/// §5.5: a missing `sequence` between the observed min and max is a source
+/// gap, surfaced honestly; never silently dropped.
+fn has_sequence_gap(events: &[&WorkEvent]) -> bool {
+    let mut seqs: Vec<u64> = events.iter().map(|e| e.sequence).collect();
+    seqs.sort_unstable();
+    seqs.dedup();
+    seqs.windows(2).any(|w| w[1].saturating_sub(w[0]) > 1)
+}
+
+fn distinct_correlations(events: &[&WorkEvent]) -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> =
+        events.iter().map(|e| e.correlation_id.clone()).collect();
+    std::mem::take(&mut set).into_iter().collect()
+}
+
+/// §3.4.2: `eventStreamDigest` preimage over the authoritative event stream,
+/// in rendering order, using the SOURCE semantic digests (never the
+/// possibly-disclosed payload copies).
+fn event_stream_digest(
+    wf: &WorkflowDefinition,
+    source: &TimelineProjectionSource<'_>,
+) -> Result<String, Vec<Diagnostic>> {
+    let events = total_order_event_list(source.batch)?;
+    let digests: Vec<&str> = events.iter().map(|e| e.semantic_digest.as_str()).collect();
+    let preimage = serde_json::json!({
+        "domain": TIMELINE_EVENTS_DOMAIN,
+        "rootSourceDigest": source_digest_of(wf)?,
+        "timelineSchemaVersion": TIMELINE_SCHEMA_VERSION,
+        "runKey": RunKeyView::from(source.scope),
+        "events": digests,
+    });
+    digest_of(&preimage)
+}
+
 fn policy_digest(
     wf: &WorkflowDefinition,
     normalized: &TimelineDisclosurePolicy,
 ) -> Result<String, Vec<Diagnostic>> {
-    let value = serde_json::json!({
-        "domain": TIMELINE_DISCLOSURE_DOMAIN,
+    let preimage = serde_json::json!({
+        "domain": TIMELINE_POLICY_DOMAIN,
         "schemaVersion": TIMELINE_SCHEMA_VERSION,
-        "rootSourceDigest": crate::workflow::projection::source_digest_of(wf)?,
+        "rootSourceDigest": source_digest_of(wf)?,
         "policy": serde_json::to_value(normalized).map_err(|e| {
             vec![Diagnostic::new(
                 "PROJ-0001",
@@ -324,7 +424,85 @@ fn policy_digest(
             )]
         })?,
     });
-    digest_of(&value)
+    digest_of(&preimage)
+}
+
+fn push_omission(acc: &mut Vec<OmissionView>, section: &str, category: &str, reason: &str) {
+    acc.push(OmissionView {
+        section: section.to_string(),
+        category: category.to_string(),
+        reason: reason.to_string(),
+    });
+}
+
+fn sort_omissions(omissions: &mut Vec<OmissionView>) {
+    omissions.sort_by(|a, b| {
+        a.section
+            .cmp(&b.section)
+            .then(a.category.cmp(&b.category))
+            .then(a.reason.cmp(&b.reason))
+    });
+    omissions.dedup();
+}
+
+/// Apply the normalized disclosure policy to the rendered events.
+fn apply_disclosure(
+    events: &mut [TimelineEventView],
+    policy: &TimelineDisclosurePolicy,
+    omissions: &mut Vec<OmissionView>,
+) {
+    let allow_actor = policy.has_target("actorIdentity");
+    let allow_details = policy.has_target("payloadDetails");
+    let allow_refs = policy.has_target("referenceDigest");
+    let mut withheld_actor = false;
+    let mut withheld_details = false;
+    let mut withheld_refs = false;
+    for view in events.iter_mut() {
+        if !allow_actor && !view.actor_identity.is_empty() {
+            withheld_actor = true;
+            view.actor_identity = String::new();
+            view.disclosure = GraphDisclosureView {
+                withheld: true,
+                reason: "actor-identity-withheld".to_string(),
+                category: "policy-withheld".to_string(),
+                hidden_nodes: None,
+                hidden_edges: None,
+            };
+        }
+        if !allow_details {
+            if !view.event_type.is_empty()
+                || !view.correlation_id.is_empty()
+                || !view.repo_revision.is_empty()
+                || view.timestamp.is_some()
+                || view.outcomes.is_some()
+                || view.status != "unavailable"
+            {
+                withheld_details = true;
+            }
+            view.event_type = String::new();
+            view.correlation_id = String::new();
+            view.repo_revision = String::new();
+            view.timestamp = None;
+            view.outcomes = None;
+            view.status = "unavailable".to_string();
+        }
+        if !allow_refs {
+            if view.semantic_digest != withheld_digest() || !view.evidence_references.is_empty() {
+                withheld_refs = true;
+            }
+            view.semantic_digest = withheld_digest();
+            view.evidence_references.clear();
+        }
+    }
+    if withheld_actor {
+        push_omission(omissions, "actorIdentity", "withheld", "disclosurePolicy");
+    }
+    if withheld_details {
+        push_omission(omissions, "payloadDetails", "withheld", "disclosurePolicy");
+    }
+    if withheld_refs {
+        push_omission(omissions, "referenceDigest", "withheld", "disclosurePolicy");
+    }
 }
 
 /// §5: deterministic timeline renderer.
@@ -334,72 +512,97 @@ pub fn render_timeline_projection(
     wf: &WorkflowDefinition,
 ) -> Result<VersionedProjectionEnvelope<TimelineProjectionPayload>, Vec<Diagnostic>> {
     validated_source(wf)?;
-    let events = total_order_event_list(source.batch)?;
-    let normalized = policy.cloned().unwrap_or_default().normalize();
-    let mut rendered_events: Vec<TimelineEventView> = Vec::new();
-    for event in events {
-        let mut view = render_event(event, source.provenance)?;
-        if !normalized
-            .authorized_targets
-            .iter()
-            .any(|t| t == "actorIdentity")
-        {
-            view.actor_identity = "".to_string();
-            view.disclosure = GraphDisclosureView {
-                withheld: true,
-                reason: "actor-identity-withheld".to_string(),
-                category: "policy-withheld".to_string(),
-                hidden_nodes: None,
-                hidden_edges: None,
-            };
-        }
-        rendered_events.push(view);
+    let normalized = normalize_timeline_policy(policy)?;
+
+    // Item 2: the authoritative event audit is mandatory and fail-closed.
+    let audit = source.batch.audit(&supported_version());
+    if !audit.is_empty() {
+        return Err(audit);
     }
-    let mut omissions = Vec::new();
+    // Item 2: bind the typed RunKey to the authoritative batch run id.
+    if source.scope.id != source.batch.run_id {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0002",
+            format!(
+                "runKey id {:?} does not match batch runId {:?}",
+                source.scope.id, source.batch.run_id
+            ),
+        )]);
+    }
+
+    let ordered = total_order_event_list(source.batch)?;
+    let comparable: Vec<&WorkEvent> = ordered.clone();
+    let mut rendered_events: Vec<TimelineEventView> = ordered
+        .iter()
+        .map(|event| render_event(event, source.provenance))
+        .collect();
+
+    let mut omissions: Vec<OmissionView> = Vec::new();
+    if has_sequence_gap(&comparable) {
+        push_omission(&mut omissions, "events", "unavailable", "sourceGap");
+    }
     if source.page.is_none() {
-        omissions.push(OmissionView {
-            section: "completeness".to_string(),
-            category: "unavailable".to_string(),
-            reason: "noAuthoritativeSource".to_string(),
-        });
+        push_omission(
+            &mut omissions,
+            "completeness",
+            "unavailable",
+            "noAuthoritativeSource",
+        );
     }
     if source.provenance.is_none() {
-        omissions.push(OmissionView {
-            section: "provenance".to_string(),
-            category: "unavailable".to_string(),
-            reason: "noAuthoritativeSource".to_string(),
-        });
+        push_omission(
+            &mut omissions,
+            "provenance",
+            "unavailable",
+            "noAuthoritativeSource",
+        );
     }
-    omissions.sort_by(|a, b| {
-        a.section
-            .cmp(&b.section)
-            .then(a.category.cmp(&b.category))
-            .then(a.reason.cmp(&b.reason))
-    });
+
+    apply_disclosure(&mut rendered_events, &normalized, &mut omissions);
+
+    let correlations = distinct_correlations(&comparable);
+    // Scope correlation is payload detail: expose it only when
+    // `payloadDetails` is authorized; a mixed set is out of scope.
+    let request_correlation = if correlations.len() == 1 {
+        if normalized.has_target("payloadDetails") {
+            correlations.first().cloned()
+        } else {
+            None
+        }
+    } else {
+        push_omission(&mut omissions, "scope", "outOfScope", "scopeExcluded");
+        None
+    };
+
+    sort_omissions(&mut omissions);
+
+    let completeness = match source.page {
+        Some(p) => CompletenessView {
+            available: true,
+            more_available: Some(p.more_available),
+            next_after: Some(p.next_after),
+        },
+        // No recorded page state: availability is unknown; never invent
+        // `moreAvailable: true`.
+        None => CompletenessView {
+            available: false,
+            more_available: None,
+            next_after: None,
+        },
+    };
+
     let payload = TimelineProjectionPayload {
         timeline_schema_version: TIMELINE_SCHEMA_VERSION.to_string(),
         disclosure_policy_digest: policy_digest(wf, &normalized)?,
+        event_stream_digest: event_stream_digest(wf, source)?,
         scope: TimelineScope {
             run_key: Some(RunKeyView::from(source.scope)),
-            request_correlation: source
-                .batch
-                .events
-                .first()
-                .map(|e| e.correlation_id.clone()),
+            request_correlation,
             projected: source.page.copied(),
         },
         events: rendered_events,
         omissions,
-        completeness: match source.page {
-            Some(p) => CompletenessView {
-                more_available: p.more_available,
-                next_after: Some(p.next_after),
-            },
-            None => CompletenessView {
-                more_available: true,
-                next_after: None,
-            },
-        },
+        completeness,
     };
     let payload_value = serde_json::to_value(&payload).map_err(|e| {
         vec![Diagnostic::new(
@@ -411,7 +614,7 @@ pub fn render_timeline_projection(
     Ok(VersionedProjectionEnvelope {
         projection_version: PROJECTION_VERSION_V1.to_string(),
         schema_version: wf.schema_version.clone(),
-        source_digest: crate::workflow::projection::source_digest_of(wf)?,
+        source_digest: source_digest_of(wf)?,
         projection_digest,
         payload,
     })
@@ -431,6 +634,20 @@ pub fn verify_timeline_projection_bytes(
             ),
         )]);
     }
+    for (label, digest) in [
+        (
+            "disclosurePolicyDigest",
+            &env.payload.disclosure_policy_digest,
+        ),
+        ("eventStreamDigest", &env.payload.event_stream_digest),
+    ] {
+        if !hex64(digest) {
+            return Err(vec![Diagnostic::new(
+                "PROJ-0002",
+                format!("{label} is not a lowercase 64-hex digest"),
+            )]);
+        }
+    }
     let payload_value = serde_json::to_value(&env.payload).map_err(|e| {
         vec![Diagnostic::new(
             "PROJ-0001",
@@ -447,7 +664,9 @@ pub fn verify_timeline_projection_bytes(
     Ok(env)
 }
 
-/// §7: against-source verifier — fresh-renders from the SAME input source.
+/// §7: against-source verifier. Independently verifies envelope metadata,
+/// `sourceDigest`, `projectionDigest == digest(payload)`, the normalized
+/// policy digest, `eventStreamDigest`, and fresh-render byte identity.
 pub fn verify_timeline_against_source(
     envelope: &VersionedProjectionEnvelope<serde_json::Value>,
     source: &TimelineProjectionSource<'_>,
@@ -461,6 +680,20 @@ pub fn verify_timeline_against_source(
             "schemaVersion does not match the source AST".to_string(),
         )]);
     }
+    let expected_source = source_digest_of(wf)?;
+    if expected_source != envelope.source_digest {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0002",
+            "sourceDigest does not match the source AST".to_string(),
+        )]);
+    }
+    let expected_payload = digest_of(&envelope.payload)?;
+    if expected_payload != envelope.projection_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "timeline projection digest does not verify".to_string(),
+        )]);
+    }
     let payload: TimelineProjectionPayload = serde_json::from_value(envelope.payload.clone())
         .map_err(|e| {
             vec![Diagnostic::new(
@@ -468,12 +701,19 @@ pub fn verify_timeline_against_source(
                 format!("timeline payload fails structural validation ({e})"),
             )]
         })?;
-    let normalized = policy.cloned().unwrap_or_default().normalize();
-    let expected = policy_digest(wf, &normalized)?;
-    if expected != payload.disclosure_policy_digest {
+    let normalized = normalize_timeline_policy(policy)?;
+    let expected_policy = policy_digest(wf, &normalized)?;
+    if expected_policy != payload.disclosure_policy_digest {
         return Err(vec![Diagnostic::new(
             "SOMA-CMP-0004",
             "disclosure policy digest does not verify".to_string(),
+        )]);
+    }
+    let expected_stream = event_stream_digest(wf, source)?;
+    if expected_stream != payload.event_stream_digest {
+        return Err(vec![Diagnostic::new(
+            "SOMA-CMP-0004",
+            "event stream digest does not verify".to_string(),
         )]);
     }
     let fresh = render_timeline_projection(source, Some(&normalized), wf)?;
@@ -483,7 +723,7 @@ pub fn verify_timeline_against_source(
             format!("timeline payload cannot be serialized ({e})"),
         )]
     })?;
-    if fresh_value != envelope.payload {
+    if fresh.source_digest != envelope.source_digest || fresh_value != envelope.payload {
         return Err(vec![Diagnostic::new(
             "PROJ-0002",
             "timeline projection does not match a fresh render of the authoritative inputs"
