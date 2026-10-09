@@ -10,14 +10,14 @@ use prometheos_lite::harness::review::{
     ReviewSummary,
 };
 use prometheos_lite::work::soma_projection::{RunKey, RunKeyKind};
-use prometheos_lite::workflow::evaluate::EvidenceBundle;
 use prometheos_lite::workflow::graph_gates::{HumanDecisionRecordV1, HumanVerdict, ReviewChannel};
 use prometheos_lite::workflow::projection::{
     ProjectionPageMeta, REVIEW_SCHEMA_VERSION, ReviewDisclosurePolicy, ReviewFacts,
-    ReviewProjectionPayload, ReviewScope, TIMELINE_SCHEMA_VERSION, TimelineDisclosurePolicy,
-    TimelineProjectionSource, VersionedProjectionEnvelope, project_canonical_json,
-    render_review_projection, render_timeline_projection, verify_canonical_projection_bytes,
-    verify_review_against_source, verify_review_projection_bytes, verify_timeline_against_source,
+    ReviewProjectionPayload, ReviewScope, RunKeyView, TIMELINE_SCHEMA_VERSION,
+    TimelineDisclosurePolicy, TimelineProjectionSource, VersionedProjectionEnvelope,
+    project_canonical_json, render_review_projection, render_timeline_projection,
+    verify_canonical_projection_bytes, verify_review_against_source,
+    verify_review_projection_bytes, verify_timeline_against_source,
     verify_timeline_projection_bytes,
 };
 use prometheos_lite::workflow::soma::contracts::{EvidenceReference, WorkflowDefinition};
@@ -125,24 +125,29 @@ fn approved_gate() -> Vec<HumanDecisionRecordV1> {
     )]
 }
 
-/// Evidence references matching `approved_gate`'s basis digest.
+/// Evidence references with both event and artifact digests; the artifact
+/// digest (`artifactDigest`) is what the gate `basisEvidenceDigest` binds.
 fn gate_refs() -> Vec<EvidenceReference> {
-    vec![evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")]
+    // artifactDigest == gate basis (`hexc('b')`); eventDigest differs (`'c'`).
+    vec![evref("r1", &hexc('c'), &hexc('b'), "2026-10-05T00:00:00Z")]
 }
 
-fn evref(id: &str, event_digest: &str, produced_at: &str) -> EvidenceReference {
+fn evref(
+    id: &str,
+    event_digest: &str,
+    artifact_digest: &str,
+    produced_at: &str,
+) -> EvidenceReference {
     serde_json::from_value(serde_json::json!({
         "id": id,
         "eventDigest": event_digest,
-        "artifactDigest": hexc('a'),
+        "artifactDigest": artifact_digest,
         "artifactKind": "review-report",
         "producedBy": "harness",
         "producedAt": produced_at,
     }))
     .expect("evidence reference literal")
 }
-
-const NO_BUNDLES: &[EvidenceBundle] = &[];
 
 fn facts<'a>(
     report: Option<&'a ReviewReport>,
@@ -152,7 +157,6 @@ fn facts<'a>(
     ReviewFacts {
         report,
         gates,
-        evidence_bundles: NO_BUNDLES,
         evidence_references: refs,
         scope: ReviewScope::default(),
     }
@@ -184,7 +188,6 @@ fn review_all_policy() -> ReviewDisclosurePolicy {
         .iter()
         .map(|s| s.to_string())
         .collect(),
-        authorized_boundaries: vec![],
     }
 }
 
@@ -273,7 +276,7 @@ fn review_render_is_deterministic_bytes() {
     let wf = base_wf();
     let report = synthetic_report();
     let gates = approved_gate();
-    let refs = [evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let refs = [evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &refs);
     let a = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render a");
     let b = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render b");
@@ -298,7 +301,8 @@ fn timeline_render_is_deterministic_bytes() {
         scope: &rk,
     };
     let a = render_timeline_projection(&source, Some(&timeline_all_policy()), &wf).expect("a");
-    let b2 = render_timeline_projection(&source, Some(&timeline_all_policy()), &wf).expect("b");
+    let b2 = render_timeline_projection(&source, Some(&timeline_all_policy()), &wf)
+        .expect("2026-10-05T00:00:00Z");
     assert_eq!(
         a.canonical_bytes().expect("a bytes"),
         b2.canonical_bytes().expect("b bytes")
@@ -364,7 +368,7 @@ fn digest_domain_separation_is_respected() {
     let wf = base_wf();
     let report = synthetic_report();
     let gates = approved_gate();
-    let refs = [evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let refs = [evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &refs);
     let base = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render");
 
@@ -638,7 +642,6 @@ fn policy_drawn_report_carries_no_withheld_issue_content() {
     let policy = ReviewDisclosurePolicy {
         authorized_targets: vec!["findings".to_string()],
         count_authorization: vec![],
-        authorized_boundaries: vec![],
     };
     let env = render_review_projection(&wf, &f, Some(&policy)).expect("render");
     assert_eq!(env.payload.issues.len(), 2);
@@ -722,6 +725,137 @@ fn omissions_distinguish_withheld_unavailable_outofscope() {
     );
 }
 
+/// §6.2 / item 4 — timeline event count independently gated.
+#[test]
+fn timeline_event_count_is_authorized() {
+    let wf = base_wf();
+    let rk = run_key("run-1");
+    let b = batch(
+        "run-1",
+        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
+    );
+    let source = TimelineProjectionSource {
+        batch: &b,
+        provenance: None,
+        page: None,
+        scope: &rk,
+    };
+    let policy = TimelineDisclosurePolicy {
+        authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        count_authorization: vec!["events".to_string()],
+    };
+    let env = render_timeline_projection(&source, Some(&policy), &wf).expect("render");
+    assert_eq!(env.payload.event_count, Some(1));
+    assert!(
+        !env.payload
+            .omissions
+            .iter()
+            .any(|o| o.section == "events" && o.category == "withheld")
+    );
+}
+
+#[test]
+fn timeline_event_count_is_withheld_when_unauthorized() {
+    let wf = base_wf();
+    let rk = run_key("run-2");
+    let b = batch(
+        "run-2",
+        vec![
+            mk_event("e1", 1, "c", "2026-10-05T00:00:00Z"),
+            mk_event("e2", 2, "c", "2026-10-05T00:00:01Z"),
+        ],
+    );
+    let source = TimelineProjectionSource {
+        batch: &b,
+        provenance: None,
+        page: None,
+        scope: &rk,
+    };
+    let policy = TimelineDisclosurePolicy {
+        authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        count_authorization: vec![],
+    };
+    let env = render_timeline_projection(&source, Some(&policy), &wf).expect("render");
+    assert!(env.payload.event_count.is_none());
+    assert!(env.payload.omissions.iter().any(|o| o.section == "events"
+        && o.category == "withheld"
+        && o.reason == "disclosurePolicy"));
+}
+
+#[test]
+fn timeline_unknown_count_target_fails_closed() {
+    let wf = base_wf();
+    let rk = run_key("run-3");
+    let b = batch(
+        "run-3",
+        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
+    );
+    let source = TimelineProjectionSource {
+        batch: &b,
+        provenance: None,
+        page: None,
+        scope: &rk,
+    };
+    let policy = TimelineDisclosurePolicy {
+        authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        count_authorization: vec!["eventCount".to_string()],
+    };
+    let err = render_timeline_projection(&source, Some(&policy), &wf).expect_err("unknown target");
+    assert!(err.iter().any(|d| d.code == "PROJ-0003"), "{err:?}");
+}
+
+/// §6.2 / item 3 — withheld `referenceDigest` must be explicit null, never a
+/// zero digest that could be mistaken for a real value.
+#[test]
+fn withheld_reference_digest_is_null_not_zero_digest() {
+    let wf = base_wf();
+    let rk = run_key("run-4");
+    let b = batch(
+        "run-4",
+        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
+    );
+    let source = TimelineProjectionSource {
+        batch: &b,
+        provenance: None,
+        page: None,
+        scope: &rk,
+    };
+    let policy = TimelineDisclosurePolicy {
+        authorized_targets: ["payloadDetails", "actorIdentity"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        count_authorization: vec!["events".to_string()],
+    };
+    let env = render_timeline_projection(&source, Some(&policy), &wf).expect("render");
+    assert!(env.payload.event_count == Some(1));
+    let event = &env.payload.events[0];
+    assert!(
+        event.semantic_digest.is_none(),
+        "semanticDigest must be null when withheld"
+    );
+    let bytes = String::from_utf8(env.canonical_bytes().expect("bytes")).expect("utf8");
+    assert!(
+        bytes.contains("\"semanticDigest\":null"),
+        "must contain explicit null"
+    );
+    assert!(
+        !bytes.contains("0000000000000000000000000000000000000000000000000000000000000000"),
+        "must not contain zero digest"
+    );
+    // Structural byte verifier still accepts the envelope.
+    assert!(verify_timeline_projection_bytes(&env.canonical_bytes().expect("bytes")).is_ok());
+}
+
 #[test]
 fn withheld_counts_are_not_exposed() {
     let wf = base_wf();
@@ -732,7 +866,6 @@ fn withheld_counts_are_not_exposed() {
     let policy = ReviewDisclosurePolicy {
         authorized_targets: vec!["findings".to_string()],
         count_authorization: vec![],
-        authorized_boundaries: vec![],
     };
     let env = render_review_projection(&wf, &f, Some(&policy)).expect("render");
     assert!(env.payload.summary.total_issues.is_none());
@@ -750,32 +883,41 @@ fn withheld_counts_are_not_exposed() {
 // Row 12 — private/composite boundaries
 // ---------------------------------------------------------------------------
 
+/// Row 12 (revised) — filenames are never composite/node identities; without
+/// an authoritative issue-to-boundary binding, findings render verbatim when
+/// `files` is authorized, and no composite parent is claimed.
 #[test]
-fn private_boundary_findings_are_generalized() {
-    let wf = nested_wf();
+fn filenames_cannot_masquerade_as_composite_identities() {
+    let wf = nested_wf(); // composite id = "flow"
     let mut report = synthetic_report();
+    // A path that looks nested under a composite, plus one exactly named like it.
     report.issues[0].file = Some("flow/src/main.rs".to_string());
     let gates = approved_gate();
     let refs = gate_refs();
     let f = facts(Some(&report), &gates, &refs);
-    // findings+files authorized, but the `flow` boundary is not.
+    // files + findings authorized (no boundary claim expected); the file renders verbatim.
     let policy = ReviewDisclosurePolicy {
         authorized_targets: vec!["findings".to_string(), "files".to_string()],
         count_authorization: vec![],
-        authorized_boundaries: vec![],
     };
     let env = render_review_projection(&wf, &f, Some(&policy)).expect("render");
-    let bytes = String::from_utf8(env.canonical_bytes().expect("bytes")).expect("utf8");
-    assert!(
-        !bytes.contains("flow/src/main.rs"),
-        "private path must not leak"
-    );
     assert!(
         env.payload
             .issues
             .iter()
+            .any(|i| i.file.as_deref() == Some("flow/src/main.rs"))
+    );
+    // No fabricated parent-composite substitution (old `generalize_file` removed).
+    assert!(
+        !env.payload
+            .issues
+            .iter()
             .any(|i| i.file.as_deref().is_some_and(|f| f.contains(":flow")))
     );
+    // No `outOfScope/scopeExcluded` omission fabricated from path matching.
+    assert!(!env.payload.omissions.iter().any(|o| o.section == "files"
+        && o.category == "outOfScope"
+        && o.reason == "scopeExcluded"));
 }
 
 // ---------------------------------------------------------------------------
@@ -788,8 +930,8 @@ fn review_findings_evidence_references_sorted_and_stable() {
     let report = synthetic_report();
     let gates = approved_gate();
     let unsorted = [
-        evref("r2", &hexc('d'), "2026-10-05T00:00:02Z"),
-        evref("r1", &hexc('b'), "2026-10-05T00:00:00Z"),
+        evref("r2", &hexc('d'), &hexc('d'), "2026-10-05T00:00:02Z"),
+        evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z"),
     ];
     let f = facts(Some(&report), &gates, &unsorted);
     let a = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render a");
@@ -820,10 +962,47 @@ fn review_against_source_fails_on_dangling_evidence_reference() {
         "alice",
         &hexc('e'),
     )];
-    let refs = [evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let refs = [evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &refs);
     let err = render_review_projection(&wf, &f, Some(&review_all_policy()))
         .expect_err("dangling gate basis must fail closed");
+    assert!(err.iter().any(|d| d.code == "SOMA-CMP-0004"), "{err:?}");
+}
+
+/// Row 14 — gate basis binds to ARTIFACT digest, not event digest.
+#[test]
+fn gate_basis_binds_to_artifact_digest() {
+    let wf = base_wf();
+    let gates = approved_gate();
+    // artifactDigest == gate basis (`b`); eventDigest differs (`c`).
+    let refs = [evref("r1", &hexc('c'), &hexc('b'), "2026-10-05T00:00:00Z")];
+    let report = synthetic_report();
+    let f = facts(Some(&report), &gates, &refs);
+    let env = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render ok");
+    assert!(env.payload.disposition.supported_by_evidence);
+}
+
+/// A reference whose eventDigest matches the gate basis but whose
+/// artifactDigest does NOT must still fail closed (SOMA-CMP-0004).
+#[test]
+fn gate_basis_matching_event_digest_only_fails_closed() {
+    let wf = base_wf();
+    let gates = vec![gate(
+        "intake.review",
+        HumanVerdict::Approved,
+        "alice",
+        &hexc('b'),
+    )];
+    // eventDigest == `b` (would match if resolved wrongly); artifactDigest == `a` (does not match).
+    let refs = [evref(
+        "r_bad",
+        &hexc('b'),
+        &hexc('a'),
+        "2026-10-05T00:00:00Z",
+    )];
+    let report = synthetic_report();
+    let f = facts(Some(&report), &gates, &refs);
+    let err = render_review_projection(&wf, &f, Some(&review_all_policy())).expect_err("must fail");
     assert!(err.iter().any(|d| d.code == "SOMA-CMP-0004"), "{err:?}");
 }
 
@@ -836,7 +1015,7 @@ fn verify_review_against_source_accepts_self_consistent() {
     let wf = base_wf();
     let report = synthetic_report();
     let gates = approved_gate();
-    let refs = [evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let refs = [evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &refs);
     let env = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render");
     let v = review_value_env(&env);
@@ -1003,7 +1182,7 @@ fn self_consistent_review() -> (
     let wf = base_wf();
     let report = synthetic_report();
     let gates = approved_gate();
-    let refs = vec![evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let refs = vec![evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &refs);
     let env = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render");
     let v = review_value_env(&env);
@@ -1038,7 +1217,7 @@ fn verify_review_against_source_fails_on_gate_verdict_substitution() {
 #[test]
 fn verify_review_against_source_fails_on_evidence_ref_substitution() {
     let (wf, report, gates, _refs, v) = self_consistent_review();
-    let swapped = vec![evref("r9", &hexc('f'), "2026-10-05T00:00:09Z")];
+    let swapped = vec![evref("r9", &hexc('f'), &hexc('f'), "2026-10-05T00:00:09Z")];
     let f = facts(Some(&report), &gates, &swapped);
     let err = verify_review_against_source(&v, &wf, &f, Some(&review_all_policy()))
         .expect_err("must fail");
@@ -1063,6 +1242,79 @@ fn verify_review_against_source_fails_on_disposition_substitution() {
     let err = verify_review_against_source(&v, &wf, &f, Some(&review_all_policy()))
         .expect_err("must fail");
     assert!(err.iter().any(|d| d.code == "PROJ-0002"), "{err:?}");
+}
+
+/// §5 / item 5 — mutation regression: each authoritative review fact mutation
+/// flips the fresh render or fails closed.
+#[test]
+fn every_accepted_review_fact_changes_render_or_fails_closed() {
+    let wf = base_wf();
+    let (_wf_ref, base_report, base_gates, base_refs, v) = self_consistent_review();
+    // Issue message mutation.
+    {
+        let mut r = base_report.clone();
+        r.issues[0].message = "mutated".to_string();
+        let mutated = facts(Some(&r), &base_gates, &base_refs);
+        let fresh =
+            render_review_projection(&wf, &mutated, Some(&review_all_policy())).expect("render ok");
+        assert_ne!(
+            serde_json::to_string(&v.payload).expect("str"),
+            serde_json::to_string(&fresh.payload).expect("str"),
+            "mutation must alter the projection payload"
+        );
+    }
+    // Gate verdict substitution (changes disposition).
+    {
+        let changed_gates = vec![gate(
+            "intake.review",
+            HumanVerdict::Rejected,
+            "alice",
+            &hexc('b'),
+        )];
+        let changed = facts(Some(&base_report), &changed_gates, &base_refs);
+        let fresh =
+            render_review_projection(&wf, &changed, Some(&review_all_policy())).expect("render ok");
+        assert_eq!(fresh.payload.disposition.status, "reject");
+    }
+    // Evidence reference identity mutation (changes evidence-reference list order/content ⇒ facts digest differs).
+    {
+        let refs_with_extra = {
+            let mut r = base_refs.clone();
+            r.push(evref(
+                "r_extra",
+                &hexc('c'),
+                &hexc('e'),
+                "2026-10-05T00:00:00Z",
+            ));
+            r
+        };
+        let mutated = facts(Some(&base_report), &base_gates, &refs_with_extra);
+        let fresh =
+            render_review_projection(&wf, &mutated, Some(&review_all_policy())).expect("render ok");
+        assert_ne!(
+            serde_json::to_string(&v.payload).expect("str"),
+            serde_json::to_string(&fresh.payload).expect("str"),
+            "mutation must alter the projection payload"
+        );
+    }
+    // Scope identity mutation (flips projection digest / source identity).
+    {
+        let mut mutated = facts(Some(&base_report), &base_gates, &base_refs);
+        mutated.scope = ReviewScope {
+            report_id: Some("mutated-report-id".to_string()),
+            run_key: Some(RunKeyView {
+                kind: "other".to_string(),
+                id: "other-run".to_string(),
+            }),
+        };
+        let fresh =
+            render_review_projection(&wf, &mutated, Some(&review_all_policy())).expect("render ok");
+        assert_ne!(
+            serde_json::to_string(&v.payload).expect("str"),
+            serde_json::to_string(&fresh.payload).expect("str"),
+            "mutation must alter the projection payload"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,7 +1453,6 @@ fn unknown_review_disclosure_target_fails_closed() {
     let policy = ReviewDisclosurePolicy {
         authorized_targets: vec!["nonsense".to_string()],
         count_authorization: vec![],
-        authorized_boundaries: vec![],
     };
     let err = render_review_projection(&wf, &f, Some(&policy)).expect_err("must fail");
     assert!(err.iter().any(|d| d.code == "PROJ-0003"), "{err:?}");
@@ -1353,7 +1604,7 @@ fn supported_by_evidence_is_bound_to_gate_basis() {
         "alice",
         &hexc('b'),
     )];
-    let matching = [evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let matching = [evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &matching);
     let env = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render");
     assert!(env.payload.disposition.supported_by_evidence);
@@ -1395,8 +1646,8 @@ fn review_authority_represents_heterogeneous_channels() {
         .expect("author"),
     ];
     let refs = [
-        evref("r1", &hexc('b'), "2026-10-05T00:00:00Z"),
-        evref("r2", &hexc('c'), "2026-10-05T00:00:01Z"),
+        evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z"),
+        evref("r2", &hexc('c'), &hexc('c'), "2026-10-05T00:00:01Z"),
     ];
     let f = facts(Some(&report), &gates, &refs);
     let env = render_review_projection(&wf, &f, Some(&review_all_policy())).expect("render");
@@ -1413,7 +1664,7 @@ fn golden_review_env() -> VersionedProjectionEnvelope<ReviewProjectionPayload> {
     let wf = base_wf();
     let report = synthetic_report();
     let gates = approved_gate();
-    let refs = [evref("r1", &hexc('b'), "2026-10-05T00:00:00Z")];
+    let refs = [evref("r1", &hexc('b'), &hexc('b'), "2026-10-05T00:00:00Z")];
     let f = facts(Some(&report), &gates, &refs);
     render_review_projection(&wf, &f, Some(&review_all_policy())).expect("golden review render")
 }

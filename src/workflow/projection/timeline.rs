@@ -63,6 +63,9 @@ impl TimelineDisclosurePolicy {
     fn has_target(&self, target: &str) -> bool {
         self.authorized_targets.iter().any(|t| t == target)
     }
+    fn has_count(&self, target: &str) -> bool {
+        self.count_authorization.iter().any(|t| t == target)
+    }
 }
 
 fn hex64(value: &str) -> bool {
@@ -170,7 +173,7 @@ pub struct TimelineEventView {
     pub timestamp: Option<String>,
     pub correlation_id: String,
     pub repo_revision: String,
-    pub semantic_digest: Hex64,
+    pub semantic_digest: Option<Hex64>,
     pub evidence_references: Vec<crate::workflow::projection::review::EvidenceReferenceView>,
     pub provenance: TimelineProvenanceView,
     pub outcomes: Option<Vec<OutcomeVariant>>,
@@ -186,6 +189,9 @@ pub struct TimelineProjectionPayload {
     pub event_stream_digest: String,
     pub scope: TimelineScope,
     pub events: Vec<TimelineEventView>,
+    /// §6.2: independently gated event count; `None` when `countAuthorization`
+    /// does not include `"events"`, paired with a withheld omission.
+    pub event_count: Option<u64>,
     pub omissions: Vec<OmissionView>,
     pub completeness: CompletenessView,
 }
@@ -316,10 +322,6 @@ fn evidence_view(
     out
 }
 
-fn withheld_digest() -> Hex64 {
-    Hex64::parse(&"0".repeat(64)).expect("zero digest is valid")
-}
-
 /// Render one event into its projected view (raw, pre-disclosure).
 fn render_event(
     event: &WorkEvent,
@@ -335,7 +337,7 @@ fn render_event(
         timestamp: Some(event.timestamp.clone()),
         correlation_id: event.correlation_id.clone(),
         repo_revision: event.repo_revision.clone(),
-        semantic_digest: event.semantic_digest.clone(),
+        semantic_digest: Some(event.semantic_digest.clone()),
         evidence_references: evidence_view(event),
         provenance: provenance_for_event(provenance, &event.id),
         outcomes: event_outcomes(event),
@@ -487,10 +489,10 @@ fn apply_disclosure(
             view.status = "unavailable".to_string();
         }
         if !allow_refs {
-            if view.semantic_digest != withheld_digest() || !view.evidence_references.is_empty() {
+            if view.semantic_digest.is_some() || !view.evidence_references.is_empty() {
                 withheld_refs = true;
             }
-            view.semantic_digest = withheld_digest();
+            view.semantic_digest = None;
             view.evidence_references.clear();
         }
     }
@@ -591,6 +593,15 @@ pub fn render_timeline_projection(
         },
     };
 
+    // §6.2: independently gated event count; `None` when unauthorized,
+    // paired with an explicit withheld omission so the absence is visible.
+    let event_count: Option<u64> = if normalized.has_count("events") {
+        Some(rendered_events.len() as u64)
+    } else {
+        push_omission(&mut omissions, "events", "withheld", "disclosurePolicy");
+        None
+    };
+
     let payload = TimelineProjectionPayload {
         timeline_schema_version: TIMELINE_SCHEMA_VERSION.to_string(),
         disclosure_policy_digest: policy_digest(wf, &normalized)?,
@@ -601,6 +612,7 @@ pub fn render_timeline_projection(
             projected: source.page.copied(),
         },
         events: rendered_events,
+        event_count,
         omissions,
         completeness,
     };

@@ -12,10 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::harness::review::{ReviewIssueType, ReviewReport, ReviewSeverity};
 use crate::work::soma_projection::RunKey;
-use crate::workflow::evaluate::EvidenceBundle;
 use crate::workflow::graph_gates::{HumanDecisionRecordV1, HumanVerdict, ReviewChannel};
 use crate::workflow::projection::envelope;
-use crate::workflow::projection::graph::GraphRegistry;
 use crate::workflow::projection::{
     PROJECTION_VERSION_V1, VersionedProjectionEnvelope, digest_of, source_digest_of,
     validated_source,
@@ -60,12 +58,6 @@ pub struct ReviewDisclosurePolicy {
     pub authorized_targets: Vec<String>,
     #[serde(default)]
     pub count_authorization: Vec<String>,
-    /// §6.3 composite boundaries whose internal finding paths may surface
-    /// verbatim (rendered composite node ids, mirroring Slice-2's
-    /// `authorizedBoundaries`). A finding under an unauthorized composite is
-    /// generalized to the composite's rendered id so no private path leaks.
-    #[serde(default)]
-    pub authorized_boundaries: Vec<String>,
 }
 
 impl ReviewDisclosurePolicy {
@@ -73,17 +65,13 @@ impl ReviewDisclosurePolicy {
     pub fn normalize(&self) -> Self {
         let mut a = self.authorized_targets.clone();
         let mut c = self.count_authorization.clone();
-        let mut b = self.authorized_boundaries.clone();
         a.sort();
         a.dedup();
         c.sort();
         c.dedup();
-        b.sort();
-        b.dedup();
         Self {
             authorized_targets: a,
             count_authorization: c,
-            authorized_boundaries: b,
         }
     }
 
@@ -167,7 +155,6 @@ pub struct ReviewScope {
 pub struct ReviewFacts<'a> {
     pub report: Option<&'a ReviewReport>,
     pub gates: &'a [HumanDecisionRecordV1],
-    pub evidence_bundles: &'a [EvidenceBundle],
     /// Explicit borrowed authoritative evidence references (item 6: evidence
     /// attribution comes from here, never from the workflow AST).
     pub evidence_references: &'a [EvidenceReference],
@@ -500,14 +487,16 @@ fn render_evidence_references(refs: &[EvidenceReference]) -> Vec<EvidenceReferen
     out
 }
 
-/// Row 14 / item 6: a gate whose non-empty `basisEvidenceDigest` references no
-/// present authoritative evidence reference is a dangling reference and fails
-/// closed (`SOMA-CMP-0004`).
+/// Row 14 / item 6: a gate's `basisEvidenceDigest` is the digest of the
+/// REVIEWED ARTIFACT (`graph_gates.rs`: "Digest of the evidence artifact the
+/// human reviewed"). Resolved against `EvidenceReference.artifactDigest` — never
+/// `eventDigest`. A dangling (non-empty) basis that references no present
+/// authoritative artifact digest fails closed (`SOMA-CMP-0004`).
 fn validate_gate_basis(facts: &ReviewFacts<'_>) -> Result<(), Vec<Diagnostic>> {
     let refs: BTreeSet<&str> = facts
         .evidence_references
         .iter()
-        .map(|r| r.event_digest.as_str())
+        .map(|r| r.artifact_digest.as_str())
         .collect();
     for g in facts.gates {
         let basis = g.basis_evidence_digest.trim();
@@ -515,7 +504,7 @@ fn validate_gate_basis(facts: &ReviewFacts<'_>) -> Result<(), Vec<Diagnostic>> {
             return Err(vec![Diagnostic::new(
                 "SOMA-CMP-0004",
                 format!(
-                    "gate {} basis evidence digest does not reference a present evidence reference",
+                    "gate {} basis evidence digest does not reference a present evidence artifact",
                     g.gate_node_id
                 ),
             )]);
@@ -524,15 +513,14 @@ fn validate_gate_basis(facts: &ReviewFacts<'_>) -> Result<(), Vec<Diagnostic>> {
     Ok(())
 }
 
-/// `supportedByEvidence` is bound to the gate basis evidence: at least one
-/// gate must carry a non-empty `basisEvidenceDigest`, and every non-empty one
-/// must match an authoritative evidence reference `eventDigest`. An unrelated
-/// passing bundle never fabricates support (item 6).
+/// `supportedByEvidence` is bound to the gate's artifact-basis evidence: at
+/// least one gate carries a non-empty `basisEvidenceDigest` and every
+/// non-empty one matches an authoritative `EvidenceReference.artifactDigest`.
 fn supported_by_gate_basis(facts: &ReviewFacts<'_>) -> bool {
     let refs: BTreeSet<&str> = facts
         .evidence_references
         .iter()
-        .map(|r| r.event_digest.as_str())
+        .map(|r| r.artifact_digest.as_str())
         .collect();
     let mut any = false;
     for g in facts.gates {
@@ -769,94 +757,14 @@ fn policy_digest(
     digest_of(&preimage)
 }
 
-/// §6.3: validate authorized boundary ids against the workflow registry.
-fn validate_boundaries(
-    registry: &GraphRegistry<'_>,
-    boundaries: &[String],
-) -> Result<(), Vec<Diagnostic>> {
-    let mut diags: Vec<Diagnostic> = Vec::new();
-    for id in boundaries {
-        match registry.entry(id) {
-            None => diags.push(Diagnostic::new(
-                "PROJ-0003",
-                format!("unknown boundary id in disclosure policy: {id}"),
-            )),
-            Some(e) if !e.is_composite() => diags.push(Diagnostic::new(
-                "PROJ-0003",
-                format!("disclosure boundary targets a non-composite node: {id}"),
-            )),
-            Some(_) => {}
-        }
-    }
-    if !diags.is_empty() {
-        diags.sort_by(|a, b| a.code.cmp(&b.code).then_with(|| a.message.cmp(&b.message)));
-        diags.dedup_by(|a, b| a.code == b.code && a.message == b.message);
-        return Err(diags);
-    }
-    Ok(())
-}
-
-/// `(raw item id, rendered id)` for every composite node, longest raw id
-/// first (deterministic deepest-match order).
-fn composite_boundaries(registry: &GraphRegistry<'_>) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for scope in &registry.scopes {
-        for node in &scope.nodes {
-            if let crate::workflow::soma::contracts::BodyItem::Composite(c) = node.item {
-                out.push((c.id.clone(), node.node_id.clone()));
-            }
-        }
-    }
-    out.sort_by(|a, b| {
-        b.0.len()
-            .cmp(&a.0.len())
-            .then(a.0.cmp(&b.0))
-            .then(a.1.cmp(&b.1))
-    });
-    out
-}
-
-/// Generalize a finding path under an unauthorized composite to the
-/// composite's rendered id (no private path leaks); `None` when the path is
-/// not under any unauthorized boundary.
-fn generalize_file(
-    file: &str,
-    boundaries: &[(String, String)],
-    authorized: &BTreeSet<String>,
-) -> Option<String> {
-    for (raw, rendered) in boundaries {
-        let under = file == raw || file.starts_with(&format!("{raw}/"));
-        if under && !authorized.contains(rendered) {
-            return Some(rendered.clone());
-        }
-    }
-    None
-}
-
 fn build_payload(
     wf: &WorkflowDefinition,
     facts: &ReviewFacts<'_>,
     disclosure: &ReviewDisclosurePolicy,
-    boundaries: &[(String, String)],
-    authorized_boundaries: &BTreeSet<String>,
 ) -> Result<ReviewProjectionPayload, Vec<Diagnostic>> {
     let source_digest = source_digest_of(wf)?;
-    let mut issues = render_issues(facts.report)?;
+    let issues = render_issues(facts.report)?;
     let mut omissions = Vec::new();
-    if disclosure.has_target("files") {
-        let mut generalized = false;
-        for issue in issues.iter_mut() {
-            if let Some(file) = issue.file.clone()
-                && let Some(rendered) = generalize_file(&file, boundaries, authorized_boundaries)
-            {
-                issue.file = Some(rendered);
-                generalized = true;
-            }
-        }
-        if generalized {
-            push_omission(&mut omissions, "files", "outOfScope", "scopeExcluded");
-        }
-    }
     let gates = render_gates(facts.gates)?;
     let summary = render_summary(facts.report);
     let authority = render_authority(facts.gates);
@@ -896,12 +804,7 @@ pub fn render_review_projection(
     validate_gate_basis(facts)?;
     let source_digest = source_digest_of(wf)?;
     let normalized = normalize_review_policy(policy)?;
-    let registry = GraphRegistry::build(wf)?;
-    validate_boundaries(&registry, &normalized.authorized_boundaries)?;
-    let boundaries = composite_boundaries(&registry);
-    let authorized_boundaries: BTreeSet<String> =
-        normalized.authorized_boundaries.iter().cloned().collect();
-    let mut payload = build_payload(wf, facts, &normalized, &boundaries, &authorized_boundaries)?;
+    let mut payload = build_payload(wf, facts, &normalized)?;
     apply_policy(&mut payload, &normalized);
     let payload_value = serde_json::to_value(&payload).map_err(|e| {
         vec![Diagnostic::new(

@@ -1,89 +1,57 @@
-# Change: E4/X07 Slice 3 — review-report + evidence-timeline projections
+# Change: E4/X07 Slice 3 — review-report + evidence-timeline projections (repair round 2)
 
-**Issue:** #243 (E4/X07 Slice 3 — review-report + evidence-timeline projections under parent #164)
-**Governing spec:** `docs/architecture/e4-x07-slice-3-review-evidence-projections.md` (approved rev 2 at PR #244; §7/Task G carry the post-#240 repair note)
-**Builds on:** Slice 1 (`84d44e4`) envelope + canonical JSON + human plan; Slice 2 (`d71cf0d`) graph projection + disclosure model; docs-state #242 (`66d3362`).
-**Base:** `main@80f201d791d21c58477b6d895ad9475fd329ee28` (reconverged from `4bc6c2c9` via merge; #240 SPEC 007 bundle included)
+**Issue:** #243 (parent #164); repair of REVIEW FAILED at `b64cabce156cf93e0b32214a8b4edd85f7618d0f` (previous repair `d12180f`).
+**Governing spec:** `docs/architecture/e4-x07-slice-3-review-evidence-projections.md` (rev updated in this round to remove fabricated semantics for composite-boundary attribution, to add the timeline event-count contract, and to remove `evidence_bundles` from the review input contract).
+**Base:** `main@80f201d791d21c58477b6d895ad9475fd329ee28` (`#240` SPEC 007).
 
-## Objective
+## Repair (5 concrete defects resolved at `b64cabce156cf93e0b32214a8b4edd85f7618d0f`)
 
-Deliver deterministic, fail-closed review-report and evidence-timeline projections reusing the Slice-1 envelope and Slice-2 acyclic digest rules.
+1. **Gate basis digest binding (item 1)** — `HumanDecisionRecordV1.basisEvidenceDigest` was documented in `graph_gates.rs:100` as the *reviewed artifact digest* (`artifactDigest`), but the code (`validate_gate_basis`, `supported_by_gate_basis` in `review.rs`) resolved it against `EvidenceReference.eventDigest`. Fixed to resolve against `artifactDigest`; added positive (`artifactDigest==basis`) and negative (`eventDigest==basis` but `artifactDigest` missing → `SOMA-CMP-0004`) controls.
+2. **Fabricated private-boundary attribution (item 2)** — `generalize_file` (`review.rs:822`) inferred containment from `ReviewIssue.file` path prefixes (`starts_with`). `ReviewIssue.file` is not a workflow composite/node identity; the authoritative issue→boundary binding (required by spec §6.3) does not exist in Slice 3. Removed `authorizedBoundaries` from `ReviewDisclosurePolicy`, removed `validate_boundaries`, `composite_boundaries`, and `generalize_file`, and revised spec §4.5/§6.3/§10-row-12. Filenames are never interpreted as composite ids; findings render verbatim when `files` is authorized. Replaced test with `filenames_cannot_masquerade_as_composite_identities`.
+3. **Fabricated zero digest (item 3)** — `TimelineEventView.semantic_digest` emitted a 64-zero `Hex64` (`withheld_digest()` at `timeline.rs:319`) when `referenceDigest` was withheld. Changed to `Option<Hex64>` (`None` when withheld); deleted `withheld_digest()`. Added `withheld_reference_digest_is_null_not_zero_digest`.
+4. **No-op timeline count authorization (item 4)** — `TIMELINE_COUNT_TARGETS = ["events"]` (`timeline.rs:38`) was validated but never read. Implemented independently gated `TimelineProjectionPayload.event_count` (`Some(events.len() as u64)` when `count_authorization` includes `"events"`, else `None` + withheld omission). Added positive/withheld/unknown-target tests and updated spec §6.2/§5.1.
+5. **Semantically ignored authoritative input (item 5)** — `ReviewFacts.evidence_bundles` (`review.rs`) was never read, rendered, or bound. The approved contract (§4.0) named it authoritative input, but no legitimate projection contribution exists (`EvidenceBundle` has no `EvidenceReference` mapping, and `final_state` is evaluate/recovery data, not projection output). Removed the field from `ReviewFacts` and the `NO_BUNDLES` test helper; revised spec §4.0/§4.2. Added mutation regression `every_accepted_review_fact_changes_render_or_fails_closed`.
 
-## Completeness repair (second review round)
+## Files changed (`6` files; budget exceeded with explicit approval — single bounded repair)
 
-The first implementation covered only a subset of the binding §10 matrix.
-This round implements the complete approved contract:
+- `src/workflow/projection/review.rs` (items 1, 2, 5)
+- `src/workflow/projection/timeline.rs` (items 3, 4)
+- `tests/review_timeline_projection_conformance_tests.rs` (tests + golden writer)
+- `tests/fixtures/slice3/valid/review-report-basic.json` (regenerated)
+- `tests/fixtures/slice3/valid/timeline-basic.json` (regenerated)
+- `docs/architecture/e4-x07-slice-3-review-evidence-projections.md` (spec revisions)
 
-1. **Content identities** — `ReviewProjectionPayload.reportReferenceDigest`
-   (domain `projection.review-report.facts.v1`) and
-   `TimelineProjectionPayload.eventStreamDigest` (domain
-   `projection.evidence-timeline.events.v1`) per §3.4.2. Both are
-   shape-checked in the structural byte verifiers and recomputed in the
-   against-source verifiers.
+`vendored/soma/**`: unchanged (verified via `git diff --stat -- vendored/` — empty).
 
-2. **Timeline validation** — `render_timeline_projection` runs the full
-   `WorkEventBatch::audit` against the supported version and refuses any
-   diagnostic (missing/cyclic parents, invalid event semantics, widened
-   authority, unsupported versions, dirty evidence); the typed `RunKey` is
-   bound to `batch.runId` (`SOMA-CMP-0002` on mismatch); deterministic
-   `(sequence, semanticDigest)` ordering is preserved.
+## Verification (all at new head `b64cabce156cf93e0b32214a8b4edd85f7618d0f`)
 
-3. **Timeline against-source** — independently verifies envelope metadata,
-   `sourceDigest == source_digest_of(wf)`, `projectionDigest ==
-   digest(payload)`, the normalized policy digest, `eventStreamDigest`, and
-   fresh-render byte identity.
+- `cargo fmt --check`: PASS
+- `cargo clippy --all-targets --all-features -- -D warnings`: PASS
+- `tests/review_timeline_projection_conformance_tests`: **56 passed, 1 ignored** (authoring helper `#[ignore]`d; 56 includes the new row-mapped tests)
+- `tests/emitted_diagnostics_conformance`: **13 passed**
+- `tests/projection_conformance_tests`: **64 passed**
+- `tests/soma_capability_conformance`: **27 passed**
+- Evidence (single clean passes; #214 retries documented):
+  - core: `fe4a9ab58137f1048a0ab065f40e7ae0df093f8836d60c5398aa2f3c0828ffb5`
+  - platform: `5d31ba2923f28abe79008e24f7f12154ede1ec7d06d866dd97659859ebe8523a`
+  - smoke: `f6c0de7eebb54bde8c5294157ceb987efe5a251bdc1a879ac0b0be3d736c910b`
+- `python scripts/local_ci.py verify --commit b64cabce156cf93e0b32214a8b4edd85f7618d0f --require-platform windows`: **PASS: 3 evidence files verify**
 
-4. **Honest completeness** — page metadata present is copied exactly; absent
-   page metadata renders `available: false`, `moreAvailable: null`,
-   `nextAfter: null` (never an invented `moreAvailable: true`); missing
-   sequence numbers surface as `OmissionView{category:"unavailable",
-   reason:"sourceGap"}`.
+### Retries / #214 disclosure (honest, not hidden)
 
-5. **Full disclosure contract** — closed target vocabularies validated
-   (`PROJ-0003` on unknown targets); `countAuthorization` gates every count
-   independently; review files/lines/messages/rules/predicates/principals/
-   evidence references are gated; timeline payload details/actor identity/
-   reference digests are gated; distinct `withheld`/`unavailable`/
-   `outOfScope` omissions; composite/private-boundary findings are
-   generalized to the owning rendered composite id (`authorizedBoundaries`)
-   so no private path leaks; narrowing never widens.
+Severe Norton AV interference (`.git/objects` permission-denied) this session:
+- core: first full attempt at this head passed (no retries needed).
+- platform: passed after ~11 full-suite attempts (victims rotated across `cancellation_tests` and lib resource-enforcement).
+- smoke: passed after ~18 attempts (`approval-controlled patch smoke` victim `src/calc.rs` object hash `7a/97037f...` repeatedly locked; other attempts hit `provider governance` or the same victim).
+Published evidence is a single clean pass at `b64cabce156cf93e0b32214a8b4edd85f7618d0f`; no evidence carried from earlier heads; no steps skipped.
 
-6. **Review attribution** — evidence references come from the authoritative
-   `ReviewFacts.evidence_references` (never `wf.evidence`);
-   `supportedByEvidence` is bound to the gate basis evidence, and a gate
-   basis digest that references no present evidence reference fails closed
-   (`SOMA-CMP-0004`); no hardcoded executor class; heterogeneous review
-   channels are represented (`reviewChannels`), never collapsed.
+## Design revisions recorded (not hidden in code only)
 
-7. **§10 acceptance matrix** — all 24 rows implemented with row-mapped
-   tests in `tests/review_timeline_projection_conformance_tests.rs`.
+- `ReviewDisclosurePolicy.authorized_boundaries` removed (no authoritative binding); `generalize_file`, `validate_boundaries`, `composite_boundaries` removed.
+- `ReviewFacts.evidence_bundles` removed; evidence references come exclusively from `evidence_references`.
+- `TimelineEventView.semantic_digest: Option<Hex64>`; `TimelineProjectionPayload.event_count: Option<u64>`.
+- Spec §4.0/4.2/4.5/5.1/5.2/6.2/6.3/§10 updated; new rows 25–28 added.
 
-8. **Test hygiene** — `golden_fixture_writer` is an `#[ignore]`d authoring
-   helper; the golden verification path is read-only.
+## Boundaries honored
 
-## Deliverables
-
-1. **Review projection** (`src/workflow/projection/review.rs`) — `lite.review-report.v1` deterministic payload over `(WorkflowDefinition, ReviewFacts, policy)` with explicit gate disposition and summary availability markers.
-
-2. **Timeline projection** (`src/workflow/projection/timeline.rs`) — `lite.evidence-timeline.v1` deterministic payload over `TimelineProjectionSource` (WorkEventBatch + optional ProvenanceState + optional scope/page meta), ordered strictly by `(sequence, semanticDigest)` tie-break.
-
-3. **Verifiers** — structural byte-path verifiers that extract the envelope shape and shape-check derived digests (policy digest, facts/event-stream digest) reuse the Slice-1 duplicate-key scan and canonical strict parse; against-source verifiers for both ways fresh-render from the SAME authoritative inputs and bytewise compare instead of re-inferring semantics.
-
-4. **Disclosure** — policy-driven filtering is consistent with §6 of the spec; unassigned principals fields remain absent with explicit omission markers; disclosure digest is acyclic per §3.4.
-
-5. **Diagnostic boundary (post-#240 repair)** — `SOMA-CMP-0011` (`duplicate_identity`) is pinned in the repository-owned Lite diagnostic-extension registry (`src/workflow/soma/diagnostic_extensions.rs`), NOT in an upstream-vendored catalogue: #240 vendored `v1.2` with a provenance lock and a v1.1→v1.2 additivity contract, which made the earlier "edit `vendored/soma/v1.1/diagnostics.json`" instruction obsolete. The earlier edit (including an accidental whole-file EOL rewrite) was reverted to the exact upstream bytes; resolution consults the upstream catalogue first, then the extension registry; cross-registry duplicate codes fail closed; unknown codes keep the fail-safe `general` fallback.
-
-## Test totals (focused)
-
-- `review_timeline_projection_conformance_tests`: 49 passed, 1 ignored (authoring helper)
-- `emitted_diagnostics_conformance`: 13 passed
-- `projection_conformance_tests` (Slice 1/2): 64 passed
-- `soma_capability_conformance` (SPEC 007): 27 passed
-
-## Scope
-
-Slice-3-specific files: `src/workflow/projection/mod.rs`, `src/workflow/projection/graph.rs` (one derive annotation), `src/workflow/projection/review.rs`, `src/workflow/projection/timeline.rs`, `src/workflow/soma/diagnostic_extensions.rs` (Lite-owned extension registry) + `src/workflow/soma/mod.rs` (`category_for` wiring), `tests/fixtures/slice3/**`, `tests/review_timeline_projection_conformance_tests.rs`, `tests/emitted_diagnostics_conformance.rs` (extension regressions), `CHANGELOG.md` slice-3 bullet. `vendored/soma/**` remains untouched (restored byte-identical to `main@80f201d`).
-
-## Boundaries
-
-Same exclusions as the plan: no #132 Slice 3, #217, compiled-plan work (#163), model native, graph runtime/spec redesign. No edits to `vendored/soma/**`.
+No #217, no #132 Slice 3 promotion, no autonomous-execution promotion, no compiled-plan work (#163), no spec redesign. PR #245 left open; no merge; no rebase; no force-push.

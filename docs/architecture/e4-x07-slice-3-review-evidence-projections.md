@@ -153,7 +153,10 @@ Normalization = Slice-2's convention (`projection/disclosure.rs: normalize_polic
 pub struct ReviewFacts<'a> {
     pub report: Option<&'a ReviewReport>,          // src/harness/review.rs:41
     pub gates: &'a [HumanDecisionRecordV1],        // src/workflow/graph_gates.rs:~100
-    pub evidence_bundles: &'a [EvidenceBundle],    // src/workflow/evaluate/evidence.rs:21
+    /// Authoritative evidence references gathered by the caller from the same
+    /// record set (e.g., `EvidenceReference` from the authoritative provenance
+    /// or evidence bundle). Not derived or synthesized by the projection.
+    pub evidence_references: &'a [EvidenceReference],
     pub scope: ReviewScope<'a>,                    // report/run scope from the authoritative data
 }
 ```
@@ -220,7 +223,7 @@ pub struct ReviewProjectionPayload {
 | reviewIssues / summary | `src/harness/review.rs::ReviewReport` (passed-in at call) | absent ⇒ `summary.passed: null`, `issues: []`, one `OmissionView{section:"issues", category:"unavailable", reason:"noAuthoritativeSource"}` |
 | gates[] | `src/workflow/graph_gates.rs::HumanDecisionRecordV1` records gathered for the workflow run | absent ⇒ gates empty + `OmissionView{category:"unavailable", reason:"noAuthoritativeSource"}` |
 | authority principals | `HumanDecisionRecordV1.decided_by`, ProvenanceEnvelope producer/kind | absent ⇒ `omissions` marker (never implied empty principal set means no author) |
-| evidence refs | `EvidenceBundle`/`ProvenanceEnvelope`/`EvidenceReference` in the same record set | absent ⇒ `evidence_references: []` + `OmissionView{category:"unavailable"}` |
+| evidence refs | `EvidenceReference` set passed explicitly in `ReviewFacts.evidence_references` (authoritative evidence references from the same record set; `EvidenceBundle` is evaluation/recovery data, not a projection input) | absent ⇒ `evidence_references: []` + `OmissionView{category:"unavailable"}` |
 
 ### 4.3 Deterministic ordering (MUST NOT round to input order)
 
@@ -293,6 +296,9 @@ pub struct TimelineProjectionPayload {
     pub disclosure_policy_digest: String,    // domain "projection.evidence-timeline.policy.v1" preimage (§3.4.1)
     pub scope: TimelineScope,                // run identity — mandatory or unavailable
     pub events: Vec<TimelineEventView>,      // deterministic total order (§5.4)
+    /// §6.2 independently gated event count (`"events"`); `None` when unauthorized,
+    /// paired with an explicit withheld omission (`null` in the payload, never omitted silently).
+    pub eventCount: Option<u64>,
     pub omissions: Vec<OmissionView>,        // same vocabulary as review
     pub completeness: CompletenessView,      // (moreAvailable, nextAfter, authoritativeIds left)
 }
@@ -314,7 +320,7 @@ TimelineEventView {
     timestamp: Option<String>,        // declared AFTER ordering; only metadata
     correlation_id: String,
     repo_revision: String,
-    semantic_digest: Hex64,           // authoritative event digest
+    semantic_digest: Option<Hex64>,      // authoritative event digest; `None` when `referenceDigest` is withheld (§3.4.2)
     event_digest_reference: Vec<EvidenceReferenceView>, // payload.evidence carried through
     provenance: TimelineProvenanceView,  // summary subset or `unavailable`
     outcomes: Option<Vec<OutcomeVariant>>,  // from payload variants when typed
@@ -351,13 +357,14 @@ TimelineEventView {
 
 ### 6.2 Count-exposure vs existence-privacy
 
-- Counts (`totalIssues`, `bySeverity`, `byType`, event counts per category) are independently sensitive: revealing counts is permitted only when `countAuthorization` covers the relevant target. An unauthorized count yields `null` value + `category: "withheld"` + omission marker.
+- Counts (`totalIssues`, `bySeverity`, `byType`, event count) are independently sensitive: revealing counts is permitted only when `countAuthorization` covers the relevant target. An unauthorized count yields `null` value + `category: "withheld"` + omission marker. The timeline's `eventCount` is derived from the authoritative event stream and disclosed separately (§5.1); it is not inferable from hidden internals (the array structure is governed by `payloadDetails`).
 - Existence-channels: payload keys that would reveal count/existence differences WERE reviewed — keys with no disclosed entries are rendered with explicit `kind: []`/`"value": null` + omission marker rather than silent omission (§4.4, §5.5).
 
 ### 6.3 Composite/private-boundary behavior
 
-- Review: a finding group inside a private composite body maps to `GraphDisclosureView.category:"private-boundary"` reuse pattern — any cross-boundary evidence-reference whose source node path is withheld results in the finding being generalized to the owning composite scope (no private ids leak).
-- Timeline: event whose disclosed payload references a private composite name surfaces the RunKey-kind only, not contained internals.
+- Generalization requires an authoritative issue-to-boundary binding (e.g., an `EvidenceReference` carrying the source node identity of the composite). Slice 3's `ReviewIssue.file` carries only a free-form path, not a composite/node identity; filenames must never be interpreted as composite ids via prefix matching (`starts_with`).
+- Review: without an authoritative binding, no parent composite is claimed. Findings render verbatim when `files` is authorized (paths are not masked or substituted); private-composite suppression for review is expressed only by withholding the `files` disclosure target (`outOfScope` omissions are reserved for scope-level exclusions, not for fabricated path containment). Composite-boundary generalization is deferred pending an authoritative binding mechanism.
+- Timeline: event payload disclosure is governed by `payloadDetails`; no private-composite claim is fabricated from event names.
 
 ### 6.4 Non-cascading/narrowing invariant
 
@@ -440,7 +447,7 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 9 | projection cannot add authority | renderer ignores an invented `verdict: "approved"` source extension | `projection_cannot_widen_authority_or_invent_verdicts` |
 | 10 | withheld information uninferable through authorized fields | disclosure applied; no removed bytes leak keys | `policy_drawn_report_carries_no_withheld_issue_content`, `timeline_payload_no_leak_of_withheld_payload_details` |
 | 11 | withheld ≠ absent | withheld item produces OmissionView; absent source produces `unavailable` | `omissions_distinguish_withheld_unavailable_outOfScope` |
-| 12 | composite/private boundaries preserved | finding inside withheld composite → parent scope only | `private_boundary_findings_are_generalized` |
+| 12 | filenames never masquerade as composite/node identities | composite-looking file paths render verbatim; no parent composite claimed | `filenames_cannot_masquerade_as_composite_identities` |
 | 13 | review findings reference evidence deterministically | same evidence_reference list through policy-equal render | `review_findings_evidence_references_sorted_and_stable` |
 | 14 | dangling/inconsistent evidence references fail | evidence_references refers to a non-present event digest | `review_against_source_fails_on_dangling_evidence_reference` (`SOMA-CMP-0004`) |
 | 15 | structural verifier behavior pinned per projection | fixed valid envelope bytes parse, fixed invalid bytes reject | `verify_review_projection_bytes_*` / `verify_timeline_projection_bytes_*` |
@@ -453,6 +460,10 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 22 | unknown gate verdict never upgraded | gate absent source; check rendering of `unavailable` | `unavailable_verdict_is_distinguishable_from_approved` |
 | 23 | against-source catches substituted authoritative ReviewFacts | modified `ReviewIssue` data / flipped gate verdict / swapped evidence reference / changed disposition-affecting raw value must flip the fresh render and fail | `verify_review_against_source_fails_on_issue_substitution`, `..._on_gate_verdict_substitution`, `..._on_evidence_ref_substitution`, `..._on_disposition_substitution` |
 | 24 | against-source catches substituted TimelineProjectionSource | modified `page.more_available`/`page.next_after`, altered `ProvenanceState` slice, or swapped out `WorkEventBatch` must flip the fresh render and fail | `verify_timeline_against_source_fails_on_page_meta_substitution`, `..._on_provenance_substitution`, `..._on_batch_substitution` |
+| 25 | gate `basisEvidenceDigest` binds to reviewed artifact (`artifactDigest`) not event identity (`eventDigest`) | positive (artifact==basis, event≠basis) and negative (event==basis, artifact≠basis → `SOMA-CMP-0004`) | `gate_basis_binds_to_artifact_digest`, `gate_basis_matching_event_digest_only_fails_closed` |
+| 26 | withheld `semanticDigest` is explicit `null`, never an all-zero `Hex64` | `referenceDigest` unauthorized ⇒ payload shows `null` + omission; canonical bytes contain no 64-zero hex string | `withheld_reference_digest_is_null_not_zero_digest` |
+| 27 | timeline `eventCount` independently gated by `countAuthorization` | authorized ⇒ `eventCount: Some(n)`; unauthorized ⇒ `None` + `events` withheld omission; unknown target ⇒ `PROJ-0003` | `timeline_event_count_is_authorized`, `timeline_event_count_is_withheld_when_unauthorized`, `timeline_unknown_count_target_fails_closed` |
+| 28 | mutation regression: every authoritative `ReviewFacts` mutation flips render or fails closed | mutated issue/gate/evidence-reference/scope identity must alter payload bytes or fail against-source verification | `every_accepted_review_fact_changes_render_or_fails_closed` |
 
 ## 11. Implementation Task Plan (TDD)
 
