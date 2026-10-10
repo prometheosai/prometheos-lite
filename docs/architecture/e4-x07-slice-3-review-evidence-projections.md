@@ -153,7 +153,10 @@ Normalization = Slice-2's convention (`projection/disclosure.rs: normalize_polic
 pub struct ReviewFacts<'a> {
     pub report: Option<&'a ReviewReport>,          // src/harness/review.rs:41
     pub gates: &'a [HumanDecisionRecordV1],        // src/workflow/graph_gates.rs:~100
-    pub evidence_bundles: &'a [EvidenceBundle],    // src/workflow/evaluate/evidence.rs:21
+    /// Authoritative evidence references gathered by the caller from the same
+    /// record set (e.g., `EvidenceReference` from the authoritative provenance
+    /// or evidence bundle). Not derived or synthesized by the projection.
+    pub evidence_references: &'a [EvidenceReference],
     pub scope: ReviewScope<'a>,                    // report/run scope from the authoritative data
 }
 ```
@@ -220,7 +223,7 @@ pub struct ReviewProjectionPayload {
 | reviewIssues / summary | `src/harness/review.rs::ReviewReport` (passed-in at call) | absent ⇒ `summary.passed: null`, `issues: []`, one `OmissionView{section:"issues", category:"unavailable", reason:"noAuthoritativeSource"}` |
 | gates[] | `src/workflow/graph_gates.rs::HumanDecisionRecordV1` records gathered for the workflow run | absent ⇒ gates empty + `OmissionView{category:"unavailable", reason:"noAuthoritativeSource"}` |
 | authority principals | `HumanDecisionRecordV1.decided_by`, ProvenanceEnvelope producer/kind | absent ⇒ `omissions` marker (never implied empty principal set means no author) |
-| evidence refs | `EvidenceBundle`/`ProvenanceEnvelope`/`EvidenceReference` in the same record set | absent ⇒ `evidence_references: []` + `OmissionView{category:"unavailable"}` |
+| evidence refs | `EvidenceReference` set passed explicitly in `ReviewFacts.evidence_references` (authoritative evidence references from the same record set; `EvidenceBundle` is evaluation/recovery data, not a projection input) | absent ⇒ `evidence_references: []` + `OmissionView{category:"unavailable"}` |
 
 ### 4.3 Deterministic ordering (MUST NOT round to input order)
 
@@ -293,6 +296,10 @@ pub struct TimelineProjectionPayload {
     pub disclosure_policy_digest: String,    // domain "projection.evidence-timeline.policy.v1" preimage (§3.4.1)
     pub scope: TimelineScope,                // run identity — mandatory or unavailable
     pub events: Vec<TimelineEventView>,      // deterministic total order (§5.4)
+    /// Timeline projections have no independently sensitive count fields; the
+    /// event array itself is the authoritative disclosure. Any `countAuthorization`
+    /// target (e.g. `"events"`) fails closed (`PROJ-0003`) — cardinality is
+    /// inherent in the list (§6.4).
     pub omissions: Vec<OmissionView>,        // same vocabulary as review
     pub completeness: CompletenessView,      // (moreAvailable, nextAfter, authoritativeIds left)
 }
@@ -314,7 +321,7 @@ TimelineEventView {
     timestamp: Option<String>,        // declared AFTER ordering; only metadata
     correlation_id: String,
     repo_revision: String,
-    semantic_digest: Hex64,           // authoritative event digest
+    semantic_digest: Option<Hex64>,      // authoritative event digest; `None` when `referenceDigest` is withheld (§3.4.2)
     event_digest_reference: Vec<EvidenceReferenceView>, // payload.evidence carried through
     provenance: TimelineProvenanceView,  // summary subset or `unavailable`
     outcomes: Option<Vec<OutcomeVariant>>,  // from payload variants when typed
@@ -351,13 +358,14 @@ TimelineEventView {
 
 ### 6.2 Count-exposure vs existence-privacy
 
-- Counts (`totalIssues`, `bySeverity`, `byType`, event counts per category) are independently sensitive: revealing counts is permitted only when `countAuthorization` covers the relevant target. An unauthorized count yields `null` value + `category: "withheld"` + omission marker.
+- Counts (`totalIssues`, `bySeverity`, `byType`) are independently sensitive: revealing counts is permitted only when `countAuthorization` covers the relevant target. An unauthorized count yields `null` value + `category: "withheld"` + omission marker. Timeline projections carry no independently gated count field (`TIMELINE_COUNT_TARGETS` is empty; any `countAuthorization` entry fails closed with `PROJ-0003`). The event array itself is the authoritative disclosure; cardinality is inherent in the list (§5.1, §6.4).
 - Existence-channels: payload keys that would reveal count/existence differences WERE reviewed — keys with no disclosed entries are rendered with explicit `kind: []`/`"value": null` + omission marker rather than silent omission (§4.4, §5.5).
 
 ### 6.3 Composite/private-boundary behavior
 
-- Review: a finding group inside a private composite body maps to `GraphDisclosureView.category:"private-boundary"` reuse pattern — any cross-boundary evidence-reference whose source node path is withheld results in the finding being generalized to the owning composite scope (no private ids leak).
-- Timeline: event whose disclosed payload references a private composite name surfaces the RunKey-kind only, not contained internals.
+- Generalization requires an authoritative issue-to-boundary binding (e.g., an `EvidenceReference` carrying the source node identity of the composite). Slice 3's `ReviewIssue.file` carries only a free-form path, not a composite/node identity; filenames must never be interpreted as composite ids via prefix matching (`starts_with`).
+- Review: without an authoritative binding, no parent composite is claimed. Findings render verbatim when `files` is authorized (paths are not masked or substituted); private-composite suppression for review is expressed only by withholding the `files` disclosure target (`outOfScope` omissions are reserved for scope-level exclusions, not for fabricated path containment). Composite-boundary generalization is deferred pending an authoritative binding mechanism.
+- Timeline: event payload disclosure is governed by `payloadDetails`; no private-composite claim is fabricated from event names.
 
 ### 6.4 Non-cascading/narrowing invariant
 
@@ -391,6 +399,8 @@ Reuse existing families whenever an existing code means the required fault. New 
 Proposed addition permitted by plan review: at most **one** new code, `SOMA-CMP-0011` (`duplicate event identity`). Every other fault maps to an existing code. Old entries `SOMA-CMP-0010`, `PROJ-0010`, `PROJ-0011`, `PROJ-0012` are REMOVED from the proposal.
 
 Any residual new code (only `SOMA-CMP-0011`) must land in `diagnostics.json` category derivation first (matching SOMA `Diagnostic.category_for` convention) before being emitted. No new enum kinds around `Diagnostic`.
+
+**Post-#240 repair (PR #245 reconvergence; supersedes the registration clause above).** The registration clause predates #240, which vendored the `v1.2` bundle with a provenance lock and a v1.1→v1.2 additivity contract — the upstream catalogues are immutable in this repository (`-text` byte-stable; any change requires a reviewed bundle upgrade). Editing `vendored/soma/v1.1/diagnostics.json` is therefore obsolete and was reverted; `SOMA-CMP-0011` is pinned in the repository-owned **Lite diagnostic-extension registry** (`src/workflow/soma/diagnostic_extensions.rs`). Category resolution consults the upstream catalogue first, then the extension registry; a code present in both registries fails closed; unknown codes keep the fail-safe `general` fallback; still no new enum kinds around `Diagnostic`.
 
 Verifiers per projection, both with exact ordered steps mirroring the graph pattern (§11 of Slice 2):
 
@@ -438,7 +448,7 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 9 | projection cannot add authority | renderer ignores an invented `verdict: "approved"` source extension | `projection_cannot_widen_authority_or_invent_verdicts` |
 | 10 | withheld information uninferable through authorized fields | disclosure applied; no removed bytes leak keys | `policy_drawn_report_carries_no_withheld_issue_content`, `timeline_payload_no_leak_of_withheld_payload_details` |
 | 11 | withheld ≠ absent | withheld item produces OmissionView; absent source produces `unavailable` | `omissions_distinguish_withheld_unavailable_outOfScope` |
-| 12 | composite/private boundaries preserved | finding inside withheld composite → parent scope only | `private_boundary_findings_are_generalized` |
+| 12 | filenames never masquerade as composite/node identities | composite-looking file paths render verbatim; no parent composite claimed | `filenames_cannot_masquerade_as_composite_identities` |
 | 13 | review findings reference evidence deterministically | same evidence_reference list through policy-equal render | `review_findings_evidence_references_sorted_and_stable` |
 | 14 | dangling/inconsistent evidence references fail | evidence_references refers to a non-present event digest | `review_against_source_fails_on_dangling_evidence_reference` (`SOMA-CMP-0004`) |
 | 15 | structural verifier behavior pinned per projection | fixed valid envelope bytes parse, fixed invalid bytes reject | `verify_review_projection_bytes_*` / `verify_timeline_projection_bytes_*` |
@@ -451,6 +461,10 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 22 | unknown gate verdict never upgraded | gate absent source; check rendering of `unavailable` | `unavailable_verdict_is_distinguishable_from_approved` |
 | 23 | against-source catches substituted authoritative ReviewFacts | modified `ReviewIssue` data / flipped gate verdict / swapped evidence reference / changed disposition-affecting raw value must flip the fresh render and fail | `verify_review_against_source_fails_on_issue_substitution`, `..._on_gate_verdict_substitution`, `..._on_evidence_ref_substitution`, `..._on_disposition_substitution` |
 | 24 | against-source catches substituted TimelineProjectionSource | modified `page.more_available`/`page.next_after`, altered `ProvenanceState` slice, or swapped out `WorkEventBatch` must flip the fresh render and fail | `verify_timeline_against_source_fails_on_page_meta_substitution`, `..._on_provenance_substitution`, `..._on_batch_substitution` |
+| 25 | gate `basisEvidenceDigest` binds to reviewed artifact (`artifactDigest`) not event identity (`eventDigest`) | positive (artifact==basis, event≠basis) and negative (event==basis, artifact≠basis → `SOMA-CMP-0004`) | `gate_basis_binds_to_artifact_digest`, `gate_basis_matching_event_digest_only_fails_closed` |
+| 26 | withheld `semanticDigest` is explicit `null`, never an all-zero `Hex64` | `referenceDigest` unauthorized ⇒ payload shows `null` + omission; canonical bytes contain no 64-zero hex string | `withheld_reference_digest_is_null_not_zero_digest` |
+| 27 | timeline count authorization unsupported; any `countAuthorization` target fails closed | no timeline count target is valid (`TIMELINE_COUNT_TARGETS` empty); any `countAuthorization` entry ⇒ `PROJ-0003` | `timeline_any_count_target_fails_closed` (replaces positive/withheld tests) |
+| 28 | mutation regression: every authoritative `ReviewFacts` mutation flips render or fails closed | mutated issue/gate/evidence-reference/scope identity must alter payload bytes or fail against-source verification | `every_accepted_review_fact_changes_render_or_fails_closed` |
 
 ## 11. Implementation Task Plan (TDD)
 
@@ -505,11 +519,12 @@ Negative tests: envelope byte flip ⇒ PROJ-0001/SOMA-CMP-0004 split correctly; 
 
 ### Task G — Diagnostics registration + invalid-fixture set
 Deps: C, F
-Files: `vendored/soma/v1.1/diagnostics.json` (add only `SOMA-CMP-0011` `duplicate event identity` — the sole proposed new code; existing criterion codes remain resolved via their category fallbacks); new `tests/fixtures/slice3/*` invalid envelopes + valid goldens.
-RED: diagnostic category resolution for `SOMA-CMP-0011` fails until registered; fixture parse expected-fail mismatch.
-GREEN min: minimal schema for `SOMA-CMP-0011` only; goldens: `valid/review-report*.json`, `valid/timeline*.json` (matching canonical renders), `invalid/*` cases per §10.
-Negative tests: unknown code family in fixtures ⇒ no diagnostic; invalid category mapping ⇒ conservative fallback; goldens byte-locked per golden files semantics for Slice 2 (referenced).
-Invariant: every new code appears in diagnostics.json and resolves via `category_for`; no uncategorized SOMA-CMP/PROJ codes.
+**Post-#240 repair:** the original "add `SOMA-CMP-0011` to `vendored/soma/v1.1/diagnostics.json`" instruction is obsolete — #240 locked the vendored catalogues (provenance + v1.1→v1.2 additivity). The code is pinned in the repository-owned extension registry instead; the vendored trees stay byte-identical to upstream.
+Files: `src/workflow/soma/diagnostic_extensions.rs` (Lite-owned extension registry: pin `SOMA-CMP-0011 → duplicate_identity`; upstream-then-extension resolution order; fail-closed cross-registry duplicate rejection; fail-safe unknown-code fallback); wiring in `src/workflow/soma/mod.rs` (`category_for`); regressions in `tests/emitted_diagnostics_conformance.rs`; new `tests/fixtures/slice3/*` invalid envelopes + valid goldens.
+RED: diagnostic category resolution for `SOMA-CMP-0011` fails until the extension registry exists (falls back to `general`); fixture parse expected-fail mismatch.
+GREEN min: `SOMA-CMP-0011` resolves to `duplicate_identity` through `category_for`; the live registries are disjoint; goldens: `valid/review-report*.json`, `valid/timeline*.json` (matching canonical renders), `invalid/*` cases per §10.
+Negative tests: an extension code already published upstream is rejected; a code duplicated inside the extension registry is rejected; unknown codes fall back to `general`; the vendored v1.1/v1.2 catalogue additivity holds and the vendored bytes carry no EOL churn; goldens byte-locked per golden files semantics for Slice 2 (referenced).
+Invariant: every new code resolves via `category_for` (upstream catalogue first, then the Lite extension registry); no uncategorized SOMA-CMP/PROJ codes; no edits to `vendored/soma/**`.
 
 ### Task H — Review/Timeline fixtures + golden locks
 Deps: C, F, G

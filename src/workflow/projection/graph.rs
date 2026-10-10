@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::workflow::execution_graph::topological_order_body;
 use crate::workflow::soma::Diagnostic;
@@ -245,7 +245,7 @@ pub struct GraphOpOutputView {
 /// Withheld-boundary disclosure block (§4). `hiddenNodes`/`hiddenEdges`
 /// appear only under count authorization (presence is decided by the
 /// disclosure state at payload-render time).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphDisclosureView {
     pub withheld: bool,

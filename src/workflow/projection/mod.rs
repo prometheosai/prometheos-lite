@@ -9,6 +9,8 @@ pub mod envelope;
 pub mod graph;
 pub mod human;
 pub mod redaction;
+pub mod review;
+pub mod timeline;
 
 pub use disclosure::GraphDisclosurePolicy;
 pub use envelope::{
@@ -17,6 +19,19 @@ pub use envelope::{
 pub use graph::{project_graph_json, verify_graph_against_source, verify_graph_projection_bytes};
 pub use human::project_human_plan;
 pub use redaction::RedactionPolicy;
+pub use review::{
+    DispositionView, EvidenceReferenceView, OmissionView, PrincipalView, REVIEW_SCHEMA_VERSION,
+    RepoBindingView, ReviewAuthoritySummary, ReviewDisclosurePolicy, ReviewFacts, ReviewGateView,
+    ReviewIssueView, ReviewProjectionPayload, ReviewScope, ReviewSourceIdentity, ReviewSummaryView,
+    RunKeyView, render_review_projection, verify_review_against_source,
+    verify_review_projection_bytes,
+};
+pub use timeline::{
+    CompletenessView, ProjectionPageMeta, TIMELINE_SCHEMA_VERSION, TimelineDisclosurePolicy,
+    TimelineEventView, TimelineProjectionPayload, TimelineProjectionSource, TimelineProvenanceView,
+    TimelineScope, render_timeline_projection, verify_timeline_against_source,
+    verify_timeline_projection_bytes,
+};
 
 use crate::workflow::soma::canonical::try_canonical_digest;
 use crate::workflow::soma::contracts::WorkflowDefinition;
