@@ -197,7 +197,8 @@ fn timeline_all_policy() -> TimelineDisclosurePolicy {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-        count_authorization: vec!["events".to_string()],
+        // Timeline projections have no independently gated count fields (§6.2).
+        count_authorization: vec![],
     }
 }
 
@@ -725,91 +726,26 @@ fn omissions_distinguish_withheld_unavailable_outofscope() {
     );
 }
 
-/// §6.2 / item 4 — timeline event count independently gated.
+/// §6.2 / item 4 — timeline count authorization unsupported; any target fails closed.
 #[test]
-fn timeline_event_count_is_authorized() {
+fn timeline_any_count_target_fails_closed() {
     let wf = base_wf();
-    let rk = run_key("run-1");
-    let b = batch(
-        "run-1",
-        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
-    );
+    let rk = run_key("run-c");
+    let b = batch("run-c", vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")]);
     let source = TimelineProjectionSource {
         batch: &b,
         provenance: None,
         page: None,
         scope: &rk,
     };
+    // Any entry in `countAuthorization` (even the previously implied `"events"`)
+    // is unsupported (`TIMELINE_COUNT_TARGETS` is empty) and must fail.
     let policy = TimelineDisclosurePolicy {
         authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        count_authorization: vec!["events".to_string()],
+            .iter().map(|s| s.to_string()).collect(),
+        count_authorization: vec!["events".to_string(), "eventCount".to_string()],
     };
-    let env = render_timeline_projection(&source, Some(&policy), &wf).expect("render");
-    assert_eq!(env.payload.event_count, Some(1));
-    assert!(
-        !env.payload
-            .omissions
-            .iter()
-            .any(|o| o.section == "events" && o.category == "withheld")
-    );
-}
-
-#[test]
-fn timeline_event_count_is_withheld_when_unauthorized() {
-    let wf = base_wf();
-    let rk = run_key("run-2");
-    let b = batch(
-        "run-2",
-        vec![
-            mk_event("e1", 1, "c", "2026-10-05T00:00:00Z"),
-            mk_event("e2", 2, "c", "2026-10-05T00:00:01Z"),
-        ],
-    );
-    let source = TimelineProjectionSource {
-        batch: &b,
-        provenance: None,
-        page: None,
-        scope: &rk,
-    };
-    let policy = TimelineDisclosurePolicy {
-        authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        count_authorization: vec![],
-    };
-    let env = render_timeline_projection(&source, Some(&policy), &wf).expect("render");
-    assert!(env.payload.event_count.is_none());
-    assert!(env.payload.omissions.iter().any(|o| o.section == "events"
-        && o.category == "withheld"
-        && o.reason == "disclosurePolicy"));
-}
-
-#[test]
-fn timeline_unknown_count_target_fails_closed() {
-    let wf = base_wf();
-    let rk = run_key("run-3");
-    let b = batch(
-        "run-3",
-        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
-    );
-    let source = TimelineProjectionSource {
-        batch: &b,
-        provenance: None,
-        page: None,
-        scope: &rk,
-    };
-    let policy = TimelineDisclosurePolicy {
-        authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        count_authorization: vec!["eventCount".to_string()],
-    };
-    let err = render_timeline_projection(&source, Some(&policy), &wf).expect_err("unknown target");
+    let err = render_timeline_projection(&source, Some(&policy), &wf).expect_err("unsupported count target");
     assert!(err.iter().any(|d| d.code == "PROJ-0003"), "{err:?}");
 }
 
@@ -834,10 +770,9 @@ fn withheld_reference_digest_is_null_not_zero_digest() {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-        count_authorization: vec!["events".to_string()],
+        count_authorization: vec![], // unsupported (§6.2)
     };
     let env = render_timeline_projection(&source, Some(&policy), &wf).expect("render");
-    assert!(env.payload.event_count == Some(1));
     let event = &env.payload.events[0];
     assert!(
         event.semantic_digest.is_none(),

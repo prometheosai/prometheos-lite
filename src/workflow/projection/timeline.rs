@@ -34,8 +34,10 @@ pub const TIMELINE_EVENTS_DOMAIN: &str = "projection.evidence-timeline.events.v1
 /// Closed vocabulary of timeline disclosure targets (§6.1).
 pub const TIMELINE_DISCLOSURE_TARGETS: &[&str] =
     &["payloadDetails", "actorIdentity", "referenceDigest"];
-/// Closed vocabulary of timeline count-authorization targets (§6.2).
-pub const TIMELINE_COUNT_TARGETS: &[&str] = &["events"];
+/// Timeline projections have no independently sensitive count fields; the
+/// event array is authoritative content (cardinality is inherent in the list).
+/// Any timeline `countAuthorization` entry fails closed (`PROJ-0003`).
+pub const TIMELINE_COUNT_TARGETS: &[&str] = &[];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -191,7 +193,6 @@ pub struct TimelineProjectionPayload {
     pub events: Vec<TimelineEventView>,
     /// §6.2: independently gated event count; `None` when `countAuthorization`
     /// does not include `"events"`, paired with a withheld omission.
-    pub event_count: Option<u64>,
     pub omissions: Vec<OmissionView>,
     pub completeness: CompletenessView,
 }
@@ -593,15 +594,6 @@ pub fn render_timeline_projection(
         },
     };
 
-    // §6.2: independently gated event count; `None` when unauthorized,
-    // paired with an explicit withheld omission so the absence is visible.
-    let event_count: Option<u64> = if normalized.has_count("events") {
-        Some(rendered_events.len() as u64)
-    } else {
-        push_omission(&mut omissions, "events", "withheld", "disclosurePolicy");
-        None
-    };
-
     let payload = TimelineProjectionPayload {
         timeline_schema_version: TIMELINE_SCHEMA_VERSION.to_string(),
         disclosure_policy_digest: policy_digest(wf, &normalized)?,
@@ -612,7 +604,6 @@ pub fn render_timeline_projection(
             projected: source.page.copied(),
         },
         events: rendered_events,
-        event_count,
         omissions,
         completeness,
     };

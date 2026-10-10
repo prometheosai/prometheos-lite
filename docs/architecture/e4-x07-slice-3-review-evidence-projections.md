@@ -296,9 +296,10 @@ pub struct TimelineProjectionPayload {
     pub disclosure_policy_digest: String,    // domain "projection.evidence-timeline.policy.v1" preimage (§3.4.1)
     pub scope: TimelineScope,                // run identity — mandatory or unavailable
     pub events: Vec<TimelineEventView>,      // deterministic total order (§5.4)
-    /// §6.2 independently gated event count (`"events"`); `None` when unauthorized,
-    /// paired with an explicit withheld omission (`null` in the payload, never omitted silently).
-    pub eventCount: Option<u64>,
+    /// Timeline projections have no independently sensitive count fields; the
+    /// event array itself is the authoritative disclosure. Any `countAuthorization`
+    /// target (e.g. `"events"`) fails closed (`PROJ-0003`) — cardinality is
+    /// inherent in the list (§6.4).
     pub omissions: Vec<OmissionView>,        // same vocabulary as review
     pub completeness: CompletenessView,      // (moreAvailable, nextAfter, authoritativeIds left)
 }
@@ -357,7 +358,7 @@ TimelineEventView {
 
 ### 6.2 Count-exposure vs existence-privacy
 
-- Counts (`totalIssues`, `bySeverity`, `byType`, event count) are independently sensitive: revealing counts is permitted only when `countAuthorization` covers the relevant target. An unauthorized count yields `null` value + `category: "withheld"` + omission marker. The timeline's `eventCount` is derived from the authoritative event stream and disclosed separately (§5.1); it is not inferable from hidden internals (the array structure is governed by `payloadDetails`).
+- Counts (`totalIssues`, `bySeverity`, `byType`) are independently sensitive: revealing counts is permitted only when `countAuthorization` covers the relevant target. An unauthorized count yields `null` value + `category: "withheld"` + omission marker. Timeline projections carry no independently gated count field (`TIMELINE_COUNT_TARGETS` is empty; any `countAuthorization` entry fails closed with `PROJ-0003`). The event array itself is the authoritative disclosure; cardinality is inherent in the list (§5.1, §6.4).
 - Existence-channels: payload keys that would reveal count/existence differences WERE reviewed — keys with no disclosed entries are rendered with explicit `kind: []`/`"value": null` + omission marker rather than silent omission (§4.4, §5.5).
 
 ### 6.3 Composite/private-boundary behavior
@@ -462,7 +463,7 @@ Adapted from the §9 contract of Slice 2: the Slice 3 matrix MUST cover the Slic
 | 24 | against-source catches substituted TimelineProjectionSource | modified `page.more_available`/`page.next_after`, altered `ProvenanceState` slice, or swapped out `WorkEventBatch` must flip the fresh render and fail | `verify_timeline_against_source_fails_on_page_meta_substitution`, `..._on_provenance_substitution`, `..._on_batch_substitution` |
 | 25 | gate `basisEvidenceDigest` binds to reviewed artifact (`artifactDigest`) not event identity (`eventDigest`) | positive (artifact==basis, event≠basis) and negative (event==basis, artifact≠basis → `SOMA-CMP-0004`) | `gate_basis_binds_to_artifact_digest`, `gate_basis_matching_event_digest_only_fails_closed` |
 | 26 | withheld `semanticDigest` is explicit `null`, never an all-zero `Hex64` | `referenceDigest` unauthorized ⇒ payload shows `null` + omission; canonical bytes contain no 64-zero hex string | `withheld_reference_digest_is_null_not_zero_digest` |
-| 27 | timeline `eventCount` independently gated by `countAuthorization` | authorized ⇒ `eventCount: Some(n)`; unauthorized ⇒ `None` + `events` withheld omission; unknown target ⇒ `PROJ-0003` | `timeline_event_count_is_authorized`, `timeline_event_count_is_withheld_when_unauthorized`, `timeline_unknown_count_target_fails_closed` |
+| 27 | timeline count authorization unsupported; any `countAuthorization` target fails closed | no timeline count target is valid (`TIMELINE_COUNT_TARGETS` empty); any `countAuthorization` entry ⇒ `PROJ-0003` | `timeline_any_count_target_fails_closed` (replaces positive/withheld tests) |
 | 28 | mutation regression: every authoritative `ReviewFacts` mutation flips render or fails closed | mutated issue/gate/evidence-reference/scope identity must alter payload bytes or fail against-source verification | `every_accepted_review_fact_changes_render_or_fails_closed` |
 
 ## 11. Implementation Task Plan (TDD)
