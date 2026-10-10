@@ -65,9 +65,6 @@ impl TimelineDisclosurePolicy {
     fn has_target(&self, target: &str) -> bool {
         self.authorized_targets.iter().any(|t| t == target)
     }
-    fn has_count(&self, target: &str) -> bool {
-        self.count_authorization.iter().any(|t| t == target)
-    }
 }
 
 fn hex64(value: &str) -> bool {

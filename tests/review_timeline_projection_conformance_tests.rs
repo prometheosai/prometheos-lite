@@ -726,26 +726,54 @@ fn omissions_distinguish_withheld_unavailable_outofscope() {
     );
 }
 
-/// §6.2 / item 4 — timeline count authorization unsupported; any target fails closed.
+/// §6.2 / item 4 — timeline count authorization unsupported; any entry fails closed (`PROJ-0003`).
 #[test]
-fn timeline_any_count_target_fails_closed() {
+fn timeline_count_target_events_is_unsupported() {
     let wf = base_wf();
     let rk = run_key("run-c");
-    let b = batch("run-c", vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")]);
+    let b = batch(
+        "run-c",
+        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
+    );
     let source = TimelineProjectionSource {
         batch: &b,
         provenance: None,
         page: None,
         scope: &rk,
     };
-    // Any entry in `countAuthorization` (even the previously implied `"events"`)
-    // is unsupported (`TIMELINE_COUNT_TARGETS` is empty) and must fail.
     let policy = TimelineDisclosurePolicy {
         authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
-            .iter().map(|s| s.to_string()).collect(),
-        count_authorization: vec!["events".to_string(), "eventCount".to_string()],
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        count_authorization: vec!["events".to_string()],
     };
-    let err = render_timeline_projection(&source, Some(&policy), &wf).expect_err("unsupported count target");
+    let err = render_timeline_projection(&source, Some(&policy), &wf).expect_err("unsupported");
+    assert!(err.iter().any(|d| d.code == "PROJ-0003"), "{err:?}");
+}
+
+#[test]
+fn timeline_count_target_eventcount_is_unsupported() {
+    let wf = base_wf();
+    let rk = run_key("run-c2");
+    let b = batch(
+        "run-c2",
+        vec![mk_event("e1", 1, "c", "2026-10-05T00:00:00Z")],
+    );
+    let source = TimelineProjectionSource {
+        batch: &b,
+        provenance: None,
+        page: None,
+        scope: &rk,
+    };
+    let policy = TimelineDisclosurePolicy {
+        authorized_targets: ["payloadDetails", "actorIdentity", "referenceDigest"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        count_authorization: vec!["eventCount".to_string()],
+    };
+    let err = render_timeline_projection(&source, Some(&policy), &wf).expect_err("unsupported");
     assert!(err.iter().any(|d| d.code == "PROJ-0003"), "{err:?}");
 }
 
