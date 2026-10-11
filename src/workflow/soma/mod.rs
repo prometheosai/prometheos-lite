@@ -19,6 +19,7 @@ pub mod audit_workflow;
 pub mod canonical;
 pub mod capability;
 pub mod contracts;
+pub mod diagnostic_extensions;
 pub mod event;
 pub mod profile;
 pub mod types;
@@ -149,14 +150,21 @@ struct CatalogueEntry<'a> {
 
 /// The published per-code category table — vendored
 /// `vendored/soma/v1.1/diagnostics.json`, the normative source of truth
-/// (same rule as the oracle's exact-match `category_for`). Every stable
-/// diagnostic code resolves to its exact pinned category, never a
-/// family-generic stand-in derived from substring matching.
+/// (same rule as the oracle's exact-match `category_for`), consulted
+/// FIRST; codes Lite emits that upstream has not published resolve from
+/// the repository-owned extension registry
+/// ([`diagnostic_extensions`]) SECOND. Every stable diagnostic code
+/// resolves to its exact pinned category, never a family-generic
+/// stand-in derived from substring matching.
 ///
-/// Fail-safe: codes absent from the catalogue fall back to `"general"`;
+/// Fail-closed: a code registered in BOTH registries is corruption and
+/// panics at init (the registries are static, so this is a programming
+/// error, refused before any diagnostic is emitted).
+///
+/// Fail-safe: codes absent from both registries fall back to `"general"`;
 /// `tests/emitted_diagnostics_conformance.rs` proves every code Lite
-/// emits is catalogue-registered, so production diagnostics never take
-/// the fallback.
+/// emits is registered, so production diagnostics never take the
+/// fallback.
 fn category_for(code: &str) -> &'static str {
     static CATALOGUE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     CATALOGUE
@@ -164,13 +172,22 @@ fn category_for(code: &str) -> &'static str {
             let file: CatalogueFile<'static> =
                 serde_json::from_str(include_str!("../../../vendored/soma/v1.1/diagnostics.json"))
                     .expect("vendored diagnostics.json parses");
-            file.codes
+            let map: HashMap<&'static str, &'static str> = file
+                .codes
                 .into_iter()
                 .map(|entry| (entry.code, entry.category))
-                .collect()
+                .collect();
+            let upstream: Vec<&'static str> = map.keys().copied().collect();
+            diagnostic_extensions::validate_registry(
+                diagnostic_extensions::DIAGNOSTIC_EXTENSIONS,
+                &upstream,
+            )
+            .expect("diagnostic-extension registry is disjoint from the upstream catalogue");
+            map
         })
         .get(code)
         .copied()
+        .or_else(|| diagnostic_extensions::extension_category(code))
         .unwrap_or("general")
 }
 
