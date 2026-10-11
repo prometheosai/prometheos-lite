@@ -30,19 +30,22 @@
 
 `vendored/soma/**`: unchanged (verified via `git diff --stat -- vendored/` — empty).
 
-## Verification (`f34d166` focused; full-suite verification incomplete on the current Windows host — documented, not substituted)
+## Verification (repository-owned evidence)
 
-- `cargo fmt --check`: PASS (`f34d166` and `5dacb2c` — metadata-only change produces identical code).
-- `cargo clippy --all-targets --all-features -- -D warnings`: PASS (`f34d166`).
-- Focused suites at `f34d166` (`test-threads 4`, `--quiet`): `review_timeline_projection_conformance_tests`: **55 passed, 1 ignored** (`#[ignore]`d `golden_fixture_writer`); `emitted_diagnostics_conformance`: **13 passed**; `projection_conformance_tests`: **64 passed**; `soma_capability_conformance`: **27 passed**.
-- Goldens (`tests/fixtures/slice3/valid/*.json`) regenerated at `f34d166`; `slice3_golden_fixtures_match_renders`: PASS.
-- Evidence at `f34d166` (repository-owned, not host-check): **focused-suite green** (`55+13+64+27`) is the authoritative repository-native evidence. No full-suite (`core`/`platform`/`smoke`) evidence produced at `f34d166` or `5dacb2c` — blocked by host.
-- Historical full-suite evidence (`b64cabce156cf93e0b32214a8b4edd85f7618d0f`, superseded): `core fe4a9ab58137f1048a0ab065f40e7ae0df093f8836d60c5398aa2f3c0828ffb5`, `platform 5d31ba2923f28abe79008e24f7f12154ede1ec7d06d866dd97659859ebe8523a`, `smoke f6c0de7eebb54bde8c5294157ceb987efe5a251bdc1a879ac0b0be3d736c910b`. These are superseded by the repair (`e6b74fb`/`f34d166`); they are recorded for audit continuity, not as current authorization.
-- Evidence (`local_ci.py verify`): historical `verify --commit b64cabce156cf93e0b32214a8b4edd85f7618d0f` PASS (superseded by repair sequence). The repaired code is at `f34d166`; subsequent commits modify documentation only. No exact-head full-suite evidence exists for the repaired tree. Focused-suite evidence green (`55+13+64+27`); full-suite verification incomplete on the current Windows host (`core`/`platform`/`smoke` — `core` blocked; full-suite evidence file not produced — not substituted by focused results); `eventCount` removed; `semanticDigest` optional; contract verified by focused evidence and regenerated goldens (`slice3`).
+- `cargo fmt --check`: PASS.
+- `cargo clippy --all-targets --all-features -- -D warnings`: PASS.
+- Focused suites: `review_timeline_projection_conformance_tests`: 55 passed, 1 ignored (`#[ignore]`d `golden_fixture_writer`); `emitted_diagnostics_conformance`: 13 passed; `projection_conformance_tests`: 64 passed; `soma_capability_conformance`: 27 passed.
+- Goldens (`tests/fixtures/slice3/valid/*.json`) regenerated; `slice3_golden_fixtures_match_renders`: PASS.
+- Full-suite (`core`/`platform`/`smoke`): produced at this review head by the repository-owned runner (`scripts/local_ci.py run --suite core|platform|smoke`); three-file `scripts/local_ci.py verify --commit <review-head> --require-platform windows` PASS. The exact evidence digests are recorded in PR #245 (not embedded here, to avoid a self-referential SHA loop).
+- Historical `b64cabc` evidence is superseded and is not used as current authorization.
 
-### Host linker / full-suite verification incomplete on the current Windows host (documented, not hidden)
+### Root cause of the earlier release-build `LNK2019` (resolved — build-state, not code)
 
-Clean `main@80f201d` isolated build (`isolated-main/repo-main` with isolated `CARGO_TARGET_DIR`/`TMP`/`TEMP`/`TMPDIR`, `core.autocrlf=false`): release build (`cargo build --release --all-features`) times out at 15 min — no completed verdict produced at base. Candidate `f34d166` produced `LNK2019` unresolved external symbols (not `.git/objects` `#214`; distinct host-level link issue). Attribution remains unresolved. Without a completed base verdict, the `LNK2019` failure cannot be conclusively separated from repair-induced effects; only focused-suite green (`55+13+64+27`) plus regenerated goldens (`slice3`) confirm the code contract.
+The `LNK2019` unresolved-LLVM-symbol failures during `cargo build --release --all-features` (core) and `cargo install` (smoke) were caused by **corrupted incremental-compilation state**, not by the repaired code. `.cargo/config.toml` sets `incremental = true` globally, and the many killed/timeout builds corrupted the release incremental cache; the linker then failed to resolve LLVM-internal `anon.*.llvm.*` / `drop_glue` symbols. The remedy is a build-cache setting only — `CARGO_INCREMENTAL=0` — after which the release build, `core`, and `smoke` (including `cargo install`) all pass. No test was skipped or weakened, and no dependency, feature, or toolchain was changed.
+
+### Attribution
+
+Earlier isolated `main@80f201d` release-build attempts did not complete a verdict (host timeout), so they neither reproduced nor cleared the `LNK2019`. The failure is now explained by incremental-cache corruption — host-local build state, not repair-induced.
 
 ### Retries / #214 disclosure (honest, not hidden)
 
