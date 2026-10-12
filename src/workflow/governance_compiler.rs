@@ -114,15 +114,46 @@ pub fn map_lite_authority(
     }
 }
 
+/// A typed boundary-port crossing recorded on an expanded (composite) step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortCrossing {
+    pub name: String,
+    pub ty: String,
+}
+
 /// One step of a compiled governance plan.
+///
+/// For atomic workflows only `key`/`operationId` are populated (the published
+/// v1.1 wire shape stays byte-identical). Composite expansion additionally
+/// binds each flattened operation to its `scopePath` and typed crossings; the
+/// extra fields are omitted when empty (`skip_serializing_if`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanStep {
     /// Published v1.1 step key: `s{index:04}:{operationId}` over the
-    /// workflow's topological order — unique within the plan.
+    /// flattened order — unique within the plan.
     pub key: String,
     /// The workflow body operation this step executes.
     pub operation_id: String,
+    /// Enclosing composite scope path (empty for root-level operations).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_path: Vec<String>,
+    /// Effective imported authority for this operation (sorted, deduped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_authority: Vec<String>,
+    /// Typed boundary-port crossings into the enclosing scope (sorted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boundary_inputs: Vec<PortCrossing>,
+    /// Typed boundary-port crossings out of the enclosing scope (sorted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boundary_outputs: Vec<PortCrossing>,
+    /// Effects this operation exports (sorted, deduped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exported_effects: Vec<String>,
+    /// Context visible to this operation inside its scope (sorted, deduped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_context: Vec<String>,
 }
 
 /// Self-sealing canonicalization block of a compiled plan.
@@ -174,18 +205,18 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
     let model: WorkflowDefinition = serde_json::from_str(text)
         .map_err(|e| vec![input_refusal(format!("schema violation: {e}"))])?;
 
-    // E4/X07 Slice 2: nested composites are refused before any plan is sealed
-    // (spec §2.4 — catalogue-governed error, no plan or partial output).
+    let workflow_digest = workflow_digest_of(&model)?;
+
+    // E4/X03 (#160) Slice B: composites expand deterministically instead of
+    // being refused. Expansion runs after the audit gate and seals no plan on
+    // any expansion rejection.
     if model.contains_composite_body_item() {
-        return Err(vec![Diagnostic::new(
-            "SOMA-CMP-0003",
-            "workflow body contains a nested composite; governance plans support atomic units only",
-        )]);
+        let steps = crate::workflow::composite_expansion::expand_composites(&model)?;
+        return seal_plan(workflow_digest, steps);
     }
 
-    let workflow_digest = workflow_digest_of(&model)?;
-    // Steps follow the published v1.1 topological ordering; a cycle here
-    // means the audit gate was bypassed, so fail closed without a plan.
+    // Atomic workflows keep the published v1.1 topological ordering; a cycle
+    // here means the audit gate was bypassed, so fail closed without a plan.
     let Some(order) = topological_order(&model) else {
         return Err(vec![Diagnostic::new(
             "SOMA-EXP-0002",
@@ -198,6 +229,12 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
         .map(|(i, &body_idx)| PlanStep {
             key: format!("s{i:04}:{}", model.body[body_idx].id()),
             operation_id: model.body[body_idx].id().to_string(),
+            scope_path: Vec::new(),
+            effective_authority: Vec::new(),
+            boundary_inputs: Vec::new(),
+            boundary_outputs: Vec::new(),
+            exported_effects: Vec::new(),
+            visible_context: Vec::new(),
         })
         .collect();
     seal_plan(workflow_digest, steps)

@@ -957,12 +957,13 @@ fn recursive_audit_rejects_nested_faults() {
 fn nested_surfaces_fail_closed_matrix() {
     let text = nested_text();
 
-    // Governance plan compiler: exact SOMA-CMP-0003 via the explicit scan.
-    let err =
-        compile_workflow_text(&text).expect_err("plan compilation must refuse nested composites");
+    // Governance plan compiler: nested composites now EXPAND deterministically
+    // (E4/X03 #160 Slice B) instead of being refused. The runtime-facing
+    // surfaces below still refuse nested dispatch.
+    let plan = compile_workflow_text(&text).expect("plan compilation expands nested composites");
     assert!(
-        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
-        "expected SOMA-CMP-0003 from compile_workflow_text, got {err:?}"
+        plan.steps.iter().any(|s| !s.scope_path.is_empty()),
+        "expanded plan must carry composite scope paths"
     );
 
     // Authority compiler: audit-sourced (scan after parse) — stable since Task 1.
@@ -974,7 +975,8 @@ fn nested_surfaces_fail_closed_matrix() {
         "expected SOMA-CMP-0003 from compile_authority, got {err:?}"
     );
 
-    // Permit chains compile_workflow_text first — inherits SOMA-CMP-0003.
+    // Permit: compiles first (now expanding), then refuses nested runtime
+    // dispatch explicitly — SOMA-CMP-0003, no runner constructed.
     let err = prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
         &text,
         "reviewed-identity",

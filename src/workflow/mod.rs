@@ -15,6 +15,7 @@
 //! generation.
 
 pub mod artifact_integrity;
+pub mod composite_expansion;
 pub mod context_planner;
 pub mod durable;
 pub mod evaluate;

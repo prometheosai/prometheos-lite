@@ -37,6 +37,16 @@ pub struct GovernancePermit {
 impl GovernancePermit {
     pub fn issue(workflow_text: &str, reviewed_identity: &str) -> Result<Self, Vec<Diagnostic>> {
         let plan = compile_workflow_text(workflow_text)?;
+        // E4/X03 (#160) Slice B: compilation now expands nested composites
+        // deterministically, but runtime dispatch of composites is out of
+        // scope. Refuse explicitly here so no runner is ever constructed for a
+        // plan that carries composite scope paths.
+        if plan.steps.iter().any(|s| !s.scope_path.is_empty()) {
+            return Err(vec![Diagnostic::new(
+                "SOMA-CMP-0003",
+                "runtime dispatch of nested composites is not supported yet",
+            )]);
+        }
         // verify_reviewed_plan takes the compiled ExecutionPlan document
         // (schemaVersion/planVersion/workflowDigest/steps/canonicalization),
         // not the workflow text: it re-validates the plan shape, recomputes
