@@ -122,7 +122,9 @@ fn authority_escalation_fails_at_inner_level() {
     body[flow]["body"][inner]["body"][0]["authority"] = json!(["exfiltrate"]);
     let codes = audit(&v);
     assert!(
-        codes.iter().any(|c| c == "SOMA-AUTH-0002" || c == "SOMA-AUTH-0001"),
+        codes
+            .iter()
+            .any(|c| c == "SOMA-AUTH-0002" || c == "SOMA-AUTH-0001"),
         "expected an authority escalation diagnostic, got {codes:?}"
     );
 }
