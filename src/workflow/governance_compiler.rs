@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::workflow::AuthorityLevel;
+use crate::workflow::composite_expansion::{
+    EXPANSION_PLAN_FORMAT, EXPANSION_PLAN_FORMAT_VERSION, ExpansionPlanV1,
+};
 use crate::workflow::execution_graph::topological_order;
 use crate::workflow::policy::EffectiveExecutionSnapshotV1;
 use crate::workflow::soma::contracts::{AuthorityProfile, EscalationPolicy, WorkflowDefinition};
@@ -114,20 +117,13 @@ pub fn map_lite_authority(
     }
 }
 
-/// A typed boundary-port crossing recorded on an expanded (composite) step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PortCrossing {
-    pub name: String,
-    pub ty: String,
-}
-
 /// One step of a compiled governance plan.
 ///
-/// For atomic workflows only `key`/`operationId` are populated (the published
-/// v1.1 wire shape stays byte-identical). Composite expansion additionally
-/// binds each flattened operation to its `scopePath` and typed crossings; the
-/// extra fields are omitted when empty (`skip_serializing_if`).
+/// The published v1.1 `ExecutionPlan` step shape (`key`/`operationId`) is
+/// never extended: composite expansion metadata (scope path, typed
+/// crossings, effective authority) lives in the separately versioned
+/// `composite_expansion::ExpansionPlanV1`, not here (the vendored
+/// `ExecutionPlan` schema denies additional members on steps).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanStep {
@@ -136,24 +132,6 @@ pub struct PlanStep {
     pub key: String,
     /// The workflow body operation this step executes.
     pub operation_id: String,
-    /// Enclosing composite scope path (empty for root-level operations).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scope_path: Vec<String>,
-    /// Effective imported authority for this operation (sorted, deduped).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub effective_authority: Vec<String>,
-    /// Typed boundary-port crossings into the enclosing scope (sorted).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub boundary_inputs: Vec<PortCrossing>,
-    /// Typed boundary-port crossings out of the enclosing scope (sorted).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub boundary_outputs: Vec<PortCrossing>,
-    /// Effects this operation exports (sorted, deduped).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exported_effects: Vec<String>,
-    /// Context visible to this operation inside its scope (sorted, deduped).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub visible_context: Vec<String>,
 }
 
 /// Self-sealing canonicalization block of a compiled plan.
@@ -189,6 +167,17 @@ pub struct CompiledGovernancePlanV1 {
 ///   no plan is produced.
 /// - On success the returned plan is deterministic for identical input.
 pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec<Diagnostic>> {
+    compile_workflow_inner(text).map(|(plan, _)| plan)
+}
+
+/// Compile workflow text, additionally returning the composite expansion
+/// plan for workflows whose body contains composites (`None` for atomic
+/// bodies). The expansion is the separately versioned Lite structure —
+/// the sealed v1.1 plan keeps its published `{key, operationId}` step
+/// shape either way.
+fn compile_workflow_inner(
+    text: &str,
+) -> Result<(CompiledGovernancePlanV1, Option<ExpansionPlanV1>), Vec<Diagnostic>> {
     match validate_artifact_text("WorkflowDefinition", text) {
         Err(reason) => {
             return Err(vec![enrich_one(
@@ -211,8 +200,22 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
     // being refused. Expansion runs after the audit gate and seals no plan on
     // any expansion rejection.
     if model.contains_composite_body_item() {
-        let steps = crate::workflow::composite_expansion::expand_composites(&model)?;
-        return seal_plan(workflow_digest, steps);
+        let expansion_steps = crate::workflow::composite_expansion::expand_composites(&model)?;
+        let steps = expansion_steps
+            .iter()
+            .map(|s| PlanStep {
+                key: s.key.clone(),
+                operation_id: s.operation_id.clone(),
+            })
+            .collect();
+        let plan = seal_plan(workflow_digest.clone(), steps)?;
+        let expansion = ExpansionPlanV1 {
+            format: EXPANSION_PLAN_FORMAT.to_string(),
+            format_version: EXPANSION_PLAN_FORMAT_VERSION.to_string(),
+            workflow_digest,
+            steps: expansion_steps,
+        };
+        return Ok((plan, Some(expansion)));
     }
 
     // Atomic workflows keep the published v1.1 topological ordering; a cycle
@@ -229,15 +232,25 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
         .map(|(i, &body_idx)| PlanStep {
             key: format!("s{i:04}:{}", model.body[body_idx].id()),
             operation_id: model.body[body_idx].id().to_string(),
-            scope_path: Vec::new(),
-            effective_authority: Vec::new(),
-            boundary_inputs: Vec::new(),
-            boundary_outputs: Vec::new(),
-            exported_effects: Vec::new(),
-            visible_context: Vec::new(),
         })
         .collect();
-    seal_plan(workflow_digest, steps)
+    let plan = seal_plan(workflow_digest, steps)?;
+    Ok((plan, None))
+}
+
+/// The Lite composite expansion plan for `text`.
+///
+/// Refuses workflows whose body contains no composite (SOMA-CMP-0003):
+/// expansion metadata exists only for composite bodies. Deterministic and
+/// byte-identical for identical input; the sealed v1.1 plan itself never
+/// carries this metadata.
+pub fn compile_expansion_plan(text: &str) -> Result<ExpansionPlanV1, Vec<Diagnostic>> {
+    compile_workflow_inner(text)?.1.ok_or_else(|| {
+        vec![Diagnostic::new(
+            "SOMA-CMP-0003",
+            "expansion plan requires a workflow with a composite body",
+        )]
+    })
 }
 
 /// Canonical digest of the serialized workflow with `contentDigest`
