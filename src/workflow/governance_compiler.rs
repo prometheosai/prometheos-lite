@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::workflow::AuthorityLevel;
+use crate::workflow::composite_expansion::{
+    EXPANSION_PLAN_FORMAT, EXPANSION_PLAN_FORMAT_VERSION, ExpansionPlanV1,
+};
 use crate::workflow::execution_graph::topological_order;
 use crate::workflow::policy::EffectiveExecutionSnapshotV1;
 use crate::workflow::soma::contracts::{AuthorityProfile, EscalationPolicy, WorkflowDefinition};
@@ -115,11 +118,17 @@ pub fn map_lite_authority(
 }
 
 /// One step of a compiled governance plan.
+///
+/// The published v1.1 `ExecutionPlan` step shape (`key`/`operationId`) is
+/// never extended: composite expansion metadata (scope path, typed
+/// crossings, effective authority) lives in the separately versioned
+/// `composite_expansion::ExpansionPlanV1`, not here (the vendored
+/// `ExecutionPlan` schema denies additional members on steps).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanStep {
     /// Published v1.1 step key: `s{index:04}:{operationId}` over the
-    /// workflow's topological order — unique within the plan.
+    /// flattened order — unique within the plan.
     pub key: String,
     /// The workflow body operation this step executes.
     pub operation_id: String,
@@ -158,6 +167,17 @@ pub struct CompiledGovernancePlanV1 {
 ///   no plan is produced.
 /// - On success the returned plan is deterministic for identical input.
 pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec<Diagnostic>> {
+    compile_workflow_inner(text).map(|(plan, _)| plan)
+}
+
+/// Compile workflow text, additionally returning the composite expansion
+/// plan for workflows whose body contains composites (`None` for atomic
+/// bodies). The expansion is the separately versioned Lite structure —
+/// the sealed v1.1 plan keeps its published `{key, operationId}` step
+/// shape either way.
+fn compile_workflow_inner(
+    text: &str,
+) -> Result<(CompiledGovernancePlanV1, Option<ExpansionPlanV1>), Vec<Diagnostic>> {
     match validate_artifact_text("WorkflowDefinition", text) {
         Err(reason) => {
             return Err(vec![enrich_one(
@@ -174,18 +194,32 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
     let model: WorkflowDefinition = serde_json::from_str(text)
         .map_err(|e| vec![input_refusal(format!("schema violation: {e}"))])?;
 
-    // E4/X07 Slice 2: nested composites are refused before any plan is sealed
-    // (spec §2.4 — catalogue-governed error, no plan or partial output).
+    let workflow_digest = workflow_digest_of(&model)?;
+
+    // E4/X03 (#160) Slice B: composites expand deterministically instead of
+    // being refused. Expansion runs after the audit gate and seals no plan on
+    // any expansion rejection.
     if model.contains_composite_body_item() {
-        return Err(vec![Diagnostic::new(
-            "SOMA-CMP-0003",
-            "workflow body contains a nested composite; governance plans support atomic units only",
-        )]);
+        let expansion_steps = crate::workflow::composite_expansion::expand_composites(&model)?;
+        let steps = expansion_steps
+            .iter()
+            .map(|s| PlanStep {
+                key: s.key.clone(),
+                operation_id: s.operation_id.clone(),
+            })
+            .collect();
+        let plan = seal_plan(workflow_digest.clone(), steps)?;
+        let expansion = ExpansionPlanV1 {
+            format: EXPANSION_PLAN_FORMAT.to_string(),
+            format_version: EXPANSION_PLAN_FORMAT_VERSION.to_string(),
+            workflow_digest,
+            steps: expansion_steps,
+        };
+        return Ok((plan, Some(expansion)));
     }
 
-    let workflow_digest = workflow_digest_of(&model)?;
-    // Steps follow the published v1.1 topological ordering; a cycle here
-    // means the audit gate was bypassed, so fail closed without a plan.
+    // Atomic workflows keep the published v1.1 topological ordering; a cycle
+    // here means the audit gate was bypassed, so fail closed without a plan.
     let Some(order) = topological_order(&model) else {
         return Err(vec![Diagnostic::new(
             "SOMA-EXP-0002",
@@ -200,7 +234,23 @@ pub fn compile_workflow_text(text: &str) -> Result<CompiledGovernancePlanV1, Vec
             operation_id: model.body[body_idx].id().to_string(),
         })
         .collect();
-    seal_plan(workflow_digest, steps)
+    let plan = seal_plan(workflow_digest, steps)?;
+    Ok((plan, None))
+}
+
+/// The Lite composite expansion plan for `text`.
+///
+/// Refuses workflows whose body contains no composite (SOMA-CMP-0003):
+/// expansion metadata exists only for composite bodies. Deterministic and
+/// byte-identical for identical input; the sealed v1.1 plan itself never
+/// carries this metadata.
+pub fn compile_expansion_plan(text: &str) -> Result<ExpansionPlanV1, Vec<Diagnostic>> {
+    compile_workflow_inner(text)?.1.ok_or_else(|| {
+        vec![Diagnostic::new(
+            "SOMA-CMP-0003",
+            "expansion plan requires a workflow with a composite body",
+        )]
+    })
 }
 
 /// Canonical digest of the serialized workflow with `contentDigest`

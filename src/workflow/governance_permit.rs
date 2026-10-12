@@ -21,6 +21,7 @@ use crate::workflow::governance::CompiledAuthorityGraph;
 use crate::workflow::governance_compiler::{compile_workflow_text, verify_reviewed_plan};
 use crate::workflow::node_contracts::NodeManifestV1;
 use crate::workflow::soma::Diagnostic;
+use crate::workflow::soma::contracts::WorkflowDefinition;
 
 /// A reviewed, sealed governance plan plus the execution graph it authorizes.
 ///
@@ -37,6 +38,22 @@ pub struct GovernancePermit {
 impl GovernancePermit {
     pub fn issue(workflow_text: &str, reviewed_identity: &str) -> Result<Self, Vec<Diagnostic>> {
         let plan = compile_workflow_text(workflow_text)?;
+        // E4/X03 (#160) Slice B: compilation expands nested composites
+        // deterministically, but runtime dispatch of composites is out of
+        // scope. Refuse explicitly (typed parse of the same document that
+        // compiled) so no runner is ever constructed for a composite body.
+        let workflow: WorkflowDefinition = serde_json::from_str(workflow_text).map_err(|e| {
+            vec![Diagnostic::new(
+                "SOMA-CMP-0003",
+                format!("schema violation: {e}"),
+            )]
+        })?;
+        if workflow.contains_composite_body_item() {
+            return Err(vec![Diagnostic::new(
+                "SOMA-CMP-0003",
+                "runtime dispatch of nested composites is not supported yet",
+            )]);
+        }
         // verify_reviewed_plan takes the compiled ExecutionPlan document
         // (schemaVersion/planVersion/workflowDigest/steps/canonicalization),
         // not the workflow text: it re-validates the plan shape, recomputes

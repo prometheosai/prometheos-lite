@@ -49,7 +49,9 @@ fn envelope_rejects_unknown_fields() {
     assert!(parsed.is_err(), "unknown envelope field must fail closed");
 }
 
-use prometheos_lite::workflow::governance_compiler::compile_workflow_text;
+use prometheos_lite::workflow::governance_compiler::{
+    compile_expansion_plan, compile_workflow_text,
+};
 use prometheos_lite::workflow::projection::{project_canonical_json, validated_source};
 use prometheos_lite::workflow::soma::contracts::WorkflowDefinition;
 
@@ -957,12 +959,21 @@ fn recursive_audit_rejects_nested_faults() {
 fn nested_surfaces_fail_closed_matrix() {
     let text = nested_text();
 
-    // Governance plan compiler: exact SOMA-CMP-0003 via the explicit scan.
-    let err =
-        compile_workflow_text(&text).expect_err("plan compilation must refuse nested composites");
+    // Governance plan compiler: nested composites now EXPAND deterministically
+    // (E4/X03 #160 Slice B) instead of being refused. The sealed v1.1 plan
+    // keeps its published step shape; composite scope paths live in the
+    // separately versioned expansion plan. The runtime-facing surfaces below
+    // still refuse nested dispatch.
+    let plan = compile_workflow_text(&text).expect("plan compilation expands nested composites");
     assert!(
-        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
-        "expected SOMA-CMP-0003 from compile_workflow_text, got {err:?}"
+        !plan.steps.is_empty(),
+        "expanded plan must flatten nested operations"
+    );
+    let expansion =
+        compile_expansion_plan(&text).expect("expansion plan expands nested composites");
+    assert!(
+        expansion.steps.iter().any(|s| !s.scope_path.is_empty()),
+        "expansion plan must carry composite scope paths"
     );
 
     // Authority compiler: audit-sourced (scan after parse) — stable since Task 1.
@@ -974,7 +985,8 @@ fn nested_surfaces_fail_closed_matrix() {
         "expected SOMA-CMP-0003 from compile_authority, got {err:?}"
     );
 
-    // Permit chains compile_workflow_text first — inherits SOMA-CMP-0003.
+    // Permit: compiles first (now expanding), then refuses nested runtime
+    // dispatch explicitly — SOMA-CMP-0003, no runner constructed.
     let err = prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
         &text,
         "reviewed-identity",
