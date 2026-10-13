@@ -159,14 +159,6 @@ impl std::fmt::Display for ResumeWithTokenError {
 
 impl std::error::Error for ResumeWithTokenError {}
 
-fn strict_semver(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-}
-
 fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
@@ -183,6 +175,39 @@ fn refusal(code: &'static str, pointer: &str, message: String) -> ResumeWithToke
     ResumeWithTokenError::Refusal(vec![d])
 }
 
+/// Lowercase 64-hex digest shape (`^[0-9a-f]{64}$`), as the vendored
+/// `SuspensionPoint`/`ResumeToken` schemas pattern every digest member.
+fn is_64hex_lower(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The exact binding tuple a resume token commits to. Absence of the
+/// optional members is explicit (empty string), so removing or extending
+/// `expiration` changes the binding digest.
+fn token_binding_input(
+    suspension_point_id: &str,
+    suspension_digest: &str,
+    plan_digest: &str,
+    authority_snapshot_digest: &str,
+    workflow_version: &str,
+    schema_version: &str,
+    revision: Option<&str>,
+    expiration: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "suspensionPointId": suspension_point_id,
+        "suspensionDigest": suspension_digest,
+        "planDigest": plan_digest,
+        "authoritySnapshotDigest": authority_snapshot_digest,
+        "workflowVersion": workflow_version,
+        "schemaVersion": schema_version,
+        "revision": revision.unwrap_or_default(),
+        "expiration": expiration.unwrap_or_default(),
+    })
+}
+
 /// Suspend a live run at a durable point and journal the event.
 ///
 /// Refuses a terminated run: a cancelled run cannot be suspended or
@@ -195,8 +220,30 @@ pub fn suspend_run(
     if state.termination.is_some() {
         bail!("cannot suspend a terminated run");
     }
-    if !strict_semver(params.workflow_version) {
-        bail!("workflowVersion must be a strict MAJOR.MINOR.PATCH version");
+    // One consistent version policy: creation, issuance, and resume all
+    // support exactly `SUSPENSION_SCHEMA_VERSION`. A suspension created
+    // under any other version could never be resumed, so creation refuses.
+    if params.workflow_version != SUSPENSION_SCHEMA_VERSION {
+        bail!(
+            "workflow_version {workflow_version:?} is not the supported version \
+             {SUSPENSION_SCHEMA_VERSION:?}",
+            workflow_version = params.workflow_version,
+        );
+    }
+    // Write-boundary digest validation: every digest member must match the
+    // vendored `^[0-9a-f]{64}$` shape before any document exists.
+    for (member, value, label) in [
+        ("planDigest", params.plan_digest, "plan_digest"),
+        (
+            "authoritySnapshotDigest",
+            params.authority_snapshot_digest,
+            "authority_snapshot_digest",
+        ),
+        ("inputsDigest", params.inputs_digest, "inputs_digest"),
+    ] {
+        if !is_64hex_lower(value) {
+            bail!("{member} ({label}) must be a 64-hex lowercase digest");
+        }
     }
     if let Some(exp) = params.expiration
         && parse_rfc3339(exp).is_none()
@@ -240,26 +287,35 @@ pub fn suspend_run(
 }
 
 /// Issue a resume token bound to one suspension point.
+///
+/// The one consistent version policy: issuance refuses a suspension whose
+/// contract versions the resume ladder does not support.
 pub fn issue_resume_token(
     suspension: &SuspensionPointV1,
     id: &str,
     expiration: Option<&str>,
 ) -> Result<ResumeTokenV1> {
+    if suspension.schema_version != SUSPENSION_SCHEMA_VERSION
+        || suspension.workflow_version != SUSPENSION_SCHEMA_VERSION
+    {
+        bail!("cannot issue a token for an unsupported suspension version");
+    }
     if let Some(exp) = expiration
         && parse_rfc3339(exp).is_none()
     {
         bail!("expiration must be RFC 3339");
     }
     let suspension_digest = suspension.digest()?;
-    let binding_digest = try_canonical_digest(&json!({
-        "suspensionPointId": suspension.id,
-        "suspensionDigest": suspension_digest,
-        "planDigest": suspension.plan_digest,
-        "authoritySnapshotDigest": suspension.authority_snapshot_digest,
-        "workflowVersion": suspension.workflow_version,
-        "schemaVersion": suspension.schema_version,
-        "revision": suspension.revision.clone().unwrap_or_default(),
-    }))
+    let binding_digest = try_canonical_digest(&token_binding_input(
+        &suspension.id,
+        &suspension_digest,
+        &suspension.plan_digest,
+        &suspension.authority_snapshot_digest,
+        &suspension.workflow_version,
+        &suspension.schema_version,
+        suspension.revision.as_deref(),
+        expiration,
+    ))
     .context("digest token binding")?;
     Ok(ResumeTokenV1 {
         id: id.to_string(),
@@ -324,16 +380,19 @@ pub fn resume_with_token(
         ));
     }
 
-    // 3. Token self-binding (tamper).
-    let recomputed = try_canonical_digest(&json!({
-        "suspensionPointId": token.suspension_point_id,
-        "suspensionDigest": token.suspension_digest,
-        "planDigest": token.plan_digest,
-        "authoritySnapshotDigest": token.authority_snapshot_digest,
-        "workflowVersion": token.workflow_version,
-        "schemaVersion": token.schema_version,
-        "revision": token.revision.clone().unwrap_or_default(),
-    }))
+    // 3. Token self-binding (tamper). Absence of the optionals is explicit
+    //    (empty-string members) so removing or extending expiration changes
+    //    the recomputed digest.
+    let recomputed = try_canonical_digest(&token_binding_input(
+        &token.suspension_point_id,
+        &token.suspension_digest,
+        &token.plan_digest,
+        &token.authority_snapshot_digest,
+        &token.workflow_version,
+        &token.schema_version,
+        token.revision.as_deref(),
+        token.expiration.as_deref(),
+    ))
     .map_err(|e| ResumeWithTokenError::Underlying(anyhow::Error::from(e)))?;
     if recomputed != token.binding_digest {
         return Err(refusal(
@@ -395,8 +454,36 @@ pub fn resume_with_token(
         params.portable_digest,
     )
     .map_err(ResumeWithTokenError::Underlying)?;
-    let mut pre = imported;
+    // The imported checkpoint must contain EXACTLY ONE suspension evidence
+    // entry for this suspension, and the entry itself must bind the
+    // suspension document and the pre-suspension state digest. A
+    // pre-suspension checkpoint (no entry), duplicated entries, or a
+    // tampered entry are all stale bindings and fail closed.
     let suspension_evidence_id = format!("suspension:{}", suspension.id);
+    let entries: Vec<_> = imported
+        .evidence_refs
+        .iter()
+        .filter(|e| e.artifact_kind == "suspension-point" && e.id == suspension_evidence_id)
+        .collect();
+    if entries.len() != 1 {
+        return Err(refusal(
+            "SOMA-RES-0001",
+            "/evidenceRefs",
+            format!(
+                "expected exactly one suspension journal entry {suspension_evidence_id:?}, found {}",
+                entries.len()
+            ),
+        ));
+    }
+    let entry = entries[0];
+    if entry.event_digest != suspension_digest || entry.artifact_digest != suspension.state_digest {
+        return Err(refusal(
+            "SOMA-RES-0001",
+            "/evidenceRefs",
+            "suspension journal entry digest mismatch (tampered evidence)".to_string(),
+        ));
+    }
+    let mut pre = imported;
     pre.evidence_refs
         .retain(|e| !(e.artifact_kind == "suspension-point" && e.id == suspension_evidence_id));
     let state_digest = pre.compute_digest();

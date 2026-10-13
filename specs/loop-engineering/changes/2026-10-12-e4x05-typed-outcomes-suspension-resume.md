@@ -44,11 +44,40 @@ bypasses checkpoint integrity, stale repo revision, or replay authorization.
         expirations checked against an injected RFC 3339 clock;
      4. staleness (`SOMA-RES-0001`) — resume-time `planDigestNow`,
         `authoritySnapshotDigestNow`, and the run-state digest must equal
-        the suspension's bindings (the state digest is reconstructed from
-        the imported checkpoint with exactly the suspension's journal entry
-        removed);
+        the suspension's bindings. The state binding additionally requires
+        the imported checkpoint to carry EXACTLY ONE suspension journal
+        entry whose `eventDigest == digest(suspension doc)` and
+        `artifactDigest == suspension.stateDigest`; the pre-suspension
+        digest is reconstructed by removing exactly that entry.
      5. delegation to `graph_resume::resume_run` — stale repo revision,
         replay authorization, termination all still gate independently.
+
+3.1. **Review repairs (independent review of head `bf8ba57`, 4×P1):**
+   - **Expiration is cryptographically bound.** `bindingDigest` covers the
+     binding tuple `{suspensionPointId, suspensionDigest, planDigest,
+     authoritySnapshotDigest, workflowVersion, schemaVersion, revision,
+     expiration}` with absence explicit (empty string): removing or
+     extending `expiration` invalidates the binding and refuses with
+     `SOMA-RES-0003`.
+   - **Pre-suspension checkpoints refused.** The staleness step now
+     REQUIRES exactly one matching suspension journal entry and validates
+     its event/artifact digests before reconstructing the pre-suspension
+     digest; a missing, duplicated, or tampered entry fails with
+     `SOMA-RES-0001`.
+   - **Typed digest validation at the write boundary.** `suspend_run`
+     refuses malformed `planDigest` / `authoritySnapshotDigest` /
+     `inputsDigest` (must be `^[0-9a-f]{64}$`, the vendored pattern)
+     before any document is created.
+   - **One version policy.** Creation, issuance, and resume all support
+     exactly `SUSPENSION_SCHEMA_VERSION` (`1.0.0`): `suspend_run` and
+     `issue_resume_token` refuse unsupported workflow/contract versions
+     instead of creating documents the resume ladder could never accept.
+   - New regression controls: expiration removal/extension invalidates
+     binding; pre-suspension checkpoint substitution, tampered/duplicated
+     journal entries, malformed digest fields, and
+     create-then-resume version consistency; plus overlapping-invalidity
+     tests proving the declared ladder precedence (version → tamper →
+     expiry → staleness).
      Token refusals surface as `Vec<Diagnostic>` with the vendored
      `SOMA-RES-*` codes plus remediation via the existing enrichment;
      delegated run-law refusals surface as the underlying typed error.
@@ -57,7 +86,7 @@ bypasses checkpoint integrity, stale repo revision, or replay authorization.
 
 2. **`src/workflow/mod.rs`** — register `pub mod graph_suspend;` (1 line).
 
-3. **`tests/graph_suspend_conformance.rs`** — 14 conformance tests:
+3. **`tests/graph_suspend_conformance.rs`** — 21 conformance tests:
    - positive: valid suspend → journal → resume round-trip; vendored wire
      shape (member set, camelCase, unknown-member refusal); deterministic
      byte-identical suspension/token digests for identical inputs;

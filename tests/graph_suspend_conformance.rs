@@ -19,7 +19,7 @@ use prometheos_lite::workflow::graph_suspend::{
 use prometheos_lite::workflow::soma::canonical::try_canonical_digest;
 
 const NOW: &str = "2026-10-12T00:00:00Z";
-const OPS_DIGEST: &str = "abc";
+const OPS_DIGEST: &str = "4444444444444444444444444444444444444444444444444444444444444444";
 const PLAN_DIGEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const AUTH_DIGEST: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const OTHER_DIGEST: &str = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -475,4 +475,152 @@ fn suspension_digest_is_the_canonical_digest_of_the_document() {
     let value = serde_json::to_value(&s).unwrap();
     let digest = try_canonical_digest(&value).unwrap();
     assert_eq!(s.digest().unwrap(), digest);
+}
+
+// --- Review-repair negative controls (P1 x4) ---
+
+#[test]
+fn expiration_is_bound_into_the_token_binding() {
+    let (m, run, suspension, _token) = suspended_fixture();
+    let issued = issue_resume_token(&suspension, "tok-e", Some("2026-10-13T00:00:00Z")).unwrap();
+    let ckpt = run.export_checkpoint().unwrap();
+
+    // Removing expiration must invalidate the binding (absence is explicit).
+    let mut removed = issued.clone();
+    removed.expiration = None;
+    let err = resume_with_token(&ckpt, &suspension, &removed, &check_params(&m)).unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0003".to_string()]);
+
+    // Extending expiration must invalidate the binding.
+    let mut extended = issued;
+    extended.expiration = Some("2027-01-01T00:00:00Z".into());
+    let err = resume_with_token(&ckpt, &suspension, &extended, &check_params(&m)).unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0003".to_string()]);
+
+    // The intact token still passes at an in-window clock reading.
+    let issued = issue_resume_token(&suspension, "tok-e", Some("2026-10-13T00:00:00Z")).unwrap();
+    assert!(resume_with_token(&ckpt, &suspension, &issued, &check_params(&m)).is_ok(),);
+}
+
+#[test]
+fn resume_refuses_pre_suspension_checkpoint() {
+    let m = manifest();
+    let mut run = open_run(&m);
+    // Checkpoint exported BEFORE the suspension exists.
+    let pre_ckpt = run.export_checkpoint().unwrap();
+    let suspension = suspend_run(&mut run, suspend_params()).unwrap();
+    let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
+    let err = resume_with_token(&pre_ckpt, &suspension, &token, &check_params(&m)).unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0001".to_string()]);
+}
+
+#[test]
+fn resume_refuses_tampered_suspension_evidence_entry() {
+    let m = manifest();
+    let mut run = open_run(&m);
+    let suspension = suspend_run(&mut run, suspend_params()).unwrap();
+    let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
+    // Corrupt the journaled event digest and reseal the state honestly.
+    run.evidence_refs[0].event_digest = OTHER_DIGEST.into();
+    run.content_digest = Some(run.compute_digest());
+    let ckpt = run.export_checkpoint().unwrap();
+    let err = resume_with_token(&ckpt, &suspension, &token, &check_params(&m)).unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0001".to_string()]);
+}
+
+#[test]
+fn resume_refuses_duplicate_suspension_evidence_entries() {
+    let m = manifest();
+    let mut run = open_run(&m);
+    let suspension = suspend_run(&mut run, suspend_params()).unwrap();
+    let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
+    // Duplicate the journal entry and reseal honestly.
+    let dup = run.evidence_refs[0].clone();
+    run.evidence_refs.push(dup);
+    run.content_digest = Some(run.compute_digest());
+    let ckpt = run.export_checkpoint().unwrap();
+    let err = resume_with_token(&ckpt, &suspension, &token, &check_params(&m)).unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0001".to_string()]);
+}
+
+#[test]
+fn suspend_refuses_malformed_digest_fields() {
+    let m = manifest();
+    let mut run = open_run(&m);
+    for (plan, auth, inputs, label) in [
+        ("xyz", AUTH_DIGEST, OPS_DIGEST, "plan"),
+        (PLAN_DIGEST, "not-hex", OPS_DIGEST, "authority"),
+        (PLAN_DIGEST, AUTH_DIGEST, "abc", "inputs"),
+        (&"F".repeat(64), AUTH_DIGEST, OPS_DIGEST, "uppercase plan"),
+        (&PLAN_DIGEST[..63], AUTH_DIGEST, OPS_DIGEST, "short plan"),
+    ] {
+        let err = suspend_run(
+            &mut run,
+            SuspendParams {
+                plan_digest: plan,
+                authority_snapshot_digest: auth,
+                inputs_digest: inputs,
+                ..suspend_params()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("64-hex"), "{label}: {err}");
+    }
+}
+
+#[test]
+fn create_then_resume_version_policy_is_consistent() {
+    let m = manifest();
+    let mut run = open_run(&m);
+    // A version the resume ladder cannot support must refuse at CREATION.
+    let err = suspend_run(
+        &mut run,
+        SuspendParams {
+            workflow_version: "2.0.0",
+            ..suspend_params()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("workflow_version"), "{err}");
+    // The supported version creates and resumes end to end.
+    let suspension = suspend_run(&mut run, suspend_params()).unwrap();
+    let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
+    let ckpt = run.export_checkpoint().unwrap();
+    assert!(resume_with_token(&ckpt, &suspension, &token, &check_params(&m)).is_ok());
+}
+
+#[test]
+fn declared_failure_precedence_holds_for_overlapping_invalidity() {
+    let (m, run, suspension, token) = suspended_fixture();
+    let ckpt = run.export_checkpoint().unwrap();
+
+    // Unsupported version beats tampered binding (gate 1 before gate 3).
+    let mut both = token.clone();
+    both.schema_version = "9.9.9".into();
+    both.plan_digest = OTHER_DIGEST.into();
+    let err = resume_with_token(&ckpt, &suspension, &both, &check_params(&m)).unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0004".to_string()]);
+
+    // Tampered binding beats expiry (gate 3 before gate 4).
+    let mut tampered_and_expired = token.clone();
+    tampered_and_expired.plan_digest = OTHER_DIGEST.into();
+    tampered_and_expired.expiration = Some("2026-10-11T23:59:59Z".into());
+    let err = resume_with_token(&ckpt, &suspension, &tampered_and_expired, &check_params(&m))
+        .unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0003".to_string()]);
+
+    // Expiry beats staleness (gate 4 before gate 5): a properly issued but
+    // expired token against a stale authority snapshot.
+    let expired = issue_resume_token(&suspension, "tok-x", Some("2026-10-11T23:59:59Z")).unwrap();
+    let err = resume_with_token(
+        &ckpt,
+        &suspension,
+        &expired,
+        &ResumeCheckParams {
+            authority_snapshot_digest_now: OTHER_DIGEST,
+            ..check_params(&m)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(codes(&err), vec!["SOMA-RES-0002".to_string()]);
 }
