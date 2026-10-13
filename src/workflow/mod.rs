@@ -28,6 +28,7 @@ pub mod graph_gates;
 pub mod graph_parallel;
 pub mod graph_resume;
 pub mod graph_state;
+pub mod graph_suspend;
 pub mod memory_contracts;
 pub mod node_contracts;
 pub mod node_doc_release;
