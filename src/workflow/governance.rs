@@ -81,6 +81,25 @@ impl CompiledAuthorityGraph {
         }
         Ok(())
     }
+    /// Canonical digest of this compiled authority snapshot: binds
+    /// `{workflow_id, workflow_version, workflow_authority, operations,
+    /// constraints}`. Used by the permit to anchor any durable suspension
+    /// / resume token to exactly this authority state (resume time must
+    /// re-derive the same digest or the token fails closed as stale).
+    pub fn snapshot_digest(&self) -> anyhow::Result<String> {
+        let value = serde_json::json!({
+            "workflowId": self.workflow_id,
+            "workflowVersion": self.workflow_version,
+            "workflowAuthority": self.workflow_authority,
+            "constraints": self.constraints,
+            "operations": self.operations.iter().map(|o| serde_json::json!({
+                "opId": o.op_id,
+                "effective": o.effective,
+            })).collect::<Vec<_>>(),
+        });
+        crate::workflow::soma::try_canonical_digest(&value)
+            .map_err(|e| anyhow::anyhow!("authority snapshot cannot be digested: {e}"))
+    }
 }
 
 /// Compile + fully validate a workflow document's authority. Fail-closed:
