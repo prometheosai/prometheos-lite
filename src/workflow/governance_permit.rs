@@ -28,6 +28,25 @@ use crate::workflow::soma::contracts::WorkflowDefinition;
 /// Constructed ONLY by GovernancePermit::issue. Fields are private on
 /// purpose: a permit is a capability-bearing artifact and must not be
 /// hand-assembled or mutated after issue.
+///
+/// Slice B (P1-A): this is also the ONLY externally reachable governed
+/// suspension/resume path — the raw transition primitives in
+/// `workflow::graph_suspend` are crate-private. Stated honestly: no
+/// API/CLI suspension endpoint exists; the library permit boundary IS
+/// the externally reachable governed transition surface.
+///
+/// Compile-fail proof (runs under `cargo test --doc --all-features`,
+/// registered in BOTH evidence-runner specification points): an external
+/// caller cannot bypass the reviewed permit by hand-assembling one:
+///
+/// ```compile_fail
+/// use prometheos_lite::workflow::governance_permit::GovernancePermit;
+/// let _permit = GovernancePermit {
+///     plan_identity: "deadbeef".repeat(8),
+///     authority_graph: loop {},
+///     execution_graph: loop {},
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct GovernancePermit {
     plan_identity: String,
@@ -94,6 +113,93 @@ impl GovernancePermit {
 
     pub fn execution_graph(&self) -> &CompiledExecutionGraphV1 {
         &self.execution_graph
+    }
+
+    /// Canonical digest of the compiled authority snapshot this permit
+    /// governs (`governance::CompiledAuthorityGraph::snapshot_digest`).
+    /// Deterministic per issued permit; used to anchor durable suspension
+    /// and resume-token bindings below.
+    pub fn authority_snapshot_digest(&self) -> String {
+        self.authority_graph
+            .snapshot_digest()
+            .expect("Lite-constructed authority graph digests")
+    }
+
+    /// Suspend a permit-governed graph run: bind the suspension to this
+    /// permit's reviewed plan identity and authority snapshot (E4/X05
+    /// contracts in [`crate::workflow::graph_suspend`]).
+    ///
+    /// `now` is the recorded-at clock; `revision`/`expiration` pass through
+    /// the vendored-mapped optional members. Refuses a terminated run and
+    /// malformed digest inputs (inherited write-boundary validation).
+    #[allow(clippy::too_many_arguments)]
+    pub fn suspend_run(
+        &self,
+        state: &mut crate::workflow::graph_state::GraphRunStateV1,
+        suspension_id: &str,
+        trigger: &str,
+        operation_id: &str,
+        inputs_digest: &str,
+        now: &str,
+        revision: Option<&str>,
+        expiration: Option<&str>,
+    ) -> anyhow::Result<crate::workflow::graph_suspend::SuspensionPointV1> {
+        crate::workflow::graph_suspend::suspend_run(
+            state,
+            crate::workflow::graph_suspend::SuspendParams {
+                id: suspension_id,
+                workflow_version: crate::workflow::graph_suspend::SUSPENSION_SCHEMA_VERSION,
+                trigger,
+                revision,
+                expiration,
+                operation_id,
+                inputs_digest,
+                recorded_at: now,
+            },
+            &crate::workflow::graph_suspend::AuthorityBinding::new(
+                &self.plan_identity,
+                &self.authority_snapshot_digest(),
+            ),
+        )
+    }
+
+    /// Resume a suspended run under THIS permit: the suspension and its
+    /// token are checked against this permit's reviewed identity and
+    /// authority snapshot before the run law (`graph_resume`) executes.
+    /// A token issued under any other plan identity or authority snapshot
+    /// fails closed (`SOMA-RES-0001`); the X05 ladder and #123 gates are
+    /// untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_run(
+        &self,
+        checkpoint_text: &str,
+        suspension: &crate::workflow::graph_suspend::SuspensionPointV1,
+        token: &crate::workflow::graph_suspend::ResumeTokenV1,
+        manifest: &crate::workflow::graph_state::GraphManifestV1,
+        portable_digest: &str,
+        repo_revision_now: &str,
+        now: &str,
+        replay: Option<crate::workflow::graph_resume::ReplayAuthorization>,
+    ) -> Result<
+        crate::workflow::graph_resume::ResumedRun,
+        crate::workflow::graph_suspend::ResumeWithTokenError,
+    > {
+        crate::workflow::graph_suspend::resume_with_token(
+            checkpoint_text,
+            suspension,
+            token,
+            &crate::workflow::graph_suspend::ResumeCheckParams {
+                manifest,
+                portable_digest,
+                repo_revision_now,
+                now,
+                replay,
+            },
+            &crate::workflow::graph_suspend::AuthorityBinding::new(
+                &self.plan_identity,
+                &self.authority_snapshot_digest(),
+            ),
+        )
     }
 
     /// Bind one concrete request to the compiled execution graph.

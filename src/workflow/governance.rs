@@ -81,6 +81,48 @@ impl CompiledAuthorityGraph {
         }
         Ok(())
     }
+    /// Canonical digest of this compiled authority snapshot.
+    ///
+    /// Members, exactly (canonical order): `workflowId`,
+    /// `workflowVersion`, `workflowAuthority` (the workflow authority
+    /// ceiling), `constraints` (every governance constraint, in order),
+    /// and `operations` — an ordered array of `{opId, effective}` that
+    /// binds each operation's identity, its COMPLETE effective-authority
+    /// profile (every `AuthorityProfile` member as serialized), and the
+    /// declared ordering (array position mirrors body order and is
+    /// contract-significant).
+    ///
+    /// The retained workflow `body` (`Vec<OperationDefinition>`) is
+    /// deliberately EXCLUDED: body semantics are already sealed through
+    /// `workflowDigest` (`governance_compiler::workflow_digest_of` over
+    /// the parsed document) and the reviewed plan identity
+    /// (`canonicalization.sha256` over the exact reviewed workflow text
+    /// that `GovernancePermit::issue` refuses to issue without). Folding
+    /// full bodies in here would couple the authority-state digest to
+    /// large review artifacts without adding authority semantics; every
+    /// authority-relevant projection of the body IS bound above —
+    /// operation identity and order, resolved effective profiles, and
+    /// constraints.
+    ///
+    /// Deterministic: identical compiled snapshots digest identically
+    /// (pinned by tests). Used by the permit to anchor any durable
+    /// suspension / resume token to exactly this authority state (resume
+    /// time must re-derive the same digest or the token fails closed as
+    /// `SOMA-RES-0001`).
+    pub fn snapshot_digest(&self) -> anyhow::Result<String> {
+        let value = serde_json::json!({
+            "workflowId": self.workflow_id,
+            "workflowVersion": self.workflow_version,
+            "workflowAuthority": self.workflow_authority,
+            "constraints": self.constraints,
+            "operations": self.operations.iter().map(|o| serde_json::json!({
+                "opId": o.op_id,
+                "effective": o.effective,
+            })).collect::<Vec<_>>(),
+        });
+        crate::workflow::soma::try_canonical_digest(&value)
+            .map_err(|e| anyhow::anyhow!("authority snapshot cannot be digested: {e}"))
+    }
 }
 
 /// Compile + fully validate a workflow document's authority. Fail-closed:
@@ -658,5 +700,140 @@ mod tests {
         text["schemaVersion"] = json!("2.0.0");
         // Digest was computed for 1.x content; version bump alone breaks it.
         assert!(GovernanceDecisionRecordV1::parse_json(&text.to_string()).is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // P1-B: CompiledAuthorityGraph::snapshot_digest() pins
+    // ------------------------------------------------------------------
+
+    fn snapshot(graph: &CompiledAuthorityGraph) -> String {
+        graph
+            .snapshot_digest()
+            .expect("Lite-constructed authority graphs digest")
+    }
+
+    /// Deterministic equality for identical compiled snapshots.
+    #[test]
+    fn snapshot_digest_is_deterministic_for_identical_compilations() {
+        let g1 = compile_authority(&base_workflow()).expect("compiles");
+        let g2 = compile_authority(&base_workflow()).expect("compiles");
+        let d1 = snapshot(&g1);
+        assert_eq!(d1.len(), 64);
+        assert_eq!(d1, snapshot(&g1), "stable across repeated calls");
+        assert_eq!(
+            d1,
+            snapshot(&g2),
+            "identical compiled snapshots must digest identically"
+        );
+    }
+
+    /// Sensitivity helper: mutating the labeled member must move the digest.
+    fn assert_snapshot_moves(
+        base: &str,
+        label: &str,
+        graph: &CompiledAuthorityGraph,
+        mutate: impl FnOnce(&mut CompiledAuthorityGraph),
+    ) {
+        let mut m = graph.clone();
+        mutate(&mut m);
+        assert_ne!(
+            snapshot(&m),
+            base,
+            "{label} must move the authority snapshot digest"
+        );
+    }
+
+    /// Sensitivity pins: workflow authority ceiling, every per-operation
+    /// effective-authority member, governance constraints, operation
+    /// identity, and contract-significant operation ordering.
+    #[test]
+    fn snapshot_digest_binds_ceiling_effective_authority_constraints_identity_and_order() {
+        let g = compile_authority(&base_workflow()).expect("compiles");
+        let base = snapshot(&g);
+
+        // Workflow authority ceiling.
+        assert_snapshot_moves(&base, "workflow authority ceiling", &g, |m| {
+            m.workflow_authority.writable_scopes = Some(vec!["ceiling-twist".into()]);
+        });
+
+        // Every per-operation effective-authority member: loop over ALL
+        // operations and twist representative serialized member kinds
+        // (enum member, scope-list member, mutation-mode member); the
+        // digest binds the complete serialized profile — these pins prove
+        // members flow into it.
+        for idx in 0..g.operations.len() {
+            assert_snapshot_moves(
+                &base,
+                &format!("operations[{idx}].effective.executionClass"),
+                &g,
+                |m| {
+                    m.operations[idx].effective.execution_class =
+                        crate::workflow::soma::types::ExecutionClass::ModelAssisted;
+                },
+            );
+            assert_snapshot_moves(
+                &base,
+                &format!("operations[{idx}].effective.readableScopes"),
+                &g,
+                |m| {
+                    m.operations[idx]
+                        .effective
+                        .readable_scopes
+                        .get_or_insert_with(Vec::new)
+                        .push("scope-twist".into());
+                },
+            );
+            assert_snapshot_moves(
+                &base,
+                &format!("operations[{idx}].effective.mutation"),
+                &g,
+                |m| {
+                    m.operations[idx].effective.mutation =
+                        crate::workflow::soma::types::MutationMode::Explicit;
+                },
+            );
+        }
+
+        // Governance constraints.
+        assert_snapshot_moves(&base, "governance constraints", &g, |m| {
+            m.constraints
+                .push(crate::workflow::soma::contracts::GovernanceConstraint {
+                    id: "c-twist".into(),
+                    subject: crate::workflow::soma::contracts::ConstraintSubject {
+                        node_set: Some(vec!["op1".into()]),
+                        edge_set: None,
+                    },
+                    predicate: "reads only orders".into(),
+                    violation_category: "dataExposure".into(),
+                    kind: crate::workflow::soma::contracts::ConstraintKind::Static,
+                    evaluation_point: None,
+                });
+        });
+
+        // Operation identity.
+        assert_snapshot_moves(&base, "operation identity", &g, |m| {
+            m.operations[0].op_id = "op1-renamed".into();
+        });
+
+        // Contract-significant operation ORDER: same member set, swapped
+        // array positions must produce different digests.
+        let extra = CompiledOperationAuthority {
+            op_id: "op2".into(),
+            effective: g.operations[0].effective.clone(),
+        };
+        let mut order_ab = g.clone();
+        order_ab.operations.push(extra.clone());
+        let mut order_ba = g.clone();
+        order_ba.operations.insert(0, extra);
+        assert_ne!(
+            snapshot(&order_ab),
+            snapshot(&order_ba),
+            "operation ordering alone must move the authority snapshot digest"
+        );
+        assert_ne!(
+            snapshot(&order_ab),
+            base,
+            "an added operation must move the authority snapshot digest"
+        );
     }
 }

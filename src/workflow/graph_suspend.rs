@@ -20,6 +20,46 @@
 //! "suspension-point"`, `id == format!("suspension:{id}")`). Any forward
 //! motion after suspension changes the filtered digest, so a state that
 //! moved fails closed as `SOMA-RES-0001`.
+//!
+//! # Permit-only boundary (Slice B repair P1-A)
+//!
+//! The raw transition primitives (`suspend_run`, `resume_with_token`) and
+//! every `AuthorityBinding` construction mechanism are crate-private, so
+//! `GovernancePermit` is the only externally reachable governed
+//! suspension/resume path. Stated honestly: NO API/CLI suspension endpoint
+//! exists today — the library permit boundary IS the externally reachable
+//! governed transition surface (nothing more is claimed). The standalone
+//! X05 implementation is preserved in-crate and exercised through that
+//! boundary.
+//!
+//! The compile-fail proofs below run as rustdoc tests under
+//! `cargo test --doc --all-features`, which is registered in BOTH
+//! authoritative evidence-runner specification points
+//! (`SUITE_SPEC["core"]` and `rust_core()` in `scripts/local_ci.py`).
+//!
+//! An external caller cannot invoke raw suspension:
+//!
+//! ```compile_fail
+//! use prometheos_lite::workflow::graph_suspend::suspend_run;
+//! ```
+//!
+//! An external caller cannot invoke raw resume:
+//!
+//! ```compile_fail
+//! use prometheos_lite::workflow::graph_suspend::resume_with_token;
+//! ```
+//!
+//! An external caller cannot construct a caller-controlled authority
+//! binding (the type itself is unnameable, so no caller-supplied plan or
+//! authority digest can ever enter a transition):
+//!
+//! ```compile_fail
+//! use prometheos_lite::workflow::graph_suspend::AuthorityBinding;
+//! let _binding = AuthorityBinding {
+//!     plan_digest: "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+//!     authority_snapshot_digest: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+//! };
+//! ```
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -102,9 +142,40 @@ pub struct ResumeTokenV1 {
     pub expiration: Option<String>,
 }
 
-/// Input bundle for [`suspend_run`].
+/// Digest binding digest-authority for suspension/resume transitions.
+///
+/// A binding packages the reviewed plan identity plus the compiled
+/// authority snapshot digest **and can only be constructed inside this
+/// crate by `GovernancePermit`** (via [`AuthorityBinding::new`]). The raw
+/// suspend/resume primitives take `&AuthorityBinding`, so production code
+/// cannot suspend or resume under caller-supplied digests without a
+/// permit — transitions are permit-only (E4/X06 Slice B repair 1).
+pub(crate) struct AuthorityBinding {
+    plan_digest: String,
+    authority_snapshot_digest: String,
+}
+
+impl AuthorityBinding {
+    pub(crate) fn new(plan_digest: &str, authority_snapshot_digest: &str) -> Self {
+        Self {
+            plan_digest: plan_digest.to_string(),
+            authority_snapshot_digest: authority_snapshot_digest.to_string(),
+        }
+    }
+
+    /// Test-only constructor for in-crate isolation controls (Blocker 2):
+    /// allows varying plan vs authority digests independently. Never
+    /// reachable from production code paths.
+    #[cfg(test)]
+    pub(crate) fn for_test(plan_digest: &str, authority_snapshot_digest: &str) -> Self {
+        Self::new(plan_digest, authority_snapshot_digest)
+    }
+}
+
+/// Input bundle for [`suspend_run`] (plan/authority digests come from the
+/// [`AuthorityBinding`] — never from the caller).
 #[derive(Debug, Clone, Copy)]
-pub struct SuspendParams<'a> {
+pub(crate) struct SuspendParams<'a> {
     pub id: &'a str,
     pub workflow_version: &'a str,
     pub trigger: &'a str,
@@ -112,19 +183,17 @@ pub struct SuspendParams<'a> {
     pub expiration: Option<&'a str>,
     pub operation_id: &'a str,
     pub inputs_digest: &'a str,
-    pub plan_digest: &'a str,
-    pub authority_snapshot_digest: &'a str,
     pub recorded_at: &'a str,
 }
 
-/// Resume-time environment the token is checked against.
+/// Resume-time environment the token is checked against. The plan and
+/// authority expectations come from the [`AuthorityBinding`] presented by
+/// the resuming permit, not from free parameters.
 #[derive(Debug, Clone)]
-pub struct ResumeCheckParams<'a> {
+pub(crate) struct ResumeCheckParams<'a> {
     pub manifest: &'a super::graph_state::GraphManifestV1,
     pub portable_digest: &'a str,
     pub repo_revision_now: &'a str,
-    pub plan_digest_now: &'a str,
-    pub authority_snapshot_digest_now: &'a str,
     pub now: &'a str,
     pub replay: Option<ReplayAuthorization>,
 }
@@ -210,12 +279,16 @@ fn token_binding_input(
 
 /// Suspend a live run at a durable point and journal the event.
 ///
-/// Refuses a terminated run: a cancelled run cannot be suspended or
-/// resumed (the #123 law). Seals the state, records the suspension
-/// evidence entry, and reseals so the exported checkpoint round-trips.
-pub fn suspend_run(
+/// The `binding` carries the reviewed plan identity and authority
+/// snapshot digests; only `GovernancePermit` can construct one, so a
+/// suspension always binds real permit materials. Refuses a terminated
+/// run: a cancelled run cannot be suspended or resumed (the #123 law).
+/// Seals the state, records the suspension evidence entry, and reseals so
+/// the exported checkpoint round-trips.
+pub(crate) fn suspend_run(
     state: &mut GraphRunStateV1,
     params: SuspendParams<'_>,
+    binding: &AuthorityBinding,
 ) -> Result<SuspensionPointV1> {
     if state.termination.is_some() {
         bail!("cannot suspend a terminated run");
@@ -230,19 +303,20 @@ pub fn suspend_run(
             workflow_version = params.workflow_version,
         );
     }
-    // Write-boundary digest validation: every digest member must match the
-    // vendored `^[0-9a-f]{64}$` shape before any document exists.
-    for (member, value, label) in [
-        ("planDigest", params.plan_digest, "plan_digest"),
+    // Write-boundary digest validation (defense in depth): the vendored
+    // `^[0-9a-f]{64}$` shape is enforced even for the binding's digests —
+    // `AuthorityBinding` is crate-private, but malformed material must
+    // never produce a document anywhere.
+    for (member, value) in &[
+        ("planDigest", binding.plan_digest.clone()),
         (
             "authoritySnapshotDigest",
-            params.authority_snapshot_digest,
-            "authority_snapshot_digest",
+            binding.authority_snapshot_digest.clone(),
         ),
-        ("inputsDigest", params.inputs_digest, "inputs_digest"),
+        ("inputsDigest", params.inputs_digest.to_string()),
     ] {
         if !is_64hex_lower(value) {
-            bail!("{member} ({label}) must be a 64-hex lowercase digest");
+            bail!("{member} must be a 64-hex lowercase digest");
         }
     }
     if let Some(exp) = params.expiration
@@ -263,8 +337,8 @@ pub fn suspend_run(
         },
         expiration: params.expiration.map(str::to_string),
         state_digest: state_digest.clone(),
-        plan_digest: params.plan_digest.to_string(),
-        authority_snapshot_digest: params.authority_snapshot_digest.to_string(),
+        plan_digest: binding.plan_digest.clone(),
+        authority_snapshot_digest: binding.authority_snapshot_digest.clone(),
         resumability: ResumabilityV1 {
             operation_id: params.operation_id.to_string(),
             inputs_digest: params.inputs_digest.to_string(),
@@ -333,11 +407,12 @@ pub fn issue_resume_token(
 
 /// Resume a suspended run with a token, enforcing the fail-closed ladder
 /// before delegating to the #123 run law.
-pub fn resume_with_token(
+pub(crate) fn resume_with_token(
     checkpoint_text: &str,
     suspension: &SuspensionPointV1,
     token: &ResumeTokenV1,
     params: &ResumeCheckParams<'_>,
+    binding: &AuthorityBinding,
 ) -> Result<ResumedRun, ResumeWithTokenError> {
     // 1. Version gate (runs first: an unrecognised shape is unsupported,
     //    not tampered).
@@ -433,15 +508,17 @@ pub fn resume_with_token(
         }
     }
 
-    // 5. Staleness: plan / authority / state must match resume time.
-    if params.plan_digest_now != suspension.plan_digest {
+    // 5. Staleness: the resuming permit's plan identity and authority
+    //    snapshot must equal the suspension's bindings; the run-state
+    //    digest is reconstructed from the imported checkpoint.
+    if binding.plan_digest != suspension.plan_digest {
         return Err(refusal(
             "SOMA-RES-0001",
             "/planDigest",
             "reviewed plan identity moved since suspension".to_string(),
         ));
     }
-    if params.authority_snapshot_digest_now != suspension.authority_snapshot_digest {
+    if binding.authority_snapshot_digest != suspension.authority_snapshot_digest {
         return Err(refusal(
             "SOMA-RES-0001",
             "/authoritySnapshotDigest",
@@ -505,4 +582,305 @@ pub fn resume_with_token(
         params.replay.clone(),
     )
     .map_err(ResumeWithTokenError::Underlying)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::graph_state::{GraphManifestV1, GraphNodeV1, GraphRunStateV1};
+
+    const PLAN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const AUTH: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const OTHER: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    fn manifest() -> GraphManifestV1 {
+        GraphManifestV1 {
+            schema_version: "1.0.0".into(),
+            graph_id: "g".into(),
+            version: "1.0.0".into(),
+            nodes: vec![GraphNodeV1 {
+                node_id: "a".into(),
+                capability: "c.a".into(),
+                purpose: None,
+                resources: vec![],
+                join: None,
+            }],
+            edges: vec![],
+            entry_points: vec!["a".into()],
+            terminal_exits: vec!["a".into()],
+            shared_state_keys: vec![],
+            policy_digest: None,
+            content_digest: None,
+        }
+        .sealed()
+    }
+
+    fn fixture() -> (
+        GraphRunStateV1,
+        SuspensionPointV1,
+        ResumeTokenV1,
+        AuthorityBinding,
+    ) {
+        let m = manifest();
+        let mut run = GraphRunStateV1::open("r1", &m, "rev-1", "pws", "pd", "t0").unwrap();
+        let binding = AuthorityBinding::new(PLAN, AUTH);
+        let suspension = suspend_run(
+            &mut run,
+            SuspendParams {
+                id: "susp-1",
+                workflow_version: SUSPENSION_SCHEMA_VERSION,
+                trigger: "human-review",
+                revision: None,
+                expiration: None,
+                operation_id: "a",
+                inputs_digest: PLAN, // shape only: any exact 64-hex value
+                recorded_at: "t1",
+            },
+            &binding,
+        )
+        .unwrap();
+        let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
+        (run, suspension, token, binding)
+    }
+
+    fn codes(err: &ResumeWithTokenError) -> Vec<String> {
+        match err {
+            ResumeWithTokenError::Refusal(d) => d.iter().map(|d| d.code.clone()).collect(),
+            ResumeWithTokenError::Underlying(e) => vec![e.to_string()],
+        }
+    }
+
+    /// First refusal's diagnostic source path, if any.
+    fn first_source(err: &ResumeWithTokenError) -> Option<&str> {
+        match err {
+            ResumeWithTokenError::Refusal(d) => d
+                .first()
+                .and_then(|d| d.source.as_ref())
+                .map(|s| s.path.as_str()),
+            ResumeWithTokenError::Underlying(_) => None,
+        }
+    }
+
+    /// Audit-clean workflow identical in shape to the shared integration
+    /// fixture `permit_for(&["a"], &["echo"])` (integration-test helpers
+    /// are not reachable from in-crate tests, so the known-good document
+    /// is reproduced here verbatim in structure).
+    fn reviewed_workflow_text() -> String {
+        r#"{
+  "schemaVersion": "1.1.0", "version": "1.1.0", "id": "lite-governed",
+  "name": "Governed", "kind": "atomic",
+  "inputPorts": [{"name": "goal", "direction": "input", "type": "string",
+                   "cardinality": "single", "requiredness": "required"}],
+  "outputPorts": [{"name": "result", "direction": "output", "type": "string",
+                    "cardinality": "single", "requiredness": "required"}],
+  "body": [{
+    "schemaVersion": "1.1.0", "version": "1.1.0", "id": "a",
+    "executionClass": "deterministic",
+    "inputs": [{"name": "goal", "type": "string", "acceptedOutcomes": ["Produced"]}],
+    "outputs": [{"name": "result", "type": "string", "emits": ["Produced"]}],
+    "authority": ["readable:repo://evaluation", "readable:repo://x", "readable:repo://fixture",
+                  "writable:work://evaluation", "writable:work://y", "writable:repo://fixture", "echo"],
+    "effects": [], "uses": [], "secrets": [], "context": []
+  }],
+  "authority": {
+    "executionClass": "deterministic", "mutation": "none", "tools": {"echo": []},
+    "readableScopes": ["repo://evaluation", "repo://x", "repo://fixture"],
+    "writableScopes": ["work://evaluation", "work://y", "repo://fixture"],
+    "networkPolicy": {"default": "deny"}, "providerPolicy": {"allowlist": []},
+    "secrets": []
+  }
+}"#
+        .to_string()
+    }
+
+    /// A REAL reviewed permit for the fixture workflow — the exact
+    /// artifact shape a reviewer approves (identity = canonical digest of
+    /// the reviewed text; issue refuses any other identity).
+    fn reviewed_permit() -> crate::workflow::governance_permit::GovernancePermit {
+        let text = reviewed_workflow_text();
+        let identity = crate::workflow::governance_compiler::compile_workflow_text(&text)
+            .expect("audit-clean workflow compiles")
+            .canonicalization
+            .sha256;
+        crate::workflow::governance_permit::GovernancePermit::issue(&text, &identity)
+            .expect("permit issues for its reviewed identity")
+    }
+
+    /// P1-B isolated authority-staleness control (review repair): plan
+    /// identity is held EXACTLY equal to a real reviewed permit's
+    /// identity; only a different VALID authority snapshot digest is
+    /// presented, and the refusal must be `SOMA-RES-0001` pointing at
+    /// `/authoritySnapshotDigest`, never `/planDigest`.
+    ///
+    /// Coherence of the four artifacts is proven first: the permit-bound
+    /// suspension binds the reviewed plan identity + authority snapshot;
+    /// the token is byte-deterministic over that suspension; the evidence
+    /// journal holds EXACTLY ONE entry binding the suspension document
+    /// and its pre-suspension state seal; the checkpoint round-trips and
+    /// reproduces that seal once the journal entry is removed; and the
+    /// issuing permit itself resumes successfully (positive control).
+    #[test]
+    fn authority_snapshot_only_drift_refuses_on_reviewed_plan_held_equal() {
+        let permit = reviewed_permit();
+        let m = manifest();
+        let mut run = GraphRunStateV1::open("r1", &m, "rev-1", "pws", "pd", "t0").unwrap();
+
+        // 1. Suspension binds EXACTLY the reviewed permit identity.
+        let suspension = permit
+            .suspend_run(
+                &mut run,
+                "susp-1",
+                "human-review",
+                "a",
+                PLAN,
+                "t1",
+                None,
+                None,
+            )
+            .expect("permit-bound suspension");
+        assert_eq!(suspension.plan_digest, permit.plan_identity());
+        assert_eq!(
+            suspension.authority_snapshot_digest,
+            permit.authority_snapshot_digest()
+        );
+        assert_ne!(
+            permit.authority_snapshot_digest(),
+            OTHER,
+            "control digest must differ from the reviewed snapshot"
+        );
+
+        // 2. Token coherence: byte-deterministic over this suspension.
+        let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
+        let reissued = issue_resume_token(&suspension, "tok-1", None).unwrap();
+        assert_eq!(token.binding_digest, reissued.binding_digest);
+        assert_eq!(token.suspension_digest, suspension.digest().unwrap());
+
+        // 3. Evidence journal coherence: exactly one entry binding the
+        //    suspension document and the pre-suspension state seal.
+        let entries: Vec<_> = run
+            .evidence_refs
+            .iter()
+            .filter(|e| e.artifact_kind == "suspension-point" && e.id == "suspension:susp-1")
+            .collect();
+        assert_eq!(entries.len(), 1, "{:?}", run.evidence_refs);
+        assert_eq!(entries[0].event_digest, suspension.digest().unwrap());
+        assert_eq!(entries[0].artifact_digest, suspension.state_digest);
+
+        // 4. Checkpoint coherence: export/import round-trips; dropping the
+        //    journal entry reproduces the exact state seal the suspension
+        //    binds (the resume ladder's own state rule).
+        let ckpt = run.export_checkpoint().unwrap();
+        let imported = GraphRunStateV1::import_checkpoint(&ckpt, &m, "pd").unwrap();
+        let mut pre = imported;
+        pre.evidence_refs
+            .retain(|e| !(e.artifact_kind == "suspension-point" && e.id == "suspension:susp-1"));
+        assert_eq!(pre.compute_digest(), suspension.state_digest);
+
+        // 5. Positive control: the issuing permit resumes all four
+        //    artifacts through the governed path.
+        permit
+            .resume_run(
+                &ckpt,
+                &suspension,
+                &token,
+                &m,
+                "pd",
+                "rev-1",
+                "2026-10-13T00:00:00Z",
+                None,
+            )
+            .expect("identical binding resumes");
+
+        // 6. ISOLATION: plan identity held EXACTLY equal to the reviewed
+        //    permit; only a different VALID authority snapshot digest.
+        let drift = AuthorityBinding::for_test(permit.plan_identity(), OTHER);
+        let err = resume_with_token(
+            &ckpt,
+            &suspension,
+            &token,
+            &ResumeCheckParams {
+                manifest: &m,
+                portable_digest: "pd",
+                repo_revision_now: "rev-1",
+                now: "2026-10-13T00:00:00Z",
+                replay: None,
+            },
+            &drift,
+        )
+        .unwrap_err();
+        assert_eq!(codes(&err), vec!["SOMA-RES-0001".to_string()], "{err:?}");
+        assert_eq!(
+            first_source(&err),
+            Some("/authoritySnapshotDigest"),
+            "refusal must point at the authority snapshot member, not planDigest: {err:?}"
+        );
+        assert_ne!(first_source(&err), Some("/planDigest"));
+    }
+
+    /// Plan-only mismatch (authority snapshot held equal) → RES-0001.
+    #[test]
+    fn plan_only_mismatch_fails_stale_with_authority_held_equal() {
+        let (run, suspension, token, _binding) = fixture();
+        let ckpt = run.export_checkpoint().unwrap();
+        let m = manifest();
+        let drifting = AuthorityBinding::for_test(OTHER, AUTH);
+        let err = resume_with_token(
+            &ckpt,
+            &suspension,
+            &token,
+            &ResumeCheckParams {
+                manifest: &m,
+                portable_digest: "pd",
+                repo_revision_now: "rev-1",
+                now: "2026-10-13T00:00:00Z",
+                replay: None,
+            },
+            &drifting,
+        )
+        .unwrap_err();
+        assert_eq!(codes(&err), vec!["SOMA-RES-0001".to_string()]);
+        assert_eq!(
+            first_source(&err),
+            Some("/planDigest"),
+            "plan drift must point at the plan member: {err:?}"
+        );
+    }
+
+    /// Control: identical bindings resume successfully.
+    #[test]
+    fn identical_binding_resumes() {
+        let (run, suspension, token, binding) = fixture();
+        let ckpt = run.export_checkpoint().unwrap();
+        let m = manifest();
+        let ok = resume_with_token(
+            &ckpt,
+            &suspension,
+            &token,
+            &ResumeCheckParams {
+                manifest: &m,
+                portable_digest: "pd",
+                repo_revision_now: "rev-1",
+                now: "2026-10-13T00:00:00Z",
+                replay: None,
+            },
+            &binding,
+        );
+        assert!(
+            ok.is_ok(),
+            "{}",
+            ok.err().map(|e| codes(&e).join(",")).unwrap_or_default()
+        );
+    }
+
+    /// Structural guarantee: the primitives cannot be exercised with
+    /// caller-supplied digests — AuthorityBinding has no public
+    /// constructor. This test's existence documents the invariant; the
+    /// compiler enforces it (a pub fn would be needed and isn't).
+    #[test]
+    fn authority_binding_fields_stay_crate_private() {
+        let b = AuthorityBinding::new(PLAN, AUTH);
+        assert_eq!(b.plan_digest, PLAN);
+        assert_eq!(b.authority_snapshot_digest, AUTH);
+        assert_eq!(b.plan_digest.len(), 64);
+    }
 }
