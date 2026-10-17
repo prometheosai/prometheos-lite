@@ -1,10 +1,11 @@
 //! E4/X05 (#162) + E4/X06 (#163 Slice B) — suspension/resume conformance.
 //!
-//! Transitions are permit-only: the vendored-shaped `SuspensionPointV1` /
-//! `ResumeTokenV1` primitives take a crate-private `AuthorityBinding`
-//! minted by `GovernancePermit`, so no caller can suspend or resume under
-//! caller-supplied digests. Tests exercise the full fail-closed ladder
-//! through that permit surface.
+//! Transitions are permit-gated: the raw `SuspensionPointV1` /
+//! `ResumeTokenV1` primitives require a real `GovernancePermit` and read
+//! their digest material from it, so no caller — external or in-crate —
+//! can suspend or resume under caller-supplied digests. Tests exercise
+//! the full fail-closed ladder (including the operation-binding
+//! revalidation) through that permit surface.
 
 mod common;
 use common::permit_for;
@@ -67,11 +68,12 @@ fn open_run(m: &GraphManifestV1) -> GraphRunStateV1 {
 fn suspend_now(
     p: &GovernancePermit,
     run: &mut GraphRunStateV1,
+    m: &GraphManifestV1,
     id: &str,
     op: &str,
     inputs: &str,
 ) -> Result<SuspensionPointV1, anyhow::Error> {
-    p.suspend_run(run, id, "human-review", op, inputs, "t1", None, None)
+    p.suspend_run(run, m, id, "human-review", op, inputs, "t1", None, None)
 }
 
 type Fixture = (
@@ -86,7 +88,8 @@ fn fixture() -> Fixture {
     let permit = permit_for(&["a"], &["echo"]);
     let m = manifest();
     let mut run = open_run(&m);
-    let suspension = suspend_now(&permit, &mut run, "susp-1", "a", INPUTS_DIGEST).expect("suspend");
+    let suspension =
+        suspend_now(&permit, &mut run, &m, "susp-1", "a", INPUTS_DIGEST).expect("suspend");
     let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
     (permit, m, run, suspension, token)
 }
@@ -182,11 +185,12 @@ fn suspension_digest_is_the_canonical_digest_of_the_document() {
 
 #[test]
 fn suspend_refuses_terminated_run() {
-    let (permit, _m, mut run, ..) = fixture();
+    let (permit, m, mut run, ..) = fixture();
     prometheos_lite::workflow::graph_resume::cancel_run(&mut run, "stop", "t2").unwrap();
     let err = permit
         .suspend_run(
             &mut run,
+            &m,
             "susp-9",
             "human-review",
             "a",
@@ -224,10 +228,18 @@ fn resume_refuses_tampered_token_binding() {
 #[test]
 fn resume_refuses_token_pointing_at_other_suspension() {
     let (permit, m, run, suspension, _token) = fixture();
-    // Mint a real token over a *different* suspension on the same permit.
+    // Mint a real token over a *different* suspension on the same permit
+    // (a second fresh run suspended at the same live operation "a").
     let mut other_run = open_run(&m);
-    let other_susp = suspend_now(&permit, &mut other_run, "susp-other", "b", INPUTS_DIGEST)
-        .expect("second suspension");
+    let other_susp = suspend_now(
+        &permit,
+        &mut other_run,
+        &m,
+        "susp-other",
+        "a",
+        INPUTS_DIGEST,
+    )
+    .expect("second suspension");
     let foreign = issue_resume_token(&other_susp, "tok-2", None).unwrap();
     let ckpt = run.export_checkpoint().unwrap();
     let err = permit
@@ -337,7 +349,8 @@ fn resume_refuses_pre_suspension_checkpoint() {
     let m = manifest();
     let mut run = open_run(&m);
     let pre_ckpt = run.export_checkpoint().unwrap();
-    let suspension = suspend_now(&permit, &mut run, "susp-1", "a", INPUTS_DIGEST).expect("suspend");
+    let suspension =
+        suspend_now(&permit, &mut run, &m, "susp-1", "a", INPUTS_DIGEST).expect("suspend");
     let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
     let err = permit
         .resume_run(&pre_ckpt, &suspension, &token, &m, "pd", "rev-1", NOW, None)
@@ -386,6 +399,7 @@ fn suspend_refuses_malformed_inputs_digest() {
         let err = permit
             .suspend_run(
                 &mut run,
+                &m,
                 "susp-x",
                 "human-review",
                 "a",
@@ -491,7 +505,8 @@ fn valid_token_still_requires_replay_authorization() {
     .unwrap();
 
     let permit = permit_for(&["a"], &["echo"]);
-    let suspension = suspend_now(&permit, &mut run, "susp-1", "a", INPUTS_DIGEST).expect("suspend");
+    let suspension =
+        suspend_now(&permit, &mut run, &m, "susp-1", "a", INPUTS_DIGEST).expect("suspend");
     let token = issue_resume_token(&suspension, "tok-1", None).unwrap();
     let ckpt = run.export_checkpoint().unwrap();
 
