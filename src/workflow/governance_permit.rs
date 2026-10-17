@@ -29,10 +29,16 @@ use crate::workflow::soma::contracts::WorkflowDefinition;
 /// purpose: a permit is a capability-bearing artifact and must not be
 /// hand-assembled or mutated after issue.
 ///
-/// Slice B (P1-A): this is also the ONLY externally reachable governed
-/// suspension/resume path — the raw transition primitives in
-/// `workflow::graph_suspend` are crate-private. Stated honestly: no
-/// API/CLI suspension endpoint exists; the library permit boundary IS
+/// Slice B (P1-A, review repair): this is the only governed
+/// suspension/resume path, and the boundary holds INSIDE the crate too —
+/// the raw transition primitives in `workflow::graph_suspend` require a
+/// real `&GovernancePermit` and read their digest material from it, so
+/// no sibling module can forge plan/authority digests (no transition
+/// accepts digest material at all). An in-crate policy regression
+/// (`graph_suspend::tests::raw_transition_surface_stays_permit_gated_in_crate`)
+/// fails if a forgeable binding constructor or raw digest-bearing
+/// transition surface becomes production-visible again. Stated honestly:
+/// no API/CLI suspension endpoint exists; the library permit boundary IS
 /// the externally reachable governed transition surface.
 ///
 /// Compile-fail proof (runs under `cargo test --doc --all-features`,
@@ -129,6 +135,12 @@ impl GovernancePermit {
     /// permit's reviewed plan identity and authority snapshot (E4/X05
     /// contracts in [`crate::workflow::graph_suspend`]).
     ///
+    /// Operation binding (P1-B repair): the supplied `manifest` must be
+    /// the exact graph revision the run pinned at open, and
+    /// `operation_id` must be (1) a step of this permit's reviewed plan,
+    /// (2) a node of `manifest`, and (3) on the run's live frontier.
+    /// The transition fails closed and journals nothing otherwise.
+    ///
     /// `now` is the recorded-at clock; `revision`/`expiration` pass through
     /// the vendored-mapped optional members. Refuses a terminated run and
     /// malformed digest inputs (inherited write-boundary validation).
@@ -136,6 +148,7 @@ impl GovernancePermit {
     pub fn suspend_run(
         &self,
         state: &mut crate::workflow::graph_state::GraphRunStateV1,
+        manifest: &crate::workflow::graph_state::GraphManifestV1,
         suspension_id: &str,
         trigger: &str,
         operation_id: &str,
@@ -146,20 +159,15 @@ impl GovernancePermit {
     ) -> anyhow::Result<crate::workflow::graph_suspend::SuspensionPointV1> {
         crate::workflow::graph_suspend::suspend_run(
             state,
-            crate::workflow::graph_suspend::SuspendParams {
-                id: suspension_id,
-                workflow_version: crate::workflow::graph_suspend::SUSPENSION_SCHEMA_VERSION,
-                trigger,
-                revision,
-                expiration,
-                operation_id,
-                inputs_digest,
-                recorded_at: now,
-            },
-            &crate::workflow::graph_suspend::AuthorityBinding::new(
-                &self.plan_identity,
-                &self.authority_snapshot_digest(),
-            ),
+            manifest,
+            suspension_id,
+            trigger,
+            operation_id,
+            inputs_digest,
+            now,
+            revision,
+            expiration,
+            self,
         )
     }
 
@@ -169,6 +177,12 @@ impl GovernancePermit {
     /// A token issued under any other plan identity or authority snapshot
     /// fails closed (`SOMA-RES-0001`); the X05 ladder and #123 gates are
     /// untouched.
+    ///
+    /// Operation binding (P1-B repair): the ladder revalidates the
+    /// suspension's resumability operation against this permit (a step
+    /// of its reviewed plan), the supplied manifest, and the imported
+    /// run's live frontier — the same binding the creation gate
+    /// enforced, re-proven at resume.
     #[allow(clippy::too_many_arguments)]
     pub fn resume_run(
         &self,
@@ -188,17 +202,12 @@ impl GovernancePermit {
             checkpoint_text,
             suspension,
             token,
-            &crate::workflow::graph_suspend::ResumeCheckParams {
-                manifest,
-                portable_digest,
-                repo_revision_now,
-                now,
-                replay,
-            },
-            &crate::workflow::graph_suspend::AuthorityBinding::new(
-                &self.plan_identity,
-                &self.authority_snapshot_digest(),
-            ),
+            manifest,
+            portable_digest,
+            repo_revision_now,
+            now,
+            replay,
+            self,
         )
     }
 
