@@ -135,16 +135,40 @@ pub fn compile_authority(workflow_json: &Value) -> Result<CompiledAuthorityGraph
             format!("schema violation: {e}"),
         )]
     })?;
-    if model.contains_composite_body_item() {
-        return Err(vec![Diagnostic::new(
-            "SOMA-CMP-0003",
-            "workflow body contains a nested composite; authority graphs support atomic units only",
-        )]);
-    }
     let supported: SupportedVersion = crate::workflow::soma::supported_version();
     let diags = model.audit(&supported);
     if !diags.is_empty() {
         return Err(diags);
+    }
+    if model.contains_composite_body_item() {
+        // E4/I07 (#253): authority graphs cover the EXPANDED leaves. The
+        // per-leaf `effective` profile keeps the atomic contract's
+        // semantics (the workflow ceiling; per-leaf narrowing is enforced
+        // by the expansion's ancestor-chain checks plus the execution
+        // graph's reduced grants at request time), and operation ids are
+        // the fully-qualified runtime identities, so the snapshot digest
+        // binds the expansion structure through scope paths.
+        let expansion = crate::workflow::composite_expansion::expand_composites(&model)?;
+        let operations = expansion
+            .iter()
+            .map(|s| CompiledOperationAuthority {
+                op_id: s.fully_qualified_id(),
+                effective: model.authority.clone(),
+            })
+            .collect();
+        let mut body = Vec::with_capacity(expansion.len());
+        for step in &expansion {
+            let (unit, _) = crate::workflow::composite_expansion::leaf_operation(&model, step)?;
+            body.push(unit.clone());
+        }
+        return Ok(CompiledAuthorityGraph {
+            workflow_id: model.id.clone(),
+            workflow_version: model.version.clone(),
+            workflow_authority: model.authority.clone(),
+            operations,
+            constraints: model.constraints.clone(),
+            body,
+        });
     }
     let operations = model
         .body

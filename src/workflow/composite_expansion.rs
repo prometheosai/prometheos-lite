@@ -107,6 +107,64 @@ pub struct BoundaryCrossing {
     pub crossed_scope: Vec<String>,
 }
 
+impl ExpansionStep {
+    /// The fully-qualified runtime identity of this leaf: the enclosing
+    /// scope path joined by `/`, then the local operation id. Root-scope
+    /// leaves keep their bare local id, so atomic-workflow identity is
+    /// unchanged. This is the identity the governed runtime uses across
+    /// execution, routing, evidence, suspension, checkpoint, and resume
+    /// (#253): reused local operation ids in different scopes can never
+    /// collide.
+    pub fn fully_qualified_id(&self) -> String {
+        fully_qualified_id(&self.scope_path, &self.operation_id)
+    }
+}
+
+/// The fully-qualified runtime id of a leaf at `scope_path` with local
+/// `operation_id` (empty scope path ⇒ the bare local id).
+pub fn fully_qualified_id(scope_path: &[String], operation_id: &str) -> String {
+    if scope_path.is_empty() {
+        operation_id.to_string()
+    } else {
+        format!("{}/{}", scope_path.join("/"), operation_id)
+    }
+}
+
+/// Resolve the workflow-body operation a flattened expansion step
+/// executes, plus the items of its enclosing scope, by walking the
+/// scope path through the composites. Fail-closed (`PROJ-0001`) if the
+/// path does not resolve — unreachable for expansions produced from an
+/// audited document; defense in depth for direct callers.
+pub(crate) fn leaf_operation<'a>(
+    wf: &'a WorkflowDefinition,
+    step: &ExpansionStep,
+) -> Result<(&'a OperationDefinition, &'a [BodyItem]), Vec<Diagnostic>> {
+    let mut items: &'a [BodyItem] = &wf.body;
+    for scope in &step.scope_path {
+        let Some(BodyItem::Composite(c)) = items.iter().find(|i| i.id() == scope.as_str()) else {
+            return Err(vec![Diagnostic::new(
+                "PROJ-0001",
+                format!(
+                    "expanded step {} references unknown scope {scope:?}",
+                    step.fully_qualified_id()
+                ),
+            )]);
+        };
+        items = &c.body;
+    }
+    let Some(BodyItem::Operation(op)) = items.iter().find(|i| i.id() == step.operation_id.as_str())
+    else {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0001",
+            format!(
+                "expanded step {} references an unknown operation",
+                step.fully_qualified_id()
+            ),
+        )]);
+    };
+    Ok((op, items))
+}
+
 /// One level of the ancestor chain: every level can restrict its
 /// descendants' effective authority / exported effects / visible context.
 struct ChainLevel<'a> {

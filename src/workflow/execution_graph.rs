@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::workflow::governance_compiler::workflow_digest_of;
 use crate::workflow::soma::Diagnostic;
 use crate::workflow::soma::contracts::{
-    AuthorityProfile, BodyItem, SecretGrant, WorkflowDefinition,
+    AuthorityProfile, BodyItem, OperationDefinition, SecretGrant, WorkflowDefinition,
 };
 use crate::workflow::soma::types::MutationMode;
 
@@ -143,6 +143,10 @@ pub struct ExecutionGraphStep {
     pub dependencies: Vec<String>,
     /// The unit's authority reduced against the workflow ceiling (R8b).
     pub granted: AuthorityProfile,
+    /// Enclosing composite scope path (E4/I07 #253): empty for
+    /// root-scope operations, so atomic workflows serialize byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_path: Vec<String>,
 }
 
 /// Compile the Lite execution graph for a workflow.
@@ -152,6 +156,10 @@ pub struct ExecutionGraphStep {
 /// fail-closed authority reduction, but it is not a substitute for the
 /// full audit. `plan_identity` is the sealed plan's
 /// `canonicalization.sha256` from that same compilation.
+///
+/// E4/I07 (#253): a workflow whose body contains composites compiles
+/// over its deterministic expansion — the flattened leaf operations in
+/// scope order, identified by fully-qualified `scopePath` runtime ids.
 pub fn compile_execution_graph(
     workflow_text: &str,
     plan_identity: &str,
@@ -163,10 +171,7 @@ pub fn compile_execution_graph(
         )]
     })?;
     if model.contains_composite_body_item() {
-        return Err(vec![Diagnostic::new(
-            "PROJ-0001",
-            "workflow body contains a nested composite; the execution graph supports atomic units only",
-        )]);
+        return compile_expanded_execution_graph(&model, plan_identity);
     }
     let workflow_digest = workflow_digest_of(&model)?;
     let Some(order) = topological_order(&model) else {
@@ -208,6 +213,7 @@ pub fn compile_execution_graph(
             order: position as u32,
             dependencies: dependencies.into_iter().map(str::to_string).collect(),
             granted,
+            scope_path: Vec::new(),
         });
     }
 
@@ -219,14 +225,78 @@ pub fn compile_execution_graph(
     })
 }
 
-/// Reduce one unit's authority against the workflow ceiling (R8b).
-///
-/// Ported from the reference `reduce_authority` (soma-validate): every
-/// capability, scope, and secret the unit declares must already appear in
-/// the ceiling; absent dimensions are carried as `None` rather than copied
-/// from the ceiling. Fail closed with `SOMA-AUTH-*` diagnostics on any
-/// widening (unreachable when the caller has already passed the audit —
-/// defense in depth for direct callers).
+/// Compile the execution graph for a workflow whose body contains
+/// composites (E4/I07 #253): the steps are the deterministic expansion
+/// leaves in flattened scope order, each identified by its fully-qualified
+/// runtime id (`scopePath` + local id, so reused local ids in different
+/// scopes can never collide) and granted the leaf's own declared
+/// authority reduced against the reviewed ceiling. The ancestor-chain
+/// import restriction has already been enforced by the expansion.
+fn compile_expanded_execution_graph(
+    model: &WorkflowDefinition,
+    plan_identity: &str,
+) -> Result<CompiledExecutionGraphV1, Vec<Diagnostic>> {
+    let expansion = crate::workflow::composite_expansion::expand_composites(model)?;
+    let mut steps = Vec::with_capacity(expansion.len());
+    for (order, xstep) in expansion.iter().enumerate() {
+        let (unit, scope_items) =
+            crate::workflow::composite_expansion::leaf_operation(model, xstep)?;
+        let granted = reduce_leaf_authority(&model.authority, unit)?;
+        let dependencies = same_scope_dependencies(&xstep.scope_path, unit, scope_items);
+        steps.push(ExecutionGraphStep {
+            operation_id: xstep.fully_qualified_id(),
+            key: xstep.key.clone(),
+            order: order as u32,
+            dependencies,
+            granted,
+            scope_path: xstep.scope_path.clone(),
+        });
+    }
+    Ok(CompiledExecutionGraphV1 {
+        schema_version: EXECUTION_GRAPH_SCHEMA_VERSION.to_string(),
+        workflow_digest: workflow_digest_of(model)?,
+        plan_identity: plan_identity.to_string(),
+        steps,
+    })
+}
+
+/// Same-scope operational producers for one expanded leaf: sibling
+/// operations whose outputs feed the leaf's inputs, identified by their
+/// fully-qualified ids. Dataflow that crosses a composite boundary
+/// (through a declared port) is carried by the deterministic flattened
+/// order and the typed boundary crossings recorded in the expansion
+/// plan — never by synthetic edges — so `dependencies` stays a
+/// same-scope fact.
+fn same_scope_dependencies(
+    scope_path: &[String],
+    unit: &OperationDefinition,
+    scope_items: &[BodyItem],
+) -> Vec<String> {
+    let mut dependencies: Vec<String> = Vec::new();
+    for input in &unit.inputs {
+        for item in scope_items {
+            if let BodyItem::Operation(producer) = item {
+                if producer.id == unit.id {
+                    continue;
+                }
+                if producer.outputs.iter().any(|o| o.name == input.name) {
+                    let dep = crate::workflow::composite_expansion::fully_qualified_id(
+                        scope_path,
+                        &producer.id,
+                    );
+                    if !dependencies.contains(&dep) {
+                        dependencies.push(dep);
+                    }
+                }
+            }
+        }
+    }
+    dependencies.sort();
+    dependencies
+}
+
+/// Reduce one root-body unit's authority against the workflow ceiling
+/// (R8b) — the atomic path.
 fn reduce_unit_authority(
     workflow: &WorkflowDefinition,
     unit_index: usize,
@@ -237,7 +307,25 @@ fn reduce_unit_authority(
             "authority reduction supports atomic units only",
         )]);
     };
-    let ceiling = &workflow.authority;
+    reduce_leaf_authority(&workflow.authority, unit)
+}
+
+/// Reduce one leaf operation's declared authority against the workflow
+/// ceiling (R8b).
+///
+/// Ported from the reference `reduce_authority` (soma-validate): every
+/// capability, scope, and secret the unit declares must already appear in
+/// the ceiling; absent dimensions are carried as `None` rather than copied
+/// from the ceiling. Fail closed with `SOMA-AUTH-*` diagnostics on any
+/// widening (unreachable when the caller has already passed the audit —
+/// defense in depth for direct callers). Shared by the atomic path
+/// (root-body units) and the expanded-composite path (#253), where the
+/// ancestor-chain import restriction is enforced by the expansion, so
+/// the reduced profile is exactly the leaf's effective grant.
+fn reduce_leaf_authority(
+    ceiling: &AuthorityProfile,
+    unit: &OperationDefinition,
+) -> Result<AuthorityProfile, Vec<Diagnostic>> {
     let mut diagnostics: Vec<(&'static str, String)> = Vec::new();
     let mut caps: BTreeSet<String> = BTreeSet::new();
     let mut readable: BTreeSet<String> = BTreeSet::new();
@@ -366,6 +454,7 @@ fn reduce_unit_authority(
 
 #[cfg(test)]
 mod tests {
+    use super::compile_expanded_execution_graph;
     use super::topological_order_body;
     use crate::workflow::soma::contracts::BodyItem;
 
@@ -430,5 +519,58 @@ mod tests {
     fn cycle_returns_none() {
         let items = vec![op("b", &["x"], &["y"]), composite("c", &["y"], &["x"])];
         assert_eq!(topological_order_body(&items), None);
+    }
+
+    #[test]
+    fn reused_local_operation_ids_stay_distinct_through_fully_qualified_paths() {
+        // Defense in depth (#253): the audit gate refuses document-wide
+        // duplicate ids (SOMA-EXP-0003) before any permit exists, so this
+        // shape is unreachable through the public compiler; it guards
+        // the runtime identity rule for direct callers — equal local
+        // operation ids in different scopes must remain distinct
+        // execution steps, identified by fully-qualified scope paths.
+        let op_json = |id: &str| {
+            serde_json::json!({
+                "schemaVersion": "1.1.0", "version": "1.1.0", "id": id,
+                "executionClass": "deterministic",
+                "inputs": [], "outputs": [],
+                "authority": [], "effects": [], "uses": [], "secrets": [], "context": []
+            })
+        };
+        let composite_json = |id: &str, body: serde_json::Value| {
+            serde_json::json!({
+                "schemaVersion": "1.1.0", "version": "1.1.0", "id": id,
+                "inputPorts": [], "outputPorts": [], "body": body
+            })
+        };
+        let text = serde_json::json!({
+            "schemaVersion": "1.1.0", "version": "1.1.0",
+            "id": "wf-reuse", "name": "Reuse", "kind": "atomic",
+            "inputPorts": [], "outputPorts": [],
+            "body": [
+                composite_json("A", serde_json::json!([op_json("x")])),
+                composite_json("B", serde_json::json!([op_json("x")])),
+            ],
+            "authority": { "executionClass": "deterministic", "mutation": "none" }
+        })
+        .to_string();
+        let model: crate::workflow::soma::contracts::WorkflowDefinition =
+            serde_json::from_str(&text).expect("parses");
+        let graph =
+            compile_expanded_execution_graph(&model, "plan").expect("expanded graph compiles");
+        let ids: Vec<&str> = graph
+            .steps
+            .iter()
+            .map(|s| s.operation_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["A/x", "B/x"],
+            "fully-qualified identity keeps distinct scopes distinct"
+        );
+        assert_ne!(
+            graph.steps[0].key, graph.steps[1].key,
+            "plan keys stay unique"
+        );
     }
 }
