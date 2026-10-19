@@ -64,6 +64,7 @@ SUITE_SPEC: dict[str, list[dict[str, object]]] = {
         {"name": "governance compiler", "command": ["cargo", "test", "--test", "governance_compiler_conformance", "--quiet"]},
         {"name": "graph suspension", "command": ["cargo", "test", "--test", "graph_suspend_conformance", "--quiet"]},
         {"name": "permit suspension", "command": ["cargo", "test", "--test", "permit_suspension_binding", "--quiet"]},
+        {"name": "expanded composite runtime", "command": ["cargo", "test", "--test", "expanded_composite_runtime_conformance", "--quiet"]},
         {"name": "verifier regressions", "command": ["python", "scripts/test_local_ci_verify.py"]},
         {"name": "repository policy", "command": ["python", "scripts/local_ci_policy.py"]},
     ],
@@ -231,6 +232,7 @@ def rust_core() -> list[dict[str, object]]:
         ("governance compiler", ["cargo", "test", "--test", "governance_compiler_conformance", "--quiet"]),
         ("graph suspension", ["cargo", "test", "--test", "graph_suspend_conformance", "--quiet"]),
         ("permit suspension", ["cargo", "test", "--test", "permit_suspension_binding", "--quiet"]),
+        ("expanded composite runtime", ["cargo", "test", "--test", "expanded_composite_runtime_conformance", "--quiet"]),
         ("verifier regressions", [sys.executable, "scripts/test_local_ci_verify.py"]),
         ("repository policy", [sys.executable, "scripts/local_ci_policy.py"]),
     ]

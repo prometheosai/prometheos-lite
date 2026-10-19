@@ -11,10 +11,15 @@
 //! chain (each ancestor can restrict a descendant, never widen it).
 //!
 //! Identity: an operation is identified by `scopePath + operationId`.
-//! Duplicate ids anywhere in the document are refused by the audit gate
-//! (SOMA-EXP-0003) before expansion runs, so local-id reuse across scopes
-//! is explicitly NOT part of this contract; the fully-qualified-path
-//! duplicate check below is defense in depth for direct callers.
+//! Local ids are unique within their enclosing scope (the audit gate
+//! refuses duplicate siblings as `SOMA-EXP-0003`), while the same local
+//! id in a DIFFERENT scope is legal and remains distinct through the
+//! fully-qualified scope path (E4/I07 #253: reused local operation ids
+//! execute as distinct identities, e.g. `A/x` and `B/x`). The
+//! fully-qualified-path duplicate check below is defense in depth for
+//! direct callers (same-scope duplicates are refused by the audit
+//! first; distinct scopes cannot produce a duplicate fully-qualified
+//! path).
 //!
 //! Expansion runs only after the audit gate. Checks the audit gate does
 //! not perform (ambiguous producer, sibling type mismatch, ancestor-chain
@@ -105,6 +110,64 @@ pub struct BoundaryCrossing {
     pub direction: CrossingDirection,
     /// The scope the port was declared on (empty for root).
     pub crossed_scope: Vec<String>,
+}
+
+impl ExpansionStep {
+    /// The fully-qualified runtime identity of this leaf: the enclosing
+    /// scope path joined by `/`, then the local operation id. Root-scope
+    /// leaves keep their bare local id, so atomic-workflow identity is
+    /// unchanged. This is the identity the governed runtime uses across
+    /// execution, routing, evidence, suspension, checkpoint, and resume
+    /// (#253): reused local operation ids in different scopes can never
+    /// collide.
+    pub fn fully_qualified_id(&self) -> String {
+        fully_qualified_id(&self.scope_path, &self.operation_id)
+    }
+}
+
+/// The fully-qualified runtime id of a leaf at `scope_path` with local
+/// `operation_id` (empty scope path ⇒ the bare local id).
+pub fn fully_qualified_id(scope_path: &[String], operation_id: &str) -> String {
+    if scope_path.is_empty() {
+        operation_id.to_string()
+    } else {
+        format!("{}/{}", scope_path.join("/"), operation_id)
+    }
+}
+
+/// Resolve the workflow-body operation a flattened expansion step
+/// executes, plus the items of its enclosing scope, by walking the
+/// scope path through the composites. Fail-closed (`PROJ-0001`) if the
+/// path does not resolve — unreachable for expansions produced from an
+/// audited document; defense in depth for direct callers.
+pub(crate) fn leaf_operation<'a>(
+    wf: &'a WorkflowDefinition,
+    step: &ExpansionStep,
+) -> Result<(&'a OperationDefinition, &'a [BodyItem]), Vec<Diagnostic>> {
+    let mut items: &'a [BodyItem] = &wf.body;
+    for scope in &step.scope_path {
+        let Some(BodyItem::Composite(c)) = items.iter().find(|i| i.id() == scope.as_str()) else {
+            return Err(vec![Diagnostic::new(
+                "PROJ-0001",
+                format!(
+                    "expanded step {} references unknown scope {scope:?}",
+                    step.fully_qualified_id()
+                ),
+            )]);
+        };
+        items = &c.body;
+    }
+    let Some(BodyItem::Operation(op)) = items.iter().find(|i| i.id() == step.operation_id.as_str())
+    else {
+        return Err(vec![Diagnostic::new(
+            "PROJ-0001",
+            format!(
+                "expanded step {} references an unknown operation",
+                step.fully_qualified_id()
+            ),
+        )]);
+    };
+    Ok((op, items))
 }
 
 /// One level of the ancestor chain: every level can restrict its

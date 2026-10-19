@@ -925,8 +925,16 @@ fn recursive_audit_rejects_nested_faults() {
 
     #[allow(clippy::type_complexity)]
     let faults: [(&str, fn(&mut Value)); 3] = [
-        ("duplicate-across-scopes", |v| {
-            v["body"][1]["body"][0]["body"][0]["id"] = serde_json::json!("inner");
+        // E4/I07 #253 (review repair P1-1): local ids are unique WITHIN
+        // their scope; the same id in a different scope is a distinct
+        // fully-qualified identity and is legal. The still-invalid form
+        // is duplicate siblings inside one scope.
+        ("duplicate-siblings-in-scope", |v| {
+            let leaf = v["body"][1]["body"][0]["body"][0].clone();
+            v["body"][1]["body"][0]["body"]
+                .as_array_mut()
+                .expect("inner body")
+                .push(leaf);
         }),
         ("unfed-nested-input", |v| {
             v["body"][1]["body"][0]["body"][0]["inputs"][0]["name"] = serde_json::json!("stray");
@@ -954,16 +962,18 @@ fn recursive_audit_rejects_nested_faults() {
     }
 }
 
-/// Spec §2.4 consumer fail-closed matrix (final form, Task 2).
+/// Spec §2.4 consumer surface matrix (final form, Task 2; E4/I07 #253).
+/// Every runtime-facing surface now BINDS the deterministic expansion
+/// instead of refusing it: fully-qualified leaf identities, scope paths,
+/// and chain-narrowed authority flow from one audited document.
 #[test]
-fn nested_surfaces_fail_closed_matrix() {
+fn nested_surfaces_bind_expanded_leaves_matrix() {
     let text = nested_text();
 
-    // Governance plan compiler: nested composites now EXPAND deterministically
-    // (E4/X03 #160 Slice B) instead of being refused. The sealed v1.1 plan
-    // keeps its published step shape; composite scope paths live in the
-    // separately versioned expansion plan. The runtime-facing surfaces below
-    // still refuse nested dispatch.
+    // Governance plan compiler: nested composites EXPAND deterministically
+    // (E4/X03 #160 Slice B). The sealed v1.1 plan keeps its published step
+    // shape; composite scope paths live in the separately versioned
+    // expansion plan.
     let plan = compile_workflow_text(&text).expect("plan compilation expands nested composites");
     assert!(
         !plan.steps.is_empty(),
@@ -976,35 +986,60 @@ fn nested_surfaces_fail_closed_matrix() {
         "expansion plan must carry composite scope paths"
     );
 
-    // Authority compiler: audit-sourced (scan after parse) — stable since Task 1.
+    // Authority compiler (E4/I07 #253): covers the fully-qualified
+    // expanded leaves — scope identity is bound into the snapshot digest.
     let v: Value = serde_json::from_str(&text).expect("nested parses");
-    let err = prometheos_lite::workflow::governance::compile_authority(&v)
-        .expect_err("authority compilation must refuse nested composites");
+    let graph = prometheos_lite::workflow::governance::compile_authority(&v)
+        .expect("authority compilation covers the expanded leaves");
+    let op_ids: Vec<&str> = graph.operations.iter().map(|o| o.op_id.as_str()).collect();
     assert!(
-        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
-        "expected SOMA-CMP-0003 from compile_authority, got {err:?}"
+        op_ids.iter().any(|id| id.contains('/')),
+        "expanded leaf ids are fully qualified: {op_ids:?}"
     );
 
-    // Permit: compiles first (now expanding), then refuses nested runtime
-    // dispatch explicitly — SOMA-CMP-0003, no runner constructed.
-    let err = prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
+    // Permit (E4/I07 #253): issues over the sealed expanded plan and
+    // carries the digest-bound expansion; the execution graph steps are
+    // the fully-qualified leaves in deterministic scope order.
+    let permit = prometheos_lite::workflow::governance_permit::GovernancePermit::issue(
         &text,
-        "reviewed-identity",
+        &plan.canonicalization.sha256,
     )
-    .expect_err("permit issuance must refuse nested composites");
-    assert!(
-        err.iter().any(|d| d.code == "SOMA-CMP-0003"),
-        "expected SOMA-CMP-0003 from GovernancePermit::issue, got {err:?}"
+    .expect("permit issues over the expanded plan");
+    assert_eq!(
+        permit
+            .expansion_plan()
+            .expect("composite permits carry the expansion")
+            .workflow_digest,
+        plan.workflow_digest
+    );
+    let step_ids: Vec<&str> = permit
+        .execution_graph()
+        .steps
+        .iter()
+        .map(|s| s.operation_id.as_str())
+        .collect();
+    assert_eq!(
+        step_ids, op_ids,
+        "graph and authority agree on leaf identity"
     );
 
-    // Execution surface: explicit PROJ-0001 scan (lands Task 1, unchanged).
-    let err =
+    // Execution surface (E4/I07 #253): compiles the expanded leaves with
+    // scope paths; atomic workflows serialize unchanged (scope paths are
+    // absent when empty).
+    let compiled =
         prometheos_lite::workflow::execution_graph::compile_execution_graph(&text, &"0".repeat(64))
-            .expect_err("execution graph must refuse nested composites");
-    assert!(
-        err.iter().any(|d| d.code == "PROJ-0001"),
-        "expected PROJ-0001 from compile_execution_graph, got {err:?}"
+            .expect("execution graph compiles the expanded leaves");
+    assert_eq!(
+        compiled.steps.len(),
+        expansion.steps.len(),
+        "execution graph flattens to the expansion leaves"
     );
+    for step in &compiled.steps {
+        assert!(
+            step.scope_path.is_empty() || step.operation_id.contains('/'),
+            "scoped steps carry fully-qualified ids"
+        );
+    }
 
     // Canonical projection: nested ASTs now parse AND audit clean, so the
     // canonical view succeeds (Slice-1 behavior for anything that parses).

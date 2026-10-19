@@ -51,6 +51,7 @@ use crate::workflow::soma::contracts::WorkflowDefinition;
 ///     plan_identity: "deadbeef".repeat(8),
 ///     authority_graph: loop {},
 ///     execution_graph: loop {},
+///     expansion: loop {},
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -58,27 +59,30 @@ pub struct GovernancePermit {
     plan_identity: String,
     authority_graph: CompiledAuthorityGraph,
     execution_graph: CompiledExecutionGraphV1,
+    /// The composite expansion plan this permit executes (E4/I07 #253);
+    /// `None` for atomic bodies. Digest-bound to the same workflow as the
+    /// sealed plan at issue time.
+    expansion: Option<crate::workflow::composite_expansion::ExpansionPlanV1>,
 }
 
 impl GovernancePermit {
     pub fn issue(workflow_text: &str, reviewed_identity: &str) -> Result<Self, Vec<Diagnostic>> {
         let plan = compile_workflow_text(workflow_text)?;
-        // E4/X03 (#160) Slice B: compilation expands nested composites
-        // deterministically, but runtime dispatch of composites is out of
-        // scope. Refuse explicitly (typed parse of the same document that
-        // compiled) so no runner is ever constructed for a composite body.
+        // E4/X03 (#160) → E4/I07 (#253): compilation expands nested
+        // composites deterministically, and the expansion is now RUNTIME
+        // INPUT — issue() binds the sealed expanded plan, the authority
+        // graph over the fully-qualified leaves, and the expansion plan
+        // (digest-bound to the same workflow) into one permit. Sequential
+        // dispatch executes the flattened leaves in expansion order;
+        // every leaf keeps its fully-qualified scope identity across
+        // execution, routing, evidence, suspension, checkpoint, and
+        // resume.
         let workflow: WorkflowDefinition = serde_json::from_str(workflow_text).map_err(|e| {
             vec![Diagnostic::new(
                 "SOMA-CMP-0003",
                 format!("schema violation: {e}"),
             )]
         })?;
-        if workflow.contains_composite_body_item() {
-            return Err(vec![Diagnostic::new(
-                "SOMA-CMP-0003",
-                "runtime dispatch of nested composites is not supported yet",
-            )]);
-        }
         // verify_reviewed_plan takes the compiled ExecutionPlan document
         // (schemaVersion/planVersion/workflowDigest/steps/canonicalization),
         // not the workflow text: it re-validates the plan shape, recomputes
@@ -102,10 +106,27 @@ impl GovernancePermit {
             workflow_text,
             &plan.canonicalization.sha256,
         )?;
+        // E4/I07 (#253): composite workflows carry their expansion plan,
+        // bound to the same reviewed workflow digest as the sealed plan —
+        // a stale or incoherent expansion can never back a permit.
+        let expansion = if workflow.contains_composite_body_item() {
+            let expansion =
+                crate::workflow::governance_compiler::compile_expansion_plan(workflow_text)?;
+            if expansion.workflow_digest != plan.workflow_digest {
+                return Err(vec![Diagnostic::new(
+                    "SOMA-CMP-0004",
+                    "expanded plan digest does not bind to the reviewed workflow",
+                )]);
+            }
+            Some(expansion)
+        } else {
+            None
+        };
         Ok(Self {
             plan_identity: plan.canonicalization.sha256,
             authority_graph,
             execution_graph,
+            expansion,
         })
     }
 
@@ -119,6 +140,14 @@ impl GovernancePermit {
 
     pub fn execution_graph(&self) -> &CompiledExecutionGraphV1 {
         &self.execution_graph
+    }
+
+    /// The composite expansion plan this permit executes (E4/I07 #253):
+    /// the flattened, scope-identified leaf steps with typed boundary
+    /// crossings and chain-narrowed effective authority. `None` for
+    /// atomic bodies (their execution graph is already the full story).
+    pub fn expansion_plan(&self) -> Option<&crate::workflow::composite_expansion::ExpansionPlanV1> {
+        self.expansion.as_ref()
     }
 
     /// Canonical digest of the compiled authority snapshot this permit
