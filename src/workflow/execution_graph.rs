@@ -225,30 +225,57 @@ pub fn compile_execution_graph(
     })
 }
 
+/// The shared per-leaf authority reduction for expanded composites
+/// (E4/I07 #253, review repair P1-2): each flattened leaf paired with
+/// its ACTUAL effective grant — the leaf's declared authority reduced
+/// against the reviewed ceiling (the ancestor-chain import restriction
+/// is enforced by the audit and the expansion chain checks). Both the
+/// expanded execution graph and the compiled authority graph consume
+/// THIS single reduction result, so the two runtime authority
+/// representations can never disagree, and `selection_within_authority`
+/// is bounded by the leaf's real grant instead of the workflow ceiling.
+pub(crate) fn expanded_leaf_grants(
+    model: &WorkflowDefinition,
+) -> Result<
+    Vec<(
+        crate::workflow::composite_expansion::ExpansionStep,
+        AuthorityProfile,
+    )>,
+    Vec<Diagnostic>,
+> {
+    let expansion = crate::workflow::composite_expansion::expand_composites(model)?;
+    let mut leaves = Vec::with_capacity(expansion.len());
+    for step in expansion {
+        let (unit, _) = crate::workflow::composite_expansion::leaf_operation(model, &step)?;
+        let granted = reduce_leaf_authority(&model.authority, unit)?;
+        leaves.push((step, granted));
+    }
+    Ok(leaves)
+}
+
 /// Compile the execution graph for a workflow whose body contains
 /// composites (E4/I07 #253): the steps are the deterministic expansion
 /// leaves in flattened scope order, each identified by its fully-qualified
 /// runtime id (`scopePath` + local id, so reused local ids in different
 /// scopes can never collide) and granted the leaf's own declared
-/// authority reduced against the reviewed ceiling. The ancestor-chain
-/// import restriction has already been enforced by the expansion.
+/// authority reduced against the reviewed ceiling — the SAME shared
+/// reduction result the compiled authority graph records.
 fn compile_expanded_execution_graph(
     model: &WorkflowDefinition,
     plan_identity: &str,
 ) -> Result<CompiledExecutionGraphV1, Vec<Diagnostic>> {
-    let expansion = crate::workflow::composite_expansion::expand_composites(model)?;
-    let mut steps = Vec::with_capacity(expansion.len());
-    for (order, xstep) in expansion.iter().enumerate() {
+    let leaves = expanded_leaf_grants(model)?;
+    let mut steps = Vec::with_capacity(leaves.len());
+    for (order, (xstep, granted)) in leaves.iter().enumerate() {
         let (unit, scope_items) =
             crate::workflow::composite_expansion::leaf_operation(model, xstep)?;
-        let granted = reduce_leaf_authority(&model.authority, unit)?;
         let dependencies = same_scope_dependencies(&xstep.scope_path, unit, scope_items);
         steps.push(ExecutionGraphStep {
             operation_id: xstep.fully_qualified_id(),
             key: xstep.key.clone(),
             order: order as u32,
             dependencies,
-            granted,
+            granted: granted.clone(),
             scope_path: xstep.scope_path.clone(),
         });
     }
@@ -523,12 +550,12 @@ mod tests {
 
     #[test]
     fn reused_local_operation_ids_stay_distinct_through_fully_qualified_paths() {
-        // Defense in depth (#253): the audit gate refuses document-wide
-        // duplicate ids (SOMA-EXP-0003) before any permit exists, so this
-        // shape is unreachable through the public compiler; it guards
-        // the runtime identity rule for direct callers — equal local
-        // operation ids in different scopes must remain distinct
-        // execution steps, identified by fully-qualified scope paths.
+        // The identity law (E4/I07 #253, review repair P1-1): local ids
+        // are unique within their scope; the same local id in DIFFERENT
+        // scopes is legal and stays distinct through fully-qualified
+        // paths. This exercises the graph builder directly over such a
+        // document; the public audit→permit→runtime path is proven in
+        // the end-to-end conformance suite.
         let op_json = |id: &str| {
             serde_json::json!({
                 "schemaVersion": "1.1.0", "version": "1.1.0", "id": id,

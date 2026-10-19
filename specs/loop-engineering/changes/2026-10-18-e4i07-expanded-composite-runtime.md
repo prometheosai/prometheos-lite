@@ -114,16 +114,73 @@ execution, routing, evidence, suspension, checkpoint, and resume. The
 - No API/CLI promotion, no dependency change, no parallel scheduler:
   dispatch is the existing sequential frontier law; #172 remains a
   separate P2 follow-on. #217 untouched. Vendored SOMA read-only.
+- The graph projection's rendered-id model (`s{NNNN}:{id}` per scope)
+  remains uniqueness-bound: a reused-local-id document fails closed
+  there with `PROJ-0001` instead of rendering. That is a fail-closed
+  projection boundary, not a runtime gap; the audit/permit/runtime path
+  executes such documents end to end.
+
+## Review round 2 (P1-1 / P1-2) — repairs at the new head
+
+The independent review of the first candidate (`d2b9ab0…`) accepted the
+end-to-end runtime but required two P1 repairs; both are implemented:
+
+### P1-1 — scoped identity law
+
+`WorkflowDefinition::audit` now enforces `SOMA-EXP-0003` per scope:
+local ids are unique WITHIN their enclosing scope (duplicate siblings
+fail closed, message unchanged — the vendored `wf-exp-0003` fixture and
+the invalid-fixture pins hold), while the same local id in a DIFFERENT
+scope is legal and remains distinct through its fully-qualified path
+(the expansion's global FQ-path duplicate check stays as defense in
+depth for direct callers). Document-wide id collection is unchanged for
+`SOMA-CMP-0002` reference resolution and `SOMA-EXP-0001`
+self-containment. The real positive control now exists end to end:
+`reused_local_ids_across_scopes_issue_and_execute_distinctly` issues
+one permit over a two-scope `A/x`/`B/x` workflow (boundary-reachable
+dataflow `goal → A → v → B → result`) and executes, routes, and
+journals both leaves as distinct identities with distinct attempt
+references; negative controls pin duplicate siblings
+(`SOMA-EXP-0003`) and ambiguous same-scope references
+(`SOMA-CMP-0003`, expansion-layer binding check inside a composite).
+The outdated first-round test that merely confirmed the refusal was
+replaced; the projection fault matrix's cross-scope rename (legal
+under the repaired law) was replaced by the still-invalid same-scope
+duplicate form.
+
+### P1-2 — per-leaf effective authority
+
+`compile_authority` no longer records the workflow ceiling for
+expanded leaves. New single-source reduction
+`execution_graph::expanded_leaf_grants`: each flattened leaf paired
+with its ACTUAL effective grant (the leaf's declared authority reduced
+against the reviewed ceiling; ancestor-chain imports enforced by the
+published audit `SOMA-AUTH-0002` plus the expansion chain checks).
+Both the expanded execution graph (`granted`) and the compiled
+authority graph (`effective`) consume THIS one reduction result, so
+authority evidence can never disagree with the execution graph, and
+`selection_within_authority` is bounded by the leaf's real grant. The
+authority snapshot digest therefore binds every fully-qualified leaf
+id AND its narrowed grant. Atomic workflows keep the accepted #161
+contract (`effective` = ceiling; the request-time enforcement point is
+the execution graph's `granted`) — unchanged and disclosed. New pins:
+equality between every permit execution step's `granted` and the
+corresponding authority-graph `effective` profile, and a negative
+control where a selection inside the workflow ceiling but outside the
+nested leaf grant is refused with `SOMA-PROF-0001` (a selection equal
+to the leaf grant passes).
 
 ## Verification
 
 - `cargo fmt --check`, clippy `--all-targets --all-features -- -D
   warnings`, doc tests (4 compile-fail proofs), full
   `cargo test --all-targets --all-features -- --test-threads 4`, focused
-  suites: `expanded_composite_runtime_conformance` (10),
+  suites: `expanded_composite_runtime_conformance` (12),
   `projection_conformance_tests` (64), `execution_graph` in-crate (4),
-  plus the existing governance compiler / composite expansion + scope /
-  graph suspension / permit suspension / runtime-policy suites.
+  plus the existing governance compiler (34) / emitted diagnostics (13)
+  / soma capability (27) / composite expansion (16) + scope (8) / graph
+  suspension (20) / permit suspension (18) / execution graph (8) /
+  runtime-policy (1) suites.
 - Repository-owned gates at the exact candidate commit:
   `python scripts/local_ci.py run --suite core|platform|smoke`, then
   `verify --commit <head> --require-platform windows` with all three
