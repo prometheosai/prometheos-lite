@@ -29,11 +29,21 @@ pub const GOV_DECISION_VERSION: &str = "1.0.0";
 // ---------------------------------------------------------------------------
 
 /// Effective authority resolved for one operation.
+///
+/// For ATOMIC workflows this keeps the accepted #161 contract: the
+/// workflow authority ceiling, narrowed by nothing further at op level
+/// (ops hold grants; the per-op reduction is enforced at request time by
+/// the execution graph's `granted`). For EXPANDED composites (E4/I07
+/// #253, review repair P1-2) this is the leaf's ACTUAL effective grant —
+/// the same shared per-leaf reduction result the execution graph
+/// records — so authority evidence never overstates a nested leaf.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledOperationAuthority {
     pub op_id: String,
-    /// Workflow authority narrowed by nothing further at op level: ops hold
-    /// grants; the workflow profile is the ceiling. Kept for evidence.
+    /// The effective authority bound for this operation (atomic: the
+    /// workflow ceiling per the accepted #161 contract; expanded leaf:
+    /// the shared per-leaf reduction result, identical to the execution
+    /// graph's `granted`).
     pub effective: AuthorityProfile,
 }
 
@@ -141,23 +151,25 @@ pub fn compile_authority(workflow_json: &Value) -> Result<CompiledAuthorityGraph
         return Err(diags);
     }
     if model.contains_composite_body_item() {
-        // E4/I07 (#253): authority graphs cover the EXPANDED leaves. The
-        // per-leaf `effective` profile keeps the atomic contract's
-        // semantics (the workflow ceiling; per-leaf narrowing is enforced
-        // by the expansion's ancestor-chain checks plus the execution
-        // graph's reduced grants at request time), and operation ids are
-        // the fully-qualified runtime identities, so the snapshot digest
-        // binds the expansion structure through scope paths.
-        let expansion = crate::workflow::composite_expansion::expand_composites(&model)?;
-        let operations = expansion
+        // E4/I07 (#253, review repair P1-2): authority graphs cover the
+        // EXPANDED leaves with each leaf's ACTUAL effective grant — the
+        // same shared per-leaf reduction result the execution graph
+        // records, so the authority snapshot, `selection_within_authority`,
+        // and the execution graph's `granted` can never disagree. The
+        // ancestor-chain import restriction is enforced by the published
+        // audit (SOMA-AUTH-0002) plus the expansion chain checks; the
+        // snapshot digest therefore binds every fully-qualified leaf id
+        // AND its real narrowed grant.
+        let leaves = crate::workflow::execution_graph::expanded_leaf_grants(&model)?;
+        let operations = leaves
             .iter()
-            .map(|s| CompiledOperationAuthority {
-                op_id: s.fully_qualified_id(),
-                effective: model.authority.clone(),
+            .map(|(step, effective)| CompiledOperationAuthority {
+                op_id: step.fully_qualified_id(),
+                effective: effective.clone(),
             })
             .collect();
-        let mut body = Vec::with_capacity(expansion.len());
-        for step in &expansion {
+        let mut body = Vec::with_capacity(leaves.len());
+        for (step, _) in &leaves {
             let (unit, _) = crate::workflow::composite_expansion::leaf_operation(&model, step)?;
             body.push(unit.clone());
         }

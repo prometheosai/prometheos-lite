@@ -483,9 +483,11 @@ fn public_cycle_is_refused_by_the_audit_gate() {
 
 #[test]
 fn public_duplicate_id_is_refused_by_the_audit_gate() {
-    // Duplicate ids anywhere in the document are refused by the audit
-    // (SOMA-EXP-0003) before expansion; local-id reuse across scopes is
-    // explicitly not part of the expansion contract.
+    // Duplicate ids among siblings in ONE scope are refused by the audit
+    // (SOMA-EXP-0003) before expansion. The same local id in a DIFFERENT
+    // scope is legal and stays distinct through fully-qualified paths
+    // (E4/I07 #253) — proven end to end in the expanded-composite
+    // runtime conformance suite.
     let workflow = json!({
         "schemaVersion": "1.1.0", "version": "1.1.0",
         "id": "wf-dup", "name": "Dup", "kind": "atomic",
