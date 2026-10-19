@@ -925,8 +925,16 @@ fn recursive_audit_rejects_nested_faults() {
 
     #[allow(clippy::type_complexity)]
     let faults: [(&str, fn(&mut Value)); 3] = [
-        ("duplicate-across-scopes", |v| {
-            v["body"][1]["body"][0]["body"][0]["id"] = serde_json::json!("inner");
+        // E4/I07 #253 (review repair P1-1): local ids are unique WITHIN
+        // their scope; the same id in a different scope is a distinct
+        // fully-qualified identity and is legal. The still-invalid form
+        // is duplicate siblings inside one scope.
+        ("duplicate-siblings-in-scope", |v| {
+            let leaf = v["body"][1]["body"][0]["body"][0].clone();
+            v["body"][1]["body"][0]["body"]
+                .as_array_mut()
+                .expect("inner body")
+                .push(leaf);
         }),
         ("unfed-nested-input", |v| {
             v["body"][1]["body"][0]["body"][0]["inputs"][0]["name"] = serde_json::json!("stray");

@@ -205,16 +205,17 @@ impl WorkflowDefinition {
             ));
         }
 
-        // SOMA-EXP-0003 — duplicate body-item ids at any depth. The message
-        // keeps its flat-workflow wording (the code is what gates the
-        // composite case; the invalid fixture suite pins the bytes).
+        // SOMA-EXP-0003 — duplicate body-item ids WITHIN one scope. Local
+        // ids are unique inside their enclosing scope; the same local id
+        // in a DIFFERENT scope is a distinct fully-qualified identity and
+        // is legal (E4/I07 #253: reused local operation ids stay distinct
+        // through fully-qualified scope paths). The message keeps its
+        // flat-workflow wording (the code is what gates the composite
+        // case; the invalid fixture suite pins the bytes).
         {
-            let dupes: BTreeSet<&str> = ids
-                .iter()
-                .filter(|id| ids.iter().filter(|o| *o == *id).count() > 1)
-                .copied()
-                .collect();
-            for d in dupes {
+            let mut dupes: BTreeSet<String> = BTreeSet::new();
+            collect_scope_duplicate_ids(&self.body, &mut dupes);
+            for d in &dupes {
                 out.push(Diagnostic::new(
                     "SOMA-EXP-0003",
                     format!("duplicate operation id {d}"),
@@ -234,6 +235,25 @@ fn collect_body_ids(items: &[BodyItem], acc: &mut Vec<String>) {
         acc.push(item.id().to_string());
         if let BodyItem::Composite(c) = item {
             collect_body_ids(&c.body, acc);
+        }
+    }
+}
+
+/// Per-scope duplicate detection (E4/I07 #253): each body is its own id
+/// namespace — duplicate ids among siblings in ONE scope fail closed,
+/// while the same local id in different scopes stays legal and remains
+/// distinct through fully-qualified scope paths. Recursion descends into
+/// composite bodies, which are their own namespaces.
+fn collect_scope_duplicate_ids(items: &[BodyItem], dupes: &mut BTreeSet<String>) {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for item in items {
+        if !seen.insert(item.id()) {
+            dupes.insert(item.id().to_string());
+        }
+    }
+    for item in items {
+        if let BodyItem::Composite(c) = item {
+            collect_scope_duplicate_ids(&c.body, dupes);
         }
     }
 }
