@@ -348,6 +348,46 @@ fn nested_composite_issues_a_permit_over_the_expanded_plan() {
         .collect();
     assert_eq!(op_ids, ["prep", LEAF_FQ, "audit"]);
 
+    // P1-2 (review repair): the authority graph records each leaf's
+    // ACTUAL effective grant — the same shared per-leaf reduction the
+    // execution graph uses — never the workflow ceiling.
+    for step in permit.execution_graph().steps.iter() {
+        let op = permit
+            .authority_graph()
+            .operations
+            .iter()
+            .find(|o| o.op_id == step.operation_id)
+            .unwrap_or_else(|| panic!("authority op for {}", step.operation_id));
+        assert_eq!(
+            step.granted, op.effective,
+            "execution grant == authority effective for {}",
+            step.operation_id
+        );
+    }
+
+    // A provider/harness selection inside the workflow ceiling but
+    // outside the nested leaf's grant must fail `selection_within_authority`
+    // (SOMA-PROF-0001): this leaf's grant is the ship capability only,
+    // while the ceiling also carries the readable orders scope.
+    let leaf_op = permit
+        .authority_graph()
+        .operations
+        .iter()
+        .find(|o| o.op_id == LEAF_FQ)
+        .expect("leaf authority op");
+    let within_grant = leaf_op.effective.clone();
+    permit
+        .authority_graph()
+        .selection_within_authority(LEAF_FQ, &within_grant)
+        .expect("a selection equal to the leaf grant is not a widening");
+    let mut widened = within_grant.clone();
+    widened.readable_scopes = Some(vec!["orders".to_string()]);
+    let err = permit
+        .authority_graph()
+        .selection_within_authority(LEAF_FQ, &widened)
+        .expect_err("ceiling-readable selection outside the leaf grant must refuse");
+    assert_eq!(err.code, "SOMA-PROF-0001", "{err:?}");
+
     // Atomic permits carry no expansion plan (existing behavior).
     let atomic = permit_for_atomic();
     assert!(atomic.expansion_plan().is_none());
@@ -659,34 +699,186 @@ fn chain_authority_widening_refuses_a_runnable_permit() {
     );
 }
 
+/// Audit-clean two-scope workflow whose composites reuse the same local
+/// operation id `x` — legal under the repaired identity law (local ids
+/// are unique per scope; fully-qualified paths are unique globally) and
+/// executable as two distinct identities `A/x` and `B/x`. Real
+/// boundary-reachable dataflow: goal → A → v → B → result.
+fn reused_local_id_text() -> String {
+    let port = |name: &str, direction: &str, ty: &str| {
+        serde_json::json!({
+            "name": name, "direction": direction, "type": ty,
+            "cardinality": "single", "requiredness": "required"
+        })
+    };
+    let op_x = |inputs: serde_json::Value, outputs: serde_json::Value| {
+        serde_json::json!({
+            "schemaVersion": "1.1.0", "version": "1.1.0", "id": "x",
+            "executionClass": "deterministic",
+            "inputs": inputs, "outputs": outputs,
+            "authority": ["ship", "readable:orders"],
+            "effects": [], "uses": [], "secrets": [], "context": []
+        })
+    };
+    let io_in = |name: &str, ty: &str| serde_json::json!([{ "name": name, "type": ty, "acceptedOutcomes": ["Produced"] }]);
+    let io_out = |name: &str, ty: &str| serde_json::json!([{ "name": name, "type": ty, "emits": ["Produced"] }]);
+    let text = serde_json::json!({
+        "schemaVersion": "1.1.0", "version": "1.1.0",
+        "id": "wf-reuse", "name": "Reuse", "kind": "atomic",
+        "inputPorts": [port("goal", "input", "Order")],
+        "outputPorts": [port("result", "output", "Shipment")],
+        "body": [
+            {
+                "schemaVersion": "1.1.0", "version": "1.1.0", "id": "A",
+                "inputPorts": [port("goal", "input", "Order")],
+                "outputPorts": [port("v", "output", "Shipment")],
+                "authorityImports": ["ship", "readable:orders"],
+                "body": [op_x(io_in("goal", "Order"), io_out("v", "Shipment"))]
+            },
+            {
+                "schemaVersion": "1.1.0", "version": "1.1.0", "id": "B",
+                "inputPorts": [port("v", "input", "Shipment")],
+                "outputPorts": [port("result", "output", "Shipment")],
+                "authorityImports": ["ship", "readable:orders"],
+                "body": [op_x(io_in("v", "Shipment"), io_out("result", "Shipment"))]
+            }
+        ],
+        "authority": {
+            "executionClass": "deterministic", "mutation": "none",
+            "tools": {"ship": ["ship.v1"]},
+            "readableScopes": ["orders"], "writableScopes": ["shipping"],
+            "networkPolicy": {"default": "deny"}, "providerPolicy": {"allowlist": []},
+            "secrets": []
+        }
+    })
+    .to_string();
+    assert_audit_clean(&text);
+    text
+}
+
 #[test]
-fn reused_local_operation_ids_are_refused_by_the_audit_and_scoped_at_runtime() {
-    // The audit gate refuses document-wide duplicate ids (SOMA-EXP-0003)
-    // before any permit exists. The identity argument is irrelevant —
-    // issuance refuses inside plan compilation.
+fn reused_local_ids_across_scopes_issue_and_execute_distinctly() {
+    // The identity law end to end (E4/I07 #253, review repair P1-1):
+    // A/x and B/x issue under one permit, execute through the real
+    // governed runtime, route, and journal as distinct evidence — same
+    // local id, different scopes.
+    let text = reused_local_id_text();
+    let permit = issue_permit(&text);
+    let ids: Vec<&str> = permit
+        .execution_graph()
+        .steps
+        .iter()
+        .map(|s| s.operation_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["A/x", "B/x"],
+        "fully-qualified identities are distinct"
+    );
+    let op_ids: Vec<&str> = permit
+        .authority_graph()
+        .operations
+        .iter()
+        .map(|o| o.op_id.as_str())
+        .collect();
+    assert_eq!(op_ids, ["A/x", "B/x"]);
+
+    let (trace, run) = drive_nested_run(&permit, None);
+    assert_eq!(trace.step_ids, ["A/x", "B/x"]);
+    assert_eq!(trace.decisions.len(), 2);
+    assert_eq!(trace.decisions[0].from_node, "A/x");
+    assert_eq!(trace.decisions[0].to_node, "B/x");
+    assert_eq!(trace.decisions[1].to_node, "terminal-exit");
+    // Distinct durable evidence: both leaves journaled separately with
+    // distinct attempt references.
+    let keys: Vec<&str> = run.node_attempts.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["A/x", "B/x"]);
+    assert_ne!(
+        run.node_attempts["A/x"][0].result_digest,
+        run.node_attempts["B/x"][0].result_digest
+    );
+    assert!(run_complete(&run));
+}
+
+#[test]
+fn duplicate_sibling_ids_within_one_scope_are_refused() {
+    // Same-scope duplicates stay fail-closed (SOMA-EXP-0003) — no permit.
     let mut v: serde_json::Value = serde_json::from_str(&fixture_text()).expect("fixture parses");
-    v["body"][1]["body"][0]["body"][0]["id"] = serde_json::json!("prep");
+    let leaf = v["body"][1]["body"][0]["body"][0].clone();
+    v["body"][1]["body"][0]["body"]
+        .as_array_mut()
+        .expect("inner body")
+        .push(leaf);
     let text = serde_json::to_string(&v).unwrap();
     let diags = GovernancePermit::issue(
         &text,
         "0000000000000000000000000000000000000000000000000000000000000000",
     )
-    .expect_err("duplicate local id must refuse issuance");
+    .expect_err("duplicate siblings must refuse issuance");
     assert!(
         diags.iter().any(|d| d.code == "SOMA-EXP-0003"),
         "duplicate identity refusal: {diags:?}"
     );
-    // Fully-qualified runtime identity keeps distinct scopes distinct
-    // even for equal local ids (defense-in-depth control lives in the
-    // in-crate execution-graph tests; the public identity format is
-    // pinned here).
-    let permit = issue_permit(&fixture_text());
+}
+
+#[test]
+fn ambiguous_reference_within_one_scope_is_refused_before_a_permit() {
+    // Two same-scope producers of one value make every reference to it
+    // ambiguous — the expansion's binding check refuses (SOMA-CMP-0003)
+    // before any plan is sealed, so no permit can exist. The ambiguity
+    // lives INSIDE a composite scope (the expansion layer owns the
+    // check); the document itself stays audit-clean.
+    let port = |name: &str, direction: &str, ty: &str| {
+        serde_json::json!({
+            "name": name, "direction": direction, "type": ty,
+            "cardinality": "single", "requiredness": "required"
+        })
+    };
+    let io_in = |name: &str, ty: &str| serde_json::json!([{ "name": name, "type": ty, "acceptedOutcomes": ["Produced"] }]);
+    let io_out = |name: &str, ty: &str| serde_json::json!([{ "name": name, "type": ty, "emits": ["Produced"] }]);
+    let op = |id: &str, inputs: serde_json::Value, outputs: serde_json::Value| {
+        serde_json::json!({
+            "schemaVersion": "1.1.0", "version": "1.1.0", "id": id,
+            "executionClass": "deterministic",
+            "inputs": inputs, "outputs": outputs,
+            "authority": ["ship", "readable:orders"],
+            "effects": [], "uses": [], "secrets": [], "context": []
+        })
+    };
+    let text = serde_json::json!({
+        "schemaVersion": "1.1.0", "version": "1.1.0",
+        "id": "wf-amb", "name": "Amb", "kind": "atomic",
+        "inputPorts": [port("g", "input", "Order")],
+        "outputPorts": [port("w", "output", "Shipment")],
+        "body": [{
+            "schemaVersion": "1.1.0", "version": "1.1.0", "id": "amb",
+            "inputPorts": [port("g", "input", "Order")],
+            "outputPorts": [port("w", "output", "Shipment")],
+            "authorityImports": ["ship", "readable:orders"],
+            "body": [
+                op("p1", io_in("g", "Order"), io_out("v", "Shipment")),
+                op("p2", io_in("g", "Order"), io_out("v", "Shipment")),
+                op("c", io_in("v", "Shipment"), io_out("w", "Shipment"))
+            ]
+        }],
+        "authority": {
+            "executionClass": "deterministic", "mutation": "none",
+            "tools": {"ship": ["ship.v1"]},
+            "readableScopes": ["orders"], "writableScopes": ["shipping"],
+            "networkPolicy": {"default": "deny"}, "providerPolicy": {"allowlist": []},
+            "secrets": []
+        }
+    })
+    .to_string();
+    assert_audit_clean(&text);
+    let diags = GovernancePermit::issue(
+        &text,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect_err("ambiguous reference must refuse issuance");
     assert!(
-        permit
-            .execution_graph()
-            .steps
-            .iter()
-            .any(|s| s.operation_id == LEAF_FQ)
+        diags.iter().any(|d| d.code == "SOMA-CMP-0003"),
+        "ambiguous producer refusal: {diags:?}"
     );
 }
 
