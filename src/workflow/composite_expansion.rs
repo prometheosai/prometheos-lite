@@ -11,10 +11,15 @@
 //! chain (each ancestor can restrict a descendant, never widen it).
 //!
 //! Identity: an operation is identified by `scopePath + operationId`.
-//! Duplicate ids anywhere in the document are refused by the audit gate
-//! (SOMA-EXP-0003) before expansion runs, so local-id reuse across scopes
-//! is explicitly NOT part of this contract; the fully-qualified-path
-//! duplicate check below is defense in depth for direct callers.
+//! Local ids are unique within their enclosing scope (the audit gate
+//! refuses duplicate siblings as `SOMA-EXP-0003`), while the same local
+//! id in a DIFFERENT scope is legal and remains distinct through the
+//! fully-qualified scope path (E4/I07 #253: reused local operation ids
+//! execute as distinct identities, e.g. `A/x` and `B/x`). The
+//! fully-qualified-path duplicate check below is defense in depth for
+//! direct callers (same-scope duplicates are refused by the audit
+//! first; distinct scopes cannot produce a duplicate fully-qualified
+//! path).
 //!
 //! Expansion runs only after the audit gate. Checks the audit gate does
 //! not perform (ambiguous producer, sibling type mismatch, ancestor-chain
