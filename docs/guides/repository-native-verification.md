@@ -48,4 +48,4 @@ A human reviewer verifies the relevant evidence before merge. No hosted status A
 
 Releases remain deliberate local operations. Run the evidence gate, complete `docs/release/release-checklist.md`, obtain explicit human approval, then create and push the tag manually. This repository does not automatically deploy, publish, sign, or release from a hosted event.
 
-Teams may mirror the same command on infrastructure they own, but mirrors do not outrank the repository evidence contract. GitHub-hosted workflow files are intentionally absent so billing, quota, or service availability cannot block development.
+Teams may mirror the same command on infrastructure they own, but mirrors do not outrank the repository evidence contract. GitHub-hosted workflow files are intentionally absent so billing, quota, or service availability cannot block development. The repository policy gate (`python scripts/local_ci_policy.py`, part of the core suite) enforces this invariant: the presence of any hosted workflow file, external CI configuration, or LFS marker fails the suite.
