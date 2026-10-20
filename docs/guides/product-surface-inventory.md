@@ -18,7 +18,7 @@ Every identifiable surface in PrometheOS Lite, classified by maturity.
 
 | Surface | Status | Notes |
 |---|---|---|
-| `prometheos work` | stable alpha | Repo Workbench CRUD, artifacts, memory, continue, approve |
+| `prometheos work` | stable alpha | Repo Workbench CRUD, artifacts, memory, continue, approve, onboarding |
 | `prometheos repo-workbench` | stable alpha | Alias for `work`; same golden path |
 | `prometheos flow` | experimental | Run/resume/replay flows from YAML/JSON |
 | `prometheos harness` | experimental | Full harness engine (run, inspect, dry-run, apply, rollback) |

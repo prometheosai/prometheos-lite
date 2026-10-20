@@ -29,14 +29,52 @@ pub struct DiagnosticExtension {
 /// The complete Lite diagnostic-extension registry. Keep this registry and
 /// the `EXTENSION` mirror in `tests/emitted_diagnostics_conformance.rs` in
 /// sync — the conformance suite fails closed on drift.
-pub const DIAGNOSTIC_EXTENSIONS: &[DiagnosticExtension] = &[DiagnosticExtension {
-    // E4/X07 Slice 3: duplicate review-issue, gate-record, or event
-    // identity (the same `(sequence, semanticDigest)` inside one run).
-    // Pinned here, not in the vendored catalogues — #240 locked the
-    // upstream trees with an additivity and provenance contract.
-    code: "SOMA-CMP-0011",
-    category: "duplicate_identity",
-}];
+pub const DIAGNOSTIC_EXTENSIONS: &[DiagnosticExtension] = &[
+    DiagnosticExtension {
+        // E4/X07 Slice 3: duplicate review-issue, gate-record, or event
+        // identity (the same `(sequence, semanticDigest)` inside one run).
+        // Pinned here, not in the vendored catalogues — #240 locked the
+        // upstream trees with an additivity and provenance contract.
+        code: "SOMA-CMP-0011",
+        category: "duplicate_identity",
+    },
+    DiagnosticExtension {
+        // E6/I05 (#134): repository onboarding — no supported package
+        // system detected in the surveyed repository.
+        code: "SOMA-ONB-0001",
+        category: "onboarding_unsupported",
+    },
+    DiagnosticExtension {
+        // E6/I05 (#134): repository onboarding — the target is not a
+        // usable git repository (missing .git or unreadable git state).
+        code: "SOMA-ONB-0002",
+        category: "onboarding_unsupported",
+    },
+    DiagnosticExtension {
+        // E6/I05 (#134): repository onboarding — a package manifest is
+        // present but does not parse (conflicting setup).
+        code: "SOMA-ONB-0003",
+        category: "onboarding_conflict",
+    },
+    DiagnosticExtension {
+        // E6/I05 (#134): repository onboarding — the repository changed
+        // after the proposal was generated (apply-time drift).
+        code: "SOMA-ONB-0004",
+        category: "onboarding_state",
+    },
+    DiagnosticExtension {
+        // E6/I05 (#134): repository onboarding — the detection-owned
+        // survey block was modified in the user's manifest.
+        code: "SOMA-ONB-0005",
+        category: "onboarding_conflict",
+    },
+    DiagnosticExtension {
+        // E6/I05 (#134): repository onboarding — applying requires
+        // explicit approval.
+        code: "SOMA-ONB-0006",
+        category: "onboarding_state",
+    },
+];
 
 /// Fail-closed registry validation: an extension registry is valid only
 /// when it contains no internal duplicate code and no code the upstream
