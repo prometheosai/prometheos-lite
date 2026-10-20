@@ -68,6 +68,27 @@ enum RepoWorkbenchSubcommand {
         #[command(subcommand)]
         command: MemorySubcommand,
     },
+    /// Survey a repository read-only and produce a reviewable onboarding
+    /// proposal (detection confidence + evidence; never modifies project
+    /// files; apply requires explicit approval)
+    Onboarding {
+        /// Repository root to survey
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Write the proposal manifest to this path (inside the tool's
+        /// own .prometheos-lite store; project files are never touched)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Apply a human-edited proposal manifest after review
+        #[arg(long)]
+        apply: Option<PathBuf>,
+        /// Record approval for the applied manifest (required with --apply)
+        #[arg(long)]
+        approve: bool,
+        /// Output the manifest as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -204,8 +225,165 @@ impl RepoWorkbenchCommand {
                     println!("{}", repo_workbench::load_memory(&context)?);
                 }
             },
+            RepoWorkbenchSubcommand::Onboarding {
+                repo,
+                out,
+                apply,
+                approve,
+                json,
+            } => onboarding::execute(&repo, out, apply, approve, json)?,
         }
 
+        Ok(())
+    }
+}
+
+/// E6/I05 (#134): onboarding command implementation. Survey is
+/// read-only; the proposal is a suggestion that enables no authority;
+/// apply requires explicit approval and writes only inside the tool's
+/// own `.prometheos-lite` store — project files are never touched.
+mod onboarding {
+    use anyhow::{Context, Result, bail};
+    use std::path::{Path, PathBuf};
+
+    use prometheos_lite::workflow::onboarding::{
+        OnboardingManifestV1, apply_user_manifest, manifest_from_survey, survey_repository,
+    };
+    use prometheos_lite::workflow::soma::Diagnostic;
+
+    fn print_diagnostics(diags: &[Diagnostic]) {
+        for d in diags {
+            println!("  [{}] {}", d.code, d.message);
+            if let Some(r) = &d.remediation {
+                if let Some(action) = &r.action {
+                    println!("    action: {action}");
+                }
+                println!("    {}", r.summary);
+            }
+        }
+    }
+
+    fn print_manifest_human(manifest: &OnboardingManifestV1) {
+        println!("Onboarding proposal ({})", manifest.schema_version);
+        println!("  Repository: {}", manifest.survey.repo_root);
+        println!(
+            "  Revision: {} (dirty: {})",
+            manifest.survey.revision, manifest.survey.dirty
+        );
+        println!();
+        for row in &manifest.survey.rows {
+            println!(
+                "  {:<20} [{}] {}",
+                row.field,
+                row.confidence,
+                serde_json::to_string(&row.value).unwrap_or_default()
+            );
+            println!("      evidence: {}", row.evidence.join(", "));
+        }
+        println!();
+        println!("Review this proposal, edit the proposed configuration if");
+        println!("needed, then apply with explicit approval:");
+        println!("  prometheos work onboarding --apply <path> --approve");
+    }
+
+    pub fn execute(
+        repo: &Path,
+        out: Option<PathBuf>,
+        apply: Option<PathBuf>,
+        approve: bool,
+        json: bool,
+    ) -> Result<()> {
+        // Apply path: read the human-edited manifest, re-survey, apply.
+        if let Some(path) = apply {
+            let text = std::fs::read_to_string(&path).with_context(|| {
+                format!(
+                    "reading {} (generate one with `prometheos work onboarding`)",
+                    path.display()
+                )
+            })?;
+            let user: OnboardingManifestV1 = serde_json::from_str(&text)
+                .with_context(|| format!("parsing {} as an onboarding manifest", path.display()))?;
+            // The survey inside the manifest binds the repository it was
+            // generated from; re-survey that root.
+            let root = if repo == Path::new(".") {
+                PathBuf::from(&user.survey.repo_root)
+            } else {
+                repo.to_path_buf()
+            };
+            let fresh = match survey_repository(&root) {
+                Ok(s) => s,
+                Err(diags) => {
+                    println!("Onboarding refused — repository no longer surveys cleanly:");
+                    print_diagnostics(&diags);
+                    bail!("onboarding apply refused");
+                }
+            };
+            // Regenerate the detection proposal bound to the user's
+            // survey (same detection run as the original proposal).
+            let proposal = manifest_from_survey(&fresh);
+            match apply_user_manifest(&proposal, &user, &fresh, approve) {
+                Ok(applied) => {
+                    let applied_path = root.join(".prometheos-lite").join("onboarding.json");
+                    if let Some(parent) = applied_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("creating {}", parent.display()))?;
+                    }
+                    std::fs::write(&applied_path, serde_json::to_string_pretty(&applied)?)
+                        .with_context(|| format!("writing {}", applied_path.display()))?;
+                    println!("Onboarding applied — approval recorded");
+                    println!("  Manifest: {}", applied_path.display());
+                    println!("  Overrides recorded: {}", applied.overrides.len());
+                    for over in &applied.overrides {
+                        println!(
+                            "    {} -> {} (detected: {})",
+                            over.field,
+                            serde_json::to_string(&over.user).unwrap_or_default(),
+                            serde_json::to_string(&over.detected).unwrap_or_default()
+                        );
+                    }
+                    println!("  Safety: no project files were modified");
+                }
+                Err(diags) => {
+                    println!("Onboarding apply refused:");
+                    print_diagnostics(&diags);
+                    bail!("onboarding apply refused");
+                }
+            }
+            return Ok(());
+        }
+
+        // Survey path: read-only detection + reviewable proposal.
+        let survey = match survey_repository(repo) {
+            Ok(s) => s,
+            Err(diags) => {
+                println!("Onboarding refused — unsupported or conflicting repository setup:");
+                print_diagnostics(&diags);
+                bail!("onboarding refused");
+            }
+        };
+        let manifest = manifest_from_survey(&survey);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        } else {
+            print_manifest_human(&manifest);
+        }
+        let out_path = out.unwrap_or_else(|| {
+            repo.join(".prometheos-lite")
+                .join("onboarding-proposal.json")
+        });
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&out_path, serde_json::to_string_pretty(&manifest)?)
+            .with_context(|| format!("writing {}", out_path.display()))?;
+        if json {
+            eprintln!("proposal written to {}", out_path.display());
+        } else {
+            println!();
+            println!("Proposal written to {}", out_path.display());
+            println!("  (inside the tool's own store; no project files were modified)");
+        }
         Ok(())
     }
 }

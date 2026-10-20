@@ -644,6 +644,37 @@ pub fn remediation_for(code: &str) -> DiagnosticRemediation {
             Some("dedupe-keys"),
             "Remove the duplicate object key so the document has one canonical form.",
         ),
+        "SOMA-ONB-0001" => (
+            Some("add-package-manifest"),
+            "Add a supported package manifest (Cargo.toml, package.json, pyproject.toml, \
+             requirements.txt, go.mod, pom.xml, or build.gradle) or point --repo at the \
+             repository root.",
+        ),
+        "SOMA-ONB-0002" => (
+            Some("initialize-git"),
+            "Run onboarding inside a git repository with at least one commit, or initialize \
+             one with git init.",
+        ),
+        "SOMA-ONB-0003" => (
+            Some("fix-package-manifest"),
+            "Repair the package manifest so it parses (valid TOML for Cargo.toml or \
+             pyproject.toml, valid JSON for package.json), or remove it.",
+        ),
+        "SOMA-ONB-0004" => (
+            Some("regenerate-onboarding"),
+            "Re-run `prometheos work onboarding` to regenerate the proposal against the \
+             current repository, then reapply your edits.",
+        ),
+        "SOMA-ONB-0005" => (
+            Some("keep-survey-verbatim"),
+            "Keep the survey block verbatim — it is detection-owned evidence; edit only the \
+             proposed configuration, or re-run onboarding to refresh detection.",
+        ),
+        "SOMA-ONB-0006" => (
+            Some("approve-onboarding"),
+            "Review the proposal, set approved to true in the manifest, and pass --approve \
+             to record the decision.",
+        ),
         _ => (
             None,
             "Refer to the SOMA v1.1 diagnostics catalogue for this code's normative guidance.",
