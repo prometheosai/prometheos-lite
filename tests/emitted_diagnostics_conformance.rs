@@ -19,7 +19,9 @@
 //!    v1.1→v1.2 catalogue additivity (#240) must hold, and the vendored
 //!    bytes must stay EOL-churn-free (`-text` byte stability).
 
-use prometheos_lite::workflow::governance_compiler::{compile_workflow_text, verify_reviewed_plan};
+use prometheos_lite::workflow::governance_compiler::{
+    compile_workflow_text, remediation_for, verify_reviewed_plan,
+};
 use prometheos_lite::workflow::soma::Diagnostic;
 
 const VENDORED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendored/soma/v1.1");
@@ -81,7 +83,15 @@ const CATALOGUE: &[(&str, &str)] = &[
 /// NOT published in the upstream-vendored catalogues. Keep this mirror
 /// and the live registry in sync: the conformance suite fails closed on
 /// drift.
-const EXTENSION: &[(&str, &str)] = &[("SOMA-CMP-0011", "duplicate_identity")];
+const EXTENSION: &[(&str, &str)] = &[
+    ("SOMA-CMP-0011", "duplicate_identity"),
+    ("SOMA-ONB-0001", "onboarding_unsupported"),
+    ("SOMA-ONB-0002", "onboarding_unsupported"),
+    ("SOMA-ONB-0003", "onboarding_conflict"),
+    ("SOMA-ONB-0004", "onboarding_state"),
+    ("SOMA-ONB-0005", "onboarding_conflict"),
+    ("SOMA-ONB-0006", "onboarding_state"),
+];
 
 /// Every `SOMA-*` literal emitted anywhere in `src/`. Update this list
 /// (and `CATALOGUE` above, from the vendored catalogue, or `EXTENSION`
@@ -130,6 +140,12 @@ const EMITTED: &[&str] = &[
     "SOMA-RES-0002",
     "SOMA-RES-0003",
     "SOMA-RES-0004",
+    "SOMA-ONB-0001",
+    "SOMA-ONB-0002",
+    "SOMA-ONB-0003",
+    "SOMA-ONB-0004",
+    "SOMA-ONB-0005",
+    "SOMA-ONB-0006",
 ];
 
 /// Compile a valid fixture and serialize the sealed plan back to text
@@ -215,6 +231,32 @@ fn extension_code_somacmp_0011_resolves_to_duplicate_identity() {
         emitted.category, "duplicate_identity",
         "SOMA-CMP-0011 must resolve through the Lite extension registry"
     );
+}
+
+/// The repository-owned onboarding extensions (E6/I05 #134) resolve to
+/// their pinned categories through the same `category_for` path, and
+/// each carries a curated remediation action.
+#[test]
+fn onboarding_extension_codes_resolve_to_pinned_categories() {
+    for (code, category) in [
+        ("SOMA-ONB-0001", "onboarding_unsupported"),
+        ("SOMA-ONB-0002", "onboarding_unsupported"),
+        ("SOMA-ONB-0003", "onboarding_conflict"),
+        ("SOMA-ONB-0004", "onboarding_state"),
+        ("SOMA-ONB-0005", "onboarding_conflict"),
+        ("SOMA-ONB-0006", "onboarding_state"),
+    ] {
+        let emitted = Diagnostic::new(code, "onboarding category guard");
+        assert_eq!(
+            emitted.category, category,
+            "{code} must resolve through the Lite extension registry"
+        );
+        let remediation = remediation_for(code);
+        assert!(
+            remediation.action.is_some(),
+            "{code} must carry a curated remediation action"
+        );
+    }
 }
 
 /// Fail-safe fallback: codes registered in NEITHER the upstream catalogue
