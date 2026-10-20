@@ -37,6 +37,7 @@ pub mod node_library;
 pub mod node_review;
 pub mod node_runner;
 pub mod node_validation;
+pub mod onboarding;
 pub mod policy;
 pub mod portable_state;
 pub mod projection;
