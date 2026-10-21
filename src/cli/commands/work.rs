@@ -9,7 +9,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use prometheos_lite::db::Db;
@@ -177,6 +177,12 @@ enum WorkSubcommand {
     /// approve, reject, or request changes. The decision records the
     /// actor, timestamp, target gate, cited evidence, and rationale, and
     /// is sealed into the run's checkpoint.
+    ///
+    /// The actor is NOT a command-line argument: it is the VERIFIED human
+    /// principal for this session (the OS account running this process,
+    /// listed in the repository's `.prometheos/human-principals.json`
+    /// trust anchor). The command refuses when that principal cannot be
+    /// verified.
     Decide {
         /// WorkContext ID
         id: String,
@@ -189,9 +195,6 @@ enum WorkSubcommand {
         /// Verdict: approve, reject, or request-changes
         #[arg(long)]
         verdict: String,
-        /// The human identity making the decision (machine actors are refused)
-        #[arg(long)]
-        actor: String,
         /// Digest (64-hex) of the evidence the human reviewed
         #[arg(long)]
         basis: String,
@@ -689,7 +692,6 @@ impl WorkCommand {
                 run,
                 gate,
                 verdict,
-                actor,
                 basis,
                 reason,
                 manifest,
@@ -697,13 +699,21 @@ impl WorkCommand {
                 // E6/I02 Slice B: the human decision interface. The
                 // decision is recorded as a durable, sealed
                 // HumanDecisionRecordV1 inside the run's checkpoint.
+                //
+                // The actor is the VERIFIED human principal for this
+                // session — established from the OS account running this
+                // process and the repository's trust anchor. There is no
+                // flag to assert an identity: an unverifiable principal
+                // refuses the decision. It is resolved FIRST: an
+                // unverifiable principal must not cause any other work.
+                let principal = graph_runs::resolve_human_principal(Path::new("."))?;
                 let context = work_context_service
                     .get_context(&id)?
                     .ok_or_else(|| anyhow::anyhow!("work context '{id}' not found"))?;
                 let manifest = graph_runs::load_manifest(&manifest)?;
                 let verdict = graph_runs::parse_verdict(&verdict)?;
                 let outcome = graph_runs::decide_run(
-                    &db, &context, "cli-user", &run, &manifest, &gate, verdict, &actor, &basis,
+                    &db, &context, "cli-user", &run, &manifest, &gate, verdict, &principal, &basis,
                     &reason,
                 )?;
                 graph_runs::print_decision_text(&outcome);

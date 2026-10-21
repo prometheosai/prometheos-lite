@@ -238,8 +238,6 @@ mod cli_contract_tests {
             "review",
             "--verdict",
             "approve",
-            "--actor",
-            "diego",
             "--basis",
             "aa",
             "--reason",
@@ -249,6 +247,38 @@ mod cli_contract_tests {
         ])
         .expect("work decide must parse");
         let _ = cli4;
+    }
+
+    #[test]
+    fn cli_work_decide_takes_no_caller_supplied_actor() {
+        // #131 F1: the human actor is a VERIFIED principal, never a
+        // caller-supplied label. There must be no way to name another
+        // human (or a machine) on the command line.
+        let err = parse(&[
+            "work",
+            "decide",
+            "wf-1",
+            "--run",
+            "run-1",
+            "--gate",
+            "review",
+            "--verdict",
+            "approve",
+            "--actor",
+            "someone-else",
+            "--basis",
+            "aa",
+            "--reason",
+            "looks good",
+            "--manifest",
+            "graph.json",
+        ])
+        .expect_err("an --actor flag must not exist");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected") || msg.contains("invalid") || msg.contains("unknown"),
+            "expected clap to reject the unknown --actor flag, got: {msg}"
+        );
     }
 
     #[test]

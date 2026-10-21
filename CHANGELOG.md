@@ -65,6 +65,37 @@
   alone is not authority. Inspection is read-only, verifies the checkpoint
   chain digest, and reports the manifest binding as `unverified` when no
   manifest is supplied rather than implying a check that did not run.
+- #131 E6/I02 Slice B (F1 repair) — the human actor behind a gate decision
+  is a VERIFIED principal, never a caller-supplied label: `work decide` has
+  no `--actor` flag, and the recorded identity is the OS-authenticated
+  account of the running thread (`GetUserNameW` resolves the CALLING
+  THREAD's token on Windows; the EFFECTIVE uid's passwd entry on Unix,
+  with a real/effective mismatch refused as privilege escalation)
+  cross-checked
+  against the repository's durable trust anchor
+  (`.prometheos/human-principals.json`). When the session identity cannot
+  be established, or the anchor does not list it, the decision is REFUSED —
+  the runtime never promotes a self-asserted identity to a human one. The
+  decision path only ever READS the anchor: it never provisions, repairs,
+  or rewrites it, a malformed anchor is refused, and on Unix an anchor
+  other accounts may write is refused outright (on Windows the anchor
+  inherits the working tree's ACLs). The durable journal records the
+  verified principal as `principal.human.identity`, which the schema CHECK
+  ties to the `principal_id` column. Scope of the guarantee, stated
+  plainly: this proves WHICH ACCOUNT acted and that the operator
+  allowlisted it for this repository — it is NOT human-presence
+  verification, and an automated process running under an allowlisted
+  account inherits that identity; interactive authentication remains a
+  separate capability. The governing identity source is declared
+  explicitly (`IDENTITY_SOURCE`) rather than assumed: on Windows it is
+  the CALLING THREAD's authenticated token (`GetUserNameW` resolves
+  `OpenThreadToken`), so an impersonating thread reports the IMPERSONATED
+  identity and the process identity is never substituted for it —
+  impersonation is named, not detected. On Unix it is the process's
+  EFFECTIVE uid. The CLI path now also proves the atomicity and
+  concurrency guarantees directly (F2): an aborted journal write rolls
+  the checkpoint back, and two racing decisions leave exactly one decision
+  and one journal event.
 
 
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
