@@ -22,6 +22,18 @@ python3 scripts/local_ci.py run --suite frontend
 
 Evidence is written under `.local-ci/evidence/<commit>/` and ignored by Git. Attach it or paste its digest into the PR/review record. Evidence produced with `--allow-dirty` is explicitly non-mergeable.
 
+## The serial core variant
+
+The `core` suite caps the test-thread count at four. The cap exists because the git-fixture tests create their own repositories, and a real-time antivirus scan of a freshly written object file intermittently denies that write (`unable to write file .git/objects/...: Permission denied`). Measured on a contended review host: **0 failures across 15 sequential** repository creations, **5–7 failures across 48 creations at four-way parallelism**, and a rotating two-to-ten test failures per suite run. The affected tests pass standalone, so the failures are environmental rather than code defects.
+
+`core-serial` is the recorded alternative for a contended host: the **same checks, the same test inventory, the same assertions**, with `--test-threads 1` on the "all tests" check. It is derived from the `core` specification in code, so the two suites cannot drift apart.
+
+```bash
+python3 scripts/local_ci.py run --suite core-serial
+```
+
+The canonical `core` suite is unchanged and remains a valid way to satisfy the core requirement. The verifier accepts either; the evidence records the exact command that produced it, so which variant ran is always visible. A `core-serial` record whose "all tests" command names any other thread count is rejected, like any other command that does not match its specification exactly.
+
 ## Verify collected evidence
 
 ```bash

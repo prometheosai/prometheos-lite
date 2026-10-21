@@ -56,6 +56,25 @@ def spec_index(suite: str, name: str) -> int:
     return [entry["name"] for entry in local_ci.SUITE_SPEC[suite]].index(name)
 
 
+def make_check_for(suite: str, name: str) -> dict[str, object]:
+    """A check whose command is denormalized from a given suite's spec."""
+    entry = next(
+        (entry for entry in local_ci.SUITE_SPEC[suite] if entry["name"] == name),
+        None,
+    )
+    if entry is None:
+        return make_check(name)
+    normalized = [str(item) for item in entry["command"]]
+    token, args = normalized[0], normalized[1:]
+    program = local_ci.TOKEN_PROGRAMS[token]
+    return {
+        "name": name,
+        "command": [program] + args,
+        "seconds": 1.0,
+        "status": "passed",
+    }
+
+
 def make_check(name: str, command: list[str] | None = None) -> dict[str, object]:
     return {
         "name": name,
@@ -494,6 +513,48 @@ def main() -> int:
         )
 
         # ------------------------------------------------------------------
+        # The serial core variant (same inventory, one test thread)
+        # ------------------------------------------------------------------
+        serial_ok = write(tmp, make_record_core_serial(), "core_serial_ok.json")
+        expect_accept(
+            "serial core evidence satisfies the core requirement",
+            [serial_ok, platform_a, smoke_a],
+        )
+
+        # The serial variant's exactness is enforced like any other suite:
+        # the canonical four-thread command does not satisfy its spec.
+        serial_wrong_threads = make_record_core_serial()
+        for check in serial_wrong_threads["checks"]:
+            if check["name"] == "all tests":
+                check["command"] = [
+                    "cargo",
+                    "test",
+                    "--all-targets",
+                    "--all-features",
+                    "--",
+                    "--test-threads",
+                    "4",
+                ]
+        serial_wrong_threads["evidenceDigest"] = hashlib.sha256(
+            local_ci.canonical_bytes(serial_wrong_threads)
+        ).hexdigest()
+        serial_wrong_path = write(tmp, serial_wrong_threads, "core_serial_wrong.json")
+        expect_reject(
+            "serial core evidence with the wrong thread count",
+            [serial_wrong_path, platform_a, smoke_a],
+        )
+
+        # A serial record missing a check is still rejected.
+        serial_missing = make_record_core_serial(
+            [name for name in CORE if name != "repository policy"]
+        )
+        serial_missing_path = write(tmp, serial_missing, "core_serial_missing.json")
+        expect_reject(
+            "serial core evidence missing a check",
+            [serial_missing_path, platform_a, smoke_a],
+        )
+
+        # ------------------------------------------------------------------
         # The valid three-suite configuration (frontend optional by default)
         # ------------------------------------------------------------------
         expect_accept("valid three-suite evidence", [core_a, platform_a, smoke_a])
@@ -557,6 +618,36 @@ def make_record_suite(
         "workingTreeClean": True,
         "completedAt": "2026-09-23T00:00:00+00:00",
         "checks": [make_check(name) for name in names],
+    }
+    if digest:
+        record["evidenceDigest"] = hashlib.sha256(
+            local_ci.canonical_bytes(record)
+        ).hexdigest()
+    return record
+
+
+def make_record_core_serial(
+    names: list[str] | None = None,
+    *,
+    digest: bool = True,
+) -> dict[str, object]:
+    """A core-serial evidence record: the canonical core checks with one
+    test thread. Built from the core-serial specification so the recorded
+    commands match that suite's spec exactly."""
+    spec_names = [entry["name"] for entry in local_ci.SUITE_SPEC["core-serial"]]
+    names = names if names is not None else spec_names
+    record: dict[str, object] = {
+        "schemaVersion": SCHEMA,
+        "commit": COMMIT,
+        "suite": "core-serial",
+        "platform": "windows",
+        "architecture": "amd64",
+        "python": "3.10.11",
+        "rustc": "rustc 1.98.0",
+        "cargo": "cargo 1.98.0",
+        "workingTreeClean": True,
+        "completedAt": "2026-09-23T00:00:00+00:00",
+        "checks": [make_check_for("core-serial", name) for name in names],
     }
     if digest:
         record["evidenceDigest"] = hashlib.sha256(
