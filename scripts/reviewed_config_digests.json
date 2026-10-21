@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "Digests of executable configuration surfaces (build, bundler, toolchain and verification-runner configuration). A change to a pinned file fails the repository policy gate until a human re-pins it deliberately with scripts/review_config_digests.py. Digests are over LF-normalized bytes so a platform checkout does not change the verdict.",
+  "files": {
+    ".cargo/config.toml": "c75eda3bf5bf8944eeeb48670ea59c816435f3f55cb0433744e26e7c3d855426",
+    ".gitattributes": "7122067052549dc8c43dbc593b25ab0d6d1bb68ae168e63f4a8dcfad28437eda",
+    "frontend/next.config.js": "660f78af355945be56f482c9b697e4892d2ee7da261c8743e75a1c95d3c72c73",
+    "frontend/postcss.config.js": "251ecddd4672c9cf467547e3dc535de00ad2129df26e7e7ae728fa4e5ac45fc5",
+    "frontend/tailwind.config.ts": "44dbf8c169128f470ea6b932ac18176bc3ca50119a226a1938b3d85d951abc5c",
+    "scripts/local_ci.py": "ac79c60f3dde04247751d9197814e11fc1c8ee42d101483c928d15f547e054c2",
+    "scripts/local_ci_policy.py": "47538cef93de27ce70ab3343ceff193df6fae0a19d537c928419fc1a593cc991",
+    "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4"
+  }
+}

@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Repository integrity cleanup: the confirmed `frontend/postcss.config.js`
+  implant is removed again (restored byte-for-byte from the commit that
+  removed it, `1c657d4`), the CRLF churn in the upstream-locked
+  `vendored/soma/v1.1/**` bundle is restored to the byte-exact approved
+  content (all 88 blobs identical to the approved #257 head `16fbba4`),
+  and committed build artifacts and local probing scratch files are
+  removed from the tree. The repository policy gate gains three general
+  invariants — reviewed pins for executable configuration surfaces,
+  duplicate-JSON-key detection over tracked documents, and LF-only
+  fidelity for the whole vendored tree — each of which is a change-review
+  or byte-fidelity rule rather than a content signature, and each of
+  which was negative-probed before landing.
+
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state
   over `(WorkflowDefinition, ReviewFacts, policy)` and
