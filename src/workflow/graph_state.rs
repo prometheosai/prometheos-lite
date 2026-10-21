@@ -605,6 +605,30 @@ impl GraphRunStateV1 {
         manifest: &GraphManifestV1,
         expected_portable_digest: &str,
     ) -> Result<Self> {
+        let s = Self::import_for_inspection(text)?;
+        if s.graph_manifest_digest != manifest.compute_digest() {
+            return Err(GraphRunError::StaleGraphRevision.into());
+        }
+        s.reconcile_portable(expected_portable_digest)?;
+        // Frontier nodes must exist in the manifest (structural integrity).
+        for f in &s.frontier {
+            if !manifest.nodes.iter().any(|n| &n.node_id == f) {
+                anyhow::bail!("checkpoint frontier references unknown node {f:?}");
+            }
+        }
+        Ok(s)
+    }
+
+    /// CHECKPOINT IMPORT (inspection): parse + verify the chain digest
+    /// WITHOUT a manifest binding.
+    ///
+    /// A read-only inspector must be able to surface a run's durable state
+    /// even when the graph manifest is not at hand. The manifest binding and
+    /// the portable-state reconciliation stay UNVERIFIED in that case — the
+    /// caller reports them as such (honest absence) rather than implying a
+    /// guarantee that was never checked. The chain digest IS verified: a
+    /// tampered blob is refused here exactly as it is on the full import.
+    pub fn import_for_inspection(text: &str) -> Result<Self> {
         let s: Self = serde_json::from_str(text).context("checkpoint parse failed")?;
         if s.schema_version != GRAPH_RUN_SCHEMA_VERSION {
             return Err(GraphRunError::UnsupportedVersion.into());
@@ -615,16 +639,6 @@ impl GraphRunStateV1 {
         };
         if declared != s.compute_digest() {
             anyhow::bail!("checkpoint contentDigest does not verify");
-        }
-        if s.graph_manifest_digest != manifest.compute_digest() {
-            return Err(GraphRunError::StaleGraphRevision.into());
-        }
-        s.reconcile_portable(expected_portable_digest)?;
-        // Frontier nodes must exist in the manifest (structural integrity).
-        for f in &s.frontier {
-            if !manifest.nodes.iter().any(|n| &n.node_id == f) {
-                anyhow::bail!("checkpoint frontier references unknown node {f:?}");
-            }
         }
         Ok(s)
     }

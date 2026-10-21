@@ -49,6 +49,23 @@
   fail-closed behaviour, and three limits that were previously left
   implicit: the set is curated and not exhaustive, the pin file is not
   itself pinned, and the gate's own pin is checked by the gate.
+- #131 E6/I02 Slice B — the governed graph-run inspector and the human gate
+  decision interface: `prometheos work runs`, `prometheos work inspect-run`,
+  and `prometheos work decide` read the durable `graph_checkpoints` registry
+  and record durable `lite.hdecision.v1` gate decisions — actor, timestamp,
+  target gate, cited evidence digest, rationale, sealed content digest —
+  through a compare-and-swap transaction that lands the checkpoint write and
+  the journal event together (a failed event write rolls the checkpoint
+  back). Machine actors are refused at authoring and at import; a decision
+  may only target a gate DECLARED by the run's manifest and only against
+  evidence still ANCHORED in the run's current state, so a superseded
+  artifact makes the recorded decision STALE and returns the gate to
+  pending. The decide endpoint now refuses a route that leaves a human gate
+  unless it is the route the recorded verdict authorizes — a journaled basis
+  alone is not authority. Inspection is read-only, verifies the checkpoint
+  chain digest, and reports the manifest binding as `unverified` when no
+  manifest is supplied rather than implying a check that did not run.
+
 
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state

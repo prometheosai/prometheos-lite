@@ -207,6 +207,51 @@ mod cli_contract_tests {
     }
 
     #[test]
+    fn cli_parses_graph_run_inspection_and_decision() {
+        // E6/I02 Slice B: the graph-run inspector and the human decision
+        // interface. Both are terminal-first: everything the web interface
+        // would show is available here.
+        let cli1 = parse(&["work", "runs", "wf-1"]).expect("work runs wf-1 must parse");
+        let _ = cli1;
+        let cli2 = parse(&["work", "inspect-run", "wf-1", "--run", "run-1"])
+            .expect("work inspect-run wf-1 --run run-1 must parse");
+        let _ = cli2;
+        let cli3 = parse(&[
+            "work",
+            "inspect-run",
+            "wf-1",
+            "--run",
+            "run-1",
+            "--manifest",
+            "graph.json",
+            "--json",
+        ])
+        .expect("work inspect-run with manifest must parse");
+        let _ = cli3;
+        let cli4 = parse(&[
+            "work",
+            "decide",
+            "wf-1",
+            "--run",
+            "run-1",
+            "--gate",
+            "review",
+            "--verdict",
+            "approve",
+            "--actor",
+            "diego",
+            "--basis",
+            "aa",
+            "--reason",
+            "looks good",
+            "--manifest",
+            "graph.json",
+        ])
+        .expect("work decide must parse");
+        let _ = cli4;
+    }
+
+    #[test]
     fn cli_rejects_unknown_subcommand() {
         let err = parse(&["flow", "frobnicate"]).expect_err("parse must fail");
         let msg = err.to_string();

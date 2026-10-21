@@ -222,6 +222,11 @@ pub enum GateRouteError {
         from: String,
         attempted_target: String,
     },
+    /// A recorded decision whose cited evidence is no longer anchored in
+    /// the run's current state (stale approval after a rework/artifact
+    /// change). The gate returns to pending until a fresh human decision
+    /// against the current evidence is recorded (#131).
+    StaleGateDecision { node: String, basis: String },
 }
 
 impl std::fmt::Display for GateRouteError {
@@ -241,6 +246,12 @@ impl std::fmt::Display for GateRouteError {
                 "run rejected at {from:?}; continuation to {attempted_target:?} \
                  requires a new authorized run"
             ),
+            GateRouteError::StaleGateDecision { node, basis } => write!(
+                f,
+                "human gate {node:?} decision is stale: cited evidence {basis} is \
+                 no longer anchored in the run; re-decide against the current \
+                 evidence"
+            ),
         }
     }
 }
@@ -253,6 +264,27 @@ pub fn is_gate_node(manifest: &GraphManifestV1, node_id: &str) -> bool {
         .nodes
         .iter()
         .any(|n| n.node_id == node_id && n.capability.starts_with(GATE_CAPABILITY_PREFIX))
+}
+
+/// STALENESS ANCHOR (#131): a gate decision is eligible only while the
+/// evidence it cites is still anchored in the run's current state — a live
+/// evidence reference, or the LATEST attempt digest of some node. After a
+/// rework cycle supersedes the reviewed artifact (a newer attempt digest,
+/// a replaced evidence ref), the recorded decision is stale and routing
+/// refuses it: the gate returns to pending for a fresh human decision.
+pub fn decision_basis_is_anchored(
+    state: &crate::workflow::graph_state::GraphRunStateV1,
+    basis: &str,
+) -> bool {
+    state
+        .evidence_refs
+        .iter()
+        .any(|r| r.artifact_digest == basis)
+        || state
+            .node_attempts
+            .values()
+            .filter_map(|attempts| attempts.last())
+            .any(|latest| latest.result_digest == basis)
 }
 
 /// Compute the gate-filtered decision for `from_node`.
@@ -289,6 +321,18 @@ pub fn route_after_gate(
             }
         );
     };
+
+    // Staleness law (#131): approval never outlives the evidence it cites.
+    // An anchored decision routes; a stale one returns the gate to pending.
+    if !decision_basis_is_anchored(state, &decision.basis_evidence_digest) {
+        anyhow::bail!(
+            "{}",
+            GateRouteError::StaleGateDecision {
+                node: from_node.to_string(),
+                basis: decision.basis_evidence_digest.clone(),
+            }
+        );
+    }
     let want = decision.verdict.edge_label();
 
     // Eligibility by verdict label only.
@@ -424,7 +468,8 @@ mod tests {
                     started_at: "t".into(),
                     completed_at: Some("t".into()),
                     outcome: OutcomeCategory::Completed,
-                    result_digest: format!("dg-{id}"),
+                    // 64-hex digest so decisions may validly cite it.
+                    result_digest: "d".repeat(64),
                 },
                 "now",
             )
@@ -432,16 +477,34 @@ mod tests {
     }
 
     fn human_decision(verdict: HumanVerdict) -> HumanDecisionRecordV1 {
+        human_decision_on(verdict, &"d".repeat(64))
+    }
+
+    /// A decision citing a specific reviewed artifact digest. Real
+    /// decisions bind to the evidence the human reviewed (here: the
+    /// build attempt's result digest journaled by `complete`).
+    fn human_decision_on(verdict: HumanVerdict, basis: &str) -> HumanDecisionRecordV1 {
         HumanDecisionRecordV1::author(
             "review",
             verdict,
             "diego",
             ReviewChannel::CliInteractive,
-            "e".repeat(64),
+            basis.to_string(),
             "lgtm",
             "2026-08-25T00:00:00Z",
         )
         .unwrap()
+    }
+
+    fn evidence_ref(digest: &str) -> crate::workflow::memory_contracts::EvidenceReferenceV1 {
+        crate::workflow::memory_contracts::EvidenceReferenceV1 {
+            id: format!("ev-{digest}"),
+            event_digest: digest.to_string(),
+            artifact_digest: digest.to_string(),
+            artifact_kind: "test-artifact".into(),
+            produced_by: "test".into(),
+            produced_at: Some("t".into()),
+        }
     }
 
     #[test]
@@ -566,6 +629,108 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("new authorized run"), "{err}");
+    }
+
+    #[test]
+    fn stale_gate_decision_returns_gate_to_pending() {
+        let m = gate_manifest();
+        let mut s =
+            crate::workflow::graph_state::GraphRunStateV1::open("r", &m, "rev", "pws", "pd", "t0")
+                .unwrap();
+        complete(&mut s, "build");
+        let d = route_after(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "build",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .unwrap();
+        s.record_route_decision(d, &m).unwrap();
+        record_gate_decision(&mut s, &m, human_decision(HumanVerdict::Approved)).unwrap();
+        let routed = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .expect("decision against the current evidence routes");
+        assert_eq!(routed.to_node, "merge");
+
+        // Rework: `build` re-executes and supersedes the reviewed artifact.
+        s.frontier.push("build".into());
+        s.apply_node_completion(
+            "build",
+            NodeAttemptRecordV1 {
+                attempt: 2,
+                started_at: "t1".into(),
+                completed_at: Some("t2".into()),
+                outcome: OutcomeCategory::Completed,
+                // A different artifact supersedes the reviewed one.
+                result_digest: "2".repeat(64),
+            },
+            "t2",
+        )
+        .unwrap();
+
+        // The recorded decision cites the superseded digest: routing is
+        // refused and the gate returns to pending for a fresh decision.
+        let err = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t2",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("stale"), "{err}");
+    }
+
+    #[test]
+    fn evidence_reference_anchors_and_supersedes_gate_decisions() {
+        let m = gate_manifest();
+        let mut s =
+            crate::workflow::graph_state::GraphRunStateV1::open("r", &m, "rev", "pws", "pd", "t0")
+                .unwrap();
+        complete(&mut s, "build");
+        // The review evidence arrives as a durable evidence reference.
+        s.evidence_refs.push(evidence_ref(&"e".repeat(64)));
+        record_gate_decision(
+            &mut s,
+            &m,
+            human_decision_on(HumanVerdict::Approved, &"e".repeat(64)),
+        )
+        .unwrap();
+        let d = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .expect("decision anchored by a live evidence reference routes");
+        assert_eq!(d.to_node, "merge");
+
+        // The reviewed artifact changes (e.g. replaces the evidence ref):
+        // the old decision goes stale.
+        s.evidence_refs = vec![evidence_ref(&"f".repeat(64))];
+        let err = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("stale"), "{err}");
     }
 
     #[test]
