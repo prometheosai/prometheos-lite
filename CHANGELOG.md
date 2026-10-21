@@ -12,6 +12,20 @@
   fidelity for the whole vendored tree — each of which is a change-review
   or byte-fidelity rule rather than a content signature, and each of
   which was negative-probed before landing.
+- Repository policy gate repair, after an independent review of the
+  cleanup above: a missing, malformed, non-object, or empty pin file is
+  now a reported violation instead of an unhandled traceback or a silent
+  pass — an empty pin set can no longer switch the pin invariant off —
+  and the duplicate-key scan now covers every tracked JSON document
+  instead of excluding whole subtrees, with only the three known-invalid
+  fixtures exempt by explicit path. The API LLM boundary now scans every
+  API root that exists, so adding a top-level `api/` directory can no
+  longer silently disable it. The pinned execution surfaces are extended
+  from eight to cover the verification runner's own scripts, the Rust
+  toolchain inputs, and the frontend bundler inputs. A new regression
+  suite, `scripts/test_local_ci_policy.py`, runs the gate against
+  throwaway sandboxes and is part of the core suite, so a gate that stops
+  rejecting any of these inputs fails the suite.
 
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state

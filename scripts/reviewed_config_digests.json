@@ -4,11 +4,22 @@
   "files": {
     ".cargo/config.toml": "c75eda3bf5bf8944eeeb48670ea59c816435f3f55cb0433744e26e7c3d855426",
     ".gitattributes": "7122067052549dc8c43dbc593b25ab0d6d1bb68ae168e63f4a8dcfad28437eda",
+    "Cargo.lock": "bfd5092d58e24313c81796a5446282cf5a3c0cb5af552c560afaefcd6a428eae",
+    "Cargo.toml": "cde045dbe4bd7b70eeb8934de1c62600c5a120877cd05819a6906eb783e061a4",
     "frontend/next.config.js": "660f78af355945be56f482c9b697e4892d2ee7da261c8743e75a1c95d3c72c73",
+    "frontend/package-lock.json": "71d5a9f0e71604576d60c1d54aebfd74621243e7c1f793797ee9d40d7cd7d7b7",
+    "frontend/package.json": "5f944b5efd9046c202ae7e5eb908bb4c7e3c5840f64137d8a0e9e6fc391d0bd0",
     "frontend/postcss.config.js": "251ecddd4672c9cf467547e3dc535de00ad2129df26e7e7ae728fa4e5ac45fc5",
+    "frontend/scripts/smoke.mjs": "24397b73ad6ca39ac52e3f64072f763c6bca0330a5b886e221d9b0b082a73ccf",
     "frontend/tailwind.config.ts": "44dbf8c169128f470ea6b932ac18176bc3ca50119a226a1938b3d85d951abc5c",
+    "scripts/approval-controlled-patch-smoke.sh": "bcec6f4cf1e53a125593677cd39726bde80fb9347e04a4538321b3e29d24b5ce",
+    "scripts/demo/repo-workbench-first-value.sh": "19ead1654c8a8aef5272889424520d79800e9e6b7d70a46197060b8d64598af6",
+    "scripts/fullstack-smoke.sh": "f6905fa1c1e960635203ec422bfff7924756c5711f923350233706883d25e74d",
     "scripts/local_ci.py": "506e3771a20525ea04a22dab074b3e612d29919894ac0ebaa791008ec1701157",
-    "scripts/local_ci_policy.py": "47538cef93de27ce70ab3343ceff193df6fae0a19d537c928419fc1a593cc991",
-    "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4"
+    "scripts/local_ci_policy.py": "bbf34597a2c215de4de107c1d2dcff6c036815ce892636a979df6fbd3f3ae3b5",
+    "scripts/provider-governed-proposal-smoke.sh": "c6d0f4b0605f36d7117bda2f10a5e893b900f392aae3310f209ebd3211e715b1",
+    "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4",
+    "scripts/test_local_ci_verify.py": "5b3b0c819fae21c14537124184307eb5a7cd796a000aaf3dcb33c31f72b1f9e7",
+    "scripts/test_target_dir.sh": "96d52788f9104712496abd956bd336158c8c8dba38bfc8b4bfbb7ccf2cd63adb"
   }
 }

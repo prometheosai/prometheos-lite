@@ -64,18 +64,30 @@ Teams may mirror the same command on infrastructure they own, but mirrors do not
 
 ## Repository integrity invariants
 
-The policy gate enforces four more invariants. They are general rules, not signatures of any particular content, and each one fails closed with a message naming what it found.
+The policy gate enforces three more invariants. They are general rules, not signatures of any particular content, and each one fails closed with a message naming what it found — an unreadable or empty input is reported as a violation, never as a traceback and never as a pass.
 
 | Invariant | Rule |
 |---|---|
-| Executable-configuration review pins | A pinned execution surface — build, bundler, toolchain, or verification-runner configuration — may only change when a human re-pins it deliberately. |
-| Duplicate JSON keys | A tracked JSON document may not contain a duplicate key: two parsers reading it differently is a supply-chain hazard, not a style choice. Deliberately invalid corpora (`tests/fixtures/`, upstream `vendored/soma/*/fixtures/invalid/`) are excluded. |
+| Executable-configuration review pins | A pinned execution surface — build, bundler, toolchain, or verification-runner configuration — may only change when a human re-pins it deliberately. A missing, unreadable, or **empty** pin set is itself a violation: a control that can be switched off by emptying its own reviewed file is not a control. |
+| Duplicate JSON keys | A tracked JSON document may not contain a duplicate key: two parsers reading it differently is a supply-chain hazard, not a style choice. Every tracked JSON document is scanned; only an explicit list of known-invalid fixtures is exempt, so a new invalid fixture is caught and must be exempted deliberately. |
 | Vendored byte fidelity | Every file under `vendored/` must be LF-only. The bundle is upstream-locked under the `-text` gitattribute, so a checkout that rewrites line endings is a provenance violation. |
-| Hosted-CI / LFS independence | No hosted workflow file, external CI configuration, or LFS marker. |
+
+The hosted-CI / LFS independence rule above is enforced by the same gate but predates these three.
+
+The gate's own behaviour is covered by `python scripts/test_local_ci_policy.py`, which runs it against throwaway sandboxes: a missing, malformed, non-object, and empty pin file; a changed, deleted, and contaminated pinned surface; a duplicate key in a tracked document and in a newly added fixture; CR bytes in a vendored file; an LLM-call boundary violation under each API root; and a hosted workflow or LFS marker. The script is part of the core suite, so a change to the gate that stops rejecting any of these fails the suite.
 
 ### Pinned execution surfaces
 
 Pins live in `scripts/reviewed_config_digests.json` and cover the files a build or the verification runner executes. Digests are computed over LF-normalized bytes, so a platform checkout does not change the verdict.
+
+The set covers the surfaces the repository's own verification executes or reads, and the toolchain and bundler inputs it builds from:
+
+| Group | Surfaces |
+|---|---|
+| Verification runner | `scripts/local_ci.py`, `scripts/local_ci_policy.py`, `scripts/review_config_digests.py`, `scripts/test_local_ci_verify.py`, `scripts/test_local_ci_policy.py`, the smoke scripts under `scripts/` and `scripts/demo/` |
+| Rust toolchain inputs | `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml` |
+| Frontend bundler inputs | `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.js`, `frontend/postcss.config.js`, `frontend/tailwind.config.ts`, `frontend/scripts/smoke.mjs` |
+| Repository attributes | `.gitattributes` |
 
 To change a pinned surface deliberately:
 
@@ -86,5 +98,5 @@ To change a pinned surface deliberately:
 
 To pin a *new* surface, add its path to the `files` object in the pin file first; the set of pinned surfaces is curated, not auto-discovered.
 
-The pin mechanism is a **change-review requirement**, not a content filter: it does not look for any particular code, so it cannot be satisfied by evading a signature. Its limit is equally explicit — a reviewer who re-pins a malicious change has approved it, so the control is the review, not the mechanism.
+The pin mechanism is a **change-review requirement**, not a content filter: it does not look for any particular code, so it cannot be satisfied by evading a signature. Its limit is equally explicit — a reviewer who re-pins a malicious change has approved it, so the control is the review, not the mechanism. Two consequences are worth stating plainly: the set is curated and therefore not exhaustive of every file that could influence a build, and a change to a pinned surface — including a dependency change, which alters `Cargo.lock` and `frontend/package-lock.json` — surfaces in the diff as a reviewed act rather than passing silently.
 
