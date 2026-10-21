@@ -73,6 +73,7 @@ SUITE_SPEC: dict[str, list[dict[str, object]]] = {
         {"name": "repository onboarding", "command": ["cargo", "test", "--test", "onboarding_conformance", "--quiet"]},
         {"name": "verifier regressions", "command": ["python", "scripts/test_local_ci_verify.py"]},
         {"name": "repository policy", "command": ["python", "scripts/local_ci_policy.py"]},
+        {"name": "policy regressions", "command": ["python", "scripts/test_local_ci_policy.py"]},
     ],
     "platform": [
         {"name": "registry leases", "command": ["cargo", "test", "--lib", "workflow::evaluate::registry", "--quiet"]},
@@ -282,6 +283,7 @@ def rust_core(test_threads: int = 4) -> list[dict[str, object]]:
         ("repository onboarding", ["cargo", "test", "--test", "onboarding_conformance", "--quiet"]),
         ("verifier regressions", [sys.executable, "scripts/test_local_ci_verify.py"]),
         ("repository policy", [sys.executable, "scripts/local_ci_policy.py"]),
+        ("policy regressions", [sys.executable, "scripts/test_local_ci_policy.py"]),
     ]
     return [run(name, command) for name, command in commands]
 

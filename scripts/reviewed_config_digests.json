@@ -15,10 +15,11 @@
     "scripts/approval-controlled-patch-smoke.sh": "bcec6f4cf1e53a125593677cd39726bde80fb9347e04a4538321b3e29d24b5ce",
     "scripts/demo/repo-workbench-first-value.sh": "19ead1654c8a8aef5272889424520d79800e9e6b7d70a46197060b8d64598af6",
     "scripts/fullstack-smoke.sh": "f6905fa1c1e960635203ec422bfff7924756c5711f923350233706883d25e74d",
-    "scripts/local_ci.py": "506e3771a20525ea04a22dab074b3e612d29919894ac0ebaa791008ec1701157",
+    "scripts/local_ci.py": "af3ea0c9b64cda15aef0706f636af92e8de0c4b50c8b421934a7a8bf2dc48ff0",
     "scripts/local_ci_policy.py": "bbf34597a2c215de4de107c1d2dcff6c036815ce892636a979df6fbd3f3ae3b5",
     "scripts/provider-governed-proposal-smoke.sh": "c6d0f4b0605f36d7117bda2f10a5e893b900f392aae3310f209ebd3211e715b1",
     "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4",
+    "scripts/test_local_ci_policy.py": "f57a47a01a3401936f1d93fa232f34561d8b164594335a2b6e3f2c0e2fb74e3a",
     "scripts/test_local_ci_verify.py": "5b3b0c819fae21c14537124184307eb5a7cd796a000aaf3dcb33c31f72b1f9e7",
     "scripts/test_target_dir.sh": "96d52788f9104712496abd956bd336158c8c8dba38bfc8b4bfbb7ccf2cd63adb"
   }
