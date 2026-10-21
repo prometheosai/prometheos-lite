@@ -364,11 +364,18 @@ def smoke_suite() -> list[dict[str, object]]:
 
 def frontend_suite() -> list[dict[str, object]]:
     frontend = ROOT / "frontend"
+    # Resolve the programs to their real paths, as the smoke suite already
+    # does for the interpreter: on Windows `npm` is a .cmd shim that cannot
+    # be launched by bare name, and `node` is node.exe. The recorded
+    # command still normalizes to the same identity token ("npm"/"node"),
+    # so the evidence contract is unchanged.
+    npm = shutil.which("npm") or "npm"
+    node = shutil.which("node") or "node"
     commands = [
-        ("frontend install", ["npm", "ci"]),
-        ("frontend build", ["npm", "run", "build"]),
-        ("frontend lint", ["npm", "run", "lint"]),
-        ("frontend smoke", ["node", "scripts/smoke.mjs"]),
+        ("frontend install", [npm, "ci"]),
+        ("frontend build", [npm, "run", "build"]),
+        ("frontend lint", [npm, "run", "lint"]),
+        ("frontend smoke", [node, "scripts/smoke.mjs"]),
     ]
     return [run(name, command, cwd=frontend) for name, command in commands]
 
