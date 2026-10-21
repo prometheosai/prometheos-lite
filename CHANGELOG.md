@@ -26,6 +26,25 @@
   suite, `scripts/test_local_ci_policy.py`, runs the gate against
   throwaway sandboxes and is part of the core suite, so a gate that stops
   rejecting any of these inputs fails the suite.
+- Repository policy gate, second repair round, after an independent review
+  of the repair above: the gate's regression suite is now discriminating
+  rather than merely present. The earlier suite exercised only the gate's
+  filesystem-fallback path, while the repository uses the tracked-file
+  path, and its two API-boundary cases never constructed the one
+  configuration that distinguishes "scans every API root" from "scans one"
+  — so reintroducing that defect left the suite green. The sandboxes are
+  now git repositories with their files tracked, both scan paths are
+  covered, and the discriminating case — both API roots present, the
+  violation in `src/api` — is exercised. The gate additionally reports
+  filesystem-level pathologies instead of raising them: a pin file that is
+  a directory, a pin entry naming a directory, an unreadable pinned
+  surface, an unreadable vendored file, and a source file that is not
+  valid UTF-8. The pinned set grows to 23 surfaces, adding `clippy.toml`,
+  `frontend/tsconfig.json` and `frontend/.eslintrc.json`. The guide now
+  states the gate's fifth rule, the exact shape of its fail-closed
+  behaviour, and three limits that were previously left implicit: the set
+  is curated and not exhaustive, the pin file is not itself pinned, and
+  the gate's own pin is checked by the gate.
 
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state

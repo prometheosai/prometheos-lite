@@ -66,7 +66,12 @@ def matches(root: Path, needles: tuple[str, ...], excluded: set[Path]) -> list[s
     for path in root.rglob("*.rs"):
         if path in excluded:
             continue
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            findings.append(f"{path.relative_to(ROOT)}: unreadable ({exc})")
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
             if any(needle in line for needle in needles):
                 findings.append(f"{path.relative_to(ROOT)}:{number}:{line.strip()}")
     return findings
@@ -166,6 +171,8 @@ else:
         parsed = True
     except (ValueError, TypeError) as exc:
         pin_violations.append(f"{PIN_FILE.relative_to(ROOT)}: unreadable pin file ({exc})")
+    except OSError as exc:
+        pin_violations.append(f"{PIN_FILE.relative_to(ROOT)}: unreadable pin file ({exc})")
     if parsed and not pinned:
         pin_violations.append(
             f"{PIN_FILE.relative_to(ROOT)}: pin set is empty — executable configuration "
@@ -179,7 +186,11 @@ else:
         if not isinstance(expected, str):
             pin_violations.append(f"{relative}: pinned digest is not a string")
             continue
-        actual = normalized_digest(target)
+        try:
+            actual = normalized_digest(target)
+        except OSError as exc:
+            pin_violations.append(f"{relative}: pinned executable configuration is unreadable ({exc})")
+            continue
         if actual != expected:
             pin_violations.append(
                 f"{relative}: executable configuration changed without a reviewed pin update "
@@ -264,7 +275,12 @@ if vendored.exists():
     for path in sorted(vendored.rglob("*")):
         if not path.is_file():
             continue
-        if b"\r" in path.read_bytes():
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            eol_violations.append(f"{path.relative_to(ROOT).as_posix()}: unreadable ({exc})")
+            continue
+        if b"\r" in payload:
             eol_violations.append(
                 f"{path.relative_to(ROOT).as_posix()}: carries CR bytes — vendored bytes are "
                 "upstream-locked (-text) and must not be rewritten"

@@ -64,7 +64,7 @@ Teams may mirror the same command on infrastructure they own, but mirrors do not
 
 ## Repository integrity invariants
 
-The policy gate enforces three more invariants. They are general rules, not signatures of any particular content, and each one fails closed with a message naming what it found — an unreadable or empty input is reported as a violation, never as a traceback and never as a pass.
+The policy gate enforces three more invariants. They are general rules, not signatures of any particular content, and each one fails closed with a message naming what it found. The inputs the gate reads are reported as violations rather than raised as errors: a missing, malformed, non-object, empty, unreadable, or directory-shaped pin file, an unreadable pinned surface, an unreadable or non-UTF-8 source file, and an unreadable vendored file are all named in the message.
 
 | Invariant | Rule |
 |---|---|
@@ -72,21 +72,21 @@ The policy gate enforces three more invariants. They are general rules, not sign
 | Duplicate JSON keys | A tracked JSON document may not contain a duplicate key: two parsers reading it differently is a supply-chain hazard, not a style choice. Every tracked JSON document is scanned; only an explicit list of known-invalid fixtures is exempt, so a new invalid fixture is caught and must be exempted deliberately. |
 | Vendored byte fidelity | Every file under `vendored/` must be LF-only. The bundle is upstream-locked under the `-text` gitattribute, so a checkout that rewrites line endings is a provenance violation. |
 
-The hosted-CI / LFS independence rule above is enforced by the same gate but predates these three.
+The gate enforces two further rules that predate these three: hosted-CI / LFS independence (above) and the fallback-confinement / API-LLM-boundary rule, which is documented in `docs/guides/product-surface-inventory.md` and scans every API root that exists, so neither `src/api` nor a top-level `api/` can escape it.
 
-The gate's own behaviour is covered by `python scripts/test_local_ci_policy.py`, which runs it against throwaway sandboxes: a missing, malformed, non-object, and empty pin file; a changed, deleted, and contaminated pinned surface; a duplicate key in a tracked document and in a newly added fixture; CR bytes in a vendored file; an LLM-call boundary violation under each API root; and a hosted workflow or LFS marker. The script is part of the core suite, so a change to the gate that stops rejecting any of these fails the suite.
+The gate's own behaviour is covered by `python scripts/test_local_ci_policy.py`: 26 checks that run the real gate against throwaway sandboxes — a missing, malformed, non-object, empty, unreadable, and directory-shaped pin file; a changed, deleted, and contaminated pinned surface; a duplicate key in a tracked document, in a document found by the filesystem fallback, and in a newly added fixture; CR bytes in a vendored file; an LLM-call boundary violation under each API root, alone and with both roots present; an unreadable pinned surface; a non-UTF-8 source file; a hosted workflow; and an LFS marker. The script is part of the core suite, so a change to the gate that stops rejecting any of these fails the suite.
 
 ### Pinned execution surfaces
 
 Pins live in `scripts/reviewed_config_digests.json` and cover the files a build or the verification runner executes. Digests are computed over LF-normalized bytes, so a platform checkout does not change the verdict.
 
-The set covers the surfaces the repository's own verification executes or reads, and the toolchain and bundler inputs it builds from:
+The set covers the surfaces the repository's own verification executes or reads, and the toolchain and bundler inputs it builds from — 23 surfaces in four groups:
 
 | Group | Surfaces |
 |---|---|
 | Verification runner | `scripts/local_ci.py`, `scripts/local_ci_policy.py`, `scripts/review_config_digests.py`, `scripts/test_local_ci_verify.py`, `scripts/test_local_ci_policy.py`, the smoke scripts under `scripts/` and `scripts/demo/` |
-| Rust toolchain inputs | `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml` |
-| Frontend bundler inputs | `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.js`, `frontend/postcss.config.js`, `frontend/tailwind.config.ts`, `frontend/scripts/smoke.mjs` |
+| Rust toolchain inputs | `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `clippy.toml` |
+| Frontend bundler inputs | `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.js`, `frontend/postcss.config.js`, `frontend/tailwind.config.ts`, `frontend/tsconfig.json`, `frontend/.eslintrc.json`, `frontend/scripts/smoke.mjs` |
 | Repository attributes | `.gitattributes` |
 
 To change a pinned surface deliberately:
@@ -98,5 +98,11 @@ To change a pinned surface deliberately:
 
 To pin a *new* surface, add its path to the `files` object in the pin file first; the set of pinned surfaces is curated, not auto-discovered.
 
-The pin mechanism is a **change-review requirement**, not a content filter: it does not look for any particular code, so it cannot be satisfied by evading a signature. Its limit is equally explicit — a reviewer who re-pins a malicious change has approved it, so the control is the review, not the mechanism. Two consequences are worth stating plainly: the set is curated and therefore not exhaustive of every file that could influence a build, and a change to a pinned surface — including a dependency change, which alters `Cargo.lock` and `frontend/package-lock.json` — surfaces in the diff as a reviewed act rather than passing silently.
+The pin mechanism is a **change-review requirement**, not a content filter: it does not look for any particular code, so it cannot be satisfied by evading a signature. Its limit is equally explicit — a reviewer who re-pins a malicious change has approved it, so the control is the review, not the mechanism. Three consequences are worth stating plainly:
+
+- The set is **curated and not exhaustive** of every file that could influence a build.
+- The pin file is **not itself pinned**. Narrowing the set to a single surface whose digest matches makes the gate pass with the other surfaces unpinned; a reviewer sees the narrowing in the diff.
+- The gate's own pin is **checked by the gate**, so replacing the gate script with a no-op makes the gate exit successfully. The signal for that is the code diff, i.e. review.
+
+A change to a pinned surface — including a dependency change, which alters `Cargo.lock` and `frontend/package-lock.json` — surfaces in the diff as a reviewed act rather than passing silently.
 

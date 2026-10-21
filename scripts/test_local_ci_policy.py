@@ -33,8 +33,14 @@ FAILURES: list[str] = []
 
 
 @contextmanager
-def sandbox() -> Iterator[Path]:
-    """A disposable repository root holding the real gate and pin set."""
+def sandbox(*, git: bool = True) -> Iterator[Path]:
+    """A disposable repository root holding the real gate and pin set.
+
+    By default the sandbox is a git repository with its files tracked, so
+    the gate exercises the same tracked-file path it uses in the real
+    repository. Pass ``git=False`` to exercise the filesystem fallback
+    instead. Both paths are part of the gate's behaviour.
+    """
     work = Path(tempfile.mkdtemp(prefix="prometheos-policy-"))
     try:
         (work / "scripts").mkdir(parents=True, exist_ok=True)
@@ -47,9 +53,25 @@ def sandbox() -> Iterator[Path]:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         shutil.copy2(ROOT / PIN_REL, work / PIN_REL)
+        if git:
+            subprocess.run(["git", "init", "-q"], cwd=str(work), capture_output=True, check=True)
+            track(work)
         yield work
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def track(root: Path, *relatives: str) -> None:
+    """Mark files as tracked, so the gate's tracked-file path sees them."""
+    if not relatives:
+        subprocess.run(
+            ["git", "add", "-A", "."], cwd=str(root), capture_output=True, check=False
+        )
+        return
+    for relative in relatives:
+        subprocess.run(
+            ["git", "add", "--", relative], cwd=str(root), capture_output=True, check=False
+        )
 
 
 def run_gate(root: Path) -> tuple[int, str]:
@@ -182,8 +204,17 @@ def main() -> int:
     # -- duplicate JSON keys ------------------------------------------------
     with sandbox() as root:
         (root / "config.json").write_text('{"a": 1, "a": 2}', encoding="utf-8")
+        track(root, "config.json")
         expect_fail(
-            "duplicate key in a repository JSON document",
+            "duplicate key in a tracked repository JSON document",
+            root,
+            "duplicate key",
+        )
+
+    with sandbox(git=False) as root:
+        (root / "config.json").write_text('{"a": 1, "a": 2}', encoding="utf-8")
+        expect_fail(
+            "duplicate key in a JSON document found by the filesystem fallback",
             root,
             "duplicate key",
         )
@@ -192,6 +223,7 @@ def main() -> int:
         target = root / "tests" / "fixtures" / "slice3" / "invalid"
         target.mkdir(parents=True, exist_ok=True)
         (target / "new-invalid.json").write_text('{"b": 1, "b": 2}', encoding="utf-8")
+        track(root, "tests/fixtures/slice3/invalid/new-invalid.json")
         expect_fail(
             "new invalid fixture inside a previously exempt subtree",
             root,
@@ -202,6 +234,7 @@ def main() -> int:
         target = root / "tests" / "fixtures" / "slice3" / "invalid"
         target.mkdir(parents=True, exist_ok=True)
         (target / "duplicate-key.json").write_text('{"a": 1, "a": 2}', encoding="utf-8")
+        track(root, "tests/fixtures/slice3/invalid/duplicate-key.json")
         expect_pass(
             "the explicitly exempt fixture is not reported",
             root,
@@ -244,6 +277,61 @@ def main() -> int:
             "LLM call boundary violation under a top-level api/",
             root,
             "llm_client.generate",
+        )
+
+    # The discriminating case: BOTH roots exist and the violation is in
+    # src/api. A gate that scans only one of the two roots picks the
+    # top-level api/ here and misses the violation, so this case is the
+    # one that distinguishes "scans every root" from "scans one root".
+    with sandbox() as root:
+        (root / "api").mkdir(parents=True, exist_ok=True)
+        (root / "api" / "clean.rs").write_text("fn go() {}\n", encoding="utf-8")
+        (root / "src" / "api" / "client.rs").write_text(
+            "fn go() { llm_client.generate(); }\n", encoding="utf-8"
+        )
+        expect_fail(
+            "LLM call boundary violation under src/api while a top-level api/ also exists",
+            root,
+            "llm_client.generate",
+        )
+
+    with sandbox() as root:
+        (root / "api").mkdir(parents=True, exist_ok=True)
+        (root / "api" / "client.rs").write_text(
+            "fn go() { LlmClient::generate(); }\n", encoding="utf-8"
+        )
+        (root / "src" / "api" / "clean.rs").write_text("fn go() {}\n", encoding="utf-8")
+        expect_fail(
+            "LLM call boundary violation under a top-level api/ while src/api also exists",
+            root,
+            "LlmClient::generate",
+        )
+
+    # -- filesystem-level pathologies are reported, not raised ---------------
+    with sandbox() as root:
+        (root / PIN_REL).unlink()
+        (root / PIN_REL).mkdir(parents=True, exist_ok=True)
+        expect_fail(
+            "pin file is a directory",
+            root,
+            "unreadable pin file",
+        )
+
+    with sandbox() as root:
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        pins["files"]["scripts"] = "0" * 64
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2), encoding="utf-8")
+        expect_fail(
+            "pin entry names a directory",
+            root,
+            "unreadable",
+        )
+
+    with sandbox() as root:
+        (root / "src" / "api" / "broken.rs").write_bytes(b"fn go() {}\n\xff\xfe invalid utf-8\n")
+        expect_pass(
+            "source file with invalid UTF-8 does not crash the gate",
+            root,
         )
 
     # -- hosted CI and LFS independence --------------------------------------
