@@ -640,6 +640,17 @@ impl GraphRunStateV1 {
         if declared != s.compute_digest() {
             anyhow::bail!("checkpoint contentDigest does not verify");
         }
+        // Every imported decision is re-verified. The checkpoint digest above
+        // covers the DOCUMENT, not the MEANING of the decisions inside it: a
+        // decision whose identity is a machine actor, or whose own content
+        // digest does not verify, must not become a human decision merely by
+        // being written into the durable registry.
+        for (node, decision) in &s.gate_decisions {
+            crate::workflow::graph_gates::HumanDecisionRecordV1::parse_json(
+                &serde_json::to_string(decision).context("gate decision re-serialize failed")?,
+            )
+            .with_context(|| format!("imported gate decision for node {node:?} does not verify"))?;
+        }
         Ok(s)
     }
 }
@@ -918,6 +929,61 @@ mod tests {
         .to_string();
         let _ = &mut state_json;
         assert!(GraphRunStateV1::import_checkpoint(&state_json, &sample_manifest(), "pd").is_err());
+    }
+
+    #[test]
+    fn imported_gate_decisions_must_verify() {
+        // An imported decision is re-verified: the checkpoint digest covers
+        // the DOCUMENT, not the meaning of the decisions inside it.
+        let m = sample_manifest();
+        let mut run = GraphRunStateV1::open("r", &m, "rev", "pws", "pd", "t0").unwrap();
+        let decision = crate::workflow::graph_gates::HumanDecisionRecordV1::author(
+            "b",
+            crate::workflow::graph_gates::HumanVerdict::Approved,
+            "verified-human",
+            crate::workflow::graph_gates::ReviewChannel::CliInteractive,
+            "d".repeat(64),
+            "evidence reviewed",
+            "2026-08-25T00:00:00Z",
+        )
+        .expect("authored decision");
+        run.gate_decisions.insert("b".to_string(), decision.clone());
+        // Re-seal, exactly as `record_gate_decision` does.
+        run.content_digest = Some(run.compute_digest());
+
+        // Control: a properly authored decision imports.
+        let ckpt = run.export_checkpoint().unwrap();
+        let restored = GraphRunStateV1::import_for_inspection(&ckpt).expect("verifies");
+        assert_eq!(restored.gate_decisions["b"], decision);
+
+        // A machine actor may never author a decision, and a checkpoint that
+        // carries one is refused even though the checkpoint itself is intact.
+        let mut forged = run.clone();
+        let mut machine = decision.clone();
+        machine.decided_by = "model:some-model".into();
+        machine.content_digest = Some(machine.compute_digest());
+        forged.gate_decisions.insert("b".to_string(), machine);
+        forged.content_digest = Some(forged.compute_digest());
+        let forged_ckpt = forged.export_checkpoint().unwrap();
+        let err = GraphRunStateV1::import_for_inspection(&forged_ckpt)
+            .expect_err("a machine-authored decision must not import");
+        assert!(
+            format!("{err:#}").contains("machine actor"),
+            "unexpected error: {err:#}"
+        );
+
+        // A decision whose own content digest no longer matches its content
+        // is refused as well.
+        let mut tampered = run.clone();
+        let mut rewritten = decision;
+        rewritten.reason = "rewritten after the fact".into();
+        tampered.gate_decisions.insert("b".to_string(), rewritten);
+        tampered.content_digest = Some(tampered.compute_digest());
+        let tampered_ckpt = tampered.export_checkpoint().unwrap();
+        assert!(
+            GraphRunStateV1::import_for_inspection(&tampered_ckpt).is_err(),
+            "a decision whose content digest does not verify must not import"
+        );
     }
 
     #[test]

@@ -56,7 +56,10 @@
   target gate, cited evidence digest, rationale, sealed content digest —
   through a compare-and-swap transaction that lands the checkpoint write and
   the journal event together (a failed event write rolls the checkpoint
-  back). Machine actors are refused at authoring and at import; a decision
+  back). Machine actors are refused at authoring AND at import: the
+  checkpoint import re-verifies every decision it carries, so a
+  machine-authored decision cannot become a human decision merely by
+  being written into the durable registry; a decision
   may only target a gate DECLARED by the run's manifest and only against
   evidence still ANCHORED in the run's current state, so a superseded
   artifact makes the recorded decision STALE and returns the gate to
@@ -72,16 +75,17 @@
   THREAD's token on Windows; the EFFECTIVE uid's passwd entry on Unix,
   with a real/effective mismatch refused as privilege escalation)
   cross-checked
-  against the repository's durable trust anchor
+  against the working directory's durable trust anchor
   (`.prometheos/human-principals.json`). When the session identity cannot
   be established, or the anchor does not list it, the decision is REFUSED —
   the runtime never promotes a self-asserted identity to a human one. The
   decision path only ever READS the anchor: it never provisions, repairs,
   or rewrites it, a malformed anchor is refused, and on Unix an anchor
-  other accounts may write is refused outright (on Windows the anchor
-  inherits the working tree's ACLs). The durable journal records the
-  verified principal as `principal.human.identity`, which the schema CHECK
-  ties to the `principal_id` column. Scope of the guarantee, stated
+  file other accounts may write is refused outright (the containing
+  directory's mode is NOT checked - a known limitation; on Windows the
+  anchor inherits the working tree's ACLs). The durable journal records the
+  verified principal as `principal.human.identity`, which a database
+  trigger ties to the `principal_id` column at the insert boundary. Scope of the guarantee, stated
   plainly: this proves WHICH ACCOUNT acted and that the operator
   allowlisted it for this repository — it is NOT human-presence
   verification, and an automated process running under an allowlisted
@@ -94,8 +98,13 @@
   impersonation is named, not detected. On Unix it is the process's
   EFFECTIVE uid. The CLI path now also proves the atomicity and
   concurrency guarantees directly (F2): an aborted journal write rolls
-  the checkpoint back, and two racing decisions leave exactly one decision
-  and one journal event.
+  the checkpoint back, and two racing decisions leave exactly one
+  decision in the registry and one journal event per RECORDED decision
+  (a writer whose read lands after the other's commit legitimately
+  supersedes it, and the loser of a true race fails closed). The API
+  records its route-decision journal event with the caller-supplied
+  `user_id`; it never authors a human gate decision, and a gate can only
+  be routed by a decision the verified CLI path recorded.
 
 
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
