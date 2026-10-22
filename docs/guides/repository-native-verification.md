@@ -64,7 +64,7 @@ Teams may mirror the same command on infrastructure they own, but mirrors do not
 
 ## Repository integrity invariants
 
-The policy gate enforces three more invariants. They are general rules, not signatures of any particular content, and each one fails closed with a message naming what it found. The inputs the gate reads are reported as violations rather than raised as errors: a missing, malformed, non-object, empty, unreadable, or directory-shaped pin file, an unreadable pinned surface, an unreadable or non-UTF-8 source file, and an unreadable vendored file are all named in the message.
+The policy gate enforces three more invariants. They are general rules, not signatures of any particular content, and each one fails closed with a message naming what it found. The inputs the gate reads are reported as violations rather than raised as errors: a missing, malformed, non-object, empty, unreadable, or directory-shaped pin file, an unreadable pinned surface, and an unreadable vendored file are all named in the message. A source file that is not valid UTF-8 is neither raised nor named — it is decoded leniently and scanned, so a violation in it is still reported.
 
 | Invariant | Rule |
 |---|---|
@@ -74,19 +74,20 @@ The policy gate enforces three more invariants. They are general rules, not sign
 
 The gate enforces two further rules that predate these three: hosted-CI / LFS independence (above) and the fallback-confinement / API-LLM-boundary rule, which is documented in `docs/guides/product-surface-inventory.md` and scans every API root that exists, so neither `src/api` nor a top-level `api/` can escape it.
 
-The gate's own behaviour is covered by `python scripts/test_local_ci_policy.py`: 26 checks that run the real gate against throwaway sandboxes — a missing, malformed, non-object, empty, unreadable, and directory-shaped pin file; a changed, deleted, and contaminated pinned surface; a duplicate key in a tracked document, in a document found by the filesystem fallback, and in a newly added fixture; CR bytes in a vendored file; an LLM-call boundary violation under each API root, alone and with both roots present; an unreadable pinned surface; a non-UTF-8 source file; a hosted workflow; and an LFS marker. The script is part of the core suite, so a change to the gate that stops rejecting any of these fails the suite.
+The gate's own behaviour is covered by `python scripts/test_local_ci_policy.py`: 28 checks that run the real gate against throwaway sandboxes — a missing, malformed, non-object, empty, unreadable, and directory-shaped pin file; a changed, deleted, and contaminated pinned surface; a duplicate key in a tracked document, in a document found by the filesystem fallback, and in a newly added fixture; CR bytes in a vendored file; an LLM-call boundary violation under each API root, alone and with both roots present; a fallback-confinement violation outside `src/tools/repo.rs` and the permitted occurrence inside it; an unreadable pinned surface; a non-UTF-8 source file; a hosted workflow; and an LFS marker. The script is part of the core suite, so a change to the gate that stops rejecting any of these fails the suite.
 
 ### Pinned execution surfaces
 
-Pins live in `scripts/reviewed_config_digests.json` and cover the files a build or the verification runner executes. Digests are computed over LF-normalized bytes, so a platform checkout does not change the verdict.
+Pins live in `scripts/reviewed_config_digests.json` and cover the execution surfaces of the repository's own verification, and the toolchain and bundler inputs it builds from. Digests are computed over LF-normalized bytes, so a platform checkout does not change the verdict.
 
-The set covers the surfaces the repository's own verification executes or reads, and the toolchain and bundler inputs it builds from — 23 surfaces in four groups:
+The set covers 25 surfaces in five groups:
 
 | Group | Surfaces |
 |---|---|
-| Verification runner | `scripts/local_ci.py`, `scripts/local_ci_policy.py`, `scripts/review_config_digests.py`, `scripts/test_local_ci_verify.py`, `scripts/test_local_ci_policy.py`, the smoke scripts under `scripts/` and `scripts/demo/` |
+| Verification runner | `scripts/local_ci.py`, `scripts/local_ci_policy.py`, `scripts/review_config_digests.py`, `scripts/test_local_ci_verify.py`, `scripts/test_local_ci_policy.py`, `scripts/fullstack-smoke.sh`, `scripts/test_target_dir.sh`, `scripts/approval-controlled-patch-smoke.sh`, `scripts/provider-governed-proposal-smoke.sh`, `scripts/demo/repo-workbench-first-value.sh`, `scripts/lib/target_dir.sh` |
 | Rust toolchain inputs | `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `clippy.toml` |
 | Frontend bundler inputs | `frontend/package.json`, `frontend/package-lock.json`, `frontend/next.config.js`, `frontend/postcss.config.js`, `frontend/tailwind.config.ts`, `frontend/tsconfig.json`, `frontend/.eslintrc.json`, `frontend/scripts/smoke.mjs` |
+| Runtime configuration read by the smoke chain | `prometheos.config.json` |
 | Repository attributes | `.gitattributes` |
 
 To change a pinned surface deliberately:
