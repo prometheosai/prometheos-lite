@@ -1,5 +1,55 @@
 ## Unreleased
 
+- Repository integrity cleanup: the confirmed `frontend/postcss.config.js`
+  implant is removed again (restored byte-for-byte from the commit that
+  removed it, `1c657d4`), the CRLF churn in the upstream-locked
+  `vendored/soma/v1.1/**` bundle is restored to the byte-exact approved
+  content (all 88 blobs identical to the approved #257 head `16fbba4`),
+  and committed build artifacts and local probing scratch files are
+  removed from the tree. The repository policy gate gains three general
+  invariants — reviewed pins for executable configuration surfaces,
+  duplicate-JSON-key detection over tracked documents, and LF-only
+  fidelity for the whole vendored tree — each of which is a change-review
+  or byte-fidelity rule rather than a content signature, and each of
+  which was negative-probed before landing.
+- Repository policy gate repair, after an independent review of the
+  cleanup above: a missing, malformed, non-object, or empty pin file is
+  now a reported violation instead of an unhandled traceback or a silent
+  pass — an empty pin set can no longer switch the pin invariant off —
+  and the duplicate-key scan now covers every tracked JSON document
+  instead of excluding whole subtrees, with only the three known-invalid
+  fixtures exempt by explicit path. The API LLM boundary now scans every
+  API root that exists, so adding a top-level `api/` directory can no
+  longer silently disable it. The pinned execution surfaces are extended
+  from eight to cover the verification runner's own scripts, the Rust
+  toolchain inputs, and the frontend bundler inputs. A new regression
+  suite, `scripts/test_local_ci_policy.py`, runs the gate against
+  throwaway sandboxes and is part of the core suite, so a gate that stops
+  rejecting any of these inputs fails the suite.
+- Repository policy gate, second repair round, after an independent review
+  of the repair above: the gate's regression suite is now discriminating
+  rather than merely present. The earlier suite exercised only the gate's
+  filesystem-fallback path, while the repository uses the tracked-file
+  path, and its two API-boundary cases never constructed the one
+  configuration that distinguishes "scans every API root" from "scans one"
+  — so reintroducing that defect left the suite green. The sandboxes are
+  now git repositories with their files tracked, both scan paths are
+  covered, and the discriminating case — both API roots present, the
+  violation in `src/api` — is exercised. The gate additionally reports
+  filesystem-level pathologies instead of raising them: a pin file that is
+  a directory, a pin entry naming a directory, an unreadable pinned
+  surface, and an unreadable vendored file. A source file that is not
+  valid UTF-8 is decoded leniently and scanned rather than rejected. The
+  pinned set grows to 25 surfaces, adding `clippy.toml`,
+  `frontend/tsconfig.json`, `frontend/.eslintrc.json`,
+  `scripts/lib/target_dir.sh` — which three pinned smoke scripts source —
+  and `prometheos.config.json`, which the smoke chain reads. The gate's
+  fallback-confinement rule gains regression coverage of its own. The
+  guide now states the gate's fifth rule, the exact shape of its
+  fail-closed behaviour, and three limits that were previously left
+  implicit: the set is curated and not exhaustive, the pin file is not
+  itself pinned, and the gate's own pin is checked by the gate.
+
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state
   over `(WorkflowDefinition, ReviewFacts, policy)` and
