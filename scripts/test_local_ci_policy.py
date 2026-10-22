@@ -334,6 +334,28 @@ def main() -> int:
             root,
         )
 
+    # -- the fallback-confinement half of the boundary rule ------------------
+    with sandbox() as root:
+        (root / "src" / "other.rs").write_text(
+            "fn go() { with_fallback_allowed(); }\n", encoding="utf-8"
+        )
+        expect_fail(
+            "fallback confinement: with_fallback_allowed outside src/tools/repo.rs",
+            root,
+            "with_fallback_allowed",
+        )
+
+    with sandbox() as root:
+        tools = root / "src" / "tools"
+        tools.mkdir(parents=True, exist_ok=True)
+        (tools / "repo.rs").write_text(
+            "fn go() { with_fallback_allowed(); }\n", encoding="utf-8"
+        )
+        expect_pass(
+            "fallback confinement: with_fallback_allowed inside src/tools/repo.rs",
+            root,
+        )
+
     # -- hosted CI and LFS independence --------------------------------------
     with sandbox() as root:
         workflows = root / ".github" / "workflows"
