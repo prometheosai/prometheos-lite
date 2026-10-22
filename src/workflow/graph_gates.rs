@@ -143,6 +143,16 @@ impl HumanDecisionRecordV1 {
         if basis_evidence_digest.len() != 64 {
             anyhow::bail!("gate decision must cite 64-hex basis evidence digest");
         }
+        // #265: the rationale is part of the audit contract, not an optional
+        // annotation. An empty or whitespace-only reason would be sealed into a
+        // durable, content-digested record that reads as though a rationale had
+        // been given. Enforced here, on the record's own authoring path, so the
+        // invariant covers every producer (CLI, API, import rebuild) rather
+        // than only the argument parser.
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            anyhow::bail!("human decision requires a non-empty rationale");
+        }
         Ok(Self {
             schema_version: HUMAN_DECISION_VERSION.into(),
             gate_node_id: gate_node_id.into(),
@@ -150,7 +160,7 @@ impl HumanDecisionRecordV1 {
             decided_by,
             channel,
             basis_evidence_digest,
-            reason: reason.into(),
+            reason,
             recorded_at: recorded_at.into(),
             content_digest: None,
         })
@@ -266,11 +276,11 @@ pub fn is_gate_node(manifest: &GraphManifestV1, node_id: &str) -> bool {
         .any(|n| n.node_id == node_id && n.capability.starts_with(GATE_CAPABILITY_PREFIX))
 }
 
-/// STALENESS ANCHOR (#131): a gate decision is eligible only while the
-/// evidence it cites is still anchored in the run's current state — a live
-/// evidence reference, or the LATEST attempt digest of some node. After a
-/// rework cycle supersedes the reviewed artifact (a newer attempt digest,
-/// a replaced evidence ref), the recorded decision is stale and routing
+/// STALENESS ANCHOR (#131, hardened by #266): a gate decision is eligible only
+/// while the evidence it cites is still anchored in the run's current state — a
+/// CURRENT evidence reference, or the LATEST attempt digest of some node. After
+/// a rework cycle supersedes the reviewed artifact (a newer attempt digest, a
+/// superseded evidence reference), the recorded decision is stale and routing
 /// refuses it: the gate returns to pending for a fresh human decision.
 pub fn decision_basis_is_anchored(
     state: &crate::workflow::graph_state::GraphRunStateV1,
@@ -279,12 +289,49 @@ pub fn decision_basis_is_anchored(
     state
         .evidence_refs
         .iter()
-        .any(|r| r.artifact_digest == basis)
+        .any(|r| r.artifact_digest == basis && evidence_reference_is_current(state, r))
         || state
             .node_attempts
             .values()
             .filter_map(|attempts| attempts.last())
             .any(|latest| latest.result_digest == basis)
+}
+
+/// The run's current frontier identity, computed exactly as a
+/// `replay-authorization` evidence reference computes the digest it stores.
+fn current_frontier_digest(
+    state: &crate::workflow::graph_state::GraphRunStateV1,
+) -> Option<String> {
+    crate::workflow::soma::try_canonical_digest(&serde_json::json!({
+        "runId": state.run_id,
+        "frontier": state.frontier,
+    }))
+    .ok()
+}
+
+/// Whether an evidence reference still describes the run's CURRENT evidence
+/// (#266).
+///
+/// Membership in `evidence_refs` is history, not currency: the vector keeps what
+/// was once true. A `replay-authorization` reference names the frontier that was
+/// reviewed, so it is current only while that frontier is still the run's
+/// frontier. Once the run advances, that reference records a superseded state
+/// and must not keep an approval alive — otherwise an approval outlives the
+/// evidence it cites.
+///
+/// Other kinds are removed from the vector when they are superseded: a
+/// `suspension-point` reference is dropped on resume, so membership is currency
+/// for it. A future kind that accumulates instead of being removed must add its
+/// own currency rule here rather than inheriting historical membership.
+fn evidence_reference_is_current(
+    state: &crate::workflow::graph_state::GraphRunStateV1,
+    reference: &crate::workflow::memory_contracts::EvidenceReferenceV1,
+) -> bool {
+    match reference.artifact_kind.as_str() {
+        "replay-authorization" => current_frontier_digest(state)
+            .is_some_and(|current| current == reference.artifact_digest),
+        _ => true,
+    }
 }
 
 /// Compute the gate-filtered decision for `from_node`.
@@ -731,6 +778,148 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("stale"), "{err}");
+    }
+
+    /// A replay-authorization reference exactly as production writes it
+    /// (`src/workflow/graph_resume.rs`): the artifact digest is the reviewed
+    /// frontier, and the id is stable per authorizer, so a later replay appends
+    /// a second reference without removing the first.
+    fn replay_authorization_ref(
+        authorizer: &str,
+        run_id: &str,
+        frontier: &[&str],
+        reason: &str,
+    ) -> (
+        String,
+        crate::workflow::memory_contracts::EvidenceReferenceV1,
+    ) {
+        let auth_digest = crate::workflow::soma::try_canonical_digest(&serde_json::json!({
+            "kind": "replay-authorization",
+            "authorizedBy": authorizer,
+            "reason": reason,
+        }))
+        .expect("auth digest");
+        let frontier_digest = crate::workflow::soma::try_canonical_digest(&serde_json::json!({
+            "runId": run_id,
+            "frontier": frontier,
+        }))
+        .expect("frontier digest");
+        (
+            frontier_digest.clone(),
+            crate::workflow::memory_contracts::EvidenceReferenceV1 {
+                id: format!("replay-auth:{authorizer}"),
+                event_digest: auth_digest,
+                artifact_digest: frontier_digest,
+                artifact_kind: "replay-authorization".into(),
+                produced_by: authorizer.into(),
+                produced_at: Some("resume-replay".into()),
+            },
+        )
+    }
+
+    /// #266: the staleness rule must track the CURRENT evidence, not historical
+    /// membership. This exercises the production shape — the superseding
+    /// reference is APPENDED and the earlier one is deliberately retained — so
+    /// the test fails if the rule regresses to "any digest ever seen". Replacing
+    /// the vector instead would hide exactly the defect being repaired.
+    #[test]
+    fn a_superseded_replay_authorization_does_not_keep_an_approval_alive() {
+        let m = gate_manifest();
+        let mut s =
+            crate::workflow::graph_state::GraphRunStateV1::open("r", &m, "rev", "pws", "pd", "t0")
+                .unwrap();
+        complete(&mut s, "build");
+        s.frontier = vec!["review".to_string()];
+        let run_id = s.run_id.clone();
+
+        // 1. A replay-authorization reference for the reviewed frontier.
+        let (frontier_a, ref_a) = replay_authorization_ref("diego", &run_id, &["review"], "replay");
+        s.evidence_refs.push(ref_a);
+
+        // 2. A decision based on that frontier routes.
+        record_gate_decision(
+            &mut s,
+            &m,
+            human_decision_on(HumanVerdict::Approved, &frontier_a),
+        )
+        .unwrap();
+        let d = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .expect("the reviewed frontier authorizes routing");
+        assert_eq!(d.to_node, "merge");
+
+        // 3. The run advances: a second reference is appended for the new
+        //    frontier, and the earlier one is NOT removed.
+        let (frontier_b, ref_b) = replay_authorization_ref("diego", &run_id, &["merge"], "replay");
+        s.evidence_refs.push(ref_b);
+        s.frontier = vec!["merge".to_string()];
+        assert!(
+            s.evidence_refs
+                .iter()
+                .any(|r| r.artifact_digest == frontier_a),
+            "the superseded reference is deliberately retained (production shape)"
+        );
+
+        // 4. The decision based on the superseded frontier no longer authorizes.
+        let err = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("stale"), "{err}");
+
+        // 5. A decision based on the current frontier proceeds.
+        record_gate_decision(
+            &mut s,
+            &m,
+            human_decision_on(HumanVerdict::Approved, &frontier_b),
+        )
+        .unwrap();
+        let d = route_after_gate(
+            &s,
+            &m,
+            ExecutionLimits::default(),
+            "review",
+            OutcomeCategory::Completed,
+            "t",
+        )
+        .expect("the current frontier authorizes routing");
+        assert_eq!(d.to_node, "merge");
+    }
+
+    /// #265: a rationale-free decision must not be sealable at all, and the
+    /// refusal must live on the record's authoring path so a non-CLI producer
+    /// cannot bypass it.
+    #[test]
+    fn a_decision_without_a_rationale_cannot_be_authored() {
+        for reason in ["", "   ", "\n\t ", " \r\n "] {
+            let err = HumanDecisionRecordV1::author(
+                "review",
+                HumanVerdict::Approved,
+                "diego",
+                ReviewChannel::CliInteractive,
+                "a".repeat(64),
+                reason,
+                "2026-08-25T00:00:00Z",
+            )
+            .expect_err("a rationale-free decision must be refused");
+            assert!(err.to_string().contains("rationale"), "{err}");
+        }
+
+        // A real rationale is unaffected.
+        let ok = human_decision_on(HumanVerdict::Approved, &"a".repeat(64));
+        assert!(ok.content_digest.is_some(), "a real decision still seals");
     }
 
     #[test]

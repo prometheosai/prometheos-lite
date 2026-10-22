@@ -298,7 +298,11 @@ mod platform {
                 );
             }
         }
-        let users = sysinfo::Users::new();
+        // The user list must be POPULATED before it can be searched: in
+        // sysinfo 0.30, `Users::new()` is an empty collection and
+        // `get_user_by_id` is a scan of it, so an unrefreshed list makes the
+        // passwd lookup fail for every uid (#264).
+        let users = sysinfo::Users::new_with_refreshed_list();
         let user = users.get_user_by_id(effective).ok_or_else(|| {
             anyhow::anyhow!(
                 "the operating system did not report a passwd entry for this session's effective uid"
