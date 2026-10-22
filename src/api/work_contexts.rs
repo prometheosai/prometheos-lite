@@ -937,6 +937,36 @@ async fn execute_decide_transaction(
             serde_json::from_value(req.decision)
                 .map_err(|e| anyhow::anyhow!("decision is not RouteDecisionV1-shaped: {e}"))?;
 
+        // AUTHORITY CONFORMANCE (#131): a route that LEAVES a human gate
+        // must be the route the gate's recorded verdict authorizes. A
+        // journaled basis alone is not authority: without this check a
+        // caller could drive a gate down ANY declared edge (e.g. route a
+        // gate on its `rejected` edge while the recorded verdict is
+        // `approved`). Non-gate routes are unchanged.
+        if crate::workflow::graph_gates::is_gate_node(&manifest, &decision.from_node) {
+            let authorized = crate::workflow::graph_gates::route_after_gate(
+                &state,
+                &manifest,
+                crate::workflow::graph_exec::ExecutionLimits::default(),
+                &decision.from_node,
+                crate::workflow::graph_state::OutcomeCategory::Completed,
+                decision.recorded_at.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("gate route not authorized: {e}"))?;
+            if authorized.to_node != decision.to_node
+                || authorized.condition_label != decision.condition_label
+                || authorized.basis_result_digest != decision.basis_result_digest
+            {
+                anyhow::bail!(
+                    "gate route not authorized: verdict permits '{}' ({:?}), decision routes to '{}' ({:?})",
+                    authorized.to_node,
+                    authorized.condition_label,
+                    decision.to_node,
+                    decision.condition_label
+                );
+            }
+        }
+
         state
             .record_route_decision(decision, &manifest)
             .map_err(|e| anyhow::anyhow!("decision rejected: {e}"))?;
@@ -995,6 +1025,8 @@ async fn execute_decide_transaction(
             || msg.contains("rejected")
             || msg.contains("tampered")
             || msg.contains("raced")
+            || msg.contains("not authorized")
+            || msg.contains("pending")
         {
             ApiError::Conflict(msg)
         } else if msg.contains("manifest")

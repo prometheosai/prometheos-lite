@@ -9,7 +9,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use prometheos_lite::db::Db;
@@ -17,6 +17,8 @@ use prometheos_lite::flow::RuntimeContext;
 use prometheos_lite::flow::execution_service::FlowExecutionService;
 use prometheos_lite::intent::IntentClassifier;
 use prometheos_lite::repo_workbench;
+
+use crate::cli::commands::graph_runs;
 use prometheos_lite::work::{
     ExecutionLimits, JournalContext, PlaybookResolver, WorkContextService, WorkOrchestrator,
     evolution_engine::EvolutionEngine,
@@ -144,6 +146,65 @@ enum WorkSubcommand {
         /// Output as a single JSON document
         #[arg(long)]
         json: bool,
+    },
+    /// List the governed graph runs registered for a WorkContext.
+    Runs {
+        /// WorkContext ID
+        id: String,
+        /// Output as a single JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a governed graph run: frontier, node attempts, route
+    /// history, human gate decisions, and evidence references.
+    /// Read-only: does not mutate any state.
+    InspectRun {
+        /// WorkContext ID
+        id: String,
+        /// Graph run ID
+        #[arg(long)]
+        run: String,
+        /// Path to the run's graph manifest (JSON). Supplying it verifies
+        /// the run's manifest binding; without it the binding is reported
+        /// as unverified.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Output as a single JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record a human gate decision on a governed graph run:
+    /// approve, reject, or request changes. The decision records the
+    /// actor, timestamp, target gate, cited evidence, and rationale, and
+    /// is sealed into the run's checkpoint.
+    ///
+    /// The actor is NOT a command-line argument: it is the VERIFIED human
+    /// principal for this session (the OS account running this process,
+    /// listed in the working directory's `.prometheos/human-principals.json`
+    /// trust anchor). The command refuses when that principal cannot be
+    /// verified.
+    Decide {
+        /// WorkContext ID
+        id: String,
+        /// Graph run ID
+        #[arg(long)]
+        run: String,
+        /// Gate node to decide on
+        #[arg(long)]
+        gate: String,
+        /// Verdict: approve, reject, or request-changes
+        #[arg(long)]
+        verdict: String,
+        /// Digest (64-hex) of the evidence the human reviewed
+        #[arg(long)]
+        basis: String,
+        /// Rationale for the decision
+        #[arg(long)]
+        reason: String,
+        /// Path to the run's graph manifest (JSON) — required: the gate
+        /// must be a declared gate of this manifest
+        #[arg(long)]
+        manifest: PathBuf,
     },
     /// Inspect persisted Repo Workbench memory
     Memory {
@@ -578,6 +639,84 @@ impl WorkCommand {
                 } else {
                     print_inspect_report_text(&report);
                 }
+            }
+            WorkSubcommand::Runs { id, json } => {
+                // E6/I02 Slice B: the graph-run listing. Read-only.
+                let runs = graph_runs::list_runs(&db, "cli-user", &id)?;
+                if json {
+                    let payload: Vec<serde_json::Value> = runs
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "workContextId": r.work_context_id,
+                                "graphRunId": r.graph_run_id,
+                                "checkpointDigest": r.checkpoint_digest,
+                                "createdAt": r.created_at,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else if runs.is_empty() {
+                    println!("No graph runs registered for work context {}", id);
+                } else {
+                    println!("Graph runs for work context {}:", id);
+                    for r in &runs {
+                        println!("  {}", r.graph_run_id);
+                        println!("    checkpoint digest: {}", r.checkpoint_digest);
+                        println!("    registered at:     {}", r.created_at);
+                    }
+                }
+            }
+            WorkSubcommand::InspectRun {
+                id,
+                run,
+                manifest,
+                json,
+            } => {
+                // E6/I02 Slice B: the graph-run inspector. Read-only: it
+                // never mutates the checkpoint registry.
+                let manifest = match manifest {
+                    Some(path) => Some(graph_runs::load_manifest(&path)?),
+                    None => None,
+                };
+                let report =
+                    graph_runs::inspect_run(&db, "cli-user", &id, &run, manifest.as_ref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    graph_runs::print_inspection_text(&report);
+                }
+            }
+            WorkSubcommand::Decide {
+                id,
+                run,
+                gate,
+                verdict,
+                basis,
+                reason,
+                manifest,
+            } => {
+                // E6/I02 Slice B: the human decision interface. The
+                // decision is recorded as a durable, sealed
+                // HumanDecisionRecordV1 inside the run's checkpoint.
+                //
+                // The actor is the VERIFIED human principal for this
+                // session — established from the OS account running this
+                // process and the repository's trust anchor. There is no
+                // flag to assert an identity: an unverifiable principal
+                // refuses the decision. It is resolved FIRST: an
+                // unverifiable principal must not cause any other work.
+                let principal = graph_runs::resolve_human_principal(Path::new("."))?;
+                let context = work_context_service
+                    .get_context(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("work context '{id}' not found"))?;
+                let manifest = graph_runs::load_manifest(&manifest)?;
+                let verdict = graph_runs::parse_verdict(&verdict)?;
+                let outcome = graph_runs::decide_run(
+                    &db, &context, "cli-user", &run, &manifest, &gate, verdict, &principal, &basis,
+                    &reason,
+                )?;
+                graph_runs::print_decision_text(&outcome);
             }
             WorkSubcommand::Memory { command } => match command {
                 MemorySubcommand::Show { id } => {

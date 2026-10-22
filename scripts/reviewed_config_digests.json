@@ -5,7 +5,7 @@
     ".cargo/config.toml": "c75eda3bf5bf8944eeeb48670ea59c816435f3f55cb0433744e26e7c3d855426",
     ".gitattributes": "7122067052549dc8c43dbc593b25ab0d6d1bb68ae168e63f4a8dcfad28437eda",
     "Cargo.lock": "bfd5092d58e24313c81796a5446282cf5a3c0cb5af552c560afaefcd6a428eae",
-    "Cargo.toml": "cde045dbe4bd7b70eeb8934de1c62600c5a120877cd05819a6906eb783e061a4",
+    "Cargo.toml": "432990f4b7e8b7efdb631da04803664d5ec34d05dbbfbdc3dbd221d103b03b75",
     "clippy.toml": "34fe5d6236ee0e8df00792d5e11a8e5c96c01143593e100626a5d63398cf006a",
     "frontend/.eslintrc.json": "1589a15e55fbebc6519c95d91d8f0a090618f20dc78e479858b9c27552484961",
     "frontend/next.config.js": "660f78af355945be56f482c9b697e4892d2ee7da261c8743e75a1c95d3c72c73",

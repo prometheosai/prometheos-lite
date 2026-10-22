@@ -16,8 +16,11 @@ use tower::ServiceExt;
 
 use prometheos_lite::db::Db;
 use prometheos_lite::db::repository::graph_checkpoints::{get_checkpoint, upsert_checkpoint};
+use prometheos_lite::workflow::graph_gates::{
+    HumanDecisionRecordV1, HumanVerdict, ReviewChannel, record_gate_decision,
+};
 use prometheos_lite::workflow::graph_state::{
-    GraphManifestV1, GraphRunStateV1, NodeAttemptRecordV1, OutcomeCategory,
+    GraphManifestV1, GraphRunStateV1, NodeAttemptRecordV1, OutcomeCategory, RouteDecisionV1,
 };
 
 const PORTABLE_DIGEST: &str = "2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -584,6 +587,190 @@ async fn unjournaled_basis_results_in_conflict() {
     )
     .await;
     assert_eq!(status, 409);
+}
+
+/// A gate manifest: build -> review (human gate) -> merge | rejected-terminal.
+fn gate_manifest() -> GraphManifestV1 {
+    use prometheos_lite::workflow::graph_state::{EdgeKind, GraphEdgeV1, GraphNodeV1};
+
+    GraphManifestV1 {
+        schema_version: "1.0.0".into(),
+        graph_id: "gated".into(),
+        version: "1.0.0".into(),
+        nodes: vec![
+            GraphNodeV1 {
+                node_id: "build".into(),
+                capability: "cap.build".into(),
+                purpose: None,
+                resources: Vec::new(),
+                join: None,
+            },
+            GraphNodeV1 {
+                node_id: "review".into(),
+                capability: "gate.human".into(),
+                purpose: None,
+                resources: Vec::new(),
+                join: None,
+            },
+            GraphNodeV1 {
+                node_id: "merge".into(),
+                capability: "cap.merge".into(),
+                purpose: None,
+                resources: Vec::new(),
+                join: None,
+            },
+            GraphNodeV1 {
+                node_id: "rejected-terminal".into(),
+                capability: "cap.rejected".into(),
+                purpose: None,
+                resources: Vec::new(),
+                join: None,
+            },
+        ],
+        edges: vec![
+            GraphEdgeV1 {
+                from: "build".into(),
+                to: "review".into(),
+                kind: EdgeKind::Sequence,
+                condition_label: None,
+            },
+            GraphEdgeV1 {
+                from: "review".into(),
+                to: "merge".into(),
+                kind: EdgeKind::Conditional,
+                condition_label: Some("approved".into()),
+            },
+            GraphEdgeV1 {
+                from: "review".into(),
+                to: "rejected-terminal".into(),
+                kind: EdgeKind::Conditional,
+                condition_label: Some("rejected".into()),
+            },
+        ],
+        entry_points: vec!["build".into()],
+        terminal_exits: vec!["rejected-terminal".into()],
+        shared_state_keys: Vec::new(),
+        policy_digest: None,
+        content_digest: Some(String::new()),
+    }
+    .sealed()
+}
+
+/// A run that reached its gate with a durable `approved` human decision.
+/// Returns the manifest, the checkpoint blob, and the decision's digest.
+fn gated_checkpoint(run_id: &str) -> (GraphManifestV1, String, String) {
+    let manifest = gate_manifest();
+    let mut state = GraphRunStateV1::open(
+        run_id,
+        &manifest,
+        "revision-1",
+        "pws",
+        PORTABLE_DIGEST,
+        "2026-01-01T00:00:00Z",
+    )
+    .expect("open run");
+
+    state
+        .apply_node_completion(
+            "build",
+            NodeAttemptRecordV1 {
+                attempt: 1,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                completed_at: Some("2026-01-01T00:00:01Z".into()),
+                outcome: OutcomeCategory::Completed,
+                result_digest: "d".repeat(64),
+            },
+            "2026-01-01T00:00:01Z",
+        )
+        .expect("journaled completion");
+    state
+        .record_route_decision(
+            RouteDecisionV1 {
+                recorded_at: "2026-01-01T00:00:02Z".into(),
+                from_node: "build".into(),
+                to_node: "review".into(),
+                condition_label: None,
+                basis_result_digest: "d".repeat(64),
+            },
+            &manifest,
+        )
+        .expect("routed to the gate");
+
+    let decision = HumanDecisionRecordV1::author(
+        "review",
+        HumanVerdict::Approved,
+        "diego",
+        ReviewChannel::CliInteractive,
+        "d".repeat(64),
+        "ship it",
+        "2026-01-01T00:00:03Z",
+    )
+    .expect("author decision");
+    let decision_digest = decision.content_digest.clone().expect("sealed digest");
+    record_gate_decision(&mut state, &manifest, decision).expect("record decision");
+
+    (
+        manifest,
+        state.export_checkpoint().expect("checkpoint"),
+        decision_digest,
+    )
+}
+
+/// #131 acceptance: the interface cannot bypass authority policy. A route
+/// that leaves a human gate must be the route the gate's recorded verdict
+/// authorizes — a journaled basis alone is not authority.
+#[tokio::test]
+async fn gate_route_must_match_the_recorded_verdict() {
+    let (state, db_path, _dir) = test_app_state();
+    let app = prometheos_lite::api::router::create_router(state);
+    let ctx = create_context(&app, "owner", "t9").await;
+    let (manifest, blob, decision_digest) = gated_checkpoint("run-1");
+    let db = Db::new(&db_path).expect("db");
+    upsert_checkpoint(&db, "owner", &ctx, "run-1", &blob).expect("seed checkpoint");
+
+    // HOSTILE: the recorded verdict is `approved`, but the request routes
+    // the gate down its `rejected` edge. The edge exists and the basis is
+    // journaled — only the verdict forbids it. Must be refused.
+    let (status, body) = decide(
+        &app,
+        "owner",
+        &ctx,
+        "run-1",
+        &manifest,
+        serde_json::json!({
+            "recordedAt": "2026-01-01T00:00:04Z",
+            "fromNode": "review",
+            "toNode": "rejected-terminal",
+            "conditionLabel": "rejected",
+            "basisResultDigest": decision_digest.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 409,
+        "hostile gate route must be refused: status {status}, body {body:?}"
+    );
+
+    // AUTHORIZED: the verdict-permitted route lands.
+    let (status, body) = decide(
+        &app,
+        "owner",
+        &ctx,
+        "run-1",
+        &manifest,
+        serde_json::json!({
+            "recordedAt": "2026-01-01T00:00:05Z",
+            "fromNode": "review",
+            "toNode": "merge",
+            "conditionLabel": "approved",
+            "basisResultDigest": decision_digest,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "verdict-authorized gate route must land: status {status}, body {body:?}"
+    );
 }
 
 #[tokio::test]

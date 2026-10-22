@@ -58,7 +58,10 @@ dotenv = "0.15"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "minwinbase", "jobapi2", "processthreadsapi", "winnt", "handleapi", "tlhelp32"] }
+# "winbase" adds GetUserNameW: the OS-authenticated session identity used to
+# verify the human principal behind a gate decision (#131 F1). Same crate,
+# no new dependency — one more API surface of the already-vendored winapi.
+winapi = { version = "0.3", features = ["fileapi", "minwinbase", "jobapi2", "processthreadsapi", "winnt", "handleapi", "tlhelp32", "winbase"] }
 
 [dev-dependencies]
 tempfile = "3"

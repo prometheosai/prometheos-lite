@@ -207,6 +207,81 @@ mod cli_contract_tests {
     }
 
     #[test]
+    fn cli_parses_graph_run_inspection_and_decision() {
+        // E6/I02 Slice B: the graph-run inspector and the human decision
+        // interface. Both are terminal-first: everything the web interface
+        // would show is available here.
+        let cli1 = parse(&["work", "runs", "wf-1"]).expect("work runs wf-1 must parse");
+        let _ = cli1;
+        let cli2 = parse(&["work", "inspect-run", "wf-1", "--run", "run-1"])
+            .expect("work inspect-run wf-1 --run run-1 must parse");
+        let _ = cli2;
+        let cli3 = parse(&[
+            "work",
+            "inspect-run",
+            "wf-1",
+            "--run",
+            "run-1",
+            "--manifest",
+            "graph.json",
+            "--json",
+        ])
+        .expect("work inspect-run with manifest must parse");
+        let _ = cli3;
+        let cli4 = parse(&[
+            "work",
+            "decide",
+            "wf-1",
+            "--run",
+            "run-1",
+            "--gate",
+            "review",
+            "--verdict",
+            "approve",
+            "--basis",
+            "aa",
+            "--reason",
+            "looks good",
+            "--manifest",
+            "graph.json",
+        ])
+        .expect("work decide must parse");
+        let _ = cli4;
+    }
+
+    #[test]
+    fn cli_work_decide_takes_no_caller_supplied_actor() {
+        // #131 F1: the human actor is a VERIFIED principal, never a
+        // caller-supplied label. There must be no way to name another
+        // human (or a machine) on the command line.
+        let err = parse(&[
+            "work",
+            "decide",
+            "wf-1",
+            "--run",
+            "run-1",
+            "--gate",
+            "review",
+            "--verdict",
+            "approve",
+            "--actor",
+            "someone-else",
+            "--basis",
+            "aa",
+            "--reason",
+            "looks good",
+            "--manifest",
+            "graph.json",
+        ])
+        .expect_err("an --actor flag must not exist");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected") || msg.contains("invalid") || msg.contains("unknown"),
+            "expected clap to reject the unknown --actor flag, got: {msg}"
+        );
+    }
+
+    #[test]
     fn cli_rejects_unknown_subcommand() {
         let err = parse(&["flow", "frobnicate"]).expect_err("parse must fail");
         let msg = err.to_string();
