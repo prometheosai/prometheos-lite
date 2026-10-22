@@ -180,7 +180,7 @@ enum WorkSubcommand {
     ///
     /// The actor is NOT a command-line argument: it is the VERIFIED human
     /// principal for this session (the OS account running this process,
-    /// listed in the repository's `.prometheos/human-principals.json`
+    /// listed in the working directory's `.prometheos/human-principals.json`
     /// trust anchor). The command refuses when that principal cannot be
     /// verified.
     Decide {

@@ -40,6 +40,7 @@ prometheos-output/
 .prometheos/checkpoints/
 .prometheos/runs.db-wal
 .prometheos/runs.db-shm
+.prometheos/runs.db-journal
 .prometheos/diagnostics/
 # Local human-principal trust anchor (#131 F1): names the account allowed to
 # record human gate decisions on this machine. Local by design, never shared.
