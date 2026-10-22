@@ -15,14 +15,16 @@
     "frontend/scripts/smoke.mjs": "24397b73ad6ca39ac52e3f64072f763c6bca0330a5b886e221d9b0b082a73ccf",
     "frontend/tailwind.config.ts": "44dbf8c169128f470ea6b932ac18176bc3ca50119a226a1938b3d85d951abc5c",
     "frontend/tsconfig.json": "e19e9f2855c4be80fc67fd51ba0f4026c997c299e37ee43ba087c5a1785afac9",
+    "prometheos.config.json": "6d66eb5f4c2060c9eeefc0aba1a5a8b505a0d62e245cde231c36d7025a772b79",
     "scripts/approval-controlled-patch-smoke.sh": "bcec6f4cf1e53a125593677cd39726bde80fb9347e04a4538321b3e29d24b5ce",
     "scripts/demo/repo-workbench-first-value.sh": "19ead1654c8a8aef5272889424520d79800e9e6b7d70a46197060b8d64598af6",
     "scripts/fullstack-smoke.sh": "f6905fa1c1e960635203ec422bfff7924756c5711f923350233706883d25e74d",
+    "scripts/lib/target_dir.sh": "5d8375407b79e65e4a2961c817dd9ddbc0ec58e2d6736b072780ab09c508e8ff",
     "scripts/local_ci.py": "af3ea0c9b64cda15aef0706f636af92e8de0c4b50c8b421934a7a8bf2dc48ff0",
     "scripts/local_ci_policy.py": "cf2c98f08ac3f05d4600a1a7385ecdc5254b9cee8143add6fbb817c8e9a42b77",
     "scripts/provider-governed-proposal-smoke.sh": "c6d0f4b0605f36d7117bda2f10a5e893b900f392aae3310f209ebd3211e715b1",
     "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4",
-    "scripts/test_local_ci_policy.py": "0eefefbad81ad4c33604ac2a1ef635c8391f1ef3c9fae22a3f8a71d19a67240c",
+    "scripts/test_local_ci_policy.py": "a28e4113e17de7aced856a02d57b0a9ec9e76a619b155f9ee26fc1fb5be4989f",
     "scripts/test_local_ci_verify.py": "5b3b0c819fae21c14537124184307eb5a7cd796a000aaf3dcb33c31f72b1f9e7",
     "scripts/test_target_dir.sh": "96d52788f9104712496abd956bd336158c8c8dba38bfc8b4bfbb7ccf2cd63adb"
   }

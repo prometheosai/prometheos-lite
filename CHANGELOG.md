@@ -38,13 +38,17 @@
   violation in `src/api` — is exercised. The gate additionally reports
   filesystem-level pathologies instead of raising them: a pin file that is
   a directory, a pin entry naming a directory, an unreadable pinned
-  surface, an unreadable vendored file, and a source file that is not
-  valid UTF-8. The pinned set grows to 23 surfaces, adding `clippy.toml`,
-  `frontend/tsconfig.json` and `frontend/.eslintrc.json`. The guide now
-  states the gate's fifth rule, the exact shape of its fail-closed
-  behaviour, and three limits that were previously left implicit: the set
-  is curated and not exhaustive, the pin file is not itself pinned, and
-  the gate's own pin is checked by the gate.
+  surface, and an unreadable vendored file. A source file that is not
+  valid UTF-8 is decoded leniently and scanned rather than rejected. The
+  pinned set grows to 25 surfaces, adding `clippy.toml`,
+  `frontend/tsconfig.json`, `frontend/.eslintrc.json`,
+  `scripts/lib/target_dir.sh` — which three pinned smoke scripts source —
+  and `prometheos.config.json`, which the smoke chain reads. The gate's
+  fallback-confinement rule gains regression coverage of its own. The
+  guide now states the gate's fifth rule, the exact shape of its
+  fail-closed behaviour, and three limits that were previously left
+  implicit: the set is curated and not exhaustive, the pin file is not
+  itself pinned, and the gate's own pin is checked by the gate.
 
 - #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state
