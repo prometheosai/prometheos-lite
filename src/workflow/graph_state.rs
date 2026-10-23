@@ -645,11 +645,25 @@ impl GraphRunStateV1 {
         // decision whose identity is a machine actor, or whose own content
         // digest does not verify, must not become a human decision merely by
         // being written into the durable registry.
+        //
+        // The same reasoning applies to gate IDENTITY (#262): a decision
+        // authored for gate A must not become gate B's verdict by being stored
+        // under B's map key. The routing consumer (`route_after_gate`) reads
+        // `gate_decisions` by key and never compares the key with the record's
+        // own `gate_node_id`, so the identity invariant is enforced HERE, at
+        // the import boundary, and every importer inherits it.
         for (node, decision) in &s.gate_decisions {
-            crate::workflow::graph_gates::HumanDecisionRecordV1::parse_json(
+            let record = crate::workflow::graph_gates::HumanDecisionRecordV1::parse_json(
                 &serde_json::to_string(decision).context("gate decision re-serialize failed")?,
             )
             .with_context(|| format!("imported gate decision for node {node:?} does not verify"))?;
+            if record.gate_node_id != *node {
+                anyhow::bail!(
+                    "imported gate decision identity mismatch: record declares gate_node_id {:?} but is stored under map key {:?}",
+                    record.gate_node_id,
+                    node
+                );
+            }
         }
         Ok(s)
     }
@@ -984,6 +998,58 @@ mod tests {
             GraphRunStateV1::import_for_inspection(&tampered_ckpt).is_err(),
             "a decision whose content digest does not verify must not import"
         );
+    }
+
+    #[test]
+    fn imported_gate_decisions_must_match_their_map_key() {
+        // #262: the checkpoint digest covers the document, not the meaning;
+        // a decision authored for gate A must not become gate B's verdict by
+        // being stored under gate B's map key. The routing consumer
+        // (`route_after_gate`) reads `gate_decisions` by key and never
+        // compares the key with the record's own `gate_node_id`, so the
+        // identity invariant is enforced here at the import boundary.
+        let m = sample_manifest();
+        let mut run = GraphRunStateV1::open("r", &m, "rev", "pws", "pd", "t0").unwrap();
+        let authored = crate::workflow::graph_gates::HumanDecisionRecordV1::author(
+            "a",
+            crate::workflow::graph_gates::HumanVerdict::Approved,
+            "verified-human",
+            crate::workflow::graph_gates::ReviewChannel::CliInteractive,
+            "d".repeat(64),
+            "evidence reviewed",
+            "2026-08-25T00:00:00Z",
+        )
+        .expect("authored decision");
+
+        // Control: a matching pair (key == gate_node_id) still imports, and
+        // `import_checkpoint` - which delegates here - inherits it.
+        run.gate_decisions.insert("a".to_string(), authored.clone());
+        run.content_digest = Some(run.compute_digest());
+        let ckpt = run.export_checkpoint().unwrap();
+        let restored =
+            GraphRunStateV1::import_for_inspection(&ckpt).expect("a matching pair imports");
+        assert_eq!(restored.gate_decisions["a"].gate_node_id, "a");
+        GraphRunStateV1::import_checkpoint(&ckpt, &m, "pd").expect("full import also passes");
+
+        // Discriminating case: the very same decision stored under a
+        // DIFFERENT key, with the whole checkpoint re-sealed so only the
+        // identity axis can fail. The decision's own content digest still
+        // verifies, so the refusal below is the identity invariant, not the
+        // digest - the test fails if the enforcement above is removed.
+        let mut mismatched = run.clone();
+        mismatched.gate_decisions.remove("a");
+        mismatched.gate_decisions.insert("b".to_string(), authored);
+        mismatched.content_digest = Some(mismatched.compute_digest());
+        let mismatched_ckpt = mismatched.export_checkpoint().unwrap();
+        let err = GraphRunStateV1::import_for_inspection(&mismatched_ckpt)
+            .expect_err("a decision stored under another gate's key must not import");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("identity mismatch") && msg.contains("gate_node_id"),
+            "expected the identity refusal, got: {msg}"
+        );
+        // The full import path refuses as well.
+        assert!(GraphRunStateV1::import_checkpoint(&mismatched_ckpt, &m, "pd").is_err());
     }
 
     #[test]
