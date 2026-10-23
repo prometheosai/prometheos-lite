@@ -702,7 +702,7 @@ impl WorkCommand {
                 //
                 // The actor is the VERIFIED human principal for this
                 // session — established from the OS account running this
-                // process and the repository's trust anchor. There is no
+                // process and the working directory's trust anchor. There is no
                 // flag to assert an identity: an unverifiable principal
                 // refuses the decision. It is resolved FIRST: an
                 // unverifiable principal must not cause any other work.
