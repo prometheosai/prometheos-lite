@@ -1,5 +1,37 @@
 ## Unreleased
 
+- #154 E6/I07 Slice A — the governed execution-harness seam and its
+  conformance foundation. `lite.harness.v1`
+  (`src/workflow/execution_harness.rs`) defines a sealed,
+  implementation-owned `HarnessDeclarationV1` (identity + revision, closed
+  adapter family, declared/claimed capabilities, SPEC 007
+  `RuntimeCapabilitySet`) whose only effect path is `HarnessDispatch::call`:
+  the caller fixes the manifest, local restrictions and known secrets, the
+  adapter chooses only among its DECLARED capabilities, and the call lands in
+  the governed `NodeRunner` nine-gate pipeline — an adapter cannot reach an
+  effect around #117/#118, and an undeclared capability is refused before the
+  runner or its journal is touched. Checkpoints carry a PORTABLE state digest
+  only (never process/PTY/chat state), and resume refuses a checkpoint that
+  does not bind the same harness, revision and portable state. A
+  declaration-driven `HarnessRegistry` generates the catalogue
+  (`HarnessCatalog`, entries ordered by id, digest-sealed), so there is no
+  separate catalogue file to drift, and duplicate or unsealed declarations
+  are refused at registration. The reusable conformance kit
+  (`HCONF-0001…0024`) EXECUTES the adapter rather than only reading its
+  declaration, and proves declaration/behaviour agreement (a declared
+  `checkpointExport` must export; a declared resume must resume). Two
+  distinct in-repo implementations — an in-process `native` worker and a
+  `protocol-bridged` scripted worker — pass it in
+  `tests/execution_harness_conformance.rs`. No concrete external adapter
+  (Claude Code, Codex, Goose, …) and no transport is claimed; real adapter
+  families and harness selection (#133) remain follow-ups.
+- Documentation correction, recorded rather than amended: PR #268
+  (`ee908f5`, merged after #259) closed the three gate-authority gaps found
+  by the #259 review — authored-path refusal for human gate decisions, the
+  `replay-authorization` current-frontier currency rule, and import-time
+  fail-closed re-verification — but landed without a CHANGELOG entry. This
+  note is the missing historical record; the merged history is unchanged.
+
 - Repository integrity cleanup: the confirmed `frontend/postcss.config.js`
   implant is removed again (restored byte-for-byte from the commit that
   removed it, `1c657d4`), the CRLF churn in the upstream-locked
