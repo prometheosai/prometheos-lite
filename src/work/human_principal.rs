@@ -285,25 +285,32 @@ mod platform {
     /// When it differs from the real uid the process runs with
     /// privileges the allowlisted human does not hold (a privilege
     /// escalation); that is REFUSED rather than reported as the human.
+    ///
+    /// Platform facts (#264): the process's uids are read from the POSIX
+    /// source via libc (`geteuid`/`getuid`) — sysinfo 0.30 carries no
+    /// user lookup on `System` at all. The passwd database is exposed
+    /// only through a POPULATED `Users` collection (`new()` builds an
+    /// empty one), so an unrefreshed list or a missing passwd entry is a
+    /// typed refusal, never a fallback.
     pub fn session_identity() -> Result<String> {
-        let system = sysinfo::System::new_all();
-        let effective = system.effective_user_id().ok_or_else(|| {
+        // SAFETY: POSIX uid getters are thread-safe syscall wrappers with no
+        // preconditions; they cannot be substituted by caller-supplied data.
+        let effective_raw = unsafe { libc::geteuid() };
+        let real_raw = unsafe { libc::getuid() };
+        if real_raw != effective_raw {
+            anyhow::bail!(
+                "this process runs with an effective uid that differs from its real uid \
+                 (privilege escalation); refusing to attribute a human decision to it"
+            );
+        }
+        // sysinfo 0.30: `Users::new()` is an empty collection and
+        // `get_user_by_id` is a scan of it, so the list must be POPULATED
+        // before it can be searched (#264).
+        let users = sysinfo::Users::new_with_refreshed_list();
+        let effective = sysinfo::Uid::try_from(effective_raw as usize).map_err(|_| {
             anyhow::anyhow!("the operating system did not report this session's effective uid")
         })?;
-        if let Some(real) = system.user_id() {
-            if real != effective {
-                anyhow::bail!(
-                    "this process runs with an effective uid that differs from its real uid \
-                     (privilege escalation); refusing to attribute a human decision to it"
-                );
-            }
-        }
-        // The user list must be POPULATED before it can be searched: in
-        // sysinfo 0.30, `Users::new()` is an empty collection and
-        // `get_user_by_id` is a scan of it, so an unrefreshed list makes the
-        // passwd lookup fail for every uid (#264).
-        let users = sysinfo::Users::new_with_refreshed_list();
-        let user = users.get_user_by_id(effective).ok_or_else(|| {
+        let user = users.get_user_by_id(&effective).ok_or_else(|| {
             anyhow::anyhow!(
                 "the operating system did not report a passwd entry for this session's effective uid"
             )
