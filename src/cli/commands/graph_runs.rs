@@ -354,7 +354,7 @@ fn build_inspection(
 /// 4. the cited basis must still be ANCHORED in the run's current state;
 /// 5. the decision names a VERIFIED HUMAN PRINCIPAL — the caller cannot
 ///    supply the actor identity; it is established by the runtime from
-///    the OS session and the repository's trust anchor
+///    the OS session and the working directory's trust anchor
 ///    (`work::human_principal`), and refused when it cannot be verified;
 /// 6. the identity must be a HUMAN (machine actors are refused);
 /// 7. the write is a compare-and-swap against the digest that was read.
@@ -484,7 +484,7 @@ pub fn decide_run(
 // ---------------------------------------------------------------------------
 
 /// Resolve and VERIFY the human principal for this session against the
-/// repository's trust anchor.
+/// working directory's trust anchor.
 ///
 /// This is the only way the CLI obtains an actor identity: the caller
 /// cannot pass one. When the OS session identity cannot be established
