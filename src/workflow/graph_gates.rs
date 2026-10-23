@@ -340,6 +340,17 @@ fn evidence_reference_is_current(
 /// eligibility keys off the recorded HUMAN verdict only — outcomes never
 /// open a gate, and no decision means pending (fail closed). After a
 /// rejection the target must be a declared terminal exit.
+///
+/// Gate-identity invariant (#262): this consumer reads `gate_decisions`
+/// BY MAP KEY (`from_node`) and never compares the key with the record's
+/// own `gate_node_id` - routing from B would attribute a decision authored
+/// for gate A to gate B if a mismatched pair ever existed. The pair's
+/// identity is enforced at the import boundary
+/// (`GraphRunStateV1::import_for_inspection`, inherited by every importer)
+/// and at authoring (`record_gate_decision`, which keys by
+/// `decision.gate_node_id`), so this consumer only ever observes a matching
+/// pair; the inspector projection (`GateDecisionView`) publishes both key
+/// and record so any drift is visible, not silent.
 pub fn route_after_gate(
     state: &crate::workflow::graph_state::GraphRunStateV1,
     manifest: &GraphManifestV1,
