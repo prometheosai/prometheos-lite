@@ -33,10 +33,13 @@
 //! The trust anchor is itself protected under this local trust model:
 //! the decision path only ever READS it (it never provisions, rewrites,
 //! or repairs it), a malformed anchor is refused, and on Unix an anchor
-//! that other accounts may write is refused outright. On Windows the
-//! anchor inherits the ACLs of the repository working tree it lives in;
-//! the runtime does not walk Windows ACLs, so that inheritance is the
-//! local trust model's protection on that platform.
+//! that other accounts may write is refused outright - as is one whose
+//! parent directory other accounts may write, since replacing the file
+//! by rename does not require write permission on the file itself
+//! (#263). On Windows the anchor inherits the ACLs of the repository
+//! working tree it lives in; the runtime does not walk Windows ACLs, so
+//! that inheritance is the local trust model's protection on that
+//! platform.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -182,13 +185,20 @@ pub fn verify_human_principal(anchor_path: &Path) -> Result<VerifiedHumanPrincip
 // Trust-anchor protection
 // ---------------------------------------------------------------------------
 
-/// Refuse a trust anchor other accounts may write.
+/// Refuse a trust anchor other accounts may write, or that lives in a
+/// directory other accounts may write.
 ///
 /// A trust anchor another account can modify is not a trust anchor: it
 /// would let that account add itself to the allowlist. On Unix the file
-/// mode answers this directly. On Windows the anchor inherits the ACLs
-/// of the working tree it lives in — the runtime does not walk Windows
-/// ACLs, so that inheritance is the local trust model's protection.
+/// mode answers this directly. The CONTAINING DIRECTORY matters for the
+/// same reason: a write to a directory entry (rename/unlink) does not
+/// require write permission on the file it replaces, so an others-writable
+/// directory lets another account replace the anchor wholesale (#263).
+/// The two refusals are distinguishable by message: one names the file,
+/// the other names the parent directory. On Windows the anchor inherits
+/// the ACLs of the working tree it lives in — the runtime does not walk
+/// Windows ACLs, so that inheritance is the local trust model's
+/// protection.
 #[cfg(unix)]
 fn ensure_anchor_is_protected(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -197,6 +207,22 @@ fn ensure_anchor_is_protected(path: &Path) -> Result<()> {
         // No anchor yet: the refusal is raised by the read below.
         return Ok(());
     };
+    // The parent directory must not be others-writable: replacing the anchor
+    // by rename is a directory write, not a file write (#263).
+    if let Some(dir) = path.parent() {
+        if let Ok(dir_meta) = std::fs::metadata(dir) {
+            let dir_mode = dir_meta.permissions().mode();
+            if dir_mode & 0o022 != 0 {
+                anyhow::bail!(
+                    "human-principal trust anchor's parent directory {} is writable by \
+                     other accounts (mode {:o}); an anchor others can replace is not a \
+                     trust anchor",
+                    dir.display(),
+                    dir_mode & 0o777
+                );
+            }
+        }
+    }
     let mode = meta.permissions().mode();
     if mode & 0o022 != 0 {
         anyhow::bail!(
@@ -384,6 +410,63 @@ mod tests {
         std::fs::write(&path, "{not json").expect("write");
         let err = load_anchor(&path).expect_err("a malformed anchor must refuse");
         assert!(err.to_string().contains("not valid"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_anchor_in_an_others_writable_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_anchor(dir.path(), &["someone"]);
+        // The FILE is locked down; the DIRECTORY is the hole (#263).
+        let anchor_dir = path.parent().expect("anchor dir").to_path_buf();
+        let mut file_perms = std::fs::metadata(&path).expect("meta").permissions();
+        file_perms.set_mode(0o600);
+        std::fs::set_permissions(&path, file_perms).expect("chmod file");
+        let mut dir_perms = std::fs::metadata(&anchor_dir).expect("meta").permissions();
+        dir_perms.set_mode(0o777);
+        std::fs::set_permissions(&anchor_dir, dir_perms).expect("chmod dir");
+        let err = load_anchor(&path)
+            .expect_err("an anchor in an others-writable directory must refuse");
+        assert!(
+            err.to_string().contains("parent directory"),
+            "expected the parent-directory refusal, got: {err}"
+        );
+        // Distinguishable from the file-mode refusal: same "other accounts"
+        // rule, different named path.
+        let file_mode_err = {
+            let mut d = std::fs::metadata(&anchor_dir).expect("meta").permissions();
+            d.set_mode(0o755);
+            std::fs::set_permissions(&anchor_dir, d).expect("chmod dir");
+            let mut f = std::fs::metadata(&path).expect("meta").permissions();
+            f.set_mode(0o666);
+            std::fs::set_permissions(&path, f).expect("chmod file");
+            load_anchor(&path).expect_err("an others-writable anchor file must refuse")
+        };
+        assert!(
+            file_mode_err.to_string().contains("writable by other accounts")
+                && !file_mode_err.to_string().contains("parent directory"),
+            "the two refusals must be distinguishable, got: {file_mode_err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_anchor_in_a_protected_directory_still_loads() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The production shape: directory 0o755, file 0o600 -> no false refusal.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_anchor(dir.path(), &["someone"]);
+        let anchor_dir = path.parent().expect("anchor dir").to_path_buf();
+        let mut d = std::fs::metadata(&anchor_dir).expect("meta").permissions();
+        d.set_mode(0o755);
+        std::fs::set_permissions(&anchor_dir, d).expect("chmod dir");
+        let mut f = std::fs::metadata(&path).expect("meta").permissions();
+        f.set_mode(0o600);
+        std::fs::set_permissions(&path, f).expect("chmod file");
+        assert!(load_anchor(&path).is_ok(), "a protected anchor must load");
     }
 
     #[cfg(unix)]
