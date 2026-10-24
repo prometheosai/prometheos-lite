@@ -427,8 +427,8 @@ mod tests {
         let mut dir_perms = std::fs::metadata(&anchor_dir).expect("meta").permissions();
         dir_perms.set_mode(0o777);
         std::fs::set_permissions(&anchor_dir, dir_perms).expect("chmod dir");
-        let err = load_anchor(&path)
-            .expect_err("an anchor in an others-writable directory must refuse");
+        let err =
+            load_anchor(&path).expect_err("an anchor in an others-writable directory must refuse");
         assert!(
             err.to_string().contains("parent directory"),
             "expected the parent-directory refusal, got: {err}"
@@ -445,7 +445,9 @@ mod tests {
             load_anchor(&path).expect_err("an others-writable anchor file must refuse")
         };
         assert!(
-            file_mode_err.to_string().contains("writable by other accounts")
+            file_mode_err
+                .to_string()
+                .contains("writable by other accounts")
                 && !file_mode_err.to_string().contains("parent directory"),
             "the two refusals must be distinguishable, got: {file_mode_err}"
         );
