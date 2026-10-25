@@ -20,12 +20,25 @@ what it found, so a failure is actionable without reading this file.
 5. Vendored byte fidelity — upstream-locked vendored bytes are LF-only,
    so a checkout cannot silently rewrite them (CRLF churn is a
    provenance violation).
+6. G-B static guard — the reviewed authority surface recorded in the
+   curated data files (scripts/reviewed_authorization_surfaces.json,
+   scripts/authority_pub_surface_baseline.json,
+   scripts/reviewed_authority_baselines.json,
+   scripts/authority_resolver_coverage_manifest.json,
+   scripts/gate_completion_registry.json) is enforced by
+   scripts/gb_static_guard.py: unreviewed authority-surface change
+   blocks, and the guard fails closed on missing, corrupt or malformed
+   reviewed data. It also verifies that every consumed data file is
+   registered in the curated pin set above, because the pin set is not
+   self-pinned. The guard DETECTS unreviewed change; it cannot
+   authorize it — the human review gate remains the trust anchor.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -287,6 +300,29 @@ if vendored.exists():
             )
 
 # ---------------------------------------------------------------------------
+# 6. G-B static guard (reviewed authority surfaces and baselines)
+# ---------------------------------------------------------------------------
+#
+# The guard enforces the reviewed authority surface recorded in the
+# curated data files enumerated in scripts/gate_completion_registry.json
+# (MG1 usage guards, initial MG2 orphan-CLI detection, MG3 public-surface
+# freeze). Blocking tree findings fail the gate; warnings are advisory.
+# The guard fails closed on missing/corrupt/malformed reviewed data and
+# independently verifies pin coverage (the pin set is not self-pinned).
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gb_static_guard  # noqa: E402
+
+try:
+    guard_violations, _findings, _guard_files, _guard_stats = (
+        gb_static_guard.policy_violations(ROOT))
+except Exception as exc:  # fail closed: an import or runtime failure is a violation
+    raise SystemExit(
+        "repository policy violations (G-B static guard unavailable):\n"
+        f"  {type(exc).__name__}: {exc}"
+    )
+
+# ---------------------------------------------------------------------------
 
 if violations:
     raise SystemExit("repository policy violations:\n" + "\n".join(violations))
@@ -305,8 +341,14 @@ if eol_violations:
         "repository policy violations (vendored byte fidelity):\n"
         + "\n".join(f"  {item}" for item in eol_violations)
     )
+if guard_violations:
+    raise SystemExit(
+        "repository policy violations (G-B static guard):\n"
+        + "\n".join(f"  {item}" for item in guard_violations)
+    )
 print("PASS: fallback confinement and API LLM boundary")
 print("PASS: hosted-CI independence (no actions, no external CI configs, no LFS)")
 print("PASS: executable configuration review pins (build surfaces are reviewed changes)")
 print("PASS: no duplicate JSON keys in repository documents")
 print("PASS: vendored byte fidelity (LF-only upstream-locked bytes)")
+print("PASS: G-B static guard (reviewed authority surfaces and baselines)")

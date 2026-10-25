@@ -348,8 +348,15 @@ def main() -> int:
     with sandbox() as root:
         tools = root / "src" / "tools"
         tools.mkdir(parents=True, exist_ok=True)
+        # src/tools/repo.rs is a G-B authority home: the sandbox must carry
+        # its REVIEWED public surface, or the guard (correctly) reports the
+        # baselined items as removals. The exemption under test is the
+        # section-1 exclusion of this exact path, so the real content is
+        # copied and the probe line appended (a private item, no surface
+        # change).
+        real = (ROOT / "src" / "tools" / "repo.rs").read_text(encoding="utf-8")
         (tools / "repo.rs").write_text(
-            "fn go() { with_fallback_allowed(); }\n", encoding="utf-8"
+            real + "\nfn go() { with_fallback_allowed(); }\n", encoding="utf-8"
         )
         expect_pass(
             "fallback confinement: with_fallback_allowed inside src/tools/repo.rs",
@@ -375,6 +382,239 @@ def main() -> int:
             "hosted-CI/LFS independence",
         )
 
+    # -- G-B static guard: CI enforcement ------------------------------------
+    with sandbox() as root:
+        (root / "src" / "flow").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "flow" / "adapter.rs").write_text(
+            "pub use crate::tools::TrustRegistry;\n", encoding="utf-8"
+        )
+        expect_fail(
+            "authority re-export outside a reviewed re-export file",
+            root,
+            "mg1_authority_reexport_outside_site",
+        )
+
+    with sandbox() as root:
+        db = root / "src" / "db" / "repository"
+        db.mkdir(parents=True, exist_ok=True)
+        (db / "mod.rs").write_text("pub use trust_policies::*;\n", encoding="utf-8")
+        expect_fail(
+            "authority-namespace glob re-export (the adjudicated defect)",
+            root,
+            "mg1_glob_import_of_authority_namespace",
+        )
+
+    with sandbox() as root:
+        db = root / "src" / "db" / "repository"
+        db.mkdir(parents=True, exist_ok=True)
+        (db / "mod.rs").write_text(
+            "pub use crate::tools::TrustRegistry;\n", encoding="utf-8"
+        )
+        expect_fail(
+            "a NEW authority symbol re-exported at a reviewed site",
+            root,
+            "mg1_new_authority_reexport",
+        )
+
+    with sandbox() as root:
+        db = root / "src" / "db" / "repository"
+        db.mkdir(parents=True, exist_ok=True)
+        (db / "mod.rs").write_text(
+            "pub use trust_policies::{TrustPolicyEntry, TrustPolicyOperations};\n",
+            encoding="utf-8",
+        )
+        (root / "src" / "cli" / "runner").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "cli" / "runner" / "mod.rs").write_text(
+            "mod flow_runner;\n#[cfg(test)]\nmod tests;\n", encoding="utf-8"
+        )
+        expect_pass(
+            "the two adjudicated production fixes are guard-clean "
+            "(enumerated re-export at a reviewed site; confined test module)",
+            root,
+        )
+
+    with sandbox() as root:
+        (root / "src" / "cli" / "runner").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "cli" / "runner" / "mod.rs").write_text(
+            "mod flow_runner;\nmod tests;\n", encoding="utf-8"
+        )
+        expect_fail(
+            "unconfined test module (the second adjudicated defect)",
+            root,
+            "mg1_unconfined_test_module",
+        )
+
+    with sandbox() as root:
+        (root / "src" / "harness").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "harness" / "permissions.rs").write_text(
+            "pub struct DeniedOperation {\n    pub why: String,\n}\n", encoding="utf-8"
+        )
+        expect_fail(
+            "visibility widening of a baselined restricted item",
+            root,
+            "mg3_public_visibility_widening",
+        )
+
+    with sandbox() as root:
+        (root / "src" / "harness").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "harness" / "permissions.rs").write_text(
+            "pub (crate) struct DeniedOperation {\n    pub why: String,\n}\n",
+            encoding="utf-8",
+        )
+        expect_fail(
+            "visibility REMOVAL side: a baselined home item absent from the file",
+            root,
+            "mg3_public_surface_removal",
+        )
+
+    # -- G-B static guard: valid-Rust negative controls (no false positives) --
+    with sandbox() as root:
+        (root / "src" / "tools").mkdir(parents=True, exist_ok=True)
+        # Private items only: the control is that authority-shaped TEXT in
+        # comments, strings, raw strings and byte strings is not a finding.
+        # (New PUBLIC items in a home are additions by design and are
+        # exercised above.)
+        (root / "src" / "tools" / "policy.rs").write_text(
+            "//! pub use crate::tools::TrustRegistry; (doc mention)\n"
+            "// pub use crate::tools::TrustRegistry;\n"
+            "/* pub use crate::tools::TrustRegistry; */\n"
+            "fn doc() -> &'static str {\n"
+            "    \"pub use crate::tools::TrustRegistry;\"\n"
+            "}\n"
+            "fn raw() -> &'static str {\n"
+            "    r#\"pub use crate::tools::TrustRegistry;\"#\n"
+            "}\n"
+            "fn bytes() -> &'static [u8] {\n"
+            "    b\"pub use crate::tools::TrustRegistry;\"\n"
+            "}\n"
+            "fn notpub() { let notpub_use = 1; }\n",
+            encoding="utf-8",
+        )
+        expect_pass(
+            "authority patterns in comments, strings, raw strings and byte strings "
+            "are not findings",
+            root,
+        )
+
+    with sandbox() as root:
+        (root / "src" / "harness").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "harness" / "permissions.rs").write_text(
+            "pub (crate)  struct   DeniedOperation {\n    pub why: String,\n}\n",
+            encoding="utf-8",
+        )
+        expect_fail(
+            "whitespace-separated qualifiers canonicalize (still a removal on the "
+            "single-item fixture, never a false widening)",
+            root,
+            "mg3_public_surface_removal",
+        )
+
+    with sandbox() as root:
+        build = root / ".cargo-target" / "debug" / "build"
+        build.mkdir(parents=True, exist_ok=True)
+        (build / "generated.rs").write_text(
+            "pub use crate::tools::TrustRegistry;\n", encoding="utf-8"
+        )
+        expect_pass(
+            "generated build trees are outside the declared scan scope",
+            root,
+        )
+
+    # -- G-B static guard: reviewed-data trust boundary ----------------------
+    with sandbox() as root:
+        # A JSON-valid but unreviewed baseline change is caught by the
+        # CURATED PIN, not by the detector: the pin digest must move only
+        # through the deliberate re-pin act.
+        surfaces = root / "scripts" / "reviewed_authorization_surfaces.json"
+        data = json.loads(surfaces.read_text(encoding="utf-8"))
+        data["reviewed_reexport_files"].append("src/flow/adapter.rs")
+        surfaces.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        expect_fail(
+            "tampered reviewed-data file without a reviewed pin update",
+            root,
+            "changed without a reviewed pin update",
+        )
+
+    with sandbox() as root:
+        # After the deliberate re-pin act the gate is green again. This is
+        # the trust boundary in executable form: the re-pin is the review
+        # artifact a human must inspect; the gate cannot itself authorize.
+        surfaces = root / "scripts" / "reviewed_authorization_surfaces.json"
+        data = json.loads(surfaces.read_text(encoding="utf-8"))
+        data["reviewed_reexport_files"].append("src/flow/adapter.rs")
+        surfaces.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        composite = root / "scripts" / "reviewed_authority_baselines.json"
+        baselines = json.loads(composite.read_text(encoding="utf-8"))
+        baselines["reexport_baseline"]["src/flow/adapter.rs"] = ["TrustRegistry"]
+        composite.write_text(json.dumps(baselines, indent=2), encoding="utf-8")
+        subprocess.run(
+            [sys.executable, "scripts/review_config_digests.py"],
+            cwd=str(root), capture_output=True, text=True, check=True,
+        )
+        (root / "src" / "flow").mkdir(parents=True, exist_ok=True)
+        (root / "src" / "flow" / "adapter.rs").write_text(
+            "pub use crate::tools::TrustRegistry;\n", encoding="utf-8"
+        )
+        expect_pass(
+            "deliberate re-pin makes a reviewed surface change reviewable and "
+            "enforceable (the re-pin is the human-review artifact)",
+            root,
+        )
+
+    with sandbox() as root:
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        del pins["files"]["scripts/authority_pub_surface_baseline.json"]
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2), encoding="utf-8")
+        expect_fail(
+            "consumed baseline missing from the curated pin set",
+            root,
+            "gb_unreviewed_baseline_pin",
+        )
+
+    with sandbox() as root:
+        (root / "scripts" / "authority_pub_surface_baseline.json").unlink()
+        expect_fail(
+            "missing reviewed baseline fails closed",
+            root,
+            "pinned executable configuration is missing",
+        )
+
+    with sandbox() as root:
+        # Missing AND unpinned AND untracked: neither the curated pin check
+        # nor the repository JSON scan covers it, so the failure must come
+        # from the GUARD's own load - proving the guard fails closed rather
+        # than silently scanning with no baseline.
+        (root / "scripts" / "authority_pub_surface_baseline.json").unlink()
+        subprocess.run(
+            ["git", "rm", "--cached", "-q", "scripts/authority_pub_surface_baseline.json"],
+            cwd=str(root), capture_output=True, check=False,
+        )
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        del pins["files"]["scripts/authority_pub_surface_baseline.json"]
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2), encoding="utf-8")
+        expect_fail(
+            "missing reviewed baseline fails closed at the guard, not silently",
+            root,
+            "gb_baseline_unavailable",
+        )
+
+    with sandbox() as root:
+        # Corrupt JSON: after the deliberate re-pin the pin check is green,
+        # so the failure must come from the repository's own JSON-validity
+        # gate - still fail-closed, one layer earlier than the guard.
+        (root / "scripts" / "authority_pub_surface_baseline.json").write_text(
+            "{ this is not json", encoding="utf-8"
+        )
+        subprocess.run(
+            [sys.executable, "scripts/review_config_digests.py"],
+            cwd=str(root), capture_output=True, text=True, check=True,
+        )
+        expect_fail(
+            "corrupt reviewed baseline fails closed (repository JSON gate)",
+            root,
+            "Expecting property name",
+        )
+
     # -- the gate's own PASS lines -------------------------------------------
     with sandbox() as base:
         code, output = run_gate(base)
@@ -384,6 +624,7 @@ def main() -> int:
             "PASS: executable configuration review pins (build surfaces are reviewed changes)",
             "PASS: no duplicate JSON keys in repository documents",
             "PASS: vendored byte fidelity (LF-only upstream-locked bytes)",
+            "PASS: G-B static guard (reviewed authority surfaces and baselines)",
         )
         missing = [line for line in expected if line not in output]
         if code == 0 and not missing:

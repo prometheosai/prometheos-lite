@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "Gate completion registry: which SPEC-0001 G-B gates are ENFORCED by this PR and which remain unbuilt. This file is the machine-readable honest record referenced by the guard report; a gate must not be described as enforced unless it is listed here as enforced. Source: Control-Gate Response #23 PR-1 authorization.",
+  "gates": {
+    "mg1_usage_guards": {
+      "status": "enforced",
+      "implementation": "scripts/gb_static_guard.py"
+    },
+    "mg2_orphan_cli_surface": {
+      "status": "enforced",
+      "implementation": "scripts/gb_static_guard.py"
+    },
+    "mg3_public_surface_freeze": {
+      "status": "enforced",
+      "implementation": "scripts/gb_static_guard.py"
+    },
+    "mg2_exception_registry": {
+      "status": "designed-only",
+      "note": "approval/expiry machinery is NOT implemented; do not represent it as enforced"
+    },
+    "r13_coverage_expansion": {
+      "status": "open-decision",
+      "note": "out-of-home authority-bearing modules remain outside the MG3 freeze pending a separate operator decision"
+    },
+    "serve_surface": {
+      "status": "open-debt",
+      "note": "remains OPEN debt; unrelated to the static guard"
+    }
+  }
+}
