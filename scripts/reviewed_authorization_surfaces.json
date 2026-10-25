@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "Reviewed authority-surface definitions for the G-B static guard (scripts/gb_static_guard.py). These are REVIEWED DATA: the guard enforces the definitions recorded here, and a change to any entry requires an operator-reviewed PR (the file is digest-pinned in reviewed_config_digests.json). Source: PROPOSAL-GB-0001 v0.3.3 (design baseline SHA-256 e3be38a92e437b5f9698ce68659f7426c66ad3f8994f34c10f9dabc35547e112).",
+  "authority_home_prefixes": [
+    "src/tools/",
+    "src/harness/permissions.rs",
+    "src/db/repository/trust_policies.rs",
+    "src/workflow/governance",
+    "src/workflow/governance_permit.rs"
+  ],
+  "authority_modules": [
+    "crate::tools",
+    "crate::harness::permissions",
+    "crate::db::repository::trust_policies",
+    "crate::workflow::governance",
+    "crate::workflow::governance_permit"
+  ],
+  "reviewed_symbols": {
+    "PermissionLedger": {
+      "modules": [
+        "crate::harness::permissions"
+      ],
+      "methods": [
+        "new",
+        "with_defaults"
+      ]
+    },
+    "ToolPolicy": {
+      "modules": [
+        "crate::tools"
+      ],
+      "methods": [
+        "new",
+        "conservative"
+      ]
+    },
+    "TrustRegistry": {
+      "modules": [
+        "crate::tools"
+      ],
+      "methods": [
+        "new"
+      ]
+    },
+    "TrustPolicyOperations": {
+      "modules": [
+        "crate::db::repository::trust_policies"
+      ],
+      "methods": []
+    },
+    "GovernancePermit": {
+      "modules": [
+        "crate::workflow::governance",
+        "crate::workflow::governance_permit"
+      ],
+      "methods": [
+        "issue"
+      ]
+    },
+    "create_standard_ledger": {
+      "modules": [
+        "crate::harness::permissions"
+      ],
+      "methods": []
+    },
+    "create_restrictive_ledger": {
+      "modules": [
+        "crate::harness::permissions"
+      ],
+      "methods": []
+    },
+    "create_permissive_ledger": {
+      "modules": [
+        "crate::harness::permissions"
+      ],
+      "methods": []
+    }
+  },
+  "permitted_sites": {
+    "PermissionLedger": [
+      "src/harness/permissions.rs"
+    ],
+    "ToolPolicy": [
+      "src/tools/",
+      "src/flow/factory/builtin_nodes.rs",
+      "src/flow/intelligence/tool.rs"
+    ],
+    "TrustRegistry": [
+      "src/tools/",
+      "src/flow/intelligence/tool.rs"
+    ],
+    "TrustPolicyOperations": [
+      "src/db/repository/trust_policies.rs"
+    ],
+    "GovernancePermit": [
+      "src/workflow/governance",
+      "src/workflow/governance_permit.rs",
+      "src/harness/",
+      "src/workflow/node_runner.rs",
+      "src/workflow/evaluate/orchestrator.rs",
+      "src/workflow/graph_suspend.rs"
+    ],
+    "create_standard_ledger": [
+      "src/harness/",
+      "src/cli/commands/"
+    ],
+    "create_restrictive_ledger": [
+      "src/harness/",
+      "src/cli/commands/"
+    ],
+    "create_permissive_ledger": [
+      "src/harness/",
+      "src/cli/commands/"
+    ]
+  },
+  "reviewed_reexport_files": [
+    "src/db/repository/mod.rs",
+    "src/harness/mod.rs",
+    "src/tools/mod.rs"
+  ],
+  "test_citation_files": {
+    "src/flow/intelligence/tests.rs": [
+      "ToolPolicy",
+      "ToolContext"
+    ],
+    "src/config/settings/tests.rs": [],
+    "tests/guardrail_tests.rs": [
+      "ToolPolicy",
+      "TrustRegistry"
+    ],
+    "tests/guardrail_integration_tests.rs": [
+      "ToolPolicy"
+    ],
+    "tests/harness_permissions.rs": [
+      "PermissionLedger"
+    ],
+    "tests/node_runner_governance_permit.rs": [
+      "GovernancePermit"
+    ],
+    "tests/expanded_composite_runtime_conformance.rs": [
+      "GovernancePermit"
+    ],
+    "tests/common/governance_permit.rs": [
+      "GovernancePermit"
+    ]
+  },
+  "name_family_pattern": "^(Trust|Permission|Authority|Ledger|Permit)"
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "Authority resolver coverage manifest: the declared scan scope of the G-B static guard and its DECLARED coverage limits. The limits are honest disclosures, not enforcement: the guard does not claim to cover what is listed here, and a reviewer must treat these as unguarded surface. Source: PROPOSAL-GB-0001 v0.3.3 residual register (R1-R15).",
+  "guard": "scripts/gb_static_guard.py",
+  "scan_scope": {
+    "roots": [
+      "repository working tree"
+    ],
+    "excluded_dir_rules": [
+      "hidden directories (leading dot)",
+      "target/",
+      "node_modules/"
+    ],
+    "file_types": [
+      "*.rs"
+    ],
+    "basis": "generated, vendored and build-output trees are out of scan scope; scanning them would attribute third-party generated code to this repository"
+  },
+  "coverage_limits": [
+    "R13: the MG3 public-surface freeze covers only the fixed authority-home set (see reviewed_authorization_surfaces.json authority_home_prefixes); an authority-bearing module outside that set has no surface freeze. Independently inventoried out-of-home authority-bearing modules at the v0.3.3 baseline include src/work/provenance.rs, src/workflow/mod.rs, src/workflow/portable_state.rs, src/workflow/soma/capability.rs, src/workflow/soma/contracts.rs, src/harness/advanced_security.rs, src/harness/multi_tenant.rs, src/harness/trust_report.rs, src/workflow/execution_harness.rs and src/work/human_principal.rs. Expanding the home set requires a separate operator decision.",
+    "Macro-generated surface: items produced by macro expansion are not statically visible (mg1_macro_unresolved blocks on authority tokens inside macros).",
+    "Dynamic dispatch: trait-object indirection is not resolved lexically.",
+    "cfg evaluation is a SYNTACTIC model, not Rust cfg evaluation (no feature resolution, build-script knowledge or target cfg).",
+    "F-05d (deferred): macro_rules! bodies containing authority-shaped pub use/pub struct text produce false-positive blockings; masking macro bodies risks accidental fail-open, so the guard errs loud. Zero current exposure.",
+    "NF-1 (recorded, not fixed): a pub re-export inside a PROVEN #[cfg(test)] module is not skipped by the re-export check; over-strict, fail-loud, zero current exposure.",
+    "NF-3 (recorded, not fixed): a baseline entry carrying trailing whitespace on its identifier reports as addition+removal; fail-loud, zero current exposure.",
+    "Trust anchors: digest pinning detects unreviewed change but cannot authorize it; the human review gate is the trust anchor. The pin set does not pin itself, and a successful re-pin is not authorization.",
+    "Windows-only evidence: the prototype corpus was validated on Windows (rustc 1.98.0); Unix evidence is unavailable."
+  ]
+}
