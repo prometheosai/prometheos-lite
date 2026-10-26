@@ -113,9 +113,10 @@
   the runtime never promotes a self-asserted identity to a human one. The
   decision path only ever READS the anchor: it never provisions, repairs,
   or rewrites it, a malformed anchor is refused, and on Unix an anchor
-  file other accounts may write is refused outright (the containing
-  directory's mode is NOT checked - a known limitation; on Windows the
-  anchor inherits the working tree's ACLs). The durable journal records the
+  file other accounts may write is refused outright, as is one whose parent
+  directory other accounts may write or whose parent directory's protection
+  cannot be established (replace-by-rename, #263, fail-closed; on Windows
+  the anchor inherits the working tree's ACLs). The durable journal records the
   verified principal as `principal.human.identity`, which a database
   trigger ties to the `principal_id` column at the insert boundary. Scope of the guarantee, stated
   plainly: this proves WHICH ACCOUNT acted and that the operator

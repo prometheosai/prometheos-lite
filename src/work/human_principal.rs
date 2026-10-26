@@ -33,10 +33,16 @@
 //! The trust anchor is itself protected under this local trust model:
 //! the decision path only ever READS it (it never provisions, rewrites,
 //! or repairs it), a malformed anchor is refused, and on Unix an anchor
-//! that other accounts may write is refused outright. On Windows the
-//! anchor inherits the ACLs of the repository working tree it lives in;
-//! the runtime does not walk Windows ACLs, so that inheritance is the
-//! local trust model's protection on that platform.
+//! that other accounts may write is refused outright - as is one whose
+//! parent directory other accounts may write, since replacing the file
+//! by rename does not require write permission on the file itself
+//! (#263). The parent inspection FAILS CLOSED: an anchor whose
+//! containing directory's properties cannot be established is refused
+//! too, because failing to inspect protection is not evidence of it.
+//! On Windows the anchor inherits the ACLs of the repository
+//! working tree it lives in; the runtime does not walk Windows ACLs, so
+//! that inheritance is the local trust model's protection on that
+//! platform.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -182,13 +188,79 @@ pub fn verify_human_principal(anchor_path: &Path) -> Result<VerifiedHumanPrincip
 // Trust-anchor protection
 // ---------------------------------------------------------------------------
 
-/// Refuse a trust anchor other accounts may write.
+/// Refuse a trust anchor other accounts may write, or that lives in a
+/// directory other accounts may write.
 ///
 /// A trust anchor another account can modify is not a trust anchor: it
 /// would let that account add itself to the allowlist. On Unix the file
-/// mode answers this directly. On Windows the anchor inherits the ACLs
-/// of the working tree it lives in — the runtime does not walk Windows
-/// ACLs, so that inheritance is the local trust model's protection.
+/// mode answers this directly. The CONTAINING DIRECTORY matters for the
+/// same reason: a write to a directory entry (rename/unlink) does not
+/// require write permission on the file it replaces, so an others-writable
+/// directory lets another account replace the anchor wholesale (#263).
+/// The parent inspection FAILS CLOSED: a parent whose metadata cannot
+/// be established refuses the anchor - an unchecked parent is not a
+/// protected one. The three refusals are distinguishable by message:
+/// one names the file, one names an others-writable parent directory,
+/// one names a parent directory whose properties cannot be established.
+/// On Windows the anchor inherits
+/// the ACLs of the working tree it lives in — the runtime does not walk
+/// Windows ACLs, so that inheritance is the local trust model's
+/// protection.
+/// What the immediate-parent inspection established for an anchor path.
+#[cfg(unix)]
+enum ParentProtection {
+    /// The path has no parent directory to inspect (the filesystem root
+    /// itself); the anchor read still applies below.
+    NoParent,
+    /// The parent was inspected and is not writable by other accounts.
+    Protected,
+    /// The parent was inspected and IS writable by other accounts.
+    OthersWritable {
+        /// Permission bits of the offending parent directory.
+        mode: u32,
+    },
+    /// The parent's security properties could NOT be established (its
+    /// metadata could not be read). This must never be read as
+    /// "protected": the caller refuses on it.
+    Unestablished {
+        /// Why the parent's metadata could not be read.
+        reason: std::io::Error,
+    },
+}
+
+/// Inspect the anchor's IMMEDIATE parent directory (#263).
+///
+/// A write to a directory entry (rename/unlink) does not require write
+/// permission on the file it replaces, so an others-writable parent lets
+/// another account replace the anchor wholesale. The inspection is the
+/// whole check and it FAILS CLOSED: a parent whose metadata cannot be
+/// read at all is reported as [`ParentProtection::Unestablished`], never
+/// as protected - an unchecked parent is not a protected one. Only the
+/// immediate parent is inspected; this is not recursive ancestor
+/// hardening.
+#[cfg(unix)]
+fn parent_directory_protection(path: &Path) -> ParentProtection {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(dir) = path.parent() else {
+        return ParentProtection::NoParent;
+    };
+    let dir_meta = match std::fs::metadata(dir) {
+        Ok(meta) => meta,
+        Err(reason) => {
+            return ParentProtection::Unestablished { reason };
+        }
+    };
+    let dir_mode = dir_meta.permissions().mode();
+    if dir_mode & 0o022 != 0 {
+        ParentProtection::OthersWritable {
+            mode: dir_mode & 0o777,
+        }
+    } else {
+        ParentProtection::Protected
+    }
+}
+
 #[cfg(unix)]
 fn ensure_anchor_is_protected(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -197,6 +269,31 @@ fn ensure_anchor_is_protected(path: &Path) -> Result<()> {
         // No anchor yet: the refusal is raised by the read below.
         return Ok(());
     };
+    // The parent directory must not be others-writable: replacing the anchor
+    // by rename is a directory write, not a file write (#263). A parent whose
+    // metadata cannot be established refuses the anchor as well: failing to
+    // inspect protection is not evidence of it.
+    let parent = path.parent();
+    match parent_directory_protection(path) {
+        ParentProtection::OthersWritable { mode } => {
+            anyhow::bail!(
+                "human-principal trust anchor's parent directory {} is writable by \
+                 other accounts (mode {:o}); an anchor others can replace is not a \
+                 trust anchor",
+                parent.unwrap_or(path).display(),
+                mode
+            )
+        }
+        ParentProtection::Unestablished { reason } => {
+            anyhow::bail!(
+                "human-principal trust anchor {} has a parent directory whose security \
+                 properties could not be established ({reason}); an anchor whose \
+                 protection cannot be established is not a trust anchor",
+                path.display()
+            )
+        }
+        ParentProtection::Protected | ParentProtection::NoParent => {}
+    }
     let mode = meta.permissions().mode();
     if mode & 0o022 != 0 {
         anyhow::bail!(
@@ -384,6 +481,139 @@ mod tests {
         std::fs::write(&path, "{not json").expect("write");
         let err = load_anchor(&path).expect_err("a malformed anchor must refuse");
         assert!(err.to_string().contains("not valid"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_anchor_in_an_others_writable_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_anchor(dir.path(), &["someone"]);
+        // The FILE is locked down; the DIRECTORY is the hole (#263).
+        let anchor_dir = path.parent().expect("anchor dir").to_path_buf();
+        let mut file_perms = std::fs::metadata(&path).expect("meta").permissions();
+        file_perms.set_mode(0o600);
+        std::fs::set_permissions(&path, file_perms).expect("chmod file");
+        let mut dir_perms = std::fs::metadata(&anchor_dir).expect("meta").permissions();
+        dir_perms.set_mode(0o777);
+        std::fs::set_permissions(&anchor_dir, dir_perms).expect("chmod dir");
+        let err =
+            load_anchor(&path).expect_err("an anchor in an others-writable directory must refuse");
+        assert!(
+            err.to_string().contains("parent directory"),
+            "expected the parent-directory refusal, got: {err}"
+        );
+        // Distinguishable from the file-mode refusal: same "other accounts"
+        // rule, different named path.
+        let file_mode_err = {
+            let mut d = std::fs::metadata(&anchor_dir).expect("meta").permissions();
+            d.set_mode(0o755);
+            std::fs::set_permissions(&anchor_dir, d).expect("chmod dir");
+            let mut f = std::fs::metadata(&path).expect("meta").permissions();
+            f.set_mode(0o666);
+            std::fs::set_permissions(&path, f).expect("chmod file");
+            load_anchor(&path).expect_err("an others-writable anchor file must refuse")
+        };
+        assert!(
+            file_mode_err
+                .to_string()
+                .contains("writable by other accounts")
+                && !file_mode_err.to_string().contains("parent directory"),
+            "the two refusals must be distinguishable, got: {file_mode_err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_anchor_in_a_protected_directory_still_loads() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The production shape: directory 0o755, file 0o600 -> no false refusal.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_anchor(dir.path(), &["someone"]);
+        let anchor_dir = path.parent().expect("anchor dir").to_path_buf();
+        let mut d = std::fs::metadata(&anchor_dir).expect("meta").permissions();
+        d.set_mode(0o755);
+        std::fs::set_permissions(&anchor_dir, d).expect("chmod dir");
+        let mut f = std::fs::metadata(&path).expect("meta").permissions();
+        f.set_mode(0o600);
+        std::fs::set_permissions(&path, f).expect("chmod file");
+        assert!(load_anchor(&path).is_ok(), "a protected anchor must load");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_anchor_whose_parent_directory_cannot_be_inspected_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The fail-closed regression for the #263 parent inspection: the
+        // anchor FILE is statable and locked down, but its parent
+        // directory's security properties cannot be established at all. A
+        // bare filename resolves against the working directory, and a
+        // bare filename's parent path is empty, so the parent's metadata
+        // can never be read. The pre-repair code skipped the parent check
+        // on that error and loaded this anchor; a boundary that cannot
+        // inspect protection must not read silence as protection.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let shielded = write_anchor(dir.path(), &["someone"]);
+        let mut perms = std::fs::metadata(&shielded).expect("meta").permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&shielded, perms).expect("chmod file");
+
+        let cwd = std::env::current_dir().expect("working directory");
+        let bare = format!(
+            "prometheos-anchor-uninspectable-parent-{}.json",
+            std::process::id()
+        );
+        let bare_path = cwd.join(&bare);
+        let _ = std::fs::remove_file(&bare_path); // clear stale litter
+        std::fs::copy(&shielded, &bare_path)
+            .expect("stage a valid anchor as a bare filename in the working directory");
+        let mut bare_perms = std::fs::metadata(&bare_path).expect("meta").permissions();
+        bare_perms.set_mode(0o600);
+        std::fs::set_permissions(&bare_path, bare_perms).expect("chmod file");
+
+        let err = load_anchor(Path::new(&bare))
+            .expect_err("an anchor whose parent directory cannot be inspected must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parent directory")
+                && msg.contains("could not be established")
+                && !msg.contains("writable by other accounts"),
+            "the uninspectable-parent refusal must be its own refusal, got: {msg}"
+        );
+        let _ = std::fs::remove_file(&bare_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_parent_inspection_reports_an_uninspectable_parent_as_unestablished() {
+        // The seam: the inspection's own answer for a parent whose
+        // metadata cannot be read is Unestablished, never Protected.
+        assert!(
+            matches!(
+                parent_directory_protection(Path::new("bare-anchor.json")),
+                ParentProtection::Unestablished { .. }
+            ),
+            "a bare filename's empty parent path cannot be inspected and must report Unestablished"
+        );
+        let dir = tempfile::tempdir().expect("temp dir");
+        let anchor = dir.path().join("no-such-dir").join("anchor.json");
+        assert!(
+            matches!(
+                parent_directory_protection(&anchor),
+                ParentProtection::Unestablished { .. }
+            ),
+            "a parent directory that does not exist must report Unestablished"
+        );
+        assert!(
+            matches!(
+                parent_directory_protection(Path::new("/")),
+                ParentProtection::NoParent
+            ),
+            "the filesystem root has no parent directory to inspect"
+        );
     }
 
     #[cfg(unix)]
