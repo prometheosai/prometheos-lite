@@ -721,4 +721,38 @@ mod tests {
         );
         assert_ne!(probed, "spoofed-user");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_anchor_fixture_pins_the_modes_the_trust_model_requires() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // #280: the fixture must not depend on the process umask.
+        // `create_dir_all` and `write` follow the umask, so under umask
+        // 0002 the pre-fix helper created the anchor directory
+        // group-writable (mode 775) and the live #263 parent check then
+        // refused the anchor - an environmental failure, not a code one.
+        // The fixture therefore pins the production shape outright, and
+        // this test reads the modes back from the FILESYSTEM rather than
+        // asserting that the fixture merely asked for them.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_anchor(dir.path(), &["someone"]);
+        let anchor_dir = path.parent().expect("anchor dir");
+        let dir_mode = std::fs::metadata(anchor_dir)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o755,
+            "the fixture must pin the anchor directory mode, got {dir_mode:o}"
+        );
+        assert_eq!(
+            file_mode, 0o600,
+            "the fixture must pin the anchor file mode, got {file_mode:o}"
+        );
+        // With the production shape pinned, the anchor loads under any umask.
+        assert!(load_anchor(&path).is_ok(), "a pinned-mode anchor must load");
+    }
 }
