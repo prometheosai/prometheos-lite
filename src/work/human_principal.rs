@@ -426,7 +426,8 @@ mod tests {
 
     fn write_anchor(dir: &Path, principals: &[&str]) -> PathBuf {
         let path = default_anchor_path(dir);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("anchor dir");
+        let anchor_dir = path.parent().expect("parent");
+        std::fs::create_dir_all(anchor_dir).expect("anchor dir");
         let anchor = HumanPrincipalAnchor {
             schema_version: PRINCIPAL_ANCHOR_SCHEMA_VERSION.into(),
             principals: principals.iter().map(|p| p.to_string()).collect(),
@@ -436,6 +437,26 @@ mod tests {
             serde_json::to_string_pretty(&anchor).expect("anchor json"),
         )
         .expect("write anchor");
+        // The production shape is PINNED, not inherited (#280).
+        // `create_dir_all` and `write` follow the process umask, so under
+        // umask 0002 the anchor directory would be created
+        // group-writable (mode 775) and the live #263 parent check would
+        // then correctly refuse this anchor - making these tests fail for
+        // an environmental reason rather than a code one. The shape the
+        // trust model requires is directory 0o755 / anchor file 0o600; the
+        // mode tests in this module deliberately override these values to
+        // prove each refusal, so no discrimination is lost.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut dir_perms = std::fs::metadata(anchor_dir).expect("meta").permissions();
+            dir_perms.set_mode(0o755);
+            std::fs::set_permissions(anchor_dir, dir_perms).expect("chmod dir");
+            let mut file_perms = std::fs::metadata(&path).expect("meta").permissions();
+            file_perms.set_mode(0o600);
+            std::fs::set_permissions(&path, file_perms).expect("chmod file");
+        }
         path
     }
 
