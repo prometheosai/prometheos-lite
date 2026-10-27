@@ -116,7 +116,10 @@
   file other accounts may write is refused outright, as is one whose parent
   directory other accounts may write or whose parent directory's protection
   cannot be established (replace-by-rename, #263, fail-closed; on Windows
-  the anchor inherits the working tree's ACLs). The durable journal records the
+  the anchor inherits the working tree's ACLs). The trust-anchor tests pin
+  the production anchor modes on Unix (directory 0o755, file 0o600) instead
+  of inheriting the process umask, so the human-principal suite is
+  umask-independent (#280). The durable journal records the
   verified principal as `principal.human.identity`, which a database
   trigger ties to the `principal_id` column at the insert boundary. Scope of the guarantee, stated
   plainly: this proves WHICH ACCOUNT acted and that the operator
