@@ -43,7 +43,11 @@ pub use projects::{AsDb, ProjectOperations};
 pub use skills::*;
 pub use snapshots::*;
 pub use trait_def::Repository;
-pub use trust_policies::*;
+// Enumerated re-export (G-B adjudicated baseline repair, PR-1): the
+// authority-namespace glob `pub use trust_policies::*` made the exported
+// authority surface unverifiable lexically. The glob re-exported exactly
+// these two public items; the enumeration preserves the surface verbatim.
+pub use trust_policies::{TrustPolicyEntry, TrustPolicyOperations};
 pub use work_artifacts::*;
 pub use work_context::*;
 pub use work_context_events::*;
