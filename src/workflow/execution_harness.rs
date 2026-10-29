@@ -39,7 +39,11 @@ use serde::{Deserialize, Serialize};
 use crate::workflow::node_contracts::NodeManifestV1;
 use crate::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use crate::workflow::policy::LocalRestrictions;
-use crate::workflow::soma::capability::{Identity, RuntimeCapabilitySet};
+use crate::workflow::soma::capability::{
+    CompatibilityDecision, DecisionStatus, Identity, NegotiationInputs, RuntimeCapabilitySet,
+    Substitution, WorkRequirements, resolve,
+};
+use crate::workflow::soma::contracts::AuthorityProfile;
 
 /// Schema version of the harness seam contracts.
 pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
@@ -531,6 +535,214 @@ impl HarnessRegistry {
             content_digest: None,
         }
         .sealed()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Selection (SPEC 007 negotiation binding)
+// ---------------------------------------------------------------------------
+
+/// Schema version of the harness-selection evidence.
+pub const HARNESS_SELECTION_SCHEMA_VERSION: &str = "1.0.0";
+
+/// A request to select exactly ONE registered harness for one work item.
+///
+/// The declaration is metadata; the decision is the published SPEC 007
+/// negotiation over it. `pinned_harness_id` is a requirement, not a hint: when
+/// it names no registered adapter the request is refused, and when it is
+/// absent an ambiguity is refused rather than resolved by registration order.
+pub struct HarnessSelectionRequest<'a> {
+    pub selection_id: String,
+    pub requirements: &'a WorkRequirements,
+    pub authority_declared: &'a AuthorityProfile,
+    pub authority_effective: &'a AuthorityProfile,
+    /// Injected instant (RFC 3339 UTC-Z); the seam never reads a clock.
+    pub evaluated_at: String,
+    pub substitutions: Vec<Substitution>,
+    pub pinned_harness_id: Option<&'a str>,
+}
+
+/// Durable evidence that one harness revision was selected for one work item.
+///
+/// It binds the harness id, the published identity revision, the declaration
+/// digest and the negotiation decision, so a later reader can re-verify the
+/// selection without re-running it and without trusting a log line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HarnessSelectionV1 {
+    pub schema_version: String,
+    pub selection_id: String,
+    pub harness_id: String,
+    pub identity: Identity,
+    pub family: HarnessFamily,
+    pub declaration_digest: String,
+    pub capability_set_digest: String,
+    pub requirements_digest: String,
+    pub decision_id: String,
+    pub decision_status: DecisionStatus,
+    pub substitutions: Vec<Substitution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+}
+
+impl HarnessSelectionV1 {
+    pub fn sealed(mut self) -> Self {
+        self.content_digest = None;
+        let digest = self.compute_digest();
+        self.content_digest = Some(digest);
+        self
+    }
+
+    pub fn compute_digest(&self) -> String {
+        let mut value = serde_json::to_value(self).expect("selection serializes");
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        crate::workflow::soma::try_canonical_digest(&value)
+            .expect("canonical digest of a Lite-constructed selection cannot fail")
+    }
+
+    /// Fail-closed re-verification of durable evidence. A rewritten revision,
+    /// declaration digest, or decision does not verify.
+    pub fn verify(&self) -> Result<()> {
+        if self.schema_version != HARNESS_SELECTION_SCHEMA_VERSION {
+            bail!(
+                "unsupported harness selection schema version {} (supported {HARNESS_SELECTION_SCHEMA_VERSION})",
+                self.schema_version
+            );
+        }
+        for (label, value) in [
+            ("declarationDigest", &self.declaration_digest),
+            ("capabilitySetDigest", &self.capability_set_digest),
+            ("requirementsDigest", &self.requirements_digest),
+        ] {
+            if !is_hex64(value) {
+                bail!("HSEL-0005: harness selection {label} is not a 64-hex digest");
+            }
+        }
+        match &self.content_digest {
+            None => bail!("HSEL-0005: harness selection evidence is unsealed"),
+            Some(digest) if *digest != self.compute_digest() => {
+                bail!("HSEL-0005: harness selection contentDigest does not verify")
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    pub fn parse_json(text: &str) -> Result<Self> {
+        let selection: Self =
+            serde_json::from_str(text).context("harness selection parse failed")?;
+        selection.verify()?;
+        Ok(selection)
+    }
+}
+
+impl HarnessRegistry {
+    /// Select exactly one registered harness for `request.requirements`.
+    ///
+    /// Fail-closed refusals, all before the adapter is touched:
+    ///
+    /// - `HSEL-0001` — no harness is registered;
+    /// - `HSEL-0002` — the pinned harness is not registered;
+    /// - `HSEL-0003` — no registered harness satisfies the requirements (the
+    ///   negotiation diagnostics are carried in the message);
+    /// - `HSEL-0004` — more than one harness satisfies them and the caller did
+    ///   not pin one, so the choice would otherwise be registration order.
+    pub fn select(&self, request: &HarnessSelectionRequest<'_>) -> Result<HarnessSelectionV1> {
+        if request.selection_id.trim().is_empty() {
+            bail!("HSEL-0006: harness selection requires a non-empty selection id");
+        }
+        if self.entries.is_empty() {
+            bail!("HSEL-0001: no harness is registered, so no selection can be made");
+        }
+
+        let candidates: Vec<&dyn ExecutionHarness> = match request.pinned_harness_id {
+            Some(harness_id) => {
+                let harness = self
+                    .entries
+                    .get(harness_id)
+                    .map(|h| h.as_ref())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "HSEL-0002: pinned harness {harness_id:?} is not registered"
+                        )
+                    })?;
+                vec![harness]
+            }
+            None => self.entries.values().map(|h| h.as_ref()).collect(),
+        };
+
+        let mut compatible: Vec<(&dyn ExecutionHarness, CompatibilityDecision)> = Vec::new();
+        let mut refusals: Vec<String> = Vec::new();
+        for harness in candidates {
+            let declaration = harness.declaration();
+            let decision = resolve(&NegotiationInputs {
+                id: format!("{}/{}", request.selection_id, declaration.harness_id),
+                requirements: request.requirements,
+                capabilities: &declaration.capabilities,
+                authority_declared: request.authority_declared,
+                authority_effective: request.authority_effective,
+                evaluated_at: request.evaluated_at.clone(),
+                substitutions: request.substitutions.clone(),
+            })
+            .map_err(|error| anyhow::anyhow!("HSEL-0003: {error}"))?;
+            if decision.status == DecisionStatus::Incompatible {
+                let detail = decision
+                    .diagnostics
+                    .iter()
+                    .map(|d| format!("{} {}", d.code, d.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                refusals.push(format!("{} refused: {detail}", declaration.harness_id));
+            } else {
+                compatible.push((harness, decision));
+            }
+        }
+
+        let (harness, decision) = match compatible.len() {
+            1 => compatible.remove(0),
+            0 => bail!(
+                "HSEL-0003: no registered harness satisfies the work requirements ({})",
+                refusals.join(" | ")
+            ),
+            _ => {
+                let ids: Vec<&str> = compatible
+                    .iter()
+                    .map(|(h, _)| h.declaration().harness_id.as_str())
+                    .collect();
+                bail!(
+                    "HSEL-0004: harness selection is ambiguous between {}; pin one explicitly",
+                    ids.join(", ")
+                )
+            }
+        };
+
+        let declaration = harness.declaration();
+        Ok(HarnessSelectionV1 {
+            schema_version: HARNESS_SELECTION_SCHEMA_VERSION.to_string(),
+            selection_id: request.selection_id.clone(),
+            harness_id: declaration.harness_id.clone(),
+            identity: declaration.identity.clone(),
+            family: declaration.family,
+            declaration_digest: declaration.compute_digest(),
+            capability_set_digest: declaration
+                .capabilities
+                .canonical_digest()
+                .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
+            requirements_digest: request
+                .requirements
+                .canonical_digest()
+                .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
+            decision_id: decision.id,
+            decision_status: decision.status,
+            substitutions: request.substitutions.clone(),
+            content_digest: None,
+        }
+        .sealed())
     }
 }
 

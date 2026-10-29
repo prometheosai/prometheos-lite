@@ -25,6 +25,20 @@
   `tests/execution_harness_conformance.rs`. No concrete external adapter
   (Claude Code, Codex, Goose, …) and no transport is claimed; real adapter
   families and harness selection (#133) remain follow-ups.
+- #154 E6/I07 Slice B — harness selection is now bound to the published
+  SPEC 007 negotiation instead of being a string lookup. `HarnessRegistry::select`
+  runs `WorkRequirements` + the adapter's declared `RuntimeCapabilitySet`
+  through `soma::capability::resolve`, so an unsupported capability, version
+  or workspace fails before execution, and a substitution the work forbids is
+  refused by `SOMA-CAP-0004` with no evidence emitted. Selection is explicit:
+  two compatible candidates are an ambiguity (`HSEL-0004`) rather than a
+  registration-order choice, and a pin that names no registered adapter is
+  refused (`HSEL-0002`). The result is digest-sealed durable evidence
+  (`HarnessSelectionV1`) binding the harness id, the published identity
+  revision, the declaration digest, the requirement digest and the decision,
+  so a later reader re-verifies the selection without re-running it. No
+  adapter is invoked during selection, and the declaration is still metadata,
+  never authority.
 - Documentation correction, recorded rather than amended: PR #268
   (`ee908f5`, merged after #259) closed the three gate-authority gaps found
   by the #259 review — authored-path refusal for human gate decisions, the
