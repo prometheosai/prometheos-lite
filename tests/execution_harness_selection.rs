@@ -644,6 +644,93 @@ fn semantic_verification_detects_substituted_inputs() {
     );
 }
 
+/// P2 regression — `verify_against` must reject forged-but-resealed evidence.
+///
+/// A modified selection_id, evaluated_at, substitutions, or decision_id can
+/// keep the content digest internally consistent, so `verify()` will pass.
+/// Semantic verification must still fail with HSEL-0008.
+#[test]
+fn semantic_verification_rejects_forged_fields() {
+    let declaration = declaration(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+    );
+    let registry = registry(vec![declaration]);
+    let reqs = requirements(&["process-exec"], true);
+    let authority = authority();
+
+    let selection = registry
+        .select(&request(&reqs, &authority, Vec::new(), None))
+        .expect("selection succeeds");
+
+    let harness = registry
+        .get("lite.harness.native")
+        .expect("registered harness is retrievable");
+
+    let trust = HarnessSelectionTrust {
+        harness,
+        requirements: &reqs,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        selection_id: "sel-1",
+        evaluated_at: "2026-10-22T12:00:00Z",
+        substitutions: &[],
+    };
+
+    // Baseline: matching trusted inputs verify semantically
+    selection
+        .verify_against(&trust)
+        .expect("matching trusted inputs verify semantically");
+
+    // Helper to reseal and test
+    let test_forgery = |name: &str, mutate: fn(&mut HarnessSelectionV1)| {
+        let forged = resealed(&selection, |evidence| {
+            mutate(evidence);
+        });
+        // Integrity alone cannot detect the forgery
+        assert!(
+            forged.verify().is_ok(),
+            "integrity verification should pass for resealed evidence"
+        );
+        // Semantic verification must fail
+        let err = forged
+            .verify_against(&trust)
+            .expect_err(&format!("forged {name} evidence must fail semantic verification"));
+        assert!(
+            err.to_string().contains("HSEL-0008"),
+            "expected HSEL-0008 for {name}, got: {err}"
+        );
+    };
+
+    // Forged selection_id
+    test_forgery("selection_id", |e| {
+        e.selection_id = "forged-sel".to_string();
+    });
+
+    // Forged evaluated_at
+    test_forgery("evaluated_at", |e| {
+        e.evaluated_at = "2026-10-22T13:00:00Z".to_string();
+    });
+
+    // Forged substitutions
+    test_forgery("substitutions", |e| {
+        e.substitutions = vec![Substitution {
+            from: "process-exec".to_string(),
+            to: "forged".to_string(),
+            reason: None,
+        }];
+    });
+
+    // Forged decision_id
+    test_forgery("decision_id", |e| {
+        e.decision_id = "forged/dec".to_string();
+    });
+}
+
 fn canonical_digest<T: serde::Serialize>(value: &T) -> String {
     prometheos_lite::workflow::soma::try_canonical_digest(
         &serde_json::to_value(value).expect("value serializes"),

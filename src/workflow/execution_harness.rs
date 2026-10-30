@@ -825,6 +825,10 @@ impl HarnessSelectionV1 {
         if self.substitutions != trust.substitutions {
             bail!("HSEL-0008: selection substitutions do not match the trusted substitutions");
         }
+        let expected_decision_id = format!("{}/{}", trust.selection_id, declaration.harness_id);
+        if self.decision_id != expected_decision_id {
+            bail!("HSEL-0008: selection decisionId does not match the trusted decision");
+        }
 
         // Re-run the resolver with the trusted inputs and the recorded
         // evaluation instant. The decision must reproduce byte for byte.
