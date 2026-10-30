@@ -373,3 +373,63 @@ fn tampered_selection_evidence_does_not_verify() {
         "a rewritten declaration digest must not verify"
     );
 }
+
+/// P2 regression — selection evidence binds authority and evaluated_at.
+///
+/// Two selections with the same selection id, requirements and harness but
+/// different authority snapshots or evaluation instants must produce
+/// distinguishable, independently verifiable evidence. The current contract
+/// omits the authority and evaluated_at bindings, so a silent substitution of
+/// authority or time cannot be detected.
+#[test]
+fn selection_evidence_binds_authority_and_evaluated_at() {
+    let registry = registry(vec![declaration(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+    )]);
+    let requirements = requirements(&["process-exec"], true);
+
+    let authority_a = authority();
+    let authority_b =
+        serde_json::from_str(r#"{"executionClass":"deterministic","mutation":"explicit"}"#)
+            .expect("different authority parses");
+
+    let evaluated_at_a = "2026-10-22T12:00:00Z".to_string();
+    let evaluated_at_b = "2026-10-22T13:00:00Z".to_string();
+
+    let selection_a = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-bind".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority_a,
+            authority_effective: &authority_a,
+            evaluated_at: evaluated_at_a.clone(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+        })
+        .expect("first selection succeeds");
+
+    let selection_b = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-bind".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority_b,
+            authority_effective: &authority_b,
+            evaluated_at: evaluated_at_b.clone(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+        })
+        .expect("second selection succeeds");
+
+    // The evidence must be distinguishable. With the current contract it is
+    // not, so this assertion fails until the contract records the negotiation
+    // basis.
+    assert_ne!(
+        selection_a, selection_b,
+        "selections with different authority/evaluated_at must produce distinct evidence"
+    );
+}

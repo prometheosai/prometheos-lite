@@ -580,6 +580,10 @@ pub struct HarnessSelectionV1 {
     pub requirements_digest: String,
     pub decision_id: String,
     pub decision_status: DecisionStatus,
+    pub evaluated_at: String,
+    pub authority_declared_digest: String,
+    pub authority_effective_digest: String,
+    pub decision_digest: String,
     pub substitutions: Vec<Substitution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_digest: Option<String>,
@@ -615,10 +619,18 @@ impl HarnessSelectionV1 {
             ("declarationDigest", &self.declaration_digest),
             ("capabilitySetDigest", &self.capability_set_digest),
             ("requirementsDigest", &self.requirements_digest),
+            ("authorityDeclaredDigest", &self.authority_declared_digest),
+            ("authorityEffectiveDigest", &self.authority_effective_digest),
+            ("decisionDigest", &self.decision_digest),
         ] {
             if !is_hex64(value) {
                 bail!("HSEL-0005: harness selection {label} is not a 64-hex digest");
             }
+        }
+        if self.evaluated_at.trim().is_empty() || !self.evaluated_at.ends_with('Z') {
+            bail!(
+                "HSEL-0005: harness selection evaluatedAt is not a valid RFC 3339 UTC-Z timestamp"
+            );
         }
         match &self.content_digest {
             None => bail!("HSEL-0005: harness selection evidence is unsealed"),
@@ -722,6 +734,20 @@ impl HarnessRegistry {
         };
 
         let declaration = harness.declaration();
+        let authority_declared_digest = crate::workflow::soma::try_canonical_digest(
+            &serde_json::to_value(request.authority_declared)
+                .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?;
+        let authority_effective_digest = crate::workflow::soma::try_canonical_digest(
+            &serde_json::to_value(request.authority_effective)
+                .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?;
+        let decision_digest = crate::workflow::soma::try_canonical_digest(
+            &serde_json::to_value(&decision).map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?;
         Ok(HarnessSelectionV1 {
             schema_version: HARNESS_SELECTION_SCHEMA_VERSION.to_string(),
             selection_id: request.selection_id.clone(),
@@ -739,6 +765,10 @@ impl HarnessRegistry {
                 .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
             decision_id: decision.id,
             decision_status: decision.status,
+            evaluated_at: request.evaluated_at.clone(),
+            authority_declared_digest,
+            authority_effective_digest,
+            decision_digest,
             substitutions: request.substitutions.clone(),
             content_digest: None,
         }
