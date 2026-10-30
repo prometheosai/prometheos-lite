@@ -696,6 +696,18 @@ impl HarnessSelectionV1 {
         if !self.evaluated_at.ends_with('Z') {
             bail!("HSEL-0005: harness selection evaluatedAt must be UTC with a Z suffix");
         }
+        // Reject non-canonical separators before chrono to prevent lenient parsing.
+        // RFC 3339 requires YYYY-MM-DDTHH:MM:SSZ with '-' '-' 'T' ':' ':' in fixed positions.
+        if self.evaluated_at.len() != 20
+            || self.evaluated_at.chars().nth(4) != Some('-')
+            || self.evaluated_at.chars().nth(7) != Some('-')
+            || self.evaluated_at.chars().nth(10) != Some('T')
+            || self.evaluated_at.chars().nth(13) != Some(':')
+            || self.evaluated_at.chars().nth(16) != Some(':')
+            || self.evaluated_at.chars().nth(19) != Some('Z')
+        {
+            bail!("HSEL-0005: harness selection evaluatedAt has invalid separators");
+        }
         let evaluated_at = chrono::DateTime::parse_from_rfc3339(&self.evaluated_at)
             .map_err(|error| {
                 anyhow::anyhow!(
