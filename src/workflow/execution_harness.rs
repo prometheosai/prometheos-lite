@@ -597,12 +597,17 @@ impl HarnessSelectionV1 {
         self
     }
 
-    pub fn compute_digest(&self) -> String {
-        let mut value = serde_json::to_value(self).expect("selection serializes");
+    pub fn try_compute_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self).context("selection serializes")?;
         if let Some(obj) = value.as_object_mut() {
             obj.remove("contentDigest");
         }
         crate::workflow::soma::try_canonical_digest(&value)
+            .map_err(|e| anyhow::anyhow!("canonical digest failed: {e}"))
+    }
+
+    pub fn compute_digest(&self) -> String {
+        self.try_compute_digest()
             .expect("canonical digest of a Lite-constructed selection cannot fail")
     }
 
@@ -627,14 +632,30 @@ impl HarnessSelectionV1 {
                 bail!("HSEL-0005: harness selection {label} is not a 64-hex digest");
             }
         }
-        if self.evaluated_at.trim().is_empty() || !self.evaluated_at.ends_with('Z') {
+        if self.evaluated_at.trim().is_empty() {
+            bail!(
+                "HSEL-0005: harness selection evaluatedAt is empty"
+            );
+        }
+        // Parse RFC 3339 UTC-Z: exactly 2026-10-22T12:00:00Z (20 chars, 4-digit year,
+        // 2-digit month, 2-digit day, T, 2-digit hour, 2-digit min, 2-digit sec, Z).
+        if self.evaluated_at.len() != 20
+            || !self.evaluated_at.chars().enumerate().all(|(i, c)| {
+                match i {
+                    4 | 7 | 10 | 13 | 16 | 19 => {
+                        matches!(c, '-' | '-' | 'T' | ':' | ':' | 'Z')
+                    }
+                    _ => c.is_ascii_digit(),
+                }
+            })
+        {
             bail!(
                 "HSEL-0005: harness selection evaluatedAt is not a valid RFC 3339 UTC-Z timestamp"
             );
         }
         match &self.content_digest {
             None => bail!("HSEL-0005: harness selection evidence is unsealed"),
-            Some(digest) if *digest != self.compute_digest() => {
+            Some(digest) if *digest != self.try_compute_digest()? => {
                 bail!("HSEL-0005: harness selection contentDigest does not verify")
             }
             Some(_) => Ok(()),
@@ -702,7 +723,7 @@ impl HarnessRegistry {
                 substitutions: request.substitutions.clone(),
             })
             .map_err(|error| anyhow::anyhow!("HSEL-0003: {error}"))?;
-            if decision.status == DecisionStatus::Incompatible {
+            if decision.status == DecisionStatus::Incompatible || decision.status == DecisionStatus::CompatibleWithDegradation {
                 let detail = decision
                     .diagnostics
                     .iter()
@@ -710,8 +731,13 @@ impl HarnessRegistry {
                     .collect::<Vec<_>>()
                     .join("; ");
                 refusals.push(format!("{} refused: {detail}", declaration.harness_id));
-            } else {
+            } else if decision.status == DecisionStatus::Compatible {
                 compatible.push((harness, decision));
+            } else {
+                bail!(
+                    "HSEL-0003: registered harness produced unexpected decision status {:?}",
+                    decision.status
+                );
             }
         }
 
