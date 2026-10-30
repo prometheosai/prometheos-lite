@@ -697,9 +697,9 @@ fn semantic_verification_rejects_forged_fields() {
             "integrity verification should pass for resealed evidence"
         );
         // Semantic verification must fail
-        let err = forged
-            .verify_against(&trust)
-            .expect_err(&format!("forged {name} evidence must fail semantic verification"));
+        let err = forged.verify_against(&trust).expect_err(&format!(
+            "forged {name} evidence must fail semantic verification"
+        ));
         assert!(
             err.to_string().contains("HSEL-0008"),
             "expected HSEL-0008 for {name}, got: {err}"
