@@ -557,6 +557,9 @@ fn semantic_verification_detects_substituted_inputs() {
         requirements: &reqs,
         authority_declared: &authority_a,
         authority_effective: &authority_a,
+        selection_id: "sel-1",
+        evaluated_at: "2026-10-22T12:00:00Z",
+        substitutions: &[],
     };
     selection
         .verify_against(&trust)
@@ -587,6 +590,9 @@ fn semantic_verification_detects_substituted_inputs() {
             requirements: &stricter,
             authority_declared: &authority_a,
             authority_effective: &authority_a,
+            selection_id: "sel-1",
+            evaluated_at: "2026-10-22T12:00:00Z",
+            substitutions: &[],
         })
         .expect_err("different trusted requirements must not verify");
     assert!(
@@ -610,6 +616,9 @@ fn semantic_verification_detects_substituted_inputs() {
             requirements: &reqs,
             authority_declared: &authority_a,
             authority_effective: &authority_a,
+            selection_id: "sel-1",
+            evaluated_at: "2026-10-22T12:00:00Z",
+            substitutions: &[],
         })
         .expect_err("a different harness revision must not verify");
     assert!(

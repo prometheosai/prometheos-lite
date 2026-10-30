@@ -618,6 +618,12 @@ pub struct HarnessSelectionTrust<'a> {
     pub requirements: &'a WorkRequirements,
     pub authority_declared: &'a AuthorityProfile,
     pub authority_effective: &'a AuthorityProfile,
+    /// The original selection ID that was used to construct the request.
+    pub selection_id: &'a str,
+    /// The original evaluation instant that was used to construct the request.
+    pub evaluated_at: &'a str,
+    /// The original substitutions that were used to construct the request.
+    pub substitutions: &'a [Substitution],
 }
 
 /// Durable evidence that one harness revision was selected for one work item.
@@ -807,16 +813,29 @@ impl HarnessSelectionV1 {
             bail!("HSEL-0008: selection evidence records a non-compatible decision");
         }
 
+        // Verify that the evidence records the same negotiation context that
+        // the trusted inputs claim. This prevents a resealed record from
+        // passing verification against a different request.
+        if self.selection_id != trust.selection_id {
+            bail!("HSEL-0008: selection selectionId does not match the trusted selection");
+        }
+        if self.evaluated_at != trust.evaluated_at {
+            bail!("HSEL-0008: selection evaluatedAt does not match the trusted evaluation instant");
+        }
+        if self.substitutions != trust.substitutions {
+            bail!("HSEL-0008: selection substitutions do not match the trusted substitutions");
+        }
+
         // Re-run the resolver with the trusted inputs and the recorded
         // evaluation instant. The decision must reproduce byte for byte.
         let decision = resolve(&NegotiationInputs {
-            id: self.decision_id.clone(),
+            id: format!("{}/{}", trust.selection_id, declaration.harness_id),
             requirements: trust.requirements,
             capabilities: &declaration.capabilities,
             authority_declared: trust.authority_declared,
             authority_effective: trust.authority_effective,
-            evaluated_at: self.evaluated_at.clone(),
-            substitutions: self.substitutions.clone(),
+            evaluated_at: trust.evaluated_at.to_string(),
+            substitutions: trust.substitutions.to_vec(),
         })
         .map_err(|error| {
             anyhow::anyhow!("HSEL-0008: trusted inputs do not reproduce a decision: {error}")
