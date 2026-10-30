@@ -58,6 +58,16 @@ fn is_hex64(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+/// Canonical digest of any serializable value, as a `Result`.
+///
+/// Used on evidence paths, where a digest failure must fail closed instead of
+/// panicking.
+fn canonical_json_digest<T: Serialize>(value: &T) -> Result<String> {
+    let value = serde_json::to_value(value).context("value serializes")?;
+    crate::workflow::soma::try_canonical_digest(&value)
+        .map_err(|error| anyhow::anyhow!("canonical digest failed: {error}"))
+}
+
 // ---------------------------------------------------------------------------
 // Declaration
 // ---------------------------------------------------------------------------
@@ -125,6 +135,22 @@ impl HarnessDeclarationV1 {
     }
 
     /// Canonical digest over every field except `contentDigest`.
+    ///
+    /// Fallible variant: used wherever the declaration may have been parsed
+    /// from untrusted input, so a digest failure fails closed.
+    pub fn try_compute_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self).context("declaration serializes")?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        crate::workflow::soma::try_canonical_digest(&value)
+            .map_err(|error| anyhow::anyhow!("canonical digest failed: {error}"))
+    }
+
+    /// Canonical digest over every field except `contentDigest`.
+    ///
+    /// Panic-on-error wrapper retained for Lite-constructed declarations.
+    /// Untrusted input must go through [`Self::try_compute_digest`].
     pub fn compute_digest(&self) -> String {
         let mut value = serde_json::to_value(self).expect("declaration serializes");
         if let Some(obj) = value.as_object_mut() {
@@ -176,7 +202,7 @@ impl HarnessDeclarationV1 {
         }
         match &d.content_digest {
             None => bail!("harness declaration missing contentDigest"),
-            Some(digest) if *digest != d.compute_digest() => {
+            Some(digest) if *digest != d.try_compute_digest()? => {
                 bail!("harness declaration contentDigest does not verify")
             }
             Some(_) => {}
@@ -235,6 +261,15 @@ impl HarnessOutcome {
         self
     }
 
+    pub fn try_compute_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self).context("outcome serializes")?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        crate::workflow::soma::try_canonical_digest(&value)
+            .map_err(|error| anyhow::anyhow!("canonical digest failed: {error}"))
+    }
+
     pub fn compute_digest(&self) -> String {
         let mut value = serde_json::to_value(self).expect("outcome serializes");
         if let Some(obj) = value.as_object_mut() {
@@ -248,7 +283,7 @@ impl HarnessOutcome {
     pub fn verify(&self) -> Result<()> {
         match &self.content_digest {
             None => bail!("harness outcome missing contentDigest"),
-            Some(digest) if *digest != self.compute_digest() => {
+            Some(digest) if *digest != self.try_compute_digest()? => {
                 bail!("harness outcome contentDigest does not verify")
             }
             Some(_) => Ok(()),
@@ -286,6 +321,15 @@ impl HarnessCheckpointV1 {
         self
     }
 
+    pub fn try_compute_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self).context("checkpoint serializes")?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        crate::workflow::soma::try_canonical_digest(&value)
+            .map_err(|error| anyhow::anyhow!("canonical digest failed: {error}"))
+    }
+
     pub fn compute_digest(&self) -> String {
         let mut value = serde_json::to_value(self).expect("checkpoint serializes");
         if let Some(obj) = value.as_object_mut() {
@@ -311,7 +355,7 @@ impl HarnessCheckpointV1 {
         }
         match &self.content_digest {
             None => bail!("harness checkpoint missing contentDigest"),
-            Some(digest) if *digest != self.compute_digest() => {
+            Some(digest) if *digest != self.try_compute_digest()? => {
                 bail!("harness checkpoint contentDigest does not verify")
             }
             Some(_) => Ok(()),
@@ -481,7 +525,7 @@ impl HarnessRegistry {
         if declaration.harness_id.trim().is_empty() {
             bail!("cannot register a harness with an empty id");
         }
-        if declaration.content_digest.as_deref() != Some(&declaration.compute_digest()) {
+        if declaration.content_digest.as_deref() != Some(&declaration.try_compute_digest()?) {
             bail!(
                 "cannot register harness {:?}: declaration is not sealed or does not verify",
                 declaration.harness_id
@@ -562,6 +606,20 @@ pub struct HarnessSelectionRequest<'a> {
     pub pinned_harness_id: Option<&'a str>,
 }
 
+/// Trusted inputs for semantic re-verification of selection evidence.
+///
+/// These are the values the verifier independently holds or can re-derive: the
+/// registered adapter (hence its sealed declaration and capability set), the
+/// work requirements, and the authority snapshots that were in force. They are
+/// deliberately NOT read back out of the evidence, so a substituted snapshot
+/// cannot validate itself.
+pub struct HarnessSelectionTrust<'a> {
+    pub harness: &'a dyn ExecutionHarness,
+    pub requirements: &'a WorkRequirements,
+    pub authority_declared: &'a AuthorityProfile,
+    pub authority_effective: &'a AuthorityProfile,
+}
+
 /// Durable evidence that one harness revision was selected for one work item.
 ///
 /// It binds the harness id, the published identity revision, the declaration
@@ -590,11 +648,15 @@ pub struct HarnessSelectionV1 {
 }
 
 impl HarnessSelectionV1 {
-    pub fn sealed(mut self) -> Self {
+    /// Build + seal selection evidence.
+    ///
+    /// Fallible: sealing is reachable from `select`, and a canonical-digest
+    /// failure must surface as an error rather than a panic.
+    pub fn try_sealed(mut self) -> Result<Self> {
         self.content_digest = None;
-        let digest = self.compute_digest();
+        let digest = self.try_compute_digest()?;
         self.content_digest = Some(digest);
-        self
+        Ok(self)
     }
 
     pub fn try_compute_digest(&self) -> Result<String> {
@@ -604,11 +666,6 @@ impl HarnessSelectionV1 {
         }
         crate::workflow::soma::try_canonical_digest(&value)
             .map_err(|e| anyhow::anyhow!("canonical digest failed: {e}"))
-    }
-
-    pub fn compute_digest(&self) -> String {
-        self.try_compute_digest()
-            .expect("canonical digest of a Lite-constructed selection cannot fail")
     }
 
     /// Fail-closed re-verification of durable evidence. A rewritten revision,
@@ -632,26 +689,27 @@ impl HarnessSelectionV1 {
                 bail!("HSEL-0005: harness selection {label} is not a 64-hex digest");
             }
         }
-        if self.evaluated_at.trim().is_empty() {
-            bail!(
-                "HSEL-0005: harness selection evaluatedAt is empty"
-            );
+        // RFC 3339 parsing is delegated to `chrono`: it validates separators,
+        // calendar ranges, month lengths and leap years, and refuses malformed
+        // input. Evidence must be canonical UTC (`Z`), so a numeric zero offset
+        // (`+00:00`) is refused as well.
+        if !self.evaluated_at.ends_with('Z') {
+            bail!("HSEL-0005: harness selection evaluatedAt must be UTC with a Z suffix");
         }
-        // Parse RFC 3339 UTC-Z: exactly 2026-10-22T12:00:00Z (20 chars, 4-digit year,
-        // 2-digit month, 2-digit day, T, 2-digit hour, 2-digit min, 2-digit sec, Z).
-        if self.evaluated_at.len() != 20
-            || !self.evaluated_at.chars().enumerate().all(|(i, c)| {
-                match i {
-                    4 | 7 | 10 | 13 | 16 | 19 => {
-                        matches!(c, '-' | '-' | 'T' | ':' | ':' | 'Z')
-                    }
-                    _ => c.is_ascii_digit(),
-                }
-            })
-        {
-            bail!(
-                "HSEL-0005: harness selection evaluatedAt is not a valid RFC 3339 UTC-Z timestamp"
-            );
+        let evaluated_at = chrono::DateTime::parse_from_rfc3339(&self.evaluated_at)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "HSEL-0005: harness selection evaluatedAt is not a valid RFC 3339 timestamp: {error}"
+                )
+            })?;
+        if evaluated_at.offset().local_minus_utc() != 0 {
+            bail!("HSEL-0005: harness selection evaluatedAt is not UTC");
+        }
+        // `chrono` represents a leap second as a nanosecond overflow. Selection
+        // evidence never records one, so refuse it rather than carry an
+        // ambiguous second.
+        if evaluated_at.timestamp_subsec_nanos() >= 1_000_000_000 {
+            bail!("HSEL-0005: harness selection evaluatedAt must not use a leap second");
         }
         match &self.content_digest {
             None => bail!("HSEL-0005: harness selection evidence is unsealed"),
@@ -671,6 +729,93 @@ impl HarnessSelectionV1 {
             serde_json::from_str(text).context("harness selection parse failed")?;
         selection.verify()?;
         Ok(selection)
+    }
+
+    /// Semantic re-verification against trusted inputs.
+    ///
+    /// [`Self::verify`] establishes only integrity: the digests are well formed
+    /// and the content digest covers the recorded bytes. It cannot establish
+    /// that the recorded decision was actually produced from the claimed
+    /// authority, capabilities and requirements, because those inputs are not
+    /// carried in the evidence.
+    ///
+    /// `verify_against` closes that gap. It recomputes every negotiation-input
+    /// digest from the trusted values, then re-runs [`resolve`] with the
+    /// recorded evaluation instant and requires the reproduced decision to
+    /// match the recorded status and canonical digest. A substituted authority
+    /// snapshot, capability set, requirement set, evaluation instant or
+    /// decision therefore fails closed with `HSEL-0008`.
+    pub fn verify_against(&self, trust: &HarnessSelectionTrust<'_>) -> Result<()> {
+        self.verify()?;
+
+        let declaration = trust.harness.declaration();
+        if declaration.harness_id != self.harness_id {
+            bail!("HSEL-0008: selection harnessId does not match the trusted harness");
+        }
+        if declaration.identity != self.identity {
+            bail!("HSEL-0008: selection identity does not match the trusted harness");
+        }
+        if declaration.family != self.family {
+            bail!("HSEL-0008: selection family does not match the trusted harness");
+        }
+        if declaration.try_compute_digest()? != self.declaration_digest {
+            bail!("HSEL-0008: selection declarationDigest does not match the trusted declaration");
+        }
+        if declaration
+            .capabilities
+            .canonical_digest()
+            .map_err(|e| anyhow::anyhow!("HSEL-0008: {e}"))?
+            != self.capability_set_digest
+        {
+            bail!(
+                "HSEL-0008: selection capabilitySetDigest does not match the trusted capability set"
+            );
+        }
+        if trust
+            .requirements
+            .canonical_digest()
+            .map_err(|e| anyhow::anyhow!("HSEL-0008: {e}"))?
+            != self.requirements_digest
+        {
+            bail!(
+                "HSEL-0008: selection requirementsDigest does not match the trusted requirements"
+            );
+        }
+        if canonical_json_digest(trust.authority_declared)? != self.authority_declared_digest {
+            bail!(
+                "HSEL-0008: selection authorityDeclaredDigest does not match the trusted authority"
+            );
+        }
+        if canonical_json_digest(trust.authority_effective)? != self.authority_effective_digest {
+            bail!(
+                "HSEL-0008: selection authorityEffectiveDigest does not match the trusted authority"
+            );
+        }
+        if self.decision_status != DecisionStatus::Compatible {
+            bail!("HSEL-0008: selection evidence records a non-compatible decision");
+        }
+
+        // Re-run the resolver with the trusted inputs and the recorded
+        // evaluation instant. The decision must reproduce byte for byte.
+        let decision = resolve(&NegotiationInputs {
+            id: self.decision_id.clone(),
+            requirements: trust.requirements,
+            capabilities: &declaration.capabilities,
+            authority_declared: trust.authority_declared,
+            authority_effective: trust.authority_effective,
+            evaluated_at: self.evaluated_at.clone(),
+            substitutions: self.substitutions.clone(),
+        })
+        .map_err(|error| {
+            anyhow::anyhow!("HSEL-0008: trusted inputs do not reproduce a decision: {error}")
+        })?;
+        if decision.status != self.decision_status {
+            bail!("HSEL-0008: selection decisionStatus does not match the reproduced decision");
+        }
+        if canonical_json_digest(&decision)? != self.decision_digest {
+            bail!("HSEL-0008: selection decisionDigest does not match the reproduced decision");
+        }
+        Ok(())
     }
 }
 
@@ -723,7 +868,9 @@ impl HarnessRegistry {
                 substitutions: request.substitutions.clone(),
             })
             .map_err(|error| anyhow::anyhow!("HSEL-0003: {error}"))?;
-            if decision.status == DecisionStatus::Incompatible || decision.status == DecisionStatus::CompatibleWithDegradation {
+            if decision.status == DecisionStatus::Incompatible
+                || decision.status == DecisionStatus::CompatibleWithDegradation
+            {
                 let detail = decision
                     .diagnostics
                     .iter()
@@ -760,27 +907,16 @@ impl HarnessRegistry {
         };
 
         let declaration = harness.declaration();
-        let authority_declared_digest = crate::workflow::soma::try_canonical_digest(
-            &serde_json::to_value(request.authority_declared)
-                .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?;
-        let authority_effective_digest = crate::workflow::soma::try_canonical_digest(
-            &serde_json::to_value(request.authority_effective)
-                .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?;
-        let decision_digest = crate::workflow::soma::try_canonical_digest(
-            &serde_json::to_value(&decision).map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("HSEL-0007: {e}"))?;
-        Ok(HarnessSelectionV1 {
+        let authority_declared_digest = canonical_json_digest(request.authority_declared)?;
+        let authority_effective_digest = canonical_json_digest(request.authority_effective)?;
+        let decision_digest = canonical_json_digest(&decision)?;
+        HarnessSelectionV1 {
             schema_version: HARNESS_SELECTION_SCHEMA_VERSION.to_string(),
             selection_id: request.selection_id.clone(),
             harness_id: declaration.harness_id.clone(),
             identity: declaration.identity.clone(),
             family: declaration.family,
-            declaration_digest: declaration.compute_digest(),
+            declaration_digest: declaration.try_compute_digest()?,
             capability_set_digest: declaration
                 .capabilities
                 .canonical_digest()
@@ -798,7 +934,7 @@ impl HarnessRegistry {
             substitutions: request.substitutions.clone(),
             content_digest: None,
         }
-        .sealed())
+        .try_sealed()
     }
 }
 
@@ -909,7 +1045,7 @@ pub async fn conformance_report(
             ),
         ));
     }
-    if declaration.content_digest.as_deref() != Some(&declaration.compute_digest()) {
+    if declaration.content_digest.as_deref() != declaration.try_compute_digest().ok().as_deref() {
         findings.push(finding(
             "HCONF-0002",
             "declaration is not sealed or its contentDigest does not verify",

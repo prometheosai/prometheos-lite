@@ -31,7 +31,9 @@ One binding, no new adapter and no new transport:
 - **`HarnessSelectionV1`** — digest-sealed durable evidence binding
   `harnessId`, the published identity `name`/`revision`, the closed
   `HarnessFamily`, the declaration digest, the capability-set digest, the
-  requirement digest, the decision id/status and the recorded substitutions.
+  requirement digest, the declared/effective authority digests, the
+  evaluation instant, the canonical decision digest, the decision id/status
+  and the recorded substitutions.
 
 ## Invariants enforced (fail closed)
 
@@ -49,7 +51,24 @@ One binding, no new adapter and no new transport:
 - Selection never invokes the adapter. The test adapters refuse to run, so any
   invocation would fail the suite.
 - Evidence is self-verifying (`HSEL-0005`): a rewritten revision, declaration
-  digest, capability-set digest or requirement digest does not verify.
+  digest, capability-set digest, requirement digest, authority digest,
+  evaluation instant or decision digest does not verify.
+- `evaluatedAt` is parsed as RFC 3339 and must be a canonical UTC (`Z`) instant
+  that is not a leap second. Separator-shape checks alone are not enough:
+  `2026:10:22-12-00-00Z` and `2026-99-99T99:99:99Z` are refused.
+- Integrity is not semantic validity. `HarnessSelectionV1::verify_against`
+  re-derives every negotiation-input digest from *trusted* values and re-runs
+  `resolve()` with the recorded instant, requiring the reproduced decision to
+  match the recorded status and canonical digest (`HSEL-0008`). A re-sealed
+  substitution therefore still fails closed.
+- Only `DecisionStatus::Compatible` is selected. `CompatibleWithDegradation` is
+  refused like `Incompatible`, and any other status is a hard refusal rather
+  than an implicit accept.
+- Evidence paths are panic-free: sealing and digesting selection evidence are
+  fallible, and every untrusted-input verification path (declaration, outcome,
+  checkpoint, selection) uses the fallible digest. The remaining
+  `compute_digest()` panic wrappers are reachable only from Lite-constructed
+  values.
 - The seam reads no clock; `evaluatedAt` is injected.
 
 ## Refusal codes
@@ -63,6 +82,7 @@ One binding, no new adapter and no new transport:
 | `HSEL-0005` | selection evidence does not verify |
 | `HSEL-0006` | empty selection id |
 | `HSEL-0007` | canonical digest of an input could not be computed |
+| `HSEL-0008` | evidence does not verify against trusted inputs / reproduced decision |
 
 ## Non-goals honored
 
@@ -91,6 +111,29 @@ enforcement and `HarnessDispatch` are untouched: Slice B decides *who* may run
 - `cargo check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo test`, and `scripts/local_ci.py run --suite core|platform|smoke`
   recorded on the candidate commit before review.
+
+### Review repair rounds
+
+1. *Evidence binding* — selection evidence recorded the decision id and status
+   but discarded the negotiation basis. Added `evaluatedAt`,
+   `authorityDeclaredDigest`, `authorityEffectiveDigest` and `decisionDigest`,
+   with a regression proving two selections over the same harness but different
+   authority/instant produce distinct evidence.
+2. *Timestamp and semantics* — replaced positional character checks with RFC
+   3339 parsing (UTC `Z` only, leap second refused), restricted selection to
+   `DecisionStatus::Compatible`, and added `verify_against` so evidence is
+   checked against trusted inputs and a resolver replay rather than only
+   against itself. Negative tests cover separator confusion, invalid calendar
+   dates, leap years and out-of-range clock values; a re-sealed authority
+   substitution and a forged decision digest both fail `HSEL-0008`.
+3. *Panic audit* — `HarnessSelectionV1` sealing is fallible
+   (`try_sealed`/`try_compute_digest`); declaration, outcome and checkpoint
+   verification paths use fallible digests, so untrusted input cannot reach a
+   panic wrapper.
+
+Round 3 evidence: selection suite 9/9, conformance suite 5/5, formatting exit
+0, Clippy `-D warnings` exit 0, `scripts/local_ci.py run --suite core` exit 0,
+MG2 regressions 6/6.
 
 ## Budget note
 

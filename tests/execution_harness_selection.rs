@@ -24,7 +24,8 @@ use anyhow::{Result, bail};
 
 use prometheos_lite::workflow::execution_harness::{
     ExecutionHarness, HARNESS_SCHEMA_VERSION, HarnessDeclarationV1, HarnessDispatch, HarnessFamily,
-    HarnessOutcome, HarnessRegistry, HarnessSelectionRequest, HarnessSelectionV1, HarnessStep,
+    HarnessOutcome, HarnessRegistry, HarnessSelectionRequest, HarnessSelectionTrust,
+    HarnessSelectionV1, HarnessStep,
 };
 use prometheos_lite::workflow::soma::capability::{
     DecisionStatus, Identity, RuntimeCapabilitySet, SUPPORTED_CAPABILITY_SCHEMA_VERSION,
@@ -176,7 +177,7 @@ fn registry(declarations: Vec<HarnessDeclarationV1>) -> HarnessRegistry {
 /// harness identity, its revision, its declaration digest and the decision.
 #[test]
 fn compatible_harness_selection_records_revision_and_decision() {
-    let declaration = declaration(
+    let registered = declaration(
         "lite.harness.native",
         "lite-native",
         "v1",
@@ -184,8 +185,8 @@ fn compatible_harness_selection_records_revision_and_decision() {
         "harness.native.probe",
         &["process-exec"],
     );
-    let expected_declaration_digest = declaration.compute_digest();
-    let registry = registry(vec![declaration]);
+    let expected_declaration_digest = registered.compute_digest();
+    let registry = registry(vec![registered]);
     let requirements = requirements(&["process-exec"], true);
     let authority = authority();
 
@@ -215,7 +216,7 @@ fn compatible_harness_selection_records_revision_and_decision() {
 /// before execution, and no selection evidence exists to act on.
 #[test]
 fn uncovered_required_capability_refuses_selection() {
-    let declaration = declaration(
+    let registered = declaration(
         "lite.harness.native",
         "lite-native",
         "v1",
@@ -223,7 +224,7 @@ fn uncovered_required_capability_refuses_selection() {
         "harness.native.probe",
         &["process-exec"],
     );
-    let registry = registry(vec![declaration]);
+    let registry = registry(vec![registered]);
     let requirements = requirements(&["fs.write"], true);
     let authority = authority();
 
@@ -432,4 +433,211 @@ fn selection_evidence_binds_authority_and_evaluated_at() {
         selection_a, selection_b,
         "selections with different authority/evaluated_at must produce distinct evidence"
     );
+}
+
+/// Re-seal a selection after rewriting a field, so a test can isolate a
+/// semantic rule from the content-digest guard.
+fn resealed(
+    selection: &HarnessSelectionV1,
+    mutate: impl FnOnce(&mut HarnessSelectionV1),
+) -> HarnessSelectionV1 {
+    let mut tampered = selection.clone();
+    tampered.content_digest = None;
+    mutate(&mut tampered);
+    tampered
+        .try_sealed()
+        .expect("Lite-constructed evidence re-seals")
+}
+
+/// P1 regression — `evaluatedAt` is parsed as RFC 3339, not merely shaped.
+///
+/// Positional character checks accepted both a swapped-separator value such as
+/// `2026:10:22-12-00-00Z` and an out-of-range calendar value such as
+/// `2026-99-99T99:99:99Z`. Both must be refused even when the evidence is
+/// re-sealed, and a valid leap day must be accepted.
+#[test]
+fn evaluated_at_must_be_a_valid_rfc3339_utc_instant() {
+    let registry = registry(vec![declaration(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+    )]);
+    let requirements = requirements(&["process-exec"], true);
+    let authority = authority();
+    let selection = registry
+        .select(&request(&requirements, &authority, Vec::new(), None))
+        .expect("selection succeeds");
+
+    let malformed = [
+        // Separator confusion: the shape is right, the positions are not.
+        "2026:10:22-12-00-00Z",
+        "2026-10-22-12:00:00Z",
+        "2026-10-22T12-00-00Z",
+        "2026/10/22T12:00:00Z",
+        "2026-10-22T12:00:00z",
+        // Calendar values the positional check could not see.
+        "2026-99-99T99:99:99Z",
+        "2026-13-01T12:00:00Z",
+        "2026-00-01T12:00:00Z",
+        "2026-02-30T12:00:00Z",
+        "2026-04-31T12:00:00Z",
+        "2025-02-29T12:00:00Z",
+        // Clock ranges.
+        "2026-10-22T24:00:00Z",
+        "2026-10-22T12:60:00Z",
+        "2026-10-22T12:00:60Z",
+        // Not UTC-Z: an offset is a different instant contract.
+        "2026-10-22T12:00:00+00:00",
+        "2026-10-22T12:00:00-03:00",
+        // Empty and truncated.
+        "",
+        "2026-10-22",
+    ];
+    for value in malformed {
+        let tampered = resealed(&selection, |evidence| {
+            evidence.evaluated_at = value.to_string();
+        });
+        assert!(
+            tampered.verify().is_err(),
+            "evaluatedAt {value:?} must not verify"
+        );
+    }
+
+    for value in [
+        "2024-02-29T00:00:00Z",
+        "2000-02-29T23:59:59Z",
+        "2026-10-22T12:00:00Z",
+    ] {
+        let accepted = resealed(&selection, |evidence| {
+            evidence.evaluated_at = value.to_string();
+        });
+        assert!(
+            accepted.verify().is_ok(),
+            "evaluatedAt {value:?} must verify"
+        );
+    }
+}
+
+/// P1 regression — integrity is not semantic validity.
+///
+/// Re-sealing substituted evidence keeps `verify()` green because the bytes are
+/// internally consistent, but `verify_against` re-derives every negotiation
+/// input from trusted values and re-runs the resolver, so the substitution
+/// fails closed.
+#[test]
+fn semantic_verification_detects_substituted_inputs() {
+    let registered = declaration(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+    );
+    let registry = registry(vec![registered]);
+    let reqs = requirements(&["process-exec"], true);
+    let authority_a = authority();
+    let authority_b: AuthorityProfile =
+        serde_json::from_str(r#"{"executionClass":"deterministic","mutation":"explicit"}"#)
+            .expect("different authority parses");
+
+    let selection = registry
+        .select(&request(&reqs, &authority_a, Vec::new(), None))
+        .expect("selection succeeds");
+
+    let harness = registry
+        .get("lite.harness.native")
+        .expect("registered harness is retrievable");
+
+    let trust = HarnessSelectionTrust {
+        harness,
+        requirements: &reqs,
+        authority_declared: &authority_a,
+        authority_effective: &authority_a,
+    };
+    selection
+        .verify_against(&trust)
+        .expect("matching trusted inputs verify semantically");
+
+    // A substituted effective authority, re-sealed to stay internally
+    // consistent, passes integrity and fails semantics.
+    let substituted = resealed(&selection, |evidence| {
+        evidence.authority_effective_digest = canonical_digest(&authority_b);
+    });
+    assert!(
+        substituted.verify().is_ok(),
+        "integrity alone cannot see the substitution"
+    );
+    let error = substituted
+        .verify_against(&trust)
+        .expect_err("a substituted authority must not verify semantically");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "unexpected semantic refusal: {error}"
+    );
+
+    // Trusted inputs that no longer match the recorded requirements.
+    let stricter = requirements(&["fs.write"], true);
+    let error = selection
+        .verify_against(&HarnessSelectionTrust {
+            harness,
+            requirements: &stricter,
+            authority_declared: &authority_a,
+            authority_effective: &authority_a,
+        })
+        .expect_err("different trusted requirements must not verify");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "unexpected semantic refusal: {error}"
+    );
+
+    // A different harness revision claiming the same id is not the harness
+    // the evidence was bound to.
+    let other = ProbeHarness::new(declaration(
+        "lite.harness.native",
+        "lite-native",
+        "v2",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+    ));
+    let error = selection
+        .verify_against(&HarnessSelectionTrust {
+            harness: &other,
+            requirements: &reqs,
+            authority_declared: &authority_a,
+            authority_effective: &authority_a,
+        })
+        .expect_err("a different harness revision must not verify");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "unexpected semantic refusal: {error}"
+    );
+
+    // A re-sealed but forged decision digest is refused by the resolver
+    // replay, not just by the content digest.
+    let forged = resealed(&selection, |evidence| {
+        evidence.decision_digest = "0".repeat(64);
+    });
+    assert!(
+        forged.verify().is_ok(),
+        "integrity alone cannot see the forgery"
+    );
+    let error = forged
+        .verify_against(&trust)
+        .expect_err("a forged decision digest must not verify semantically");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "unexpected semantic refusal: {error}"
+    );
+}
+
+fn canonical_digest<T: serde::Serialize>(value: &T) -> String {
+    prometheos_lite::workflow::soma::try_canonical_digest(
+        &serde_json::to_value(value).expect("value serializes"),
+    )
+    .expect("canonical digest succeeds")
 }
