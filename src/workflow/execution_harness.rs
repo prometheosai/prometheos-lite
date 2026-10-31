@@ -162,6 +162,52 @@ impl HarnessDeclarationV1 {
 
     /// Fail-closed parse: version gate, structural checks, claim law, digest
     /// verification. Refusals are input errors, never silent repair.
+    /// Fail-closed validation of a sealed declaration.
+    ///
+    /// Returns a list of findings (empty = valid). Used by the conformance kit
+    /// and by the Slice C drift guard.
+    pub fn validate(&self) -> Vec<String> {
+        let mut findings = Vec::new();
+        if self.schema_version != HARNESS_SCHEMA_VERSION {
+            findings.push(format!(
+                "unsupported schema version {} (expected {HARNESS_SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.harness_id.trim().is_empty() {
+            findings.push("empty harnessId".to_string());
+        }
+        if self.identity.name.trim().is_empty() || self.identity.revision.trim().is_empty() {
+            findings.push("empty identity name or revision".to_string());
+        }
+        if self.declared_capabilities.is_empty() {
+            findings.push("no declared capabilities".to_string());
+        }
+        let declared_set: BTreeSet<&str> = self
+            .declared_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if declared_set.len() != self.declared_capabilities.len() {
+            findings.push("duplicate declared capability".to_string());
+        }
+        for c in &self.claimed_capabilities {
+            if !declared_set.contains(c.as_str()) {
+                findings.push(format!("claimed capability {c:?} not in declared set"));
+            }
+        }
+        if self.capabilities.identity != self.identity {
+            findings.push("capability identity diverges from declaration identity".to_string());
+        }
+        // Stale version check: spec_versions must be non-empty
+        if self.capabilities.spec_versions.is_empty() {
+            findings.push("no supported spec versions declared".to_string());
+        }
+        findings
+    }
+
+    /// Fail-closed parse: version gate, structural checks, claim law, digest
+    /// verification. Refusals are input errors, never silent repair.
     pub fn parse_json(text: &str) -> Result<Self> {
         let d: Self = serde_json::from_str(text).context("harness declaration parse failed")?;
         if d.schema_version != HARNESS_SCHEMA_VERSION {
@@ -565,10 +611,34 @@ impl HarnessRegistry {
                     declaration_digest: d.compute_digest(),
                     declared_capabilities: d.declared_capabilities.clone(),
                     claimed_capabilities: d.claimed_capabilities.clone(),
+                    effect_classes: d.capabilities.effect_classes.clone(),
+                    spec_versions: d.capabilities.spec_versions.clone(),
+                    adapter_families: d
+                        .capabilities
+                        .adapter_families
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect(),
                     locality: d.capabilities.locality,
                     checkpoint_export: d.capabilities.checkpoint_export,
                     checkpoint_import: d.capabilities.checkpoint_import,
                     resume_support: d.capabilities.resume_support,
+                    event_streaming: d.capabilities.event_streaming,
+                    read_projection: d.capabilities.read_projection,
+                    privacy_classes: d.capabilities.privacy_classes.clone(),
+                    evidence_attachment: d.capabilities.evidence_attachment,
+                    validation: d.capabilities.validation,
+                    approval_escalation: d.capabilities.approval_escalation,
+                    unclaimed_capabilities: d
+                        .declared_capabilities
+                        .iter()
+                        .filter(|c| !d.claimed_capabilities.contains(c))
+                        .cloned()
+                        .collect(),
+                    over_claimed: d
+                        .claimed_capabilities
+                        .iter()
+                        .any(|c| !d.declared_capabilities.contains(c)),
                 }
             })
             .collect();
@@ -984,10 +1054,26 @@ pub struct HarnessCatalogEntry {
     pub declaration_digest: String,
     pub declared_capabilities: Vec<String>,
     pub claimed_capabilities: Vec<String>,
+    // --- Capability surface (from RuntimeCapabilitySet) ---
+    pub effect_classes: Vec<String>,
+    pub spec_versions: Vec<String>,
+    pub adapter_families: Vec<String>,
     pub locality: Option<crate::workflow::soma::capability::Locality>,
     pub checkpoint_export: Option<bool>,
     pub checkpoint_import: Option<bool>,
     pub resume_support: Option<bool>,
+    pub event_streaming: Option<bool>,
+    pub read_projection: Option<bool>,
+    pub privacy_classes: Vec<String>,
+    pub evidence_attachment: Option<bool>,
+    pub validation: Option<bool>,
+    pub approval_escalation: Option<bool>,
+    // --- Limitations (derived, never granted authority) ---
+    /// Capabilities declared but not claimed — the adapter's limitations.
+    pub unclaimed_capabilities: Vec<String>,
+    /// Whether the adapter claims more than it declares (must always be false
+    /// for a valid declaration).
+    pub over_claimed: bool,
 }
 
 /// Generated, digest-sealed capability catalogue.
@@ -1018,9 +1104,57 @@ impl HarnessCatalog {
             .expect("canonical digest of a Lite-constructed catalogue cannot fail")
     }
 
+    /// Fail-closed validation of a generated catalog.
+    ///
+    /// Returns a list of findings (empty = valid). Used by the Slice C drift
+    /// guard to detect malformed or inconsistent catalogs.
+    pub fn validate(&self) -> Vec<String> {
+        let mut findings = Vec::new();
+        if self.schema_version != HARNESS_SCHEMA_VERSION {
+            findings.push(format!(
+                "unsupported schema version {} (expected {HARNESS_SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.conformance_version != HARNESS_CONFORMANCE_VERSION {
+            findings.push(format!(
+                "unsupported conformance version {} (expected {HARNESS_CONFORMANCE_VERSION})",
+                self.conformance_version
+            ));
+        }
+        // Check for duplicate harness_ids
+        let mut seen = BTreeSet::new();
+        for entry in &self.entries {
+            if !seen.insert(&entry.harness_id) {
+                findings.push(format!("duplicate harnessId {:?}", entry.harness_id));
+            }
+            if entry.declaration_digest.len() != 64 {
+                findings.push(format!(
+                    "invalid declaration_digest for {:?}",
+                    entry.harness_id
+                ));
+            }
+            // Over-claimed check
+            if entry.over_claimed {
+                findings.push(format!(
+                    "harness {:?} claims capabilities it does not declare",
+                    entry.harness_id
+                ));
+            }
+        }
+        // Entries must be sorted by harness_id for deterministic output
+        let sorted: Vec<&str> = self.entries.iter().map(|e| e.harness_id.as_str()).collect();
+        let mut sorted_copy = sorted.clone();
+        sorted_copy.sort();
+        if sorted != sorted_copy {
+            findings.push("catalog entries are not sorted by harnessId".to_string());
+        }
+        findings
+    }
+
     /// Deterministic JSON (entries already ordered by `harnessId`).
     pub fn to_json(&self) -> Result<String> {
-        Ok(serde_json::to_string(self)?)
+        Ok(serde_json::to_string_pretty(self)?)
     }
 }
 
