@@ -35,19 +35,18 @@
         "maxStructuredOutput": {"oneOf": [{"type": "null"}, {"type": "number"}]},
         "budgetCeilings": {"oneOf": [{"type": "null"}, {"type": "object"}]},
         "locality": {"oneOf": [{"type": "null"}, {"type": "string"}]},
-        "checkpointExport": {"type": "boolean"},
-        "checkpointImport": {"type": "boolean"},
-        "resumeSupport": {"type": "boolean"},
-        "eventStreaming": {"type": "boolean"},
-        "readProjection": {"type": "boolean"},
+        "checkpointExport": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+        "checkpointImport": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+        "resumeSupport": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+        "eventStreaming": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+        "readProjection": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
         "privacyClasses": {"type": "array", "items": {"type": "string"}},
-        "evidenceAttachment": {"type": "boolean"},
-        "validation": {"type": "boolean"},
-        "approvalEscalation": {"type": "boolean"},
+        "evidenceAttachment": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+        "validation": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+        "approvalEscalation": {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
         "unclaimedCapabilities": {"type": "array", "items": {"type": "string"}},
         "overClaimed": {"type": "boolean"}
       }
     }
   }
 }
-"
