@@ -81,7 +81,8 @@ impl ExecutionHarness for CanonicalHarness {
         _step: HarnessStep,
         _dispatch: &mut HarnessDispatch<'_>,
     ) -> Result<HarnessOutcome> {
-        unimplemented!("canonical harness is not executable")
+        // Canonical harnesses are declaration-only; they are not executable.
+        bail!("canonical harness is not executable")
     }
 }
 
@@ -707,6 +708,16 @@ impl HarnessRegistry {
                 findings.join("; ")
             );
         }
+        // Enforce canonical capability audit (SOMA SPEC 007).
+        let audit = declaration.capabilities.audit();
+        if let Some(first) = audit.first() {
+            bail!(
+                "cannot register harness {:?}: capability declaration is not audit-clean: {} {}",
+                declaration.harness_id,
+                first.code,
+                first.message
+            );
+        }
         if declaration.content_digest.as_deref() != Some(&declaration.try_compute_digest()?) {
             bail!(
                 "cannot register harness {:?}: declaration is not sealed or does not verify",
@@ -1298,6 +1309,13 @@ impl HarnessCatalog {
         } else {
             findings.push("missing contentDigest".to_string());
         }
+        // Entries must be sorted by harness_id for deterministic output
+        let sorted: Vec<&str> = self.entries.iter().map(|e| e.harness_id.as_str()).collect();
+        let mut sorted_copy = sorted.clone();
+        sorted_copy.sort();
+        if sorted != sorted_copy {
+            findings.push("catalog entries are not sorted by harnessId".to_string());
+        }
         findings
     }
 
@@ -1339,6 +1357,15 @@ impl HarnessCatalog {
                         entry.harness_id
                     ));
                 }
+                if entry.name != decl.identity.name {
+                    findings.push(format!("name mismatch for {:?}", entry.harness_id));
+                }
+                if entry.revision != decl.identity.revision {
+                    findings.push(format!("revision mismatch for {:?}", entry.harness_id));
+                }
+                if entry.family != decl.family {
+                    findings.push(format!("family mismatch for {:?}", entry.harness_id));
+                }
                 if entry.declared_capabilities != decl.declared_capabilities {
                     findings.push(format!(
                         "declaredCapabilities mismatch for {:?}",
@@ -1348,6 +1375,84 @@ impl HarnessCatalog {
                 if entry.claimed_capabilities != decl.claimed_capabilities {
                     findings.push(format!(
                         "claimedCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.effect_classes != decl.capabilities.effect_classes {
+                    findings.push(format!("effectClasses mismatch for {:?}", entry.harness_id));
+                }
+                if entry.spec_versions != decl.capabilities.spec_versions {
+                    findings.push(format!("specVersions mismatch for {:?}", entry.harness_id));
+                }
+                if entry.privacy_classes != decl.capabilities.privacy_classes {
+                    findings.push(format!(
+                        "privacyClasses mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.workspace != decl.capabilities.workspace {
+                    findings.push(format!("workspace mismatch for {:?}", entry.harness_id));
+                }
+                if entry.max_structured_input != decl.capabilities.max_structured_input {
+                    findings.push(format!(
+                        "maxStructuredInput mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.max_structured_output != decl.capabilities.max_structured_output {
+                    findings.push(format!(
+                        "maxStructuredOutput mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.budget_ceilings != decl.capabilities.budget_ceilings {
+                    findings.push(format!(
+                        "budgetCeilings mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.locality != decl.capabilities.locality {
+                    findings.push(format!("locality mismatch for {:?}", entry.harness_id));
+                }
+                if entry.checkpoint_export != decl.capabilities.checkpoint_export {
+                    findings.push(format!(
+                        "checkpointExport mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.checkpoint_import != decl.capabilities.checkpoint_import {
+                    findings.push(format!(
+                        "checkpointImport mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.resume_support != decl.capabilities.resume_support {
+                    findings.push(format!("resumeSupport mismatch for {:?}", entry.harness_id));
+                }
+                if entry.event_streaming != decl.capabilities.event_streaming {
+                    findings.push(format!(
+                        "eventStreaming mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.read_projection != decl.capabilities.read_projection {
+                    findings.push(format!(
+                        "readProjection mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.evidence_attachment != decl.capabilities.evidence_attachment {
+                    findings.push(format!(
+                        "evidenceAttachment mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.validation != decl.capabilities.validation {
+                    findings.push(format!("validation mismatch for {:?}", entry.harness_id));
+                }
+                if entry.approval_escalation != decl.capabilities.approval_escalation {
+                    findings.push(format!(
+                        "approvalEscalation mismatch for {:?}",
                         entry.harness_id
                     ));
                 }

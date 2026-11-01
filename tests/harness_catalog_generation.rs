@@ -147,13 +147,22 @@ fn catalog_generation_is_deterministic() {
 /// T2 — catalog validation rejects malformed/inconsistent catalogs.
 #[test]
 fn catalog_validation_rejects_inconsistent() {
-    let decls = vec![declaration(
-        "lite.harness.native",
-        "lite-native",
-        "v1",
-        HarnessFamily::Native,
-        &["process-exec"],
-    )];
+    let decls = vec![
+        declaration(
+            "lite.harness.alpha",
+            "alpha",
+            "v1",
+            HarnessFamily::Native,
+            &["process-exec"],
+        ),
+        declaration(
+            "lite.harness.beta",
+            "beta",
+            "v1",
+            HarnessFamily::Native,
+            &["process-exec"],
+        ),
+    ];
     let registry = registry_with_declarations(decls);
     let catalog = registry.catalog();
 
@@ -182,8 +191,14 @@ fn catalog_validation_rejects_inconsistent() {
     let mut unsorted = catalog.clone();
     if unsorted.entries.len() >= 2 {
         unsorted.entries.swap(0, 1);
+        let findings = unsorted.validate();
+        assert!(!findings.is_empty(), "unsorted entries should be detected");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("not sorted") || f.contains("sorted"))
+        );
     }
-    // Only check if we had 2+ entries; with 1 entry it's trivially sorted
 }
 
 /// T3 — declaration validation rejects malformed declarations.
