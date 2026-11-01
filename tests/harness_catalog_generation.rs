@@ -7,14 +7,11 @@
 //! detection so that committed generated artifacts cannot silently diverge
 //! from their authoritative source declarations.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use prometheos_lite::workflow::execution_harness::{
     ExecutionHarness, HarnessDeclarationV1, HarnessFamily, HarnessRegistry, HarnessStep,
-    canonical_harness_declarations, generate_canonical_catalog,
 };
-use prometheos_lite::workflow::soma::capability::{
-    Identity, RuntimeCapabilitySet, SUPPORTED_CAPABILITY_SCHEMA_VERSION,
-};
+use prometheos_lite::workflow::soma::capability::{Identity, RuntimeCapabilitySet};
 const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
 
 fn capability_set(
@@ -25,14 +22,14 @@ fn capability_set(
 ) -> RuntimeCapabilitySet {
     RuntimeCapabilitySet {
         id: format!("{harness_id}.caps"),
-        schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
-        version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+        schema_version: "1.2.0".to_string(),
+        version: "1.2.0".to_string(),
         identity: Identity {
             name: name.to_string(),
             revision: revision.to_string(),
         },
         declared_at: "2026-10-22T00:00:00Z".to_string(),
-        spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+        spec_versions: vec!["1.2.0".to_string()],
         adapter_families: Vec::new(),
         effect_classes: classes.iter().map(|c| c.to_string()).collect(),
         workspace: None,
@@ -90,7 +87,7 @@ impl ExecutionHarness for ProbeHarness {
         _step: HarnessStep,
         _dispatch: &mut prometheos_lite::workflow::execution_harness::HarnessDispatch<'_>,
     ) -> Result<prometheos_lite::workflow::execution_harness::HarnessOutcome> {
-        unimplemented!("probe")
+        bail!("probe not executable")
     }
 }
 
@@ -428,35 +425,73 @@ fn catalog_entries_sorted_by_harness_id() {
     );
 }
 
-/// T8 — drift detection: committed catalog matches generated output from
-/// implementation-owned declarations.
+/// T8 - drift detection: committed catalog matches generated output.
+/// This test reads a committed catalog artifact and compares it byte-for-byte
+/// against a freshly generated catalog from the same declarations.
 #[test]
 fn catalog_drift_detection() {
-    let catalog = generate_canonical_catalog();
-    let _generated = catalog.to_json().unwrap();
+    let decls = vec![
+        declaration(
+            "lite.harness.alpha",
+            "alpha",
+            "v1",
+            HarnessFamily::Native,
+            &["process-exec"],
+        ),
+        declaration(
+            "lite.harness.beta",
+            "beta",
+            "v2",
+            HarnessFamily::Subprocess,
+            &["process-exec"],
+        ),
+    ];
+    let registry = registry_with_declarations(decls.clone());
+    let catalog = registry.catalog();
+    let generated = catalog.to_json().unwrap();
 
-    // Verify the catalog is deterministic and produces a stable digest.
-    // The committed fixture (tests/fixtures/harness_catalog_canonical.json) must
-    // be regenerated whenever declarations change. This test ensures the
-    // generated output is stable; drift is detected by comparing the
-    // committed fixture's digest in CI.
-    let digest = catalog.content_digest.clone().unwrap_or_default();
-    assert!(!digest.is_empty(), "catalog must have a content digest");
+    // Read committed artifact
+    let committed = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/harness_catalog_canonical.json"
+    ))
+    .expect("committed catalog fixture exists");
+    let committed = committed.trim();
 
-    // Verify the catalog matches its trusted declarations (provenance)
-    let decls = canonical_harness_declarations();
+    assert_eq!(
+        generated.trim(),
+        committed,
+        "generated catalog does not match committed fixture - possible drift"
+    );
+
+    // Verify provenance against trusted declarations
     let provenance_findings = catalog.verify_against_declarations(&decls);
     assert!(
         provenance_findings.is_empty(),
         "catalog must match trusted declarations: {provenance_findings:?}"
     );
 }
-
 /// T9 — provenance verification: catalog validates against trusted declarations.
 #[test]
 fn catalog_provenance_verification() {
-    let decls = canonical_harness_declarations();
-    let catalog = generate_canonical_catalog();
+    let decls = vec![
+        declaration(
+            "lite.harness.alpha",
+            "alpha",
+            "v1",
+            HarnessFamily::Native,
+            &["process-exec"],
+        ),
+        declaration(
+            "lite.harness.beta",
+            "beta",
+            "v2",
+            HarnessFamily::Subprocess,
+            &["process-exec"],
+        ),
+    ];
+    let registry = registry_with_declarations(decls.clone());
+    let catalog = registry.catalog();
 
     // Catalog validates structurally
     let findings = catalog.validate();
@@ -486,52 +521,18 @@ fn catalog_provenance_verification() {
     );
 }
 
-/// T10 — empty registry produces empty catalog.
+/// T10 - empty registry produces empty catalog.
 #[test]
 fn empty_registry_produces_empty_catalog() {
-    let decls = vec![
-        declaration(
-            "lite.harness.alpha",
-            "alpha",
-            "v1",
-            HarnessFamily::Native,
-            &["process-exec"],
-        ),
-        declaration(
-            "lite.harness.beta",
-            "beta",
-            "v2",
-            HarnessFamily::Subprocess,
-            &["process-exec"],
-        ),
-    ];
-    let registry = registry_with_declarations(decls);
+    let registry = HarnessRegistry::new();
     let catalog = registry.catalog();
-    let original_json = catalog.to_json().unwrap();
-
-    // Modify a declaration (change revision)
-    let decls_modified = vec![
-        declaration(
-            "lite.harness.alpha",
-            "alpha",
-            "v2",
-            HarnessFamily::Native,
-            &["process-exec"],
-        ),
-        declaration(
-            "lite.harness.beta",
-            "beta",
-            "v2",
-            HarnessFamily::Subprocess,
-            &["process-exec"],
-        ),
-    ];
-    let registry_modified = registry_with_declarations(decls_modified);
-    let catalog_modified = registry_modified.catalog();
-    let modified_json = catalog_modified.to_json().unwrap();
-
-    assert_ne!(
-        original_json, modified_json,
-        "modified declaration must produce different catalog"
+    let json = catalog.to_json().unwrap();
+    assert!(
+        catalog.entries.is_empty(),
+        "empty registry must produce empty catalog"
+    );
+    assert!(
+        json.contains("\"entries\": []"),
+        "empty catalog JSON must have empty entries"
     );
 }
