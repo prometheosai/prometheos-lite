@@ -279,6 +279,8 @@ def rust_core(test_threads: int = 4) -> list[dict[str, object]]:
         ("verification policy", ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]),
         ("patch diagnostics", ["cargo", "test", "--test", "patch_provider_diagnostics_tests", "--quiet"]),
         ("governance compiler", ["cargo", "test", "--test", "governance_compiler_conformance", "--quiet"]),
+        ("harness catalog generation", ["cargo", "test", "--test", "harness_catalog_generation", "--quiet"]),
+        ("harness catalog schema validation", [sys.executable, "scripts/validate_harness_catalog.py"]),
         ("graph suspension", ["cargo", "test", "--test", "graph_suspend_conformance", "--quiet"]),
         ("permit suspension", ["cargo", "test", "--test", "permit_suspension_binding", "--quiet"]),
         ("expanded composite runtime", ["cargo", "test", "--test", "expanded_composite_runtime_conformance", "--quiet"]),
