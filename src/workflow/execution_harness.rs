@@ -1197,6 +1197,15 @@ impl HarnessCatalog {
         declarations: &[HarnessDeclarationV1],
     ) -> Vec<String> {
         let mut findings = Vec::new();
+
+        if let Some(digest) = &self.content_digest {
+            let computed = self.compute_digest();
+            if *digest != computed {
+                findings.push("catalog contentDigest does not verify".to_string());
+            }
+        } else {
+            findings.push("catalog missing contentDigest".to_string());
+        }
         let catalog_ids: BTreeSet<&str> =
             self.entries.iter().map(|e| e.harness_id.as_str()).collect();
         let decl_ids: BTreeSet<&str> = declarations.iter().map(|d| d.harness_id.as_str()).collect();
@@ -1339,6 +1348,25 @@ impl HarnessCatalog {
                         "approvalEscalation mismatch for {:?}",
                         entry.harness_id
                     ));
+                }
+                let expected_unclaimed: Vec<String> = decl
+                    .declared_capabilities
+                    .iter()
+                    .filter(|c| !decl.claimed_capabilities.contains(c))
+                    .cloned()
+                    .collect();
+                if entry.unclaimed_capabilities != expected_unclaimed {
+                    findings.push(format!(
+                        "unclaimedCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                let expected_over_claimed = decl
+                    .claimed_capabilities
+                    .iter()
+                    .any(|c| !decl.declared_capabilities.contains(c));
+                if entry.over_claimed != expected_over_claimed {
+                    findings.push(format!("overClaimed mismatch for {:?}", entry.harness_id));
                 }
             }
         }

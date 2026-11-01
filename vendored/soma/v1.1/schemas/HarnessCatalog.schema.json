@@ -1,0 +1,53 @@
+{
+  "$id": "/schemas/HarnessCatalog.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HarnessCatalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "conformanceVersion", "entries", "contentDigest"],
+  "properties": {
+    "schemaVersion": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+    "conformanceVersion": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+    "entries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/HarnessCatalogEntry"}
+    },
+    "contentDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "HarnessCatalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["harnessId", "family", "name", "revision", "declarationDigest", "declaredCapabilities", "claimedCapabilities", "effectClasses", "specVersions", "adapterFamilies", "unclaimedCapabilities", "overClaimed"],
+      "properties": {
+        "harnessId": {"type": "string", "minLength": 1},
+        "family": {"type": "string"},
+        "name": {"type": "string"},
+        "revision": {"type": "string"},
+        "declarationDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "declaredCapabilities": {"type": "array", "items": {"type": "string"}},
+        "claimedCapabilities": {"type": "array", "items": {"type": "string"}},
+        "effectClasses": {"type": "array", "items": {"type": "string"}},
+        "specVersions": {"type": "array", "items": {"type": "string"}},
+        "adapterFamilies": {"type": "array", "items": {"type": "string"}},
+        "workspace": {"oneOf": [{"type": "null"}, {"type": "object"}]},
+        "maxStructuredInput": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+        "maxStructuredOutput": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+        "budgetCeilings": {"oneOf": [{"type": "null"}, {"type": "object"}]},
+        "locality": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+        "checkpointExport": {"type": "boolean"},
+        "checkpointImport": {"type": "boolean"},
+        "resumeSupport": {"type": "boolean"},
+        "eventStreaming": {"type": "boolean"},
+        "readProjection": {"type": "boolean"},
+        "privacyClasses": {"type": "array", "items": {"type": "string"}},
+        "evidenceAttachment": {"type": "boolean"},
+        "validation": {"type": "boolean"},
+        "approvalEscalation": {"type": "boolean"},
+        "unclaimedCapabilities": {"type": "array", "items": {"type": "string"}},
+        "overClaimed": {"type": "boolean"}
+      }
+    }
+  }
+}
+"

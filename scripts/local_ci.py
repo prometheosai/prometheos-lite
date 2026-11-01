@@ -67,6 +67,7 @@ SUITE_SPEC: dict[str, list[dict[str, object]]] = {
         {"name": "verification policy", "command": ["cargo", "test", "--test", "ci_enforcement_tests", "--quiet"]},
         {"name": "patch diagnostics", "command": ["cargo", "test", "--test", "patch_provider_diagnostics_tests", "--quiet"]},
         {"name": "governance compiler", "command": ["cargo", "test", "--test", "governance_compiler_conformance", "--quiet"]},
+        {"name": "harness catalog generation", "command": ["cargo", "test", "--test", "harness_catalog_generation", "--quiet"]},
         {"name": "graph suspension", "command": ["cargo", "test", "--test", "graph_suspend_conformance", "--quiet"]},
         {"name": "permit suspension", "command": ["cargo", "test", "--test", "permit_suspension_binding", "--quiet"]},
         {"name": "expanded composite runtime", "command": ["cargo", "test", "--test", "expanded_composite_runtime_conformance", "--quiet"]},
