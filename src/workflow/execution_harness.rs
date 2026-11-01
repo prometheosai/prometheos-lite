@@ -41,12 +41,104 @@ use crate::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use crate::workflow::policy::LocalRestrictions;
 use crate::workflow::soma::capability::{
     CompatibilityDecision, DecisionStatus, Identity, NegotiationInputs, RuntimeCapabilitySet,
-    Substitution, WorkRequirements, resolve,
+    SUPPORTED_CAPABILITY_SCHEMA_VERSION, Substitution, WorkRequirements, resolve,
 };
 use crate::workflow::soma::contracts::AuthorityProfile;
 
 /// Schema version of the harness seam contracts.
 pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Canonical harness declarations owned by the implementation.
+/// Canonical harness declarations owned by the implementation.
+///
+/// These are the authoritative source declarations from which the capability
+/// catalog is generated. They correspond to the adapter implementations
+/// in the conformance tests and represent the production adapter inventory.
+pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
+    use crate::workflow::soma::capability::Locality;
+    vec![
+        HarnessDeclarationV1 {
+            schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+            harness_id: "lite.harness.native".to_string(),
+            identity: Identity {
+                name: "lite-native".to_string(),
+                revision: "v1".to_string(),
+            },
+            family: HarnessFamily::Native,
+            declared_capabilities: vec!["harness.native.probe".to_string()],
+            claimed_capabilities: vec!["harness.native.probe".to_string()],
+            capabilities: RuntimeCapabilitySet {
+                id: "lite.harness.native.caps".to_string(),
+                schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                identity: Identity {
+                    name: "lite-native".to_string(),
+                    revision: "v1".to_string(),
+                },
+                declared_at: "2026-10-22T00:00:00Z".to_string(),
+                spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+                adapter_families: Vec::new(),
+                effect_classes: vec!["process-exec".to_string()],
+                workspace: None,
+                checkpoint_import: Some(false),
+                checkpoint_export: Some(false),
+                resume_support: Some(false),
+                event_streaming: Some(true),
+                read_projection: Some(true),
+                locality: Some(Locality::Local),
+                privacy_classes: Vec::new(),
+                max_structured_input: None,
+                max_structured_output: None,
+                budget_ceilings: None,
+                evidence_attachment: Some(true),
+                validation: Some(true),
+                approval_escalation: Some(false),
+            },
+            content_digest: None,
+        }
+        .sealed(),
+        HarnessDeclarationV1 {
+            schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+            harness_id: "lite.harness.protocol".to_string(),
+            identity: Identity {
+                name: "lite-protocol".to_string(),
+                revision: "v1".to_string(),
+            },
+            family: HarnessFamily::ProtocolBridged,
+            declared_capabilities: vec!["harness.protocol.relay".to_string()],
+            claimed_capabilities: vec!["harness.protocol.relay".to_string()],
+            capabilities: RuntimeCapabilitySet {
+                id: "lite.harness.protocol.caps".to_string(),
+                schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                identity: Identity {
+                    name: "lite-protocol".to_string(),
+                    revision: "v1".to_string(),
+                },
+                declared_at: "2026-10-22T00:00:00Z".to_string(),
+                spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+                adapter_families: Vec::new(),
+                effect_classes: vec!["process-exec".to_string()],
+                workspace: None,
+                checkpoint_import: Some(true),
+                checkpoint_export: Some(true),
+                resume_support: Some(true),
+                event_streaming: Some(true),
+                read_projection: Some(true),
+                locality: Some(Locality::Local),
+                privacy_classes: Vec::new(),
+                max_structured_input: None,
+                max_structured_output: None,
+                budget_ceilings: None,
+                evidence_attachment: Some(true),
+                validation: Some(true),
+                approval_escalation: Some(false),
+            },
+            content_digest: None,
+        }
+        .sealed(),
+    ]
+}
 
 /// Schema version of a conformance report.
 pub const HARNESS_CONFORMANCE_VERSION: &str = "1.0.0";
