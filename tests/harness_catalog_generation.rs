@@ -472,7 +472,7 @@ fn catalog_drift_detection() {
     for d in decls.clone() {
         registry
             .register(Box::new(ProbeHarness { declaration: d }))
-            .expect("production harness registers");
+            .expect("declaration registers through fail-closed register()");
     }
     let catalog = registry.catalog();
     let generated = catalog.to_json().unwrap();
