@@ -458,8 +458,7 @@ fn catalog_drift_detection() {
     .expect("committed catalog fixture exists");
 
     assert_eq!(
-        generated,
-        committed,
+        generated, committed,
         "generated catalog does not match committed fixture - possible drift"
     );
 
