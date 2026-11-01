@@ -49,11 +49,13 @@ use crate::workflow::soma::contracts::AuthorityProfile;
 pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
 
 /// Canonical harness declarations owned by the implementation.
-/// Canonical harness declarations owned by the implementation.
 ///
 /// These are the authoritative source declarations from which the capability
-/// catalog is generated. They correspond to the adapter implementations
-/// in the conformance tests and represent the production adapter inventory.
+/// catalog is generated. They represent the harness declaration seam families
+/// (native, protocol) and correspond to the adapter implementations in the
+/// conformance tests. There is no production HarnessRegistry in src/; these
+/// declarations are the implementation-owned inventory, not a registry of
+/// production executables.
 pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
     use crate::workflow::soma::capability::Locality;
     vec![
