@@ -1274,6 +1274,18 @@ impl HarnessCatalog {
                         entry.harness_id
                     ));
                 }
+                let decl_adapter_families: Vec<String> = decl
+                    .capabilities
+                    .adapter_families
+                    .iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect();
+                if entry.adapter_families != decl_adapter_families {
+                    findings.push(format!(
+                        "adapterFamilies mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
                 if entry.spec_versions != decl.capabilities.spec_versions {
                     findings.push(format!("specVersions mismatch for {:?}", entry.harness_id));
                 }
