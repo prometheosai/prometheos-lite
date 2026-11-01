@@ -10,6 +10,7 @@
 use anyhow::{Result, bail};
 use prometheos_lite::workflow::execution_harness::{
     ExecutionHarness, HarnessDeclarationV1, HarnessFamily, HarnessRegistry, HarnessStep,
+    canonical_harness_declarations,
 };
 use prometheos_lite::workflow::soma::capability::{Identity, RuntimeCapabilitySet};
 const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
@@ -74,6 +75,37 @@ fn declaration(
 
 struct ProbeHarness {
     declaration: HarnessDeclarationV1,
+}
+
+/// Maintenance helper — NOT a gate.
+///
+/// Regenerates the committed canonical fixture from the production
+/// declaration inventory. Run explicitly (and only when the declaration
+/// inventory legitimately changed):
+///
+/// ```text
+/// cargo test --test harness_catalog_generation update_canonical_fixture -- --ignored
+/// ```
+///
+/// The `catalog_drift_detection` gate compares against the committed bytes;
+/// this function also regenerates through the fail-closed `register()` path,
+/// so an inventory that cannot register cannot produce a fixture.
+#[test]
+#[ignore = "explicit fixture maintenance; run with -- --ignored"]
+fn update_canonical_fixture() {
+    let mut registry = HarnessRegistry::new();
+    for d in canonical_harness_declarations() {
+        registry
+            .register(Box::new(ProbeHarness { declaration: d }))
+            .expect("production declaration registers through fail-closed register()");
+    }
+    let generated = registry.catalog().to_json().expect("catalog serializes");
+    let fixture_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/harness_catalog_canonical.json"
+    );
+    std::fs::write(fixture_path, generated).expect("fixture writes");
+    println!("updated {fixture_path}");
 }
 
 #[async_trait::async_trait]
@@ -427,26 +459,17 @@ fn catalog_entries_sorted_by_harness_id() {
 
 /// T8 - drift detection: committed catalog matches generated output.
 /// This test reads a committed catalog artifact and compares it byte-for-byte
-/// against a freshly generated catalog from the same declarations.
+/// against a freshly generated catalog from the authoritative production
+/// declarations (canonical_harness_declarations).
 #[test]
 fn catalog_drift_detection() {
-    let decls = vec![
-        declaration(
-            "lite.harness.alpha",
-            "alpha",
-            "v1",
-            HarnessFamily::Native,
-            &["process-exec"],
-        ),
-        declaration(
-            "lite.harness.beta",
-            "beta",
-            "v2",
-            HarnessFamily::Subprocess,
-            &["process-exec"],
-        ),
-    ];
-    let registry = registry_with_declarations(decls.clone());
+    let decls = canonical_harness_declarations();
+    let mut registry = HarnessRegistry::new();
+    for d in decls.clone() {
+        registry
+            .register(Box::new(ProbeHarness { declaration: d }))
+            .expect("production harness registers");
+    }
     let catalog = registry.catalog();
     let generated = catalog.to_json().unwrap();
 
