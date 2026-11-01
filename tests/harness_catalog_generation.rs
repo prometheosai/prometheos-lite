@@ -456,10 +456,9 @@ fn catalog_drift_detection() {
         "/tests/fixtures/harness_catalog_canonical.json"
     ))
     .expect("committed catalog fixture exists");
-    let committed = committed.trim();
 
     assert_eq!(
-        generated.trim(),
+        generated,
         committed,
         "generated catalog does not match committed fixture - possible drift"
     );

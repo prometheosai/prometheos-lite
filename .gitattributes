@@ -4,3 +4,4 @@ tests/projection_golden/** -text
 # goldens: byte-stable on every platform (-text disables EOL conversion).
 vendored/soma/** -text
 tests/fixtures/soma-event-projection/** -text
+tests/fixtures/harness_catalog_canonical.json -text
