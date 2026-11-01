@@ -24,7 +24,7 @@
     "scripts/gate_completion_registry.json": "7ad70d8f6fcc890a8689adcd19c9404e825cce99196b3cd860cff02616105213",
     "scripts/gb_static_guard.py": "3ac5bddb819dfe19b08a7edaad2d2ec33195254566426776dc511a03c34c357f",
     "scripts/lib/target_dir.sh": "5d8375407b79e65e4a2961c817dd9ddbc0ec58e2d6736b072780ab09c508e8ff",
-    "scripts/local_ci.py": "0e3bb9d3095a4db01a4fd96bc72dc252b29c708311c420ff95db5b0535fd0197",
+    "scripts/local_ci.py": "139aaf7aafa23ed78e6e122d286a69049660f5d7b1f56e6be6118def6a1c848a",
     "scripts/local_ci_policy.py": "93a226b561107c8a60f987eba8a429366680822996066ecbf18c13e78b9e4951",
     "scripts/provider-governed-proposal-smoke.sh": "c6d0f4b0605f36d7117bda2f10a5e893b900f392aae3310f209ebd3211e715b1",
     "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4",
