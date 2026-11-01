@@ -21,6 +21,10 @@
         "1.2.0"
       ],
       "adapterFamilies": [],
+      "workspace": null,
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
       "locality": null,
       "checkpointExport": false,
       "checkpointImport": false,
@@ -53,6 +57,10 @@
         "1.2.0"
       ],
       "adapterFamilies": [],
+      "workspace": null,
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
       "locality": null,
       "checkpointExport": false,
       "checkpointImport": false,
@@ -67,5 +75,5 @@
       "overClaimed": false
     }
   ],
-  "contentDigest": "d18f91dae08dda5372b130f7579473b6bcc42daf922c520af3c5a2dc85b9f2ee"
+  "contentDigest": "dc758beb693a0cc55c78633d2d9f70a6f60eacb4ba797b70abd12f67a927c0c5"
 }

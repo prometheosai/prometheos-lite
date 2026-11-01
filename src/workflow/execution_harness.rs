@@ -41,12 +41,139 @@ use crate::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use crate::workflow::policy::LocalRestrictions;
 use crate::workflow::soma::capability::{
     CompatibilityDecision, DecisionStatus, Identity, NegotiationInputs, RuntimeCapabilitySet,
-    Substitution, WorkRequirements, resolve,
+    SUPPORTED_CAPABILITY_SCHEMA_VERSION, Substitution, WorkRequirements, resolve,
 };
 use crate::workflow::soma::contracts::AuthorityProfile;
 
 /// Schema version of the harness seam contracts.
 pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Generate the canonical catalog from implementation-owned declarations.
+///
+/// This is the authoritative generation path used by the drift guard. It
+/// builds a `HarnessRegistry` from `canonical_harness_declarations()`, generates
+/// the catalog, and returns it sealed.
+pub fn generate_canonical_catalog() -> HarnessCatalog {
+    let decls = canonical_harness_declarations();
+    let mut registry = HarnessRegistry::new();
+    for d in decls {
+        // Use a minimal harness wrapper for catalog generation.
+        // In production, real adapters register themselves.
+        registry
+            .register(Box::new(CanonicalHarness { declaration: d }))
+            .expect("canonical declaration registers");
+    }
+    registry.catalog()
+}
+
+/// Minimal harness wrapper for catalog generation from declarations.
+struct CanonicalHarness {
+    declaration: HarnessDeclarationV1,
+}
+
+#[async_trait::async_trait]
+impl ExecutionHarness for CanonicalHarness {
+    fn declaration(&self) -> &HarnessDeclarationV1 {
+        &self.declaration
+    }
+    async fn run(
+        &self,
+        _step: HarnessStep,
+        _dispatch: &mut HarnessDispatch<'_>,
+    ) -> Result<HarnessOutcome> {
+        unimplemented!("canonical harness is not executable")
+    }
+}
+
+/// Canonical harness declarations owned by the implementation.
+///
+/// These are the authoritative source declarations from which the capability
+/// catalog is generated. The drift guard compares the generated catalog
+/// against a committed fixture derived from these declarations.
+pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
+    vec![
+        HarnessDeclarationV1 {
+            schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+            harness_id: "lite.harness.alpha".to_string(),
+            identity: Identity {
+                name: "alpha".to_string(),
+                revision: "v1".to_string(),
+            },
+            family: HarnessFamily::Native,
+            declared_capabilities: vec!["harness.probe".to_string()],
+            claimed_capabilities: vec!["harness.probe".to_string()],
+            capabilities: RuntimeCapabilitySet {
+                id: "lite.harness.alpha.caps".to_string(),
+                schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                identity: Identity {
+                    name: "alpha".to_string(),
+                    revision: "v1".to_string(),
+                },
+                declared_at: "2026-10-22T00:00:00Z".to_string(),
+                spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+                adapter_families: Vec::new(),
+                effect_classes: vec!["process-exec".to_string()],
+                workspace: None,
+                checkpoint_import: Some(false),
+                checkpoint_export: Some(false),
+                resume_support: Some(false),
+                event_streaming: Some(true),
+                read_projection: Some(true),
+                locality: None,
+                privacy_classes: Vec::new(),
+                max_structured_input: None,
+                max_structured_output: None,
+                budget_ceilings: None,
+                evidence_attachment: Some(true),
+                validation: Some(true),
+                approval_escalation: Some(false),
+            },
+            content_digest: None,
+        }
+        .sealed(),
+        HarnessDeclarationV1 {
+            schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+            harness_id: "lite.harness.beta".to_string(),
+            identity: Identity {
+                name: "beta".to_string(),
+                revision: "v2".to_string(),
+            },
+            family: HarnessFamily::Subprocess,
+            declared_capabilities: vec!["harness.probe".to_string()],
+            claimed_capabilities: vec!["harness.probe".to_string()],
+            capabilities: RuntimeCapabilitySet {
+                id: "lite.harness.beta.caps".to_string(),
+                schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                identity: Identity {
+                    name: "beta".to_string(),
+                    revision: "v2".to_string(),
+                },
+                declared_at: "2026-10-22T00:00:00Z".to_string(),
+                spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+                adapter_families: Vec::new(),
+                effect_classes: vec!["process-exec".to_string()],
+                workspace: None,
+                checkpoint_import: Some(false),
+                checkpoint_export: Some(false),
+                resume_support: Some(false),
+                event_streaming: Some(true),
+                read_projection: Some(true),
+                locality: None,
+                privacy_classes: Vec::new(),
+                max_structured_input: None,
+                max_structured_output: None,
+                budget_ceilings: None,
+                evidence_attachment: Some(true),
+                validation: Some(true),
+                approval_escalation: Some(false),
+            },
+            content_digest: None,
+        }
+        .sealed(),
+    ]
+}
 
 /// Schema version of a conformance report.
 pub const HARNESS_CONFORMANCE_VERSION: &str = "1.0.0";
@@ -571,6 +698,15 @@ impl HarnessRegistry {
         if declaration.harness_id.trim().is_empty() {
             bail!("cannot register a harness with an empty id");
         }
+        // Fail-closed: reject malformed declarations even if sealed.
+        let findings = declaration.validate();
+        if !findings.is_empty() {
+            bail!(
+                "cannot register harness {:?}: declaration is invalid: {}",
+                declaration.harness_id,
+                findings.join("; ")
+            );
+        }
         if declaration.content_digest.as_deref() != Some(&declaration.try_compute_digest()?) {
             bail!(
                 "cannot register harness {:?}: declaration is not sealed or does not verify",
@@ -619,6 +755,10 @@ impl HarnessRegistry {
                         .iter()
                         .map(|f| format!("{f:?}"))
                         .collect(),
+                    workspace: d.capabilities.workspace,
+                    max_structured_input: d.capabilities.max_structured_input.clone(),
+                    max_structured_output: d.capabilities.max_structured_output.clone(),
+                    budget_ceilings: d.capabilities.budget_ceilings.clone(),
                     locality: d.capabilities.locality,
                     checkpoint_export: d.capabilities.checkpoint_export,
                     checkpoint_import: d.capabilities.checkpoint_import,
@@ -1044,7 +1184,7 @@ impl HarnessRegistry {
 }
 
 /// One adapter as published by the generated catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HarnessCatalogEntry {
     pub harness_id: String,
@@ -1058,6 +1198,13 @@ pub struct HarnessCatalogEntry {
     pub effect_classes: Vec<String>,
     pub spec_versions: Vec<String>,
     pub adapter_families: Vec<String>,
+    // --- Workspace compatibility ---
+    pub workspace: Option<crate::workflow::soma::profile::Boundaries>,
+    // --- Structured I/O limits ---
+    pub max_structured_input: Option<serde_json::Number>,
+    pub max_structured_output: Option<serde_json::Number>,
+    // --- Budget ceilings ---
+    pub budget_ceilings: Option<crate::workflow::soma::contracts::Budgets>,
     pub locality: Option<crate::workflow::soma::capability::Locality>,
     pub checkpoint_export: Option<bool>,
     pub checkpoint_import: Option<bool>,
@@ -1077,7 +1224,7 @@ pub struct HarnessCatalogEntry {
 }
 
 /// Generated, digest-sealed capability catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HarnessCatalog {
     pub schema_version: String,
@@ -1142,12 +1289,69 @@ impl HarnessCatalog {
                 ));
             }
         }
-        // Entries must be sorted by harness_id for deterministic output
-        let sorted: Vec<&str> = self.entries.iter().map(|e| e.harness_id.as_str()).collect();
-        let mut sorted_copy = sorted.clone();
-        sorted_copy.sort();
-        if sorted != sorted_copy {
-            findings.push("catalog entries are not sorted by harnessId".to_string());
+        // Verify content digest if present
+        if let Some(digest) = &self.content_digest {
+            let computed = self.compute_digest();
+            if *digest != computed {
+                findings.push("contentDigest does not verify".to_string());
+            }
+        } else {
+            findings.push("missing contentDigest".to_string());
+        }
+        findings
+    }
+
+    /// Verify the catalog against a set of trusted declarations.
+    pub fn verify_against_declarations(
+        &self,
+        declarations: &[HarnessDeclarationV1],
+    ) -> Vec<String> {
+        let mut findings = Vec::new();
+        let catalog_ids: BTreeSet<&str> =
+            self.entries.iter().map(|e| e.harness_id.as_str()).collect();
+        let decl_ids: BTreeSet<&str> = declarations.iter().map(|d| d.harness_id.as_str()).collect();
+
+        // Missing entries
+        for id in &decl_ids {
+            if !catalog_ids.contains(id) {
+                findings.push(format!(
+                    "missing catalog entry for trusted declaration {id:?}"
+                ));
+            }
+        }
+        // Extra entries
+        for id in &catalog_ids {
+            if !decl_ids.contains(id) {
+                findings.push(format!(
+                    "catalog contains entry for unknown declaration {id:?}"
+                ));
+            }
+        }
+        // Verify each entry matches its declaration
+        for entry in &self.entries {
+            if let Some(decl) = declarations
+                .iter()
+                .find(|d| d.harness_id == entry.harness_id)
+            {
+                if entry.declaration_digest != decl.compute_digest() {
+                    findings.push(format!(
+                        "declarationDigest mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.declared_capabilities != decl.declared_capabilities {
+                    findings.push(format!(
+                        "declaredCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.claimed_capabilities != decl.claimed_capabilities {
+                    findings.push(format!(
+                        "claimedCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+            }
         }
         findings
     }

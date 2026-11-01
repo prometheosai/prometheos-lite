@@ -10,12 +10,11 @@
 use anyhow::Result;
 use prometheos_lite::workflow::execution_harness::{
     ExecutionHarness, HarnessDeclarationV1, HarnessFamily, HarnessRegistry, HarnessStep,
+    canonical_harness_declarations, generate_canonical_catalog,
 };
 use prometheos_lite::workflow::soma::capability::{
     Identity, RuntimeCapabilitySet, SUPPORTED_CAPABILITY_SCHEMA_VERSION,
 };
-use std::fs;
-
 const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
 
 fn capability_set(
@@ -414,35 +413,22 @@ fn catalog_entries_sorted_by_harness_id() {
     );
 }
 
-/// T8 — drift detection: committed catalog matches generated output.
+/// T8 — drift detection: committed catalog matches generated output from
+/// implementation-owned declarations.
 #[test]
 fn catalog_drift_detection() {
-    let decls = vec![
-        declaration(
-            "lite.harness.alpha",
-            "alpha",
-            "v1",
-            HarnessFamily::Native,
-            &["process-exec"],
-        ),
-        declaration(
-            "lite.harness.beta",
-            "beta",
-            "v2",
-            HarnessFamily::Subprocess,
-            &["process-exec"],
-        ),
-    ];
-    let registry = registry_with_declarations(decls);
-    let catalog = registry.catalog();
+    let catalog = generate_canonical_catalog();
     let generated = catalog.to_json().unwrap();
 
-    let committed = fs::read_to_string(concat!(
+    // Committed canonical catalog
+    let committed = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/harness_catalog_canonical.json"
-    ))
-    .expect("committed catalog fixture exists");
+    ));
     let committed = committed.trim();
+
+    println!("Generated length: {}", generated.len());
+    println!("Committed length: {}", committed.len());
 
     assert_eq!(
         generated.trim(),
@@ -451,9 +437,43 @@ fn catalog_drift_detection() {
     );
 }
 
-/// T9 — stale artifact detection: modifying a declaration changes the catalog.
+/// T9 — provenance verification: catalog validates against trusted declarations.
 #[test]
-fn stale_artifact_detected_on_declaration_change() {
+fn catalog_provenance_verification() {
+    let decls = canonical_harness_declarations();
+    let catalog = generate_canonical_catalog();
+
+    // Catalog validates structurally
+    let findings = catalog.validate();
+    assert!(
+        findings.is_empty(),
+        "valid catalog should have no findings: {findings:?}"
+    );
+
+    // Catalog matches its trusted declarations
+    let provenance_findings = catalog.verify_against_declarations(&decls);
+    assert!(
+        provenance_findings.is_empty(),
+        "catalog should match trusted declarations: {provenance_findings:?}"
+    );
+
+    // Tampered catalog: wrong declaration digest
+    let mut tampered = catalog.clone();
+    if let Some(entry) = tampered.entries.first_mut() {
+        entry.declaration_digest = "0".repeat(64);
+    }
+    let findings = tampered.verify_against_declarations(&decls);
+    assert!(!findings.is_empty(), "tampered digest should be detected");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("declarationDigest mismatch"))
+    );
+}
+
+/// T10 — empty registry produces empty catalog.
+#[test]
+fn empty_registry_produces_empty_catalog() {
     let decls = vec![
         declaration(
             "lite.harness.alpha",
