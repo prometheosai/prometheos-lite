@@ -1077,39 +1077,58 @@ impl HarnessSelectionV1 {
         if canonical_json_digest(&decision)? != self.decision_digest {
             bail!("HSEL-0008: selection decisionDigest does not match the reproduced decision");
         }
-        // Verify workspace binding when selection evidence includes a workspace reference.
-        if self.workspace.is_some() {
-            let Some(trust_workspace) = trust.workspace else {
+        // Verify workspace binding symmetrically.
+        match (&self.workspace, trust.workspace) {
+            (Some(_), None) => {
                 bail!(
-                    "HSEL-0008: trusted inputs missing workspace reference but selection evidence includes one"
+                    "HSEL-0008: selection evidence includes workspace but trusted inputs have none"
                 );
-            };
-            let manifest = trust_workspace;
-            if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
-                bail!("HSEL-0008: trusted workspace schema version does not match");
             }
-            // Build expected workspace evidence from the trusted manifest.
-            let adapter_family_str = match manifest.adapter {
-                AdapterKind::GitWorktree => "git-worktree",
-                AdapterKind::ExistingReadOnly => "existing-read-only",
-            };
-            let mode_boundary = match manifest.mode {
-                WorkspaceMode::ReadOnly => "read",
-                WorkspaceMode::Writable => "write",
-            };
-            let manifest_digest = manifest.compute_digest();
-            let expected = WorkspaceEvidenceV1 {
-                workspace_id: manifest.workspace_id.clone(),
-                adapter: adapter_family_str.to_string(),
-                adapter_revision: manifest.adapter_revision.clone(),
-                mode: mode_boundary.to_string(),
-                manifest_digest,
-            };
-            match &self.workspace {
-                Some(actual) if actual == &expected => {}
-                _ => bail!(
-                    "HSEL-0008: selection workspace evidence does not match the trusted workspace"
-                ),
+            (None, Some(_)) => {
+                bail!(
+                    "HSEL-0008: trusted inputs include workspace but selection evidence has none"
+                );
+            }
+            (Some(actual), Some(manifest)) => {
+                // Verify the trusted manifest is sealed and internally valid
+                // via the existing #171 policy engine.
+                let manifest_json =
+                    serde_json::to_string(manifest).context("workspace manifest serializes")?;
+                if WorkspaceManifestV1::parse_json(&manifest_json).is_err() {
+                    bail!("HSEL-0008: trusted workspace manifest integrity check failed");
+                }
+                if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
+                    bail!("HSEL-0008: trusted workspace schema version does not match");
+                }
+                let expected_digest = manifest.compute_digest();
+                if manifest.content_digest.as_deref() != Some(&expected_digest) {
+                    bail!("HSEL-0008: trusted workspace manifest contentDigest does not verify");
+                }
+                // Build expected workspace evidence from the trusted manifest.
+                let adapter_family_str = match manifest.adapter {
+                    AdapterKind::GitWorktree => "git-worktree",
+                    AdapterKind::ExistingReadOnly => "existing-read-only",
+                };
+                let mode_boundary = match manifest.mode {
+                    WorkspaceMode::ReadOnly => "read",
+                    WorkspaceMode::Writable => "write",
+                };
+                let manifest_digest = manifest.compute_digest();
+                let expected = WorkspaceEvidenceV1 {
+                    workspace_id: manifest.workspace_id.clone(),
+                    adapter: adapter_family_str.to_string(),
+                    adapter_revision: manifest.adapter_revision.clone(),
+                    mode: mode_boundary.to_string(),
+                    manifest_digest,
+                };
+                if actual != &expected {
+                    bail!(
+                        "HSEL-0008: selection workspace evidence does not match the trusted workspace"
+                    );
+                }
+            }
+            (None, None) => {
+                // Both None - legitimately optional workspace; accept.
             }
         }
         Ok(())
@@ -1157,7 +1176,18 @@ impl HarnessRegistry {
         // --- Workspace compatibility enforcement (#171).
         // Validate the workspace manifest integrity if a workspace is requested.
         let workspace_manifest = request.workspace;
+        let requires_workspace = request.requirements.workspace.is_some();
+        if requires_workspace && workspace_manifest.is_none() {
+            bail!("HSEL-0009: work requirements demand a workspace but none was provided");
+        }
         if let Some(manifest) = workspace_manifest {
+            // Use the existing #171 workspace policy engine for full manifest
+            // integrity (schema, identity fields, writable scopes, digest).
+            let manifest_json =
+                serde_json::to_string(manifest).context("workspace manifest serializes")?;
+            if let Err(err) = WorkspaceManifestV1::parse_json(&manifest_json) {
+                bail!("HSEL-0009: workspace manifest integrity check failed: {err}");
+            }
             // Schema version gate.
             if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
                 bail!(
