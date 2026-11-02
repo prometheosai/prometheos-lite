@@ -44,6 +44,10 @@ use crate::workflow::soma::capability::{
     SUPPORTED_CAPABILITY_SCHEMA_VERSION, Substitution, WorkRequirements, resolve,
 };
 use crate::workflow::soma::contracts::AuthorityProfile;
+use crate::workflow::soma::profile::Boundary;
+use crate::workflow::workspace::{
+    AdapterKind, WORKSPACE_SCHEMA_VERSION, WorkspaceManifestV1, WorkspaceMode,
+};
 
 /// Schema version of the harness seam contracts.
 pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
@@ -791,6 +795,10 @@ pub struct HarnessSelectionRequest<'a> {
     pub evaluated_at: String,
     pub substitutions: Vec<Substitution>,
     pub pinned_harness_id: Option<&'a str>,
+    /// The actual execution workspace (#171) that will receive the harness's effects.
+    /// When present, selection enforces workspace compatibility and binds the
+    /// evidence to this concrete workspace instance.
+    pub workspace: Option<&'a WorkspaceManifestV1>,
 }
 
 /// Trusted inputs for semantic re-verification of selection evidence.
@@ -811,6 +819,22 @@ pub struct HarnessSelectionTrust<'a> {
     pub evaluated_at: &'a str,
     /// The original substitutions that were used to construct the request.
     pub substitutions: &'a [Substitution],
+    /// The actual workspace (#171) the selection was bound to, if any.
+    pub workspace: Option<&'a WorkspaceManifestV1>,
+}
+
+/// Workspace evidence bound to a harness selection. Captures the concrete
+/// #171 workspace instance so the selection decision can be verified against
+/// the actual execution workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceEvidenceV1 {
+    pub workspace_id: String,
+    pub adapter: String,
+    pub adapter_revision: String,
+    pub mode: String,
+    #[serde(rename = "manifestDigest")]
+    pub manifest_digest: String,
 }
 
 /// Durable evidence that one harness revision was selected for one work item.
@@ -836,6 +860,8 @@ pub struct HarnessSelectionV1 {
     pub authority_effective_digest: String,
     pub decision_digest: String,
     pub substitutions: Vec<Substitution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceEvidenceV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_digest: Option<String>,
 }
@@ -880,6 +906,20 @@ impl HarnessSelectionV1 {
         ] {
             if !is_hex64(value) {
                 bail!("HSEL-0005: harness selection {label} is not a 64-hex digest");
+            }
+        }
+        if let Some(ws) = &self.workspace {
+            if !is_hex64(&ws.manifest_digest) {
+                bail!(
+                    "HSEL-0005: harness selection workspace manifestDigest is not a 64-hex digest"
+                );
+            }
+            if ws.workspace_id.trim().is_empty()
+                || ws.adapter.trim().is_empty()
+                || ws.adapter_revision.trim().is_empty()
+                || ws.mode.trim().is_empty()
+            {
+                bail!("HSEL-0005: harness selection workspace evidence has empty required fields");
             }
         }
         // RFC 3339 parsing is delegated to `chrono`: it validates separators,
@@ -1037,6 +1077,41 @@ impl HarnessSelectionV1 {
         if canonical_json_digest(&decision)? != self.decision_digest {
             bail!("HSEL-0008: selection decisionDigest does not match the reproduced decision");
         }
+        // Verify workspace binding when selection evidence includes a workspace reference.
+        if self.workspace.is_some() {
+            let Some(trust_workspace) = trust.workspace else {
+                bail!(
+                    "HSEL-0008: trusted inputs missing workspace reference but selection evidence includes one"
+                );
+            };
+            let manifest = trust_workspace;
+            if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
+                bail!("HSEL-0008: trusted workspace schema version does not match");
+            }
+            // Build expected workspace evidence from the trusted manifest.
+            let adapter_family_str = match manifest.adapter {
+                AdapterKind::GitWorktree => "git-worktree",
+                AdapterKind::ExistingReadOnly => "existing-read-only",
+            };
+            let mode_boundary = match manifest.mode {
+                WorkspaceMode::ReadOnly => "read",
+                WorkspaceMode::Writable => "write",
+            };
+            let manifest_digest = manifest.compute_digest();
+            let expected = WorkspaceEvidenceV1 {
+                workspace_id: manifest.workspace_id.clone(),
+                adapter: adapter_family_str.to_string(),
+                adapter_revision: manifest.adapter_revision.clone(),
+                mode: mode_boundary.to_string(),
+                manifest_digest,
+            };
+            match &self.workspace {
+                Some(actual) if actual == &expected => {}
+                _ => bail!(
+                    "HSEL-0008: selection workspace evidence does not match the trusted workspace"
+                ),
+            }
+        }
         Ok(())
     }
 }
@@ -1078,8 +1153,69 @@ impl HarnessRegistry {
 
         let mut compatible: Vec<(&dyn ExecutionHarness, CompatibilityDecision)> = Vec::new();
         let mut refusals: Vec<String> = Vec::new();
+
+        // --- Workspace compatibility enforcement (#171).
+        // Validate the workspace manifest integrity if a workspace is requested.
+        let workspace_manifest = request.workspace;
+        if let Some(manifest) = workspace_manifest {
+            // Schema version gate.
+            if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
+                bail!(
+                    "HSEL-0009: unsupported workspace schema version {} (expected {WORKSPACE_SCHEMA_VERSION})",
+                    manifest.schema_version
+                );
+            }
+            // Content-digest integrity gate (manifest must be sealed).
+            let expected_digest = manifest.compute_digest();
+            if manifest.content_digest.as_deref() != Some(&expected_digest) {
+                bail!("HSEL-0009: workspace manifest contentDigest does not verify");
+            }
+            // Mode satisfaction gate: if the work requires a workspace boundary,
+            // the manifest's mode must be sufficient.
+            if let Some(req_boundaries) = request.requirements.workspace {
+                let rank_req = match req_boundaries.workspace {
+                    Some(Boundary::Write) => 2u8,
+                    Some(Boundary::Read) => 1u8,
+                    Some(Boundary::None) | None => 0,
+                };
+                let rank_manifest = match manifest.mode {
+                    WorkspaceMode::Writable => 2u8,
+                    WorkspaceMode::ReadOnly => 1u8,
+                };
+                if rank_manifest < rank_req {
+                    bail!(
+                        "HSEL-0009: workspace mode ({:?}) cannot satisfy required boundary ({})",
+                        manifest.mode,
+                        if rank_req == 2 { "writable" } else { "read" }
+                    );
+                }
+            }
+            }
+
         for harness in candidates {
             let declaration = harness.declaration();
+
+            // Skip candidate if it doesn't support the required workspace adapter.
+            if let Some(manifest) = workspace_manifest {
+                let adapter_family_str = match manifest.adapter {
+                    AdapterKind::GitWorktree => "git-worktree",
+                    AdapterKind::ExistingReadOnly => "existing-read-only",
+                };
+                let manifest_rev = &manifest.adapter_revision;
+                let harness_supports = declaration
+                    .capabilities
+                    .adapter_families
+                    .iter()
+                    .any(|f| f.family == adapter_family_str && f.revision == *manifest_rev);
+                if !harness_supports {
+                    refusals.push(format!(
+                        "{} refused: workspace adapter {} / revision {} not declared",
+                        declaration.harness_id, adapter_family_str, manifest_rev
+                    ));
+                    continue;
+                }
+            }
+
             let decision = resolve(&NegotiationInputs {
                 id: format!("{}/{}", request.selection_id, declaration.harness_id),
                 requirements: request.requirements,
@@ -1154,6 +1290,25 @@ impl HarnessRegistry {
             authority_effective_digest,
             decision_digest,
             substitutions: request.substitutions.clone(),
+            workspace: workspace_manifest.map(|manifest| {
+                // Build workspace evidence from the validated manifest.
+                let adapter_family_str = match manifest.adapter {
+                    AdapterKind::GitWorktree => "git-worktree",
+                    AdapterKind::ExistingReadOnly => "existing-read-only",
+                };
+                let mode_boundary = match manifest.mode {
+                    WorkspaceMode::ReadOnly => "read",
+                    WorkspaceMode::Writable => "write",
+                };
+                let manifest_digest = manifest.compute_digest();
+                WorkspaceEvidenceV1 {
+                    workspace_id: manifest.workspace_id.clone(),
+                    adapter: adapter_family_str.to_string(),
+                    adapter_revision: manifest.adapter_revision.clone(),
+                    mode: mode_boundary.to_string(),
+                    manifest_digest,
+                }
+            }),
             content_digest: None,
         }
         .try_sealed()

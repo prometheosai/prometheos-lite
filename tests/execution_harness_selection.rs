@@ -160,6 +160,7 @@ fn request<'a>(
         evaluated_at: "2026-10-22T12:00:00Z".to_string(),
         substitutions,
         pinned_harness_id,
+        workspace: None,
     }
 }
 
@@ -411,6 +412,7 @@ fn selection_evidence_binds_authority_and_evaluated_at() {
             evaluated_at: evaluated_at_a.clone(),
             substitutions: Vec::new(),
             pinned_harness_id: None,
+            workspace: None,
         })
         .expect("first selection succeeds");
 
@@ -423,6 +425,7 @@ fn selection_evidence_binds_authority_and_evaluated_at() {
             evaluated_at: evaluated_at_b.clone(),
             substitutions: Vec::new(),
             pinned_harness_id: None,
+            workspace: None,
         })
         .expect("second selection succeeds");
 
@@ -560,6 +563,7 @@ fn semantic_verification_detects_substituted_inputs() {
         selection_id: "sel-1",
         evaluated_at: "2026-10-22T12:00:00Z",
         substitutions: &[],
+        workspace: None,
     };
     selection
         .verify_against(&trust)
@@ -593,6 +597,7 @@ fn semantic_verification_detects_substituted_inputs() {
             selection_id: "sel-1",
             evaluated_at: "2026-10-22T12:00:00Z",
             substitutions: &[],
+            workspace: None,
         })
         .expect_err("different trusted requirements must not verify");
     assert!(
@@ -619,6 +624,7 @@ fn semantic_verification_detects_substituted_inputs() {
             selection_id: "sel-1",
             evaluated_at: "2026-10-22T12:00:00Z",
             substitutions: &[],
+            workspace: None,
         })
         .expect_err("a different harness revision must not verify");
     assert!(
@@ -679,6 +685,7 @@ fn semantic_verification_rejects_forged_fields() {
         selection_id: "sel-1",
         evaluated_at: "2026-10-22T12:00:00Z",
         substitutions: &[],
+        workspace: None,
     };
 
     // Baseline: matching trusted inputs verify semantically
