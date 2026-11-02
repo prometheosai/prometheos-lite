@@ -41,12 +41,106 @@ use crate::workflow::node_runner::{NodeRunOutcome, NodeRunRequest, NodeRunner};
 use crate::workflow::policy::LocalRestrictions;
 use crate::workflow::soma::capability::{
     CompatibilityDecision, DecisionStatus, Identity, NegotiationInputs, RuntimeCapabilitySet,
-    Substitution, WorkRequirements, resolve,
+    SUPPORTED_CAPABILITY_SCHEMA_VERSION, Substitution, WorkRequirements, resolve,
 };
 use crate::workflow::soma::contracts::AuthorityProfile;
 
 /// Schema version of the harness seam contracts.
 pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Canonical harness declarations owned by the implementation.
+///
+/// These are the authoritative source declarations from which the capability
+/// catalog is generated. They represent the harness declaration seam families
+/// (native, protocol) and correspond to the adapter implementations in the
+/// conformance tests. There is no production HarnessRegistry in src/; these
+/// declarations are the implementation-owned inventory, not a registry of
+/// production executables.
+pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
+    use crate::workflow::soma::capability::Locality;
+    vec![
+        HarnessDeclarationV1 {
+            schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+            harness_id: "lite.harness.native".to_string(),
+            identity: Identity {
+                name: "lite-native".to_string(),
+                revision: "v1".to_string(),
+            },
+            family: HarnessFamily::Native,
+            declared_capabilities: vec!["harness.native.probe".to_string()],
+            claimed_capabilities: vec!["harness.native.probe".to_string()],
+            capabilities: RuntimeCapabilitySet {
+                id: "lite.harness.native.caps".to_string(),
+                schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                identity: Identity {
+                    name: "lite-native".to_string(),
+                    revision: "v1".to_string(),
+                },
+                declared_at: "2026-10-22T00:00:00Z".to_string(),
+                spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+                adapter_families: Vec::new(),
+                effect_classes: vec!["process-exec".to_string()],
+                workspace: None,
+                checkpoint_import: Some(false),
+                checkpoint_export: Some(false),
+                resume_support: Some(false),
+                event_streaming: Some(true),
+                read_projection: Some(true),
+                locality: Some(Locality::Local),
+                privacy_classes: Vec::new(),
+                max_structured_input: None,
+                max_structured_output: None,
+                budget_ceilings: None,
+                evidence_attachment: Some(true),
+                validation: Some(true),
+                approval_escalation: Some(false),
+            },
+            content_digest: None,
+        }
+        .sealed(),
+        HarnessDeclarationV1 {
+            schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+            harness_id: "lite.harness.protocol".to_string(),
+            identity: Identity {
+                name: "lite-protocol".to_string(),
+                revision: "v1".to_string(),
+            },
+            family: HarnessFamily::ProtocolBridged,
+            declared_capabilities: vec!["harness.protocol.relay".to_string()],
+            claimed_capabilities: vec!["harness.protocol.relay".to_string()],
+            capabilities: RuntimeCapabilitySet {
+                id: "lite.harness.protocol.caps".to_string(),
+                schema_version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                version: SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string(),
+                identity: Identity {
+                    name: "lite-protocol".to_string(),
+                    revision: "v1".to_string(),
+                },
+                declared_at: "2026-10-22T00:00:00Z".to_string(),
+                spec_versions: vec![SUPPORTED_CAPABILITY_SCHEMA_VERSION.to_string()],
+                adapter_families: Vec::new(),
+                effect_classes: vec!["process-exec".to_string()],
+                workspace: None,
+                checkpoint_import: Some(true),
+                checkpoint_export: Some(true),
+                resume_support: Some(true),
+                event_streaming: Some(true),
+                read_projection: Some(true),
+                locality: Some(Locality::Local),
+                privacy_classes: Vec::new(),
+                max_structured_input: None,
+                max_structured_output: None,
+                budget_ceilings: None,
+                evidence_attachment: Some(true),
+                validation: Some(true),
+                approval_escalation: Some(false),
+            },
+            content_digest: None,
+        }
+        .sealed(),
+    ]
+}
 
 /// Schema version of a conformance report.
 pub const HARNESS_CONFORMANCE_VERSION: &str = "1.0.0";
@@ -158,6 +252,52 @@ impl HarnessDeclarationV1 {
         }
         crate::workflow::soma::try_canonical_digest(&value)
             .expect("canonical digest of a Lite-constructed declaration cannot fail")
+    }
+
+    /// Fail-closed parse: version gate, structural checks, claim law, digest
+    /// verification. Refusals are input errors, never silent repair.
+    /// Fail-closed validation of a sealed declaration.
+    ///
+    /// Returns a list of findings (empty = valid). Used by the conformance kit
+    /// and by the Slice C drift guard.
+    pub fn validate(&self) -> Vec<String> {
+        let mut findings = Vec::new();
+        if self.schema_version != HARNESS_SCHEMA_VERSION {
+            findings.push(format!(
+                "unsupported schema version {} (expected {HARNESS_SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.harness_id.trim().is_empty() {
+            findings.push("empty harnessId".to_string());
+        }
+        if self.identity.name.trim().is_empty() || self.identity.revision.trim().is_empty() {
+            findings.push("empty identity name or revision".to_string());
+        }
+        if self.declared_capabilities.is_empty() {
+            findings.push("no declared capabilities".to_string());
+        }
+        let declared_set: BTreeSet<&str> = self
+            .declared_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if declared_set.len() != self.declared_capabilities.len() {
+            findings.push("duplicate declared capability".to_string());
+        }
+        for c in &self.claimed_capabilities {
+            if !declared_set.contains(c.as_str()) {
+                findings.push(format!("claimed capability {c:?} not in declared set"));
+            }
+        }
+        if self.capabilities.identity != self.identity {
+            findings.push("capability identity diverges from declaration identity".to_string());
+        }
+        // Stale version check: spec_versions must be non-empty
+        if self.capabilities.spec_versions.is_empty() {
+            findings.push("no supported spec versions declared".to_string());
+        }
+        findings
     }
 
     /// Fail-closed parse: version gate, structural checks, claim law, digest
@@ -525,6 +665,25 @@ impl HarnessRegistry {
         if declaration.harness_id.trim().is_empty() {
             bail!("cannot register a harness with an empty id");
         }
+        // Fail-closed: reject malformed declarations even if sealed.
+        let findings = declaration.validate();
+        if !findings.is_empty() {
+            bail!(
+                "cannot register harness {:?}: declaration is invalid: {}",
+                declaration.harness_id,
+                findings.join("; ")
+            );
+        }
+        // Enforce canonical capability audit (SOMA SPEC 007).
+        let audit = declaration.capabilities.audit();
+        if let Some(first) = audit.first() {
+            bail!(
+                "cannot register harness {:?}: capability declaration is not audit-clean: {} {}",
+                declaration.harness_id,
+                first.code,
+                first.message
+            );
+        }
         if declaration.content_digest.as_deref() != Some(&declaration.try_compute_digest()?) {
             bail!(
                 "cannot register harness {:?}: declaration is not sealed or does not verify",
@@ -565,10 +724,38 @@ impl HarnessRegistry {
                     declaration_digest: d.compute_digest(),
                     declared_capabilities: d.declared_capabilities.clone(),
                     claimed_capabilities: d.claimed_capabilities.clone(),
+                    effect_classes: d.capabilities.effect_classes.clone(),
+                    spec_versions: d.capabilities.spec_versions.clone(),
+                    adapter_families: d
+                        .capabilities
+                        .adapter_families
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect(),
+                    workspace: d.capabilities.workspace,
+                    max_structured_input: d.capabilities.max_structured_input.clone(),
+                    max_structured_output: d.capabilities.max_structured_output.clone(),
+                    budget_ceilings: d.capabilities.budget_ceilings.clone(),
                     locality: d.capabilities.locality,
                     checkpoint_export: d.capabilities.checkpoint_export,
                     checkpoint_import: d.capabilities.checkpoint_import,
                     resume_support: d.capabilities.resume_support,
+                    event_streaming: d.capabilities.event_streaming,
+                    read_projection: d.capabilities.read_projection,
+                    privacy_classes: d.capabilities.privacy_classes.clone(),
+                    evidence_attachment: d.capabilities.evidence_attachment,
+                    validation: d.capabilities.validation,
+                    approval_escalation: d.capabilities.approval_escalation,
+                    unclaimed_capabilities: d
+                        .declared_capabilities
+                        .iter()
+                        .filter(|c| !d.claimed_capabilities.contains(c))
+                        .cloned()
+                        .collect(),
+                    over_claimed: d
+                        .claimed_capabilities
+                        .iter()
+                        .any(|c| !d.declared_capabilities.contains(c)),
                 }
             })
             .collect();
@@ -974,7 +1161,7 @@ impl HarnessRegistry {
 }
 
 /// One adapter as published by the generated catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HarnessCatalogEntry {
     pub harness_id: String,
@@ -984,14 +1171,37 @@ pub struct HarnessCatalogEntry {
     pub declaration_digest: String,
     pub declared_capabilities: Vec<String>,
     pub claimed_capabilities: Vec<String>,
+    // --- Capability surface (from RuntimeCapabilitySet) ---
+    pub effect_classes: Vec<String>,
+    pub spec_versions: Vec<String>,
+    pub adapter_families: Vec<String>,
+    // --- Workspace compatibility ---
+    pub workspace: Option<crate::workflow::soma::profile::Boundaries>,
+    // --- Structured I/O limits ---
+    pub max_structured_input: Option<serde_json::Number>,
+    pub max_structured_output: Option<serde_json::Number>,
+    // --- Budget ceilings ---
+    pub budget_ceilings: Option<crate::workflow::soma::contracts::Budgets>,
     pub locality: Option<crate::workflow::soma::capability::Locality>,
     pub checkpoint_export: Option<bool>,
     pub checkpoint_import: Option<bool>,
     pub resume_support: Option<bool>,
+    pub event_streaming: Option<bool>,
+    pub read_projection: Option<bool>,
+    pub privacy_classes: Vec<String>,
+    pub evidence_attachment: Option<bool>,
+    pub validation: Option<bool>,
+    pub approval_escalation: Option<bool>,
+    // --- Limitations (derived, never granted authority) ---
+    /// Capabilities declared but not claimed — the adapter's limitations.
+    pub unclaimed_capabilities: Vec<String>,
+    /// Whether the adapter claims more than it declares (must always be false
+    /// for a valid declaration).
+    pub over_claimed: bool,
 }
 
 /// Generated, digest-sealed capability catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HarnessCatalog {
     pub schema_version: String,
@@ -1018,9 +1228,260 @@ impl HarnessCatalog {
             .expect("canonical digest of a Lite-constructed catalogue cannot fail")
     }
 
+    /// Fail-closed validation of a generated catalog.
+    ///
+    /// Returns a list of findings (empty = valid). Used by the Slice C drift
+    /// guard to detect malformed or inconsistent catalogs.
+    pub fn validate(&self) -> Vec<String> {
+        let mut findings = Vec::new();
+        if self.schema_version != HARNESS_SCHEMA_VERSION {
+            findings.push(format!(
+                "unsupported schema version {} (expected {HARNESS_SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.conformance_version != HARNESS_CONFORMANCE_VERSION {
+            findings.push(format!(
+                "unsupported conformance version {} (expected {HARNESS_CONFORMANCE_VERSION})",
+                self.conformance_version
+            ));
+        }
+        // Check for duplicate harness_ids
+        let mut seen = BTreeSet::new();
+        for entry in &self.entries {
+            if !seen.insert(&entry.harness_id) {
+                findings.push(format!("duplicate harnessId {:?}", entry.harness_id));
+            }
+            if entry.declaration_digest.len() != 64 {
+                findings.push(format!(
+                    "invalid declaration_digest for {:?}",
+                    entry.harness_id
+                ));
+            }
+            // Over-claimed check
+            if entry.over_claimed {
+                findings.push(format!(
+                    "harness {:?} claims capabilities it does not declare",
+                    entry.harness_id
+                ));
+            }
+        }
+        // Verify content digest if present
+        if let Some(digest) = &self.content_digest {
+            let computed = self.compute_digest();
+            if *digest != computed {
+                findings.push("contentDigest does not verify".to_string());
+            }
+        } else {
+            findings.push("missing contentDigest".to_string());
+        }
+        // Entries must be sorted by harness_id for deterministic output
+        let sorted: Vec<&str> = self.entries.iter().map(|e| e.harness_id.as_str()).collect();
+        let mut sorted_copy = sorted.clone();
+        sorted_copy.sort();
+        if sorted != sorted_copy {
+            findings.push("catalog entries are not sorted by harnessId".to_string());
+        }
+        findings
+    }
+
+    /// Verify the catalog against a set of trusted declarations.
+    pub fn verify_against_declarations(
+        &self,
+        declarations: &[HarnessDeclarationV1],
+    ) -> Vec<String> {
+        let mut findings = Vec::new();
+
+        if let Some(digest) = &self.content_digest {
+            let computed = self.compute_digest();
+            if *digest != computed {
+                findings.push("catalog contentDigest does not verify".to_string());
+            }
+        } else {
+            findings.push("catalog missing contentDigest".to_string());
+        }
+        let catalog_ids: BTreeSet<&str> =
+            self.entries.iter().map(|e| e.harness_id.as_str()).collect();
+        let decl_ids: BTreeSet<&str> = declarations.iter().map(|d| d.harness_id.as_str()).collect();
+
+        // Missing entries
+        for id in &decl_ids {
+            if !catalog_ids.contains(id) {
+                findings.push(format!(
+                    "missing catalog entry for trusted declaration {id:?}"
+                ));
+            }
+        }
+        // Extra entries
+        for id in &catalog_ids {
+            if !decl_ids.contains(id) {
+                findings.push(format!(
+                    "catalog contains entry for unknown declaration {id:?}"
+                ));
+            }
+        }
+        // Verify each entry matches its declaration
+        for entry in &self.entries {
+            if let Some(decl) = declarations
+                .iter()
+                .find(|d| d.harness_id == entry.harness_id)
+            {
+                if entry.declaration_digest != decl.compute_digest() {
+                    findings.push(format!(
+                        "declarationDigest mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.name != decl.identity.name {
+                    findings.push(format!("name mismatch for {:?}", entry.harness_id));
+                }
+                if entry.revision != decl.identity.revision {
+                    findings.push(format!("revision mismatch for {:?}", entry.harness_id));
+                }
+                if entry.family != decl.family {
+                    findings.push(format!("family mismatch for {:?}", entry.harness_id));
+                }
+                if entry.declared_capabilities != decl.declared_capabilities {
+                    findings.push(format!(
+                        "declaredCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.claimed_capabilities != decl.claimed_capabilities {
+                    findings.push(format!(
+                        "claimedCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.effect_classes != decl.capabilities.effect_classes {
+                    findings.push(format!("effectClasses mismatch for {:?}", entry.harness_id));
+                }
+                let decl_adapter_families: Vec<String> = decl
+                    .capabilities
+                    .adapter_families
+                    .iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect();
+                if entry.adapter_families != decl_adapter_families {
+                    findings.push(format!(
+                        "adapterFamilies mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                let decl_adapter_families: Vec<String> = decl
+                    .capabilities
+                    .adapter_families
+                    .iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect();
+                if entry.adapter_families != decl_adapter_families {
+                    findings.push(format!(
+                        "adapterFamilies mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.spec_versions != decl.capabilities.spec_versions {
+                    findings.push(format!("specVersions mismatch for {:?}", entry.harness_id));
+                }
+                if entry.privacy_classes != decl.capabilities.privacy_classes {
+                    findings.push(format!(
+                        "privacyClasses mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.workspace != decl.capabilities.workspace {
+                    findings.push(format!("workspace mismatch for {:?}", entry.harness_id));
+                }
+                if entry.max_structured_input != decl.capabilities.max_structured_input {
+                    findings.push(format!(
+                        "maxStructuredInput mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.max_structured_output != decl.capabilities.max_structured_output {
+                    findings.push(format!(
+                        "maxStructuredOutput mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.budget_ceilings != decl.capabilities.budget_ceilings {
+                    findings.push(format!(
+                        "budgetCeilings mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.locality != decl.capabilities.locality {
+                    findings.push(format!("locality mismatch for {:?}", entry.harness_id));
+                }
+                if entry.checkpoint_export != decl.capabilities.checkpoint_export {
+                    findings.push(format!(
+                        "checkpointExport mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.checkpoint_import != decl.capabilities.checkpoint_import {
+                    findings.push(format!(
+                        "checkpointImport mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.resume_support != decl.capabilities.resume_support {
+                    findings.push(format!("resumeSupport mismatch for {:?}", entry.harness_id));
+                }
+                if entry.event_streaming != decl.capabilities.event_streaming {
+                    findings.push(format!(
+                        "eventStreaming mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.read_projection != decl.capabilities.read_projection {
+                    findings.push(format!(
+                        "readProjection mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.evidence_attachment != decl.capabilities.evidence_attachment {
+                    findings.push(format!(
+                        "evidenceAttachment mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                if entry.validation != decl.capabilities.validation {
+                    findings.push(format!("validation mismatch for {:?}", entry.harness_id));
+                }
+                if entry.approval_escalation != decl.capabilities.approval_escalation {
+                    findings.push(format!(
+                        "approvalEscalation mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                let expected_unclaimed: Vec<String> = decl
+                    .declared_capabilities
+                    .iter()
+                    .filter(|c| !decl.claimed_capabilities.contains(c))
+                    .cloned()
+                    .collect();
+                if entry.unclaimed_capabilities != expected_unclaimed {
+                    findings.push(format!(
+                        "unclaimedCapabilities mismatch for {:?}",
+                        entry.harness_id
+                    ));
+                }
+                let expected_over_claimed = decl
+                    .claimed_capabilities
+                    .iter()
+                    .any(|c| !decl.declared_capabilities.contains(c));
+                if entry.over_claimed != expected_over_claimed {
+                    findings.push(format!("overClaimed mismatch for {:?}", entry.harness_id));
+                }
+            }
+        }
+        findings
+    }
+
     /// Deterministic JSON (entries already ordered by `harnessId`).
     pub fn to_json(&self) -> Result<String> {
-        Ok(serde_json::to_string(self)?)
+        Ok(serde_json::to_string_pretty(self)?)
     }
 }
 

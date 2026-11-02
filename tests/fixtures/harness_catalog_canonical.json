@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "1.0.0",
+  "conformanceVersion": "1.0.0",
+  "entries": [
+    {
+      "harnessId": "lite.harness.native",
+      "family": "native",
+      "name": "lite-native",
+      "revision": "v1",
+      "declarationDigest": "4284323c5f59ec3a1eaaa242a155d85eb1f71e4390c5fd6f067c58b00095cca8",
+      "declaredCapabilities": [
+        "harness.native.probe"
+      ],
+      "claimedCapabilities": [
+        "harness.native.probe"
+      ],
+      "effectClasses": [
+        "process-exec"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [],
+      "workspace": null,
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": false,
+      "checkpointImport": false,
+      "resumeSupport": false,
+      "eventStreaming": true,
+      "readProjection": true,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    },
+    {
+      "harnessId": "lite.harness.protocol",
+      "family": "protocol-bridged",
+      "name": "lite-protocol",
+      "revision": "v1",
+      "declarationDigest": "0cf227ceb5cc86086c25cdc020302730a6fd204a3b9fde5f420df11ad242769d",
+      "declaredCapabilities": [
+        "harness.protocol.relay"
+      ],
+      "claimedCapabilities": [
+        "harness.protocol.relay"
+      ],
+      "effectClasses": [
+        "process-exec"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [],
+      "workspace": null,
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": true,
+      "readProjection": true,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    }
+  ],
+  "contentDigest": "464425de86bd2e8d83a922acca26f909b75e6dc54715097c387cd960fa49af8d"
+}

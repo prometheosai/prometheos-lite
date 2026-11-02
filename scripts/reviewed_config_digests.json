@@ -3,7 +3,7 @@
   "note": "Digests of executable configuration surfaces (build, bundler, toolchain and verification-runner configuration). A change to a pinned file fails the repository policy gate until a human re-pins it deliberately with scripts/review_config_digests.py. Digests are over LF-normalized bytes so a platform checkout does not change the verdict.",
   "files": {
     ".cargo/config.toml": "c75eda3bf5bf8944eeeb48670ea59c816435f3f55cb0433744e26e7c3d855426",
-    ".gitattributes": "7122067052549dc8c43dbc593b25ab0d6d1bb68ae168e63f4a8dcfad28437eda",
+    ".gitattributes": "dcba1494827fe76c16ed5842634c0acc2f597cebcd36c0091f1cb92f806cb036",
     "Cargo.lock": "bfd5092d58e24313c81796a5446282cf5a3c0cb5af552c560afaefcd6a428eae",
     "Cargo.toml": "432990f4b7e8b7efdb631da04803664d5ec34d05dbbfbdc3dbd221d103b03b75",
     "clippy.toml": "34fe5d6236ee0e8df00792d5e11a8e5c96c01143593e100626a5d63398cf006a",
@@ -24,7 +24,7 @@
     "scripts/gate_completion_registry.json": "7ad70d8f6fcc890a8689adcd19c9404e825cce99196b3cd860cff02616105213",
     "scripts/gb_static_guard.py": "3ac5bddb819dfe19b08a7edaad2d2ec33195254566426776dc511a03c34c357f",
     "scripts/lib/target_dir.sh": "5d8375407b79e65e4a2961c817dd9ddbc0ec58e2d6736b072780ab09c508e8ff",
-    "scripts/local_ci.py": "af3ea0c9b64cda15aef0706f636af92e8de0c4b50c8b421934a7a8bf2dc48ff0",
+    "scripts/local_ci.py": "139aaf7aafa23ed78e6e122d286a69049660f5d7b1f56e6be6118def6a1c848a",
     "scripts/local_ci_policy.py": "93a226b561107c8a60f987eba8a429366680822996066ecbf18c13e78b9e4951",
     "scripts/provider-governed-proposal-smoke.sh": "c6d0f4b0605f36d7117bda2f10a5e893b900f392aae3310f209ebd3211e715b1",
     "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4",
