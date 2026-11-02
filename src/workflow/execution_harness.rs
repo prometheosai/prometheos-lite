@@ -1190,7 +1190,7 @@ impl HarnessRegistry {
                     );
                 }
             }
-            }
+        }
 
         for harness in candidates {
             let declaration = harness.declaration();
