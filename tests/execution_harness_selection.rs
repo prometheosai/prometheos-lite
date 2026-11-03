@@ -142,6 +142,43 @@ impl ExecutionHarness for ProbeHarness {
     }
 }
 
+/// Instrumented harness that counts invocations to verify zero invocation on refusal.
+#[derive(Clone)]
+struct CountingHarness {
+    declaration: HarnessDeclarationV1,
+    invocations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingHarness {
+    fn new(declaration: HarnessDeclarationV1) -> Self {
+        Self {
+            declaration,
+            invocations: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn invocation_count(&self) -> usize {
+        self.invocations.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionHarness for CountingHarness {
+    fn declaration(&self) -> &HarnessDeclarationV1 {
+        &self.declaration
+    }
+
+    async fn run(
+        &self,
+        _step: HarnessStep,
+        _dispatch: &mut HarnessDispatch<'_>,
+    ) -> Result<HarnessOutcome> {
+        self.invocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        bail!("counting harness must not be invoked during selection")
+    }
+}
+
 fn requirements(required: &[&str], forbid_substitution: bool) -> WorkRequirements {
     let mut json = serde_json::json!({
         "id": "reqs-selection",
@@ -183,6 +220,18 @@ fn registry(declarations: Vec<HarnessDeclarationV1>) -> HarnessRegistry {
             .expect("registration succeeds");
     }
     registry
+}
+
+/// Registry with a counting harness for zero-invocation verification.
+fn counting_registry(
+    declaration: HarnessDeclarationV1,
+) -> (HarnessRegistry, CountingHarness) {
+    let harness = CountingHarness::new(declaration);
+    let mut registry = HarnessRegistry::new();
+    registry
+        .register(Box::new(harness.clone()))
+        .expect("registration succeeds");
+    (registry, harness)
 }
 
 /// Helper to create a sealed workspace manifest for testing.
@@ -1219,19 +1268,28 @@ fn trusted_workspace_mismatch_refused() {
     );
 }
 
-/// T9 — attempted authority widening is refused
+/// T9 — attempted authority widening is refused (with real sealed workspace)
 #[test]
 fn attempted_authority_widening_refused() {
-    let registry = registry(vec![declaration(
+    let registry = registry(vec![declaration_with_workspace_adapter(
         "lite.harness.native",
         "lite-native",
         "v1",
         HarnessFamily::Native,
         "harness.native.probe",
         &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
     )]);
 
-    let requirements = requirements(&["process-exec"], true);
+    let ws_manifest = sealed_workspace_manifest(
+        "ws-authority",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+
+    let requirements = requirements_with_workspace(&["process-exec"], true, Some(Boundary::Read));
     let declared = authority();
     let hostile: AuthorityProfile = serde_json::from_str(
         r#"{"executionClass":"open-ended","mutation":"explicit","readableScopes":["*"],"writableScopes":["*"]}"#,
@@ -1247,7 +1305,7 @@ fn attempted_authority_widening_refused() {
             evaluated_at: "2026-10-22T12:00:00Z".to_string(),
             substitutions: Vec::new(),
             pinned_harness_id: None,
-            workspace: None,
+            workspace: Some(&ws_manifest),
         })
         .expect_err("authority widening refused");
 
@@ -1257,14 +1315,10 @@ fn attempted_authority_widening_refused() {
     );
 }
 
-/// T10 — zero harness invocation on all refusal paths
+/// T10 — zero harness invocation on all refusal paths (instrumented)
 #[test]
 fn zero_harness_invocation_on_refusal() {
-    // We cannot easily assert that no adapter was invoked since
-    // ProbeHarness::run always bails. Instead, we verify that
-    // the refusal happens at selection time before any dispatch.
-
-    let registry = registry(vec![declaration_with_workspace_adapter(
+    let decl = declaration_with_workspace_adapter(
         "lite.harness.native",
         "lite-native",
         "v1",
@@ -1273,12 +1327,13 @@ fn zero_harness_invocation_on_refusal() {
         &["process-exec"],
         "existing-read-only",
         "lite.workspace.adapter.v1",
-    )]);
+    );
+    let (registry, harness) = counting_registry(decl);
+
+    let authority = authority();
 
     // Test 1: missing required workspace
     let requirements = requirements_with_workspace(&["process-exec"], true, Some(Boundary::Read));
-    let authority = authority();
-
     let error = registry
         .select(&HarnessSelectionRequest {
             selection_id: "zero-refusal-1".to_string(),
@@ -1292,10 +1347,14 @@ fn zero_harness_invocation_on_refusal() {
         })
         .expect_err("missing required workspace refused");
 
-    // Verify the error is about workspace, not harness capability
     assert!(
         error.to_string().contains("HSEL-0009"),
         "expected workspace refusal, got: {error}"
+    );
+    assert_eq!(
+        harness.invocation_count(),
+        0,
+        "harness must not be invoked on missing workspace refusal"
     );
 
     // Test 2: read-only workspace with writable requirement
@@ -1322,5 +1381,413 @@ fn zero_harness_invocation_on_refusal() {
     assert!(
         error2.to_string().contains("HSEL-0009"),
         "expected workspace refusal, got: {error2}"
+    );
+    assert_eq!(
+        harness.invocation_count(),
+        0,
+        "harness must not be invoked on mode mismatch refusal"
+    );
+
+    // Test 3: adapter family mismatch
+    let ws_manifest2 = sealed_workspace_manifest(
+        "ws-test2",
+        AdapterKind::GitWorktree,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+    let requirements3 = requirements_with_workspace(&["process-exec"], true, Some(Boundary::Read));
+    let error3 = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "zero-refusal-3".to_string(),
+            requirements: &requirements3,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest2),
+        })
+        .expect_err("adapter family mismatch refusal");
+
+    assert!(
+        error3.to_string().contains("HSEL-0003"),
+        "expected adapter family refusal, got: {error3}"
+    );
+    assert_eq!(
+        harness.invocation_count(),
+        0,
+        "harness must not be invoked on adapter family mismatch"
+    );
+
+    // Test 4: adapter revision mismatch
+    let ws_manifest3 = sealed_workspace_manifest(
+        "ws-test3",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+    let decl_rev = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "v2", // mismatch
+    );
+    let (registry_rev, harness_rev) = counting_registry(decl_rev);
+    let error4 = registry_rev
+        .select(&HarnessSelectionRequest {
+            selection_id: "zero-refusal-4".to_string(),
+            requirements: &requirements3,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest3),
+        })
+        .expect_err("adapter revision mismatch refusal");
+
+    assert!(
+        error4.to_string().contains("HSEL-0003"),
+        "expected adapter revision refusal, got: {error4}"
+    );
+    assert_eq!(
+        harness_rev.invocation_count(),
+        0,
+        "harness must not be invoked on adapter revision mismatch"
+    );
+}
+
+/// T11 — sealed workspace selection succeeds (requirements without boundary, workspace provided)
+#[test]
+fn sealed_workspace_selection_succeeds() {
+    let decl = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
+    );
+    let registry = registry(vec![decl]);
+
+    let ws_manifest = sealed_workspace_manifest(
+        "ws-valid",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+
+    // No workspace boundary in requirements — workspace provided as evidence only.
+    let requirements = requirements_with_workspace(&["process-exec"], true, None);
+    let authority = authority();
+
+    let selection = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-sealed-ws".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest),
+        })
+        .expect("sealed workspace selection succeeds");
+
+    assert_eq!(selection.decision_status, DecisionStatus::Compatible);
+    assert!(selection.workspace.is_some());
+    assert_eq!(selection.workspace.as_ref().unwrap().workspace_id, "ws-valid");
+}
+
+/// T12 — matching trusted workspace passes verify_against (no boundary in requirements)
+#[test]
+fn matching_trusted_workspace_passes_verify_against() {
+    let decl = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
+    );
+    let registry = registry(vec![decl]);
+
+    let ws_manifest = sealed_workspace_manifest(
+        "ws-match",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+
+    // No workspace boundary in requirements — workspace provided as evidence only.
+    let requirements = requirements_with_workspace(&["process-exec"], true, None);
+    let authority = authority();
+
+    let selection = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-verify-match".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest),
+        })
+        .expect("selection with workspace succeeds");
+
+    let trust = prometheos_lite::workflow::execution_harness::HarnessSelectionTrust {
+        harness: registry.get("lite.harness.native").expect("harness"),
+        requirements: &requirements,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        selection_id: "sel-verify-match",
+        evaluated_at: "2026-10-22T12:00:00Z",
+        substitutions: &[],
+        workspace: Some(&ws_manifest),
+    };
+
+    selection
+        .verify_against(&trust)
+        .expect("matching trusted workspace passes verify_against");
+}
+
+/// T13 — different sealed trusted workspace fails verify_against (no boundary in requirements)
+#[test]
+fn different_trusted_workspace_fails_verify_against() {
+    let decl = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
+    );
+    let registry = registry(vec![decl]);
+
+    let ws_manifest1 = sealed_workspace_manifest(
+        "ws-one",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+    let ws_manifest2 = sealed_workspace_manifest(
+        "ws-two",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"def".repeat(40),
+    );
+
+    // No workspace boundary in requirements — workspace provided as evidence only.
+    let requirements = requirements_with_workspace(&["process-exec"], true, None);
+    let authority = authority();
+
+    let selection = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-verify-diff".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest1),
+        })
+        .expect("selection with workspace succeeds");
+
+    let trust = prometheos_lite::workflow::execution_harness::HarnessSelectionTrust {
+        harness: registry.get("lite.harness.native").expect("harness"),
+        requirements: &requirements,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        selection_id: "sel-verify-diff",
+        evaluated_at: "2026-10-22T12:00:00Z",
+        substitutions: &[],
+        workspace: Some(&ws_manifest2), // different workspace
+    };
+
+    let error = selection
+        .verify_against(&trust)
+        .expect_err("different trusted workspace fails verify_against");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "expected HSEL-0008 for workspace mismatch, got: {error}"
+    );
+}
+
+/// T14 — evidence Some / trusted None refuses verify_against (no boundary in requirements)
+#[test]
+fn evidence_some_trusted_none_refuses_verify_against() {
+    let decl = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
+    );
+    let registry = registry(vec![decl]);
+
+    let ws_manifest = sealed_workspace_manifest(
+        "ws-evidence",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+
+    // No workspace boundary in requirements — workspace provided as evidence only.
+    let requirements = requirements_with_workspace(&["process-exec"], true, None);
+    let authority = authority();
+
+    let selection = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-evid-some".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest),
+        })
+        .expect("selection with workspace succeeds");
+
+    let trust = prometheos_lite::workflow::execution_harness::HarnessSelectionTrust {
+        harness: registry.get("lite.harness.native").expect("harness"),
+        requirements: &requirements,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        selection_id: "sel-evid-some",
+        evaluated_at: "2026-10-22T12:00:00Z",
+        substitutions: &[],
+        workspace: None, // trusted has no workspace
+    };
+
+    let error = selection
+        .verify_against(&trust)
+        .expect_err("evidence Some / trusted None refuses");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "expected HSEL-0008 for evidence Some / trusted None, got: {error}"
+    );
+}
+
+/// T15 — evidence None / trusted Some refuses verify_against
+#[test]
+fn evidence_none_trusted_some_refuses_verify_against() {
+    let decl = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
+    );
+    let registry = registry(vec![decl]);
+
+    let ws_manifest = sealed_workspace_manifest(
+        "ws-trusted",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+
+    let requirements = requirements_with_workspace(&["process-exec"], true, None);
+    let authority = authority();
+
+    let selection = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-evid-none".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: None, // selection has no workspace
+        })
+        .expect("selection without workspace succeeds");
+
+    let trust = prometheos_lite::workflow::execution_harness::HarnessSelectionTrust {
+        harness: registry.get("lite.harness.native").expect("harness"),
+        requirements: &requirements,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        selection_id: "sel-evid-none",
+        evaluated_at: "2026-10-22T12:00:00Z",
+        substitutions: &[],
+        workspace: Some(&ws_manifest), // trusted has workspace
+    };
+
+    let error = selection
+        .verify_against(&trust)
+        .expect_err("evidence None / trusted Some refuses");
+    assert!(
+        error.to_string().contains("HSEL-0008"),
+        "expected HSEL-0008 for evidence None / trusted Some, got: {error}"
+    );
+}
+
+/// T16 — invalid trusted manifest refuses verify_against (no boundary in requirements)
+#[test]
+fn invalid_trusted_manifest_refuses_verify_against() {
+    let decl = declaration_with_workspace_adapter(
+        "lite.harness.native",
+        "lite-native",
+        "v1",
+        HarnessFamily::Native,
+        "harness.native.probe",
+        &["process-exec"],
+        "existing-read-only",
+        "lite.workspace.adapter.v1",
+    );
+    let registry = registry(vec![decl]);
+
+    // Create an invalid manifest (tampered digest)
+    let mut ws_manifest = sealed_workspace_manifest(
+        "ws-invalid",
+        AdapterKind::ExistingReadOnly,
+        WorkspaceMode::ReadOnly,
+        &"abc".repeat(40),
+    );
+    ws_manifest.content_digest = Some("0".repeat(64)); // tampered
+
+    // No workspace boundary in requirements — workspace provided as evidence only.
+    // Selection will refuse with HSEL-0009 because the #171 workspace policy engine
+    // validates the manifest contentDigest integrity. This test verifies that the
+    // manifest integrity enforcement happens at selection time.
+    let requirements = requirements_with_workspace(&["process-exec"], true, None);
+    let authority = authority();
+
+    let selection_err = registry
+        .select(&HarnessSelectionRequest {
+            selection_id: "sel-invalid-manifest".to_string(),
+            requirements: &requirements,
+            authority_declared: &authority,
+            authority_effective: &authority,
+            evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+            substitutions: Vec::new(),
+            pinned_harness_id: None,
+            workspace: Some(&ws_manifest),
+        })
+        .expect_err("selection should refuse invalid manifest (integrity check at selection time)");
+
+    assert!(
+        selection_err.to_string().contains("HSEL-0009"),
+        "expected selection to refuse invalid manifest with HSEL-0009, got: {selection_err}"
     );
 }
