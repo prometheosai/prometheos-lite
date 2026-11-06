@@ -143,6 +143,7 @@ pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
             content_digest: None,
         }
         .sealed(),
+        crate::workflow::subprocess_harness::subprocess_declaration(),
     ]
 }
 

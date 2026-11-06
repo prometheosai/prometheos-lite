@@ -1,0 +1,602 @@
+//! Governed subprocess harness (issue #154, slice E) — discriminating tests.
+//!
+//! Each test drives the REAL subprocess path: an [`ExecutionHarness`]
+//! adapter whose `run` invokes the declared capability through
+//! [`HarnessDispatch::call`] (the only sanctioned effect path), a
+//! [`SubprocessHarness`] registration in the [`HarnessRegistry`], and the
+//! [`CapabilityRegistry`] handler that spawns allowlisted executables
+//! inside a governed workspace with deadlines, cancellation, and output
+//! caps. Fixtures are harmless and deterministic (system version commands,
+//! sleep, marker creation); nothing depends on live commercial APIs.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
+
+use prometheos_lite::workflow::execution_harness::{
+    ExecutionHarness, HarnessDeclarationV1, HarnessDispatch, HarnessOutcome, HarnessRegistry,
+    HarnessStep, canonical_harness_declarations,
+};
+use prometheos_lite::workflow::node_contracts::NodeManifestV1;
+use prometheos_lite::workflow::node_runner::{CapabilityRegistry, NodeRunner};
+use prometheos_lite::workflow::policy::LocalRestrictions;
+use prometheos_lite::workflow::subprocess_harness::{
+    SUBPROCESS_EXEC_CAPABILITY, SUBPROCESS_HARNESS_ID, SubprocessConfig, SubprocessHarness,
+    subprocess_capability,
+};
+
+mod common;
+
+const NODE_ID: &str = "subprocess-step";
+
+fn manifest() -> NodeManifestV1 {
+    NodeManifestV1::parse_json(
+        &serde_json::json!({
+            "schemaVersion": "1.0.0",
+            "nodeId": NODE_ID,
+            "purpose": "governed subprocess fixture",
+            "inputs": [],
+            "outputs": [{"name": "out", "typeRef": "string"}],
+            "readableScopes": ["repo://x"],
+            "writableScopes": ["work://y"],
+            "retry": {"maxAttempts": 2, "retryableClasses": ["infra"]}
+        })
+        .to_string(),
+    )
+    .unwrap()
+}
+
+fn restrictions() -> LocalRestrictions {
+    LocalRestrictions {
+        readable_scopes: vec!["repo://x".into()],
+        writable_scopes: vec!["work://y".into()],
+        token_budget_ceiling: None,
+        denied_providers: vec![],
+        forbidden_paths: vec![],
+        max_attempts: 3,
+        escalation_target: "human-review".into(),
+    }
+}
+
+/// A governed runner with the subprocess capability declared under the
+/// execute cap. `permit_caps` controls the governance grant; the registry
+/// always declares the real capability.
+fn runner_for(
+    config: SubprocessConfig,
+    workspace_root: std::path::PathBuf,
+    permit_caps: &[&str],
+) -> NodeRunner {
+    let mut registry = CapabilityRegistry::new();
+    registry.declare(
+        SUBPROCESS_EXEC_CAPABILITY,
+        subprocess_capability(config, workspace_root),
+    );
+    NodeRunner::new(registry, common::permit_for(&[NODE_ID], permit_caps))
+}
+
+fn harness() -> SubprocessHarness {
+    SubprocessHarness::new()
+}
+
+fn dispatch<'a>(
+    harness: &'a dyn ExecutionHarness,
+    m: &'a NodeManifestV1,
+    r: &'a LocalRestrictions,
+    runner: &'a mut NodeRunner,
+) -> HarnessDispatch<'a> {
+    HarnessDispatch::new(harness, m, r, vec![], runner)
+}
+
+fn step(args: serde_json::Value) -> HarnessStep {
+    HarnessStep {
+        step_id: "step-1".to_string(),
+        capability: SUBPROCESS_EXEC_CAPABILITY.to_string(),
+        args,
+    }
+}
+
+/// Cross-platform sleeper: long enough that only a deadline/cancel can
+/// stop it. Returns (executable, argv).
+fn sleeper() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 30".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        ("sleep", vec!["30".to_string()])
+    }
+}
+
+/// A fixture that would create `marker.txt` in the child cwd if it ran.
+/// Used to prove refusal happened before any effect.
+fn marker_fixture() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "New-Item -ItemType File -Path marker.txt".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        ("touch", vec!["marker.txt".to_string()])
+    }
+}
+
+fn version_args() -> serde_json::Value {
+    serde_json::json!({"exe": "cargo", "argv": ["--version"]})
+}
+
+/// 1 — A permitted invocation succeeds and journals the evidence.
+#[tokio::test]
+async fn permitted_invocation_succeeds() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let config = SubprocessConfig::default();
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(version_args()), &mut d)
+            .await
+            .expect("run succeeds")
+    };
+
+    assert_eq!(outcome.harness_id, SUBPROCESS_HARNESS_ID);
+    assert!(
+        outcome.output.contains("cargo"),
+        "output carries version: {}",
+        outcome.output
+    );
+    assert_eq!(outcome.events.len(), 2);
+    outcome.verify().expect("sealed outcome verifies");
+    assert!(is_hex64(&outcome.evidence_entry_digest));
+    // Journal advanced exactly one terminal entry for this step.
+    assert_eq!(runner.journal().len(), 1);
+    assert_eq!(runner.journal()[0].identity_key, "step-1");
+}
+
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// 2 — An undeclared capability refuses before any effect exists.
+#[tokio::test]
+async fn undeclared_capability_refuses_before_effects() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = marker_fixture();
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let mut bad = step(serde_json::json!({"exe": exe, "argv": argv}));
+    bad.capability = "harness.subprocess.other".to_string();
+
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(bad, &mut d)
+            .await
+            .expect_err("undeclared capability refuses")
+    };
+    assert!(
+        err.to_string().contains("outside its declaration"),
+        "got: {err}"
+    );
+    // No gate-9 journal entry exists and no marker file was created:
+    // nothing ran.
+    assert!(runner.journal().is_empty());
+    assert!(!root.path().join("marker.txt").exists());
+}
+
+/// 3 — Execution without the governance grant refuses before effects.
+#[tokio::test]
+async fn unauthorized_execution_refuses_before_effects() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = marker_fixture();
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    // The permit governs the node but grants a DIFFERENT capability.
+    let mut runner = runner_for(config, root.path().to_path_buf(), &["other.cap"]);
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect_err("unauthorized execution refuses")
+    };
+    assert!(
+        err.to_string().contains("SOMA-AUTH"),
+        "governance refusal got: {err}"
+    );
+    assert!(runner.journal().is_empty());
+    assert!(!root.path().join("marker.txt").exists());
+}
+
+/// 4 — An escaping or missing workspace refuses without any fallback.
+#[tokio::test]
+async fn invalid_workspace_refuses_without_source_checkout_fallback() {
+    let base = tempfile::tempdir().expect("base tempdir");
+    let workspace = base.path().join("ws");
+    std::fs::create_dir(&workspace).expect("workspace dir");
+    let source_checkout = base.path().join("src");
+    std::fs::create_dir(&source_checkout).expect("source dir");
+    let (exe, argv) = marker_fixture();
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(config, workspace.clone(), &[SUBPROCESS_EXEC_CAPABILITY]);
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    // cwd escapes the governed workspace ("../src" resolves outside it).
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(
+                step(serde_json::json!({"exe": exe, "argv": argv, "cwd": "../src"})),
+                &mut d,
+            )
+            .await
+            .expect_err("escaping cwd refuses")
+    };
+    assert!(err.to_string().contains("escapes"), "got: {err}");
+    assert!(runner.journal().is_empty());
+    // The would-be fallback location gained no marker: nothing ran anywhere.
+    assert!(!source_checkout.join("marker.txt").exists());
+    assert!(!workspace.join("marker.txt").exists());
+
+    // A missing governed root refuses just as closedly (no other directory
+    // is substituted for it).
+    let missing_root = base.path().join("does-not-exist");
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(config, missing_root, &[SUBPROCESS_EXEC_CAPABILITY]);
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect_err("missing workspace refuses")
+    };
+    assert!(err.to_string().contains("missing"), "got: {err}");
+    assert!(runner.journal().is_empty());
+    assert!(!source_checkout.join("marker.txt").exists());
+}
+
+/// 5a — Timeout kills and reaps the child promptly.
+#[tokio::test]
+async fn timeout_terminates_safely() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = sleeper();
+    let config = SubprocessConfig::default()
+        .allowed_executables(vec![exe.to_string()])
+        .timeout_ms(5_000);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let started = Instant::now();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(
+                step(serde_json::json!({"exe": exe, "argv": argv, "timeoutMs": 300})),
+                &mut d,
+            )
+            .await
+            .expect_err("sleeper must time out")
+    };
+    let elapsed = started.elapsed();
+    assert!(err.to_string().contains("timed out"), "got: {err}");
+    assert!(elapsed < Duration::from_secs(15), "wall time: {elapsed:?}");
+}
+
+/// 5b — Cancellation kills and reaps the child promptly.
+#[tokio::test]
+async fn cancellation_terminates_safely() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = sleeper();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let config = SubprocessConfig::default()
+        .allowed_executables(vec![exe.to_string()])
+        .timeout_ms(60_000)
+        .cancel(cancel.clone());
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let started = Instant::now();
+    let err = std::thread::scope(|scope| {
+        let harness_ref = &harness;
+        let mut d = dispatch(harness_ref, &m, &r, &mut runner);
+        let handle = scope.spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(
+                    harness_ref.run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d),
+                )
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        cancel.store(true, Ordering::Relaxed);
+        handle.join().expect("run thread")
+    })
+    .expect_err("cancellation must refuse the command");
+    let elapsed = started.elapsed();
+    assert!(err.to_string().contains("cancelled"), "got: {err}");
+    assert!(elapsed < Duration::from_secs(15), "wall time: {elapsed:?}");
+}
+
+/// 6 — Output is bounded at the configured cap and flagged.
+#[tokio::test]
+async fn output_limits_are_enforced() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let config = SubprocessConfig::default().max_output_bytes(16);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(version_args()), &mut d)
+            .await
+            .expect("run succeeds")
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.output).expect("output is JSON");
+    assert_eq!(parsed["truncated"], true, "output: {}", outcome.output);
+    assert!(
+        parsed["stdout"].as_str().unwrap().len() <= 16,
+        "capped: {}",
+        parsed["stdout"]
+    );
+    assert_eq!(
+        parsed["success"], true,
+        "exit 0 is still success under truncation"
+    );
+}
+
+/// 7 — Nonzero exit is a typed failure, never a success.
+#[tokio::test]
+async fn nonzero_exit_is_not_reported_as_success() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let config = SubprocessConfig::default();
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(
+                step(serde_json::json!({"exe": "cargo", "argv": ["--definitely-not-a-flag"]})),
+                &mut d,
+            )
+            .await
+            .expect_err("nonzero exit must refuse")
+    };
+    assert!(err.to_string().contains("code"), "typed failure got: {err}");
+}
+
+/// 8 — Durable evidence survives process termination.
+#[tokio::test]
+async fn durable_evidence_survives_process_termination() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = tempfile::tempdir().expect("evidence dir");
+    let outcome = {
+        let config = SubprocessConfig::default();
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[SUBPROCESS_EXEC_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(version_args()), &mut d)
+            .await
+            .expect("run succeeds")
+        // runner, harness, and dispatch all drop here — the "process" ends.
+    };
+
+    let path = store.path().join("outcome.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&outcome).expect("serializes"),
+    )
+    .expect("persist");
+    drop(outcome);
+
+    let reloaded: HarnessOutcome =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("reload"))
+            .expect("outcome parses");
+    reloaded.verify().expect("reloaded evidence verifies");
+    assert!(is_hex64(&reloaded.evidence_entry_digest));
+    assert_eq!(reloaded.events.len(), 2);
+}
+
+/// 9 — Incompatible checkpoint bindings refuse.
+#[tokio::test]
+async fn stale_or_incompatible_resume_evidence_refuses() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let outcome = {
+        let config = SubprocessConfig::default();
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[SUBPROCESS_EXEC_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(version_args()), &mut d)
+            .await
+            .expect("run succeeds")
+    };
+    let harness = harness();
+    let digest = outcome.evidence_entry_digest.clone();
+
+    // Fresh checkpoint binds and resumes.
+    let checkpoint = futures::executor::block_on(harness.checkpoint(&outcome, &digest))
+        .expect("checkpoint exports");
+    let continuation = futures::executor::block_on(harness.resume(&checkpoint, &digest))
+        .expect("matching resume succeeds");
+    assert_eq!(continuation.harness_id, SUBPROCESS_HARNESS_ID);
+
+    // Stale portable digest refuses.
+    let err = futures::executor::block_on(harness.resume(&checkpoint, &"0".repeat(64)))
+        .expect_err("stale digest refuses");
+    assert!(err.to_string().contains("portable"), "got: {err}");
+
+    // Incompatible harness revision refuses.
+    let mut wrong_rev = checkpoint.clone();
+    wrong_rev.harness_revision = "v9".to_string();
+    wrong_rev.content_digest = None;
+    let wrong_rev = wrong_rev.sealed();
+    let err = futures::executor::block_on(harness.resume(&wrong_rev, &digest))
+        .expect_err("wrong revision refuses");
+    assert!(err.to_string().contains("revision"), "got: {err}");
+
+    // Tampered checkpoint (digest no longer verifies) refuses.
+    let mut tampered = checkpoint.clone();
+    tampered.portable_state_digest = "1".repeat(64);
+    let err = futures::executor::block_on(harness.resume(&tampered, &"1".repeat(64)))
+        .expect_err("tampered checkpoint refuses");
+    assert!(err.to_string().contains("contentDigest"), "got: {err}");
+}
+
+/// 10 — The real declaration is in the generated catalog, and catalog
+/// drift is detectable.
+#[test]
+fn catalog_contains_subprocess_declaration_and_drift_is_detectable() {
+    struct StaticHarness {
+        declaration: HarnessDeclarationV1,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionHarness for StaticHarness {
+        fn declaration(&self) -> &HarnessDeclarationV1 {
+            &self.declaration
+        }
+        async fn run(
+            &self,
+            _step: HarnessStep,
+            _dispatch: &mut HarnessDispatch<'_>,
+        ) -> anyhow::Result<HarnessOutcome> {
+            anyhow::bail!("static probe is not executable")
+        }
+    }
+
+    let decls = canonical_harness_declarations();
+    assert!(
+        decls.iter().any(|d| d.harness_id == SUBPROCESS_HARNESS_ID),
+        "canonical inventory must include the subprocess harness"
+    );
+
+    let mut registry = HarnessRegistry::new();
+    for d in &decls {
+        registry
+            .register(Box::new(StaticHarness {
+                declaration: d.clone(),
+            }))
+            .expect("production declarations register");
+    }
+    let catalog = registry.catalog();
+    let entry = catalog
+        .entries
+        .iter()
+        .find(|e| e.harness_id == SUBPROCESS_HARNESS_ID)
+        .expect("catalog carries the subprocess entry");
+    assert_eq!(
+        entry.declared_capabilities,
+        vec![SUBPROCESS_EXEC_CAPABILITY.to_string()]
+    );
+    assert!(catalog.verify_against_declarations(&decls).is_empty());
+
+    // Any declaration change moves the catalog digest: drift is detectable.
+    let mut drifted = decls.clone();
+    for d in drifted.iter_mut() {
+        if d.harness_id == SUBPROCESS_HARNESS_ID {
+            d.declared_capabilities = vec!["harness.subprocess.other".to_string()];
+            d.claimed_capabilities = vec!["harness.subprocess.other".to_string()];
+        }
+        d.content_digest = None;
+        let sealed = d.clone().sealed();
+        *d = sealed;
+    }
+    let mut drifted_registry = HarnessRegistry::new();
+    for d in &drifted {
+        drifted_registry
+            .register(Box::new(StaticHarness {
+                declaration: d.clone(),
+            }))
+            .expect("drifted declaration still registers");
+    }
+    let drifted_catalog = drifted_registry.catalog();
+    assert_ne!(
+        drifted_catalog.content_digest, catalog.content_digest,
+        "a capability change must move the catalog digest"
+    );
+    assert!(
+        !drifted_catalog
+            .verify_against_declarations(&decls)
+            .is_empty(),
+        "drifted catalog must not verify against the canonical declarations"
+    );
+}
