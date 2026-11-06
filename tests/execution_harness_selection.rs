@@ -223,9 +223,7 @@ fn registry(declarations: Vec<HarnessDeclarationV1>) -> HarnessRegistry {
 }
 
 /// Registry with a counting harness for zero-invocation verification.
-fn counting_registry(
-    declaration: HarnessDeclarationV1,
-) -> (HarnessRegistry, CountingHarness) {
+fn counting_registry(declaration: HarnessDeclarationV1) -> (HarnessRegistry, CountingHarness) {
     let harness = CountingHarness::new(declaration);
     let mut registry = HarnessRegistry::new();
     registry
@@ -1502,7 +1500,10 @@ fn sealed_workspace_selection_succeeds() {
 
     assert_eq!(selection.decision_status, DecisionStatus::Compatible);
     assert!(selection.workspace.is_some());
-    assert_eq!(selection.workspace.as_ref().unwrap().workspace_id, "ws-valid");
+    assert_eq!(
+        selection.workspace.as_ref().unwrap().workspace_id,
+        "ws-valid"
+    );
 }
 
 /// T12 — matching trusted workspace passes verify_against (no boundary in requirements)
