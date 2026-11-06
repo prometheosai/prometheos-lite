@@ -167,6 +167,103 @@ fn canonical_json_digest<T: Serialize>(value: &T) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace compatibility (issue #154, slice D1).
+//
+// `HarnessRegistry::select` and `HarnessSelectionV1::verify_against` must
+// agree on which workspace/harness combinations are acceptable: anything
+// `select` would refuse, `verify_against` must also refuse (as HSEL-0008).
+// These pure helpers are shared by both paths so the gates cannot diverge.
+// ---------------------------------------------------------------------------
+
+/// Canonical adapter-family lexeme for a workspace adapter kind.
+fn workspace_adapter_family(adapter: AdapterKind) -> &'static str {
+    match adapter {
+        AdapterKind::GitWorktree => "git-worktree",
+        AdapterKind::ExistingReadOnly => "existing-read-only",
+    }
+}
+
+/// Canonical mode lexeme recorded in workspace evidence.
+fn workspace_mode_lexeme(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::ReadOnly => "read",
+        WorkspaceMode::Writable => "write",
+    }
+}
+
+/// Defect found by [`validate_workspace_manifest`]. The caller maps the
+/// defect to its own refusal code (HSEL-0009 for `select`, HSEL-0008 for
+/// `verify_against`).
+enum WorkspaceManifestDefect {
+    /// The #171 policy engine rejected the manifest structure.
+    IntegrityCheckFailed(String),
+    /// The manifest schema version is not the supported version.
+    UnsupportedSchemaVersion(String),
+    /// The manifest content digest does not verify (not sealed).
+    DigestMismatch,
+}
+
+/// Validate a workspace manifest with the existing #171 workspace policy
+/// engine: schema version, structural parse (schema, identity, writable
+/// scopes), and sealed content digest.
+fn validate_workspace_manifest(
+    manifest: &WorkspaceManifestV1,
+) -> Result<(), WorkspaceManifestDefect> {
+    let manifest_json = serde_json::to_string(manifest).map_err(|error| {
+        WorkspaceManifestDefect::IntegrityCheckFailed(format!(
+            "workspace manifest serializes: {error}"
+        ))
+    })?;
+    if let Err(error) = WorkspaceManifestV1::parse_json(&manifest_json) {
+        return Err(WorkspaceManifestDefect::IntegrityCheckFailed(
+            error.to_string(),
+        ));
+    }
+    if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
+        return Err(WorkspaceManifestDefect::UnsupportedSchemaVersion(
+            manifest.schema_version.clone(),
+        ));
+    }
+    let expected_digest = manifest.compute_digest();
+    if manifest.content_digest.as_deref() != Some(&expected_digest) {
+        return Err(WorkspaceManifestDefect::DigestMismatch);
+    }
+    Ok(())
+}
+
+/// Whether the manifest's mode satisfies the required workspace boundary.
+/// `ReadOnly` satisfies `Read` but not `Write`; no required boundary is
+/// always satisfied.
+fn workspace_mode_satisfies(mode: WorkspaceMode, requirements: &WorkRequirements) -> bool {
+    let Some(required) = requirements.workspace else {
+        return true;
+    };
+    let rank_required = match required.workspace {
+        Some(Boundary::Write) => 2u8,
+        Some(Boundary::Read) => 1u8,
+        Some(Boundary::None) | None => 0,
+    };
+    let rank_manifest = match mode {
+        WorkspaceMode::Writable => 2u8,
+        WorkspaceMode::ReadOnly => 1u8,
+    };
+    rank_manifest >= rank_required
+}
+
+/// Whether the harness's declared capability set covers the workspace
+/// adapter (family + exact revision).
+fn harness_declares_workspace_adapter(
+    capabilities: &RuntimeCapabilitySet,
+    manifest: &WorkspaceManifestV1,
+) -> bool {
+    let family = workspace_adapter_family(manifest.adapter);
+    capabilities
+        .adapter_families
+        .iter()
+        .any(|f| f.family == family && f.revision == manifest.adapter_revision)
+}
+
+// ---------------------------------------------------------------------------
 // Declaration
 // ---------------------------------------------------------------------------
 
@@ -1077,7 +1174,9 @@ impl HarnessSelectionV1 {
         if canonical_json_digest(&decision)? != self.decision_digest {
             bail!("HSEL-0008: selection decisionDigest does not match the reproduced decision");
         }
-        // Verify workspace binding symmetrically.
+        // Verify workspace binding symmetrically. The compatibility gates below
+        // mirror `select()` exactly: anything selection would refuse under the
+        // same trusted inputs is refused here as HSEL-0008.
         match (&self.workspace, trust.workspace) {
             (Some(_), None) => {
                 bail!(
@@ -1092,34 +1191,42 @@ impl HarnessSelectionV1 {
             (Some(actual), Some(manifest)) => {
                 // Verify the trusted manifest is sealed and internally valid
                 // via the existing #171 policy engine.
-                let manifest_json =
-                    serde_json::to_string(manifest).context("workspace manifest serializes")?;
-                if WorkspaceManifestV1::parse_json(&manifest_json).is_err() {
-                    bail!("HSEL-0008: trusted workspace manifest integrity check failed");
+                if let Err(defect) = validate_workspace_manifest(manifest) {
+                    match defect {
+                        WorkspaceManifestDefect::IntegrityCheckFailed(_) => {
+                            bail!("HSEL-0008: trusted workspace manifest integrity check failed");
+                        }
+                        WorkspaceManifestDefect::UnsupportedSchemaVersion(_) => {
+                            bail!("HSEL-0008: trusted workspace schema version does not match");
+                        }
+                        WorkspaceManifestDefect::DigestMismatch => {
+                            bail!(
+                                "HSEL-0008: trusted workspace manifest contentDigest does not verify"
+                            );
+                        }
+                    }
                 }
-                if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
-                    bail!("HSEL-0008: trusted workspace schema version does not match");
+                // Reapply the workspace-mode compatibility gate: a read-only
+                // workspace cannot satisfy a writable requirement.
+                if !workspace_mode_satisfies(manifest.mode, trust.requirements) {
+                    bail!(
+                        "HSEL-0008: trusted workspace mode does not satisfy the required boundary"
+                    );
                 }
-                let expected_digest = manifest.compute_digest();
-                if manifest.content_digest.as_deref() != Some(&expected_digest) {
-                    bail!("HSEL-0008: trusted workspace manifest contentDigest does not verify");
+                // Reapply the adapter gate: the trusted harness must declare
+                // the trusted workspace adapter (family + exact revision).
+                if !harness_declares_workspace_adapter(&declaration.capabilities, manifest) {
+                    bail!(
+                        "HSEL-0008: trusted harness does not declare the required workspace adapter"
+                    );
                 }
                 // Build expected workspace evidence from the trusted manifest.
-                let adapter_family_str = match manifest.adapter {
-                    AdapterKind::GitWorktree => "git-worktree",
-                    AdapterKind::ExistingReadOnly => "existing-read-only",
-                };
-                let mode_boundary = match manifest.mode {
-                    WorkspaceMode::ReadOnly => "read",
-                    WorkspaceMode::Writable => "write",
-                };
-                let manifest_digest = manifest.compute_digest();
                 let expected = WorkspaceEvidenceV1 {
                     workspace_id: manifest.workspace_id.clone(),
-                    adapter: adapter_family_str.to_string(),
+                    adapter: workspace_adapter_family(manifest.adapter).to_string(),
                     adapter_revision: manifest.adapter_revision.clone(),
-                    mode: mode_boundary.to_string(),
-                    manifest_digest,
+                    mode: workspace_mode_lexeme(manifest.mode).to_string(),
+                    manifest_digest: manifest.compute_digest(),
                 };
                 if actual != &expected {
                     bail!(
@@ -1128,7 +1235,12 @@ impl HarnessSelectionV1 {
                 }
             }
             (None, None) => {
-                // Both None - legitimately optional workspace; accept.
+                // Both None — legitimately optional workspace, unless the
+                // trusted requirements demand one. Missing required workspace
+                // is refused (select() would refuse under the same inputs).
+                if trust.requirements.workspace.is_some() {
+                    bail!("HSEL-0008: trusted inputs require a workspace but none was provided");
+                }
             }
         }
         Ok(())
@@ -1183,42 +1295,42 @@ impl HarnessRegistry {
         if let Some(manifest) = workspace_manifest {
             // Use the existing #171 workspace policy engine for full manifest
             // integrity (schema, identity fields, writable scopes, digest).
-            let manifest_json =
-                serde_json::to_string(manifest).context("workspace manifest serializes")?;
-            if let Err(err) = WorkspaceManifestV1::parse_json(&manifest_json) {
-                bail!("HSEL-0009: workspace manifest integrity check failed: {err}");
-            }
-            // Schema version gate.
-            if manifest.schema_version != WORKSPACE_SCHEMA_VERSION {
-                bail!(
-                    "HSEL-0009: unsupported workspace schema version {} (expected {WORKSPACE_SCHEMA_VERSION})",
-                    manifest.schema_version
-                );
-            }
-            // Content-digest integrity gate (manifest must be sealed).
-            let expected_digest = manifest.compute_digest();
-            if manifest.content_digest.as_deref() != Some(&expected_digest) {
-                bail!("HSEL-0009: workspace manifest contentDigest does not verify");
+            if let Err(defect) = validate_workspace_manifest(manifest) {
+                match defect {
+                    WorkspaceManifestDefect::IntegrityCheckFailed(error) => {
+                        bail!("HSEL-0009: workspace manifest integrity check failed: {error}");
+                    }
+                    WorkspaceManifestDefect::UnsupportedSchemaVersion(version) => {
+                        bail!(
+                            "HSEL-0009: unsupported workspace schema version {version} (expected {WORKSPACE_SCHEMA_VERSION})"
+                        );
+                    }
+                    WorkspaceManifestDefect::DigestMismatch => {
+                        bail!("HSEL-0009: workspace manifest contentDigest does not verify");
+                    }
+                }
             }
             // Mode satisfaction gate: if the work requires a workspace boundary,
             // the manifest's mode must be sufficient.
-            if let Some(req_boundaries) = request.requirements.workspace {
-                let rank_req = match req_boundaries.workspace {
+            if !workspace_mode_satisfies(manifest.mode, request.requirements) {
+                let rank_required = match request
+                    .requirements
+                    .workspace
+                    .and_then(|boundaries| boundaries.workspace)
+                {
                     Some(Boundary::Write) => 2u8,
                     Some(Boundary::Read) => 1u8,
-                    Some(Boundary::None) | None => 0,
+                    _ => 0,
                 };
-                let rank_manifest = match manifest.mode {
-                    WorkspaceMode::Writable => 2u8,
-                    WorkspaceMode::ReadOnly => 1u8,
-                };
-                if rank_manifest < rank_req {
-                    bail!(
-                        "HSEL-0009: workspace mode ({:?}) cannot satisfy required boundary ({})",
-                        manifest.mode,
-                        if rank_req == 2 { "writable" } else { "read" }
-                    );
-                }
+                bail!(
+                    "HSEL-0009: workspace mode ({:?}) cannot satisfy required boundary ({})",
+                    manifest.mode,
+                    if rank_required == 2 {
+                        "writable"
+                    } else {
+                        "read"
+                    }
+                );
             }
         }
 
@@ -1227,17 +1339,9 @@ impl HarnessRegistry {
 
             // Skip candidate if it doesn't support the required workspace adapter.
             if let Some(manifest) = workspace_manifest {
-                let adapter_family_str = match manifest.adapter {
-                    AdapterKind::GitWorktree => "git-worktree",
-                    AdapterKind::ExistingReadOnly => "existing-read-only",
-                };
+                let adapter_family_str = workspace_adapter_family(manifest.adapter);
                 let manifest_rev = &manifest.adapter_revision;
-                let harness_supports = declaration
-                    .capabilities
-                    .adapter_families
-                    .iter()
-                    .any(|f| f.family == adapter_family_str && f.revision == *manifest_rev);
-                if !harness_supports {
+                if !harness_declares_workspace_adapter(&declaration.capabilities, manifest) {
                     refusals.push(format!(
                         "{} refused: workspace adapter {} / revision {} not declared",
                         declaration.harness_id, adapter_family_str, manifest_rev
@@ -1322,21 +1426,12 @@ impl HarnessRegistry {
             substitutions: request.substitutions.clone(),
             workspace: workspace_manifest.map(|manifest| {
                 // Build workspace evidence from the validated manifest.
-                let adapter_family_str = match manifest.adapter {
-                    AdapterKind::GitWorktree => "git-worktree",
-                    AdapterKind::ExistingReadOnly => "existing-read-only",
-                };
-                let mode_boundary = match manifest.mode {
-                    WorkspaceMode::ReadOnly => "read",
-                    WorkspaceMode::Writable => "write",
-                };
-                let manifest_digest = manifest.compute_digest();
                 WorkspaceEvidenceV1 {
                     workspace_id: manifest.workspace_id.clone(),
-                    adapter: adapter_family_str.to_string(),
+                    adapter: workspace_adapter_family(manifest.adapter).to_string(),
                     adapter_revision: manifest.adapter_revision.clone(),
-                    mode: mode_boundary.to_string(),
-                    manifest_digest,
+                    mode: workspace_mode_lexeme(manifest.mode).to_string(),
+                    manifest_digest: manifest.compute_digest(),
                 }
             }),
             content_digest: None,
