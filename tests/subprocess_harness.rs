@@ -194,6 +194,44 @@ fn version_args() -> serde_json::Value {
     serde_json::json!({"exe": "cargo", "argv": ["--version"]})
 }
 
+/// A fixture printing an arbitrary opaque secret token on stdout.
+fn opaque_secret_fixture() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Write-Output 'OPAQUE-CANARY-1234-no-regex-shape'".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "printf",
+            vec![
+                "%s".to_string(),
+                "OPAQUE-CANARY-1234-no-regex-shape".to_string(),
+            ],
+        )
+    }
+}
+
+/// Decode a lowercase-hex field from the subprocess result document.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks(2) {
+        let hex = std::str::from_utf8(pair).ok()?;
+        out.push(u8::from_str_radix(hex, 16).ok()?);
+    }
+    Some(out)
+}
+
 /// Decode a lowercase-hex field from the subprocess result document.
 fn stdout_of(output: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(output).expect("result JSON parses");
@@ -717,6 +755,35 @@ fn catalog_contains_subprocess_declaration_and_drift_is_detectable() {
     );
 }
 
+/// A fixture whose direct child exits immediately after spawning a
+/// detached grandchild that sleeps and then writes
+/// `grandchild-marker.txt` in its cwd. The spawn is suspend-contained,
+/// so the grandchild starts inside the job even if the parent exits the
+/// first instant it runs.
+fn fast_exit_grandchild_fixture() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 3; New-Item -ItemType File -Path grandchild-marker.txt'".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "sh",
+            vec![
+                "-c".to_string(),
+                "( sleep 3; touch grandchild-marker.txt ) & true".to_string(),
+            ],
+        )
+    }
+}
+
 /// R1 — process-tree containment: a direct child that spawns a detached
 /// grandchild attempting a delayed workspace mutation is contained. After
 /// the timeout returns, the grandchild must not fire: terminate the whole
@@ -758,6 +825,51 @@ async fn grandchild_tree_terminated_on_timeout() {
     assert!(
         !marker.exists(),
         "grandchild survived the timeout and mutated the workspace"
+    );
+}
+
+/// R3.1 — an immediately-exiting parent's delayed grandchild mutation
+/// must not happen: containment is installed before any child code runs,
+/// and cleanup sweeps the tree on normal exit.
+#[tokio::test]
+async fn immediate_parent_exit_grandchild_contained() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = fast_exit_grandchild_fixture();
+    let config = SubprocessConfig::default()
+        .allowed_executables(vec![exe.to_string()])
+        .timeout_ms(5_000);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let marker = root.path().join("grandchild-marker.txt");
+    assert!(!marker.exists(), "marker must not pre-exist");
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect("immediate parent exits cleanly")
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.output).expect("output is JSON");
+    assert_eq!(
+        parsed["success"], true,
+        "child succeeded: {}",
+        outcome.output
+    );
+
+    // The grandchild's delayed mutation was scheduled for ~3s after its
+    // start. Well past that point, no mutation may have occurred.
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        !marker.exists(),
+        "grandchild of an immediately exiting parent mutated the workspace"
     );
 }
 
@@ -869,4 +981,60 @@ async fn credential_diagnostics_stay_parseable_and_redacted() {
         "canary persisted in evidence: {}",
         outcome.output
     );
+}
+
+/// R3.2 — an arbitrary opaque known secret that matches NO credential
+/// regex must still never appear in decoded evidence: known secrets are
+/// redacted verbatim before encoding, and the encoded bytes cannot leak
+/// them through gate-7 or the durable JSON.
+#[tokio::test]
+async fn opaque_known_secret_redacted_before_persistence() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let canary = "OPAQUE-CANARY-1234-no-regex-shape";
+    let (exe, argv) = opaque_secret_fixture();
+    let config = SubprocessConfig::default()
+        .allowed_executables(vec![exe.to_string()])
+        .known_secrets(vec![canary.to_string()]);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect("opaque known secret still succeeds")
+    };
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output must remain valid JSON");
+    assert_eq!(parsed["success"], true);
+    let stdout = stdout_of(&outcome.output);
+    assert!(
+        !stdout.contains(canary),
+        "canary leaked into stdout: {stdout}"
+    );
+    assert!(stdout.contains("<redacted>"), "redacted marker: {stdout}");
+    // The persisted, gate-7-processed evidence must not expose the canary
+    // in plaintext NOR in reversible encoding.
+    assert!(
+        !outcome.output.contains(canary),
+        "canary persisted in evidence: {}",
+        outcome.output
+    );
+    for value in [
+        parsed["stdoutHex"].as_str().unwrap(),
+        parsed["stderrHex"].as_str().unwrap(),
+    ] {
+        if let Some(decoded) = decode_hex(value) {
+            let text = String::from_utf8_lossy(&decoded);
+            assert!(!text.contains(canary), "canary in decoded evidence: {text}");
+        }
+    }
 }
