@@ -137,8 +137,74 @@ fn marker_fixture() -> (&'static str, Vec<String>) {
     }
 }
 
+/// A fixture whose direct child spawns a detached grandchild that sleeps
+/// and then writes `grandchild-marker.txt` in its cwd. If tree containment
+/// is absent, the grandchild survives the parent's termination and the
+/// marker appears after the test's run returns.
+fn grandchild_fixture() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 3; New-Item -ItemType File -Path grandchild-marker.txt'".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "sh",
+            vec![
+                "-c".to_string(),
+                "( sleep 3; touch grandchild-marker.txt ) & sleep 30".to_string(),
+            ],
+        )
+    }
+}
+
+/// A fixture printing credential-shaped output on stdout.
+fn credential_fixture() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Write-Output 'Authorization: Bearer test-secret-deep-41'".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "printf",
+            vec![
+                "%s".to_string(),
+                "Authorization: Bearer test-secret-deep-41".to_string(),
+            ],
+        )
+    }
+}
+
 fn version_args() -> serde_json::Value {
     serde_json::json!({"exe": "cargo", "argv": ["--version"]})
+}
+
+/// Decode a lowercase-hex field from the subprocess result document.
+fn stdout_of(output: &str) -> String {
+    let parsed: serde_json::Value = serde_json::from_str(output).expect("result JSON parses");
+    let hex = parsed["stdoutHex"].as_str().expect("stdoutHex field");
+    let mut bytes = Vec::new();
+    for pair in hex.as_bytes().chunks(2) {
+        let v = u8::from_str_radix(std::str::from_utf8(pair).expect("hex pairs"), 16)
+            .expect("hex pair");
+        bytes.push(v);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// 1 — A permitted invocation succeeds and journals the evidence.
@@ -165,7 +231,7 @@ async fn permitted_invocation_succeeds() {
 
     assert_eq!(outcome.harness_id, SUBPROCESS_HARNESS_ID);
     assert!(
-        outcome.output.contains("cargo"),
+        stdout_of(&outcome.output).contains("cargo"),
         "output carries version: {}",
         outcome.output
     );
@@ -369,7 +435,10 @@ async fn cancellation_terminates_safely() {
     assert!(elapsed < Duration::from_secs(15), "wall time: {elapsed:?}");
 }
 
-/// 6 — Output is bounded at the configured cap and flagged.
+/// 6 — Output beyond the configured budget is a typed refusal (R3).
+/// The budget binds the bytes the child may write, and the final size
+/// check after exit closes the fast-exit bypass: nothing is reported as
+/// success once the breach is observed.
 #[tokio::test]
 async fn output_limits_are_enforced() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -383,7 +452,28 @@ async fn output_limits_are_enforced() {
     let m = manifest();
     let r = restrictions();
 
+    // `cargo --version` writes ~38 bytes: a fast exit, over the 16-byte
+    // budget. It must not be reported as (truncated) success.
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(version_args()), &mut d)
+            .await
+            .expect_err("budget breach must refuse")
+    };
+    assert!(
+        err.to_string().contains("budget"),
+        "typed breach got: {err}"
+    );
+
+    // Within budget the same output is retained and succeeds.
     let outcome = {
+        let config = SubprocessConfig::default();
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[SUBPROCESS_EXEC_CAPABILITY],
+        );
         let mut d = dispatch(&harness, &m, &r, &mut runner);
         harness
             .run(step(version_args()), &mut d)
@@ -391,15 +481,41 @@ async fn output_limits_are_enforced() {
             .expect("run succeeds")
     };
     let parsed: serde_json::Value = serde_json::from_str(&outcome.output).expect("output is JSON");
-    assert_eq!(parsed["truncated"], true, "output: {}", outcome.output);
     assert!(
-        parsed["stdout"].as_str().unwrap().len() <= 16,
-        "capped: {}",
-        parsed["stdout"]
+        stdout_of(&outcome.output).contains("cargo"),
+        "retained: {}",
+        parsed["stdoutHex"]
     );
-    assert_eq!(
-        parsed["success"], true,
-        "exit 0 is still success under truncation"
+    assert_eq!(parsed["success"], true);
+}
+
+/// 6b — A fast large burst of output cannot bypass the budget check.
+#[tokio::test]
+async fn output_burst_cannot_bypass_budget() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = credential_fixture();
+    let config = SubprocessConfig::default()
+        .allowed_executables(vec![exe.to_string()])
+        .max_output_bytes(8);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect_err("burst over budget must refuse")
+    };
+    assert!(
+        err.to_string().contains("budget"),
+        "typed breach got: {err}"
     );
 }
 
@@ -598,5 +714,159 @@ fn catalog_contains_subprocess_declaration_and_drift_is_detectable() {
             .verify_against_declarations(&decls)
             .is_empty(),
         "drifted catalog must not verify against the canonical declarations"
+    );
+}
+
+/// R1 — process-tree containment: a direct child that spawns a detached
+/// grandchild attempting a delayed workspace mutation is contained. After
+/// the timeout returns, the grandchild must not fire: terminate the whole
+/// owned tree, not just the direct child.
+#[tokio::test]
+async fn grandchild_tree_terminated_on_timeout() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = grandchild_fixture();
+    let config = SubprocessConfig::default()
+        .allowed_executables(vec![exe.to_string()])
+        .timeout_ms(5_000);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let marker = root.path().join("grandchild-marker.txt");
+    assert!(!marker.exists(), "marker must not pre-exist");
+
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(
+                step(serde_json::json!({"exe": exe, "argv": argv, "timeoutMs": 300})),
+                &mut d,
+            )
+            .await
+            .expect_err("direct child must time out")
+    };
+    assert!(err.to_string().contains("timed out"), "got: {err}");
+
+    // The grandchild's delayed mutation was scheduled for ~3s after its
+    // start. Well past that point, no mutation may have occurred.
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        !marker.exists(),
+        "grandchild survived the timeout and mutated the workspace"
+    );
+}
+
+/// R2 — spool safety: hostile pre-existing spool paths must not redirect
+/// child output or overwrite unrelated files.
+#[tokio::test]
+async fn hostile_spool_precreation_does_not_redirect_or_overwrite() {
+    // Pre-create exclusive-path candidates under the two naming schemes the
+    // old code used (`prometheos-subprocess-{pid}-{counter}.out|.err`), plus
+    // a canary file the spool code must never touch.
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let mut victims = Vec::new();
+    for counter in 0..99u32 {
+        for ext in ["out", "err"] {
+            let path = dir.join(format!("prometheos-subprocess-{pid}-{counter}.{ext}"));
+            if !path.exists() {
+                let _ = std::fs::write(&path, "PREEXISTING-SPOOL-CANARY");
+                victims.push(path);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        // A symlink candidate: old-style `File::create` follows it and
+        // truncates the target; `create_new` must not.
+        let canary = dir.join(format!("prometheos-subprocess-victim-{pid}.txt"));
+        std::fs::write(&canary, "victim-canary").expect("canary writes");
+        let link = dir.join(format!("prometheos-subprocess-{pid}-0.out"));
+        let _ = std::os::unix::fs::symlink(&canary, &link);
+        victims.push(canary);
+    }
+
+    let root = tempfile::tempdir().expect("workspace");
+    let config = SubprocessConfig::default();
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(version_args()), &mut d)
+            .await
+            .expect("run succeeds despite pre-created candidates")
+    };
+    assert!(
+        stdout_of(&outcome.output).contains("cargo"),
+        "real child output, not redirected: {}",
+        outcome.output
+    );
+
+    // Every pre-created victim must hold its original contents.
+    for v in &victims {
+        let content = std::fs::read_to_string(v).unwrap_or_default();
+        assert!(
+            content == "PREEXISTING-SPOOL-CANARY" || content == "victim-canary",
+            "victim {} was overwritten: {content:?}",
+            v.display()
+        );
+    }
+    for v in &victims {
+        let _ = std::fs::remove_file(v);
+    }
+}
+
+/// R4 — structured diagnostic redaction: credential-shaped output must
+/// remain parseable JSON after redaction, and the secret must not appear
+/// in persisted evidence.
+#[tokio::test]
+async fn credential_diagnostics_stay_parseable_and_redacted() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = credential_fixture();
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect("credential-shaped output still succeeds")
+    };
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("redacted output must remain valid JSON");
+    let stdout = stdout_of(&outcome.output);
+    assert!(stdout.contains("<redacted>"), "redacted: {stdout}");
+    assert!(!stdout.contains("test-secret"), "leak in stdout: {stdout}");
+    assert_eq!(
+        parsed["success"], true,
+        "child succeeded; outcome is success"
+    );
+    // The persisted evidence (gate-7 output = outcome.output) is canary-free.
+    assert!(
+        !outcome.output.contains("test-secret"),
+        "canary persisted in evidence: {}",
+        outcome.output
     );
 }

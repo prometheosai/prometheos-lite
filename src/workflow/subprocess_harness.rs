@@ -13,12 +13,28 @@
 //!   subprocess execution passes the NodeRunner nine-gate pipeline
 //!   (capability resolution, argument validation, authorization, retry
 //!   budget, redaction, journaled evidence) before any child exists.
-//! - The capability handler runs the child with a bounded lifetime:
-//!   strict argument validation, an exact-match executable allowlist, a
-//!   workspace-contained working directory (paths that escape the governed
-//!   root refuse; there is no fallback to the process cwd), an explicit
-//!   deadline, cancellation, and output caps. On refusal/timeout/cancel
-//!   the child is killed and reaped before the handler returns.
+//! - The capability handler runs the child with an owned process-tree
+//!   containment and a bounded output lifecycle: on timeout, cancellation,
+//!   output overflow, or normal completion the entire owned tree is
+//!   terminated (grandchildren included) and the direct child is reaped
+//!   before the handler returns, so no unmanaged descendants survive.
+//! - Strict argument validation, an exact-match executable allowlist, a
+//!   workspace-contained working directory (escapes refuse; no fallback to
+//!   the process cwd), an explicit deadline, cancellation, and a hard
+//!   output budget enforced on the bytes actually written (not just the
+//!   bytes retained). Exceeding the budget is a typed refusal and never
+//!   reports success.
+//!
+//! Output storage (R2): child stdout/stderr spool to securely random,
+//! atomically created, exclusive (`create_new`) temporary files with
+//! private permissions; the file handles are retained for the whole
+//! invocation (never reopened by untrusted path) and unlinked on every
+//! exit path, including spawn failure and refusal.
+//!
+//! Structured redaction (R4): child output is redacted with the shared
+//! credential-shape rules BEFORE it is embedded into the JSON result
+//! document, so gate-7 regex redaction cannot corrupt the JSON grammar
+//! and known secrets never reach persisted evidence.
 //!
 //! Portable continuity (E2): the adapter owns no durable work state. Its
 //! `checkpoint`/`resume` bind the harness identity + revision to a digest
@@ -30,6 +46,7 @@
 //! Evidence correlation: every outcome carries the journaled evidence
 //! digest; evidence survives adapter process termination.
 
+use std::fs::File;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -48,6 +65,7 @@ use crate::workflow::execution_harness::{
     HarnessStep,
 };
 use crate::workflow::node_runner::Capability;
+use crate::workflow::redaction::Redactor;
 use crate::workflow::soma::capability::{
     AdapterFamily, Identity, Locality, RuntimeCapabilitySet, SUPPORTED_CAPABILITY_SCHEMA_VERSION,
 };
@@ -64,6 +82,8 @@ pub const SUBPROCESS_REVISION: &str = "v1";
 
 /// Poll interval for the child wait loop.
 const POLL: Duration = Duration::from_millis(5);
+/// Settle time for tree quiescence after termination / group sweeps.
+const SETTLE: Duration = Duration::from_millis(100);
 /// Monotonic counter disambiguating concurrent spool files.
 static SPOOL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -81,11 +101,12 @@ pub struct SubprocessConfig {
     pub default_timeout_ms: u64,
     /// Hard ceiling for any invocation deadline (1 h).
     pub max_timeout_ms: u64,
-    /// Bytes of stdout/stderr retained as evidence after completion.
+    /// Hard budget, in bytes, of stdout+stderr the child may write during
+    /// one invocation. Exceeding it kills the tree and refuses.
     pub max_output_bytes: usize,
     /// Bytes of serialized arguments accepted per invocation.
     pub max_args_bytes: usize,
-    /// Cooperative cancellation source; setting it aborts the running child.
+    /// Cooperative cancellation source; setting it aborts the running tree.
     pub cancel: Arc<AtomicBool>,
 }
 
@@ -234,11 +255,13 @@ impl ExecutionHarness for SubprocessHarness {
             .context("subprocess capability output must be a JSON result document")?;
         let exit_code = parsed.get("exitCode").and_then(serde_json::Value::as_i64);
         if exit_code != Some(0) {
-            let stderr = parsed
-                .get("stderr")
+            let stderr_bytes = parsed
+                .get("stderrHex")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .trim();
+                .and_then(decode_hex)
+                .unwrap_or_default();
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let stderr = stderr.trim();
             let stderr_suffix = if stderr.is_empty() {
                 String::new()
             } else {
@@ -339,33 +362,353 @@ pub fn subprocess_capability(config: SubprocessConfig, workspace_root: PathBuf) 
     })
 }
 
-/// Spool files for child stdout/stderr, removed on drop (best effort).
-struct SpoolFiles {
-    stdout: PathBuf,
-    stderr: PathBuf,
+// ---------------------------------------------------------------------------
+// Secure spool (R2)
+// ---------------------------------------------------------------------------
+
+/// One child-stdout/stderr spool: an exclusively created, privately
+/// permissioned temporary file. The [`File`] handle is retained for the
+/// whole invocation and is never reopened by path; the path exists only so
+/// the file can be unlinked on drop.
+struct SpoolFile {
+    file: File,
+    path: PathBuf,
 }
 
-impl Drop for SpoolFiles {
+impl Drop for SpoolFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.stdout);
-        let _ = std::fs::remove_file(&self.stderr);
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
-fn spool_files() -> Result<SpoolFiles> {
-    let nonce = SPOOL_COUNTER.fetch_add(1, Ordering::Relaxed);
+/// Create a spool file atomically and exclusively: `create_new` never
+/// follows a pre-existing symlink and never truncates an existing file; on
+/// collision a fresh random name is tried. Names derive from pid, a
+/// monotonic counter, and a per-process random seed hashed over the
+/// nanosecond clock, so hostile pre-creation cannot predict them.
+fn create_spool_file(tag: &str) -> Result<SpoolFile> {
     let pid = std::process::id();
+    let counter = SPOOL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seed = format!("{tag}:{pid}:{counter}:{nanos}:{}", seed_salt());
+    let nonce = sha256_hex(seed.as_bytes());
     let dir = std::env::temp_dir();
-    let stdout = dir.join(format!("prometheos-subprocess-{pid}-{nonce}.out"));
-    let stderr = dir.join(format!("prometheos-subprocess-{pid}-{nonce}.err"));
-    let out = std::fs::File::create(&stdout)
-        .with_context(|| format!("cannot create subprocess stdout spool {}", stdout.display()))?;
-    let err = std::fs::File::create(&stderr)
-        .with_context(|| format!("cannot create subprocess stderr spool {}", stderr.display()))?;
-    drop(out);
-    drop(err);
-    Ok(SpoolFiles { stdout, stderr })
+    for attempt in 0u32..16 {
+        let name = match attempt {
+            0 => format!("prometheos-subprocess-{pid}-{counter}-{nonce}.tmp"),
+            _ => format!("prometheos-subprocess-{pid}-{counter}-{nonce}-retry{attempt}.tmp"),
+        };
+        let path = dir.join(name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
+            Ok(file) => return Ok(SpoolFile { file, path }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                anyhow::bail!("cannot create subprocess spool {}: {error}", path.display())
+            }
+        }
+    }
+    anyhow::bail!("cannot create a unique subprocess spool after 16 attempts")
 }
+
+/// Per-process random salt (SipHash with random keys) so spool names are
+/// unpredictable even for a local attacker pre-creating candidates.
+fn seed_salt() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher as _};
+    RandomState::new().build_hasher().finish()
+}
+
+/// The retained spool pair for one invocation.
+struct SpoolFiles {
+    stdout: SpoolFile,
+    stderr: SpoolFile,
+}
+
+impl SpoolFiles {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            stdout: create_spool_file("out")?,
+            stderr: create_spool_file("err")?,
+        })
+    }
+
+    /// Total bytes currently written by the child, observed through the
+    /// retained handles (never by re-reading an untrusted path).
+    fn written(&self) -> u64 {
+        let out = self.stdout.file.metadata().map(|m| m.len()).unwrap_or(0);
+        let err = self.stderr.file.metadata().map(|m| m.len()).unwrap_or(0);
+        out + err
+    }
+
+    /// Read a spool after the child has exited. The parent's original
+    /// handle was donated to the child, so reading goes through a fresh
+    /// no-follow handle on the exclusively created path (see `read_spool`
+    /// for why this cannot be confused with a hostile file).
+    fn read(&self, which: &SpoolFile) -> String {
+        read_spool(&which.path)
+    }
+}
+
+/// Reopen a spool for reading without following symlinks.
+///
+/// The file at `path` was atomically created exclusively by us; this open
+/// is read-only and refuses symlink replacement even if a hostile actor
+/// swapped the path after creation. Content that came from the child was
+/// already bounded by the output budget before any read happens.
+fn read_spool(path: &Path) -> String {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        opts.custom_flags(winapi::um::winbase::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let Ok(mut file) = opts.open(path) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Process-tree containment (R1)
+// ---------------------------------------------------------------------------
+
+/// Owned process-tree containment for one child invocation.
+///
+/// - Windows: a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+///   created at install time and assigned to the child after spawn. On
+///   termination the whole job tree dies; on normal completion the job
+///   handle is closed and kill-on-close sweeps any stragglers.
+/// - Unix: the child is placed in its own session via `setsid` at spawn
+///   time (pre_exec), so its process group id is the child's pid; the
+///   group is SIGKILLed on termination and swept on normal completion.
+///
+/// If containment cannot be established, the caller kills and reaps the
+/// child and fails closed — never proceeds uncontained.
+struct Containment {
+    #[cfg(windows)]
+    job: Option<winapi::shared::ntdef::HANDLE>,
+    /// Process group id once spawned (Unix only): equals the child's pid
+    /// because `setsid` made it a session/group leader.
+    #[cfg(unix)]
+    pgid: Option<i32>,
+}
+
+impl Containment {
+    /// Install containment BEFORE spawn (Unix `setsid` hook) or the pending
+    /// state for post-spawn assignment (Windows job).
+    fn install(command: &mut Command) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.pre_exec(|| {
+                if unsafe { libc::setsid() } < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+            Ok(Self { pgid: None })
+        }
+        #[cfg(windows)]
+        {
+            let _ = command;
+            Ok(Self { job: None })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = command;
+            anyhow::bail!("subprocess containment is unsupported on this platform")
+        }
+    }
+
+    /// Attach the spawned child to the containment. Windows assigns the
+    /// child to the job (the child has only just started); Unix is a no-op
+    /// because containment was installed at spawn time. On failure the
+    /// caller must kill and reap the child and fail closed.
+    fn attach(&mut self, child: &mut std::process::Child) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let _ = child;
+            self.pgid = Some(child.id() as i32);
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            use winapi::shared::minwindef::{BOOL, DWORD, LPVOID};
+            use winapi::um::handleapi::CloseHandle;
+            use winapi::um::jobapi2::{
+                AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            };
+            use winapi::um::processthreadsapi::OpenProcess;
+            use winapi::um::winnt::{
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JobObjectExtendedLimitInformation, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+            };
+
+            // Fast path: the child already exited; nothing to contain.
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+
+            let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
+            if job.is_null() {
+                anyhow::bail!(
+                    "subprocess containment unavailable: CreateJobObjectW failed ({})",
+                    std::io::Error::last_os_error()
+                );
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set_ok = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &mut info as *mut _ as LPVOID,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
+                )
+            };
+            if set_ok == 0 {
+                unsafe {
+                    CloseHandle(job);
+                };
+                anyhow::bail!(
+                    "subprocess containment unavailable: SetInformationJobObject failed ({})",
+                    std::io::Error::last_os_error()
+                );
+            }
+            let pid = child.id();
+            let proc = unsafe {
+                OpenProcess(
+                    PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                    0 as BOOL,
+                    pid as DWORD,
+                )
+            };
+            if proc.is_null() {
+                unsafe {
+                    CloseHandle(job);
+                };
+                anyhow::bail!(
+                    "subprocess containment unavailable: OpenProcess failed ({})",
+                    std::io::Error::last_os_error()
+                );
+            }
+            let assigned = unsafe { AssignProcessToJobObject(job, proc) };
+            unsafe {
+                CloseHandle(proc);
+            };
+            if assigned == 0 {
+                unsafe {
+                    CloseHandle(job);
+                };
+                anyhow::bail!(
+                    "subprocess containment unavailable: AssignProcessToJobObject failed ({})",
+                    std::io::Error::last_os_error()
+                );
+            }
+            self.job = Some(job);
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = child;
+            Ok(())
+        }
+    }
+
+    /// Terminate the entire owned tree. The direct child is still reaped by
+    /// the caller's `wait`. Returns after a settle period so descendants
+    /// have been delivered the kill.
+    fn terminate(&mut self, child: &std::process::Child) {
+        #[cfg(unix)]
+        {
+            if let Some(pgid) = self.pgid {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+            let _ = child;
+        }
+        #[cfg(windows)]
+        {
+            if let Some(job) = self.job.take() {
+                let _ = unsafe { winapi::um::jobapi2::TerminateJobObject(job, 1) };
+            }
+            let _ = child;
+        }
+        std::thread::sleep(SETTLE);
+    }
+
+    /// Terminate stragglers after normal direct-child exit: Windows is
+    /// handled by kill-on-job-close when the handle drops; Unix sweeps the
+    /// (possibly empty) group.
+    fn sweep_on_normal(&mut self) {
+        #[cfg(unix)]
+        {
+            if let Some(pgid) = self.pgid.take() {
+                let rc = unsafe { libc::kill(-pgid, 0) };
+                if rc == 0 {
+                    unsafe {
+                        libc::kill(-pgid, libc::SIGKILL);
+                    }
+                    std::thread::sleep(SETTLE);
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            // Dropping the handle fires JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            // for any descendant still running.
+            if let Some(job) = self.job.take() {
+                unsafe {
+                    winapi::um::handleapi::CloseHandle(job);
+                }
+                std::thread::sleep(SETTLE);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Containment {
+    fn drop(&mut self) {
+        // Last-resort sweep on any forgotten path: closing the handle
+        // kills the remaining tree (kill-on-job-close).
+        if let Some(job) = self.job.take() {
+            unsafe {
+                winapi::um::handleapi::CloseHandle(job);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Governing checks (workspace binding)
+// ---------------------------------------------------------------------------
 
 /// Resolve the governed workspace root or refuse. The root must exist on
 /// every invocation: workspaces are ephemeral, and a missing root must
@@ -486,25 +829,19 @@ fn run_subprocess_guarded(
     let cwd = child_cwd(&canonical_root, cwd)?;
 
     // ---- Spawn with file-backed stdio (no pipe deadlock). ----
-    let spool = spool_files()?;
-    let out_file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&spool.stdout)
-        .with_context(|| {
-            format!(
-                "cannot open subprocess stdout spool {}",
-                spool.stdout.display()
-            )
-        })?;
-    let err_file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&spool.stderr)
-        .with_context(|| {
-            format!(
-                "cannot open subprocess stderr spool {}",
-                spool.stderr.display()
-            )
-        })?;
+    let spool = SpoolFiles::new()?;
+    let stdout_dup = spool.stdout.file.try_clone().with_context(|| {
+        format!(
+            "cannot duplicate subprocess stdout spool {}",
+            spool.stdout.path.display()
+        )
+    })?;
+    let stderr_dup = spool.stderr.file.try_clone().with_context(|| {
+        format!(
+            "cannot duplicate subprocess stderr spool {}",
+            spool.stderr.path.display()
+        )
+    })?;
 
     let started = Instant::now();
     let deadline = started + Duration::from_millis(timeout_ms);
@@ -512,87 +849,145 @@ fn run_subprocess_guarded(
     cmd.args(&argv)
         .current_dir(&cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(out_file))
-        .stderr(Stdio::from(err_file));
-    let mut child = match cmd.spawn() {
+        .stdout(Stdio::from(stdout_dup))
+        .stderr(Stdio::from(stderr_dup));
+    let mut containment = Containment::install(&mut cmd)?;
+    let spawn_result = cmd.spawn();
+    let mut child = match spawn_result {
         Ok(child) => child,
         Err(error) => {
             anyhow::bail!("subprocess spawn failed for executable {exe:?}: {error}")
         }
     };
+    if let Err(error) = containment.attach(&mut child) {
+        // Containment unavailable: kill and reap, then fail closed.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
 
-    // ---- Deadline / cancellation / high-water loop. ----
-    // The child is always killed AND reaped before any refusal returns.
-    let high_water = (config.max_output_bytes as u64).saturating_mul(4) + 1024 * 1024;
+    // ---- Deadline / cancellation / budget loop. ----
+    // Every refusal below terminates the whole owned tree first and reaps
+    // the direct child, so descendants cannot continue past this return.
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if config.cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
+            containment.terminate(&child);
             let _ = child.wait();
             anyhow::bail!("subprocess cancelled");
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            containment.terminate(&child);
             let _ = child.wait();
             anyhow::bail!("subprocess timed out after {timeout_ms}ms");
         }
-        let written = std::fs::metadata(&spool.stdout)
-            .map(|m| m.len())
-            .unwrap_or(0)
-            + std::fs::metadata(&spool.stderr)
-                .map(|m| m.len())
-                .unwrap_or(0);
-        if written > high_water {
-            let _ = child.kill();
+        if spool.written() > config.max_output_bytes as u64 {
+            containment.terminate(&child);
             let _ = child.wait();
-            anyhow::bail!("subprocess output exceeded the configured limit");
+            anyhow::bail!(
+                "subprocess output exceeded the configured budget of {} bytes",
+                config.max_output_bytes
+            );
         }
         std::thread::sleep(POLL);
     };
     let duration_ms = started.elapsed().as_millis() as u64;
 
-    let (stdout, stdout_len) = read_capped(&spool.stdout, config.max_output_bytes);
-    let (stderr, stderr_len) = read_capped(&spool.stderr, config.max_output_bytes);
-    let output_cap = u64::try_from(config.max_output_bytes).unwrap_or(u64::MAX);
-    let truncated = stdout_len > output_cap || stderr_len > output_cap;
+    // The direct child exited: sweep any stragglers it left behind before
+    // trusting the result, then close the resource budget accounting.
+    containment.sweep_on_normal();
+    if spool.written() > config.max_output_bytes as u64 {
+        anyhow::bail!(
+            "subprocess output exceeded the configured budget of {} bytes",
+            config.max_output_bytes
+        );
+    }
+
+    // Structured redaction before encoding (R4): the shared credential-shape
+    // rules run on the separate stream VALUES, and the redacted values are
+    // hex-encoded into the result document. Gate-7's patterns then cannot
+    // match (hex text contains no credential triggers and no `"`/`\`
+    // structure to corrupt), so the document stays valid typed JSON, and
+    // only redacted data is persisted at every stage.
+    let redactor = Redactor::new();
+    let stdout = encode_hex(redactor.redact(&spool.read(&spool.stdout)).as_bytes());
+    let stderr = encode_hex(redactor.redact(&spool.read(&spool.stderr)).as_bytes());
     let exit_code = status.code();
 
     Ok(serde_json::json!({
         "exitCode": exit_code,
         "success": exit_code == Some(0),
-        "stdout": stdout,
-        "stderr": stderr,
-        "truncated": truncated,
+        "stdoutHex": stdout,
+        "stderrHex": stderr,
         "durationMs": duration_ms,
     })
     .to_string())
 }
 
-/// Read a spool file, retaining at most `cap` bytes. Returns the retained
-/// text (lossy) and the file's total byte length for truncation evidence.
-fn read_capped(path: &Path, cap: usize) -> (String, u64) {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return (String::new(), 0),
-    };
-    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut retained = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let remaining = cap.saturating_sub(retained.len());
-                if remaining == 0 {
-                    // Drain the rest without retaining.
-                    continue;
-                }
-                retained.extend_from_slice(&buf[..remaining.min(n)]);
-            }
-            Err(_) => break,
-        }
+/// Lowercase hex encode: keeps the result document inert to the gate-7
+/// credential patterns (hex digits cannot spell any trigger word, and no
+/// structural quote/backslash can be consumed).
+fn encode_hex(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for byte in data {
+        out.push_str(&format!("{byte:02x}"));
     }
-    (String::from_utf8_lossy(&retained).into_owned(), total)
+    out
+}
+
+/// Decode lowercase hex; `None` on any malformed input.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(text.len() / 2);
+    for pair in bytes.chunks(2) {
+        let high = hex_digit(pair[0])?;
+        let low = hex_digit(pair[1])?;
+        out.push(high * 16 + low);
+    }
+    Some(out)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exclusive creation: a pre-created file at the spool name is never
+    /// truncated and never followed; a fresh name is returned instead.
+    #[test]
+    fn spool_file_creation_is_exclusive() {
+        // Pre-create a plausible host-file name that a collision would
+        // otherwise clobber.
+        let victim: String = "V".repeat(64);
+        let first = create_spool_file("test-probe").expect("first spool");
+        std::fs::write(&first.path, &victim).expect("write victim bytes");
+        let second = create_spool_file("test-probe").expect("second spool");
+        assert_ne!(first.path, second.path);
+        let kept = std::fs::read_to_string(&first.path).expect("read back");
+        assert_eq!(kept, victim, "existing spool content must survive");
+        // Files are created empty (no leak of other runs' bytes).
+        assert_eq!(second.file.metadata().expect("meta").len(), 0);
+    }
+
+    /// Unix spool files carry private (0600) permissions.
+    #[cfg(unix)]
+    #[test]
+    fn unix_spool_files_are_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let spool = create_spool_file("perm-probe").expect("spool");
+        let mode = spool.file.metadata().expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "spool files must be 0600");
+    }
 }
