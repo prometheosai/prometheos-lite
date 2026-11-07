@@ -73,7 +73,48 @@
       "approvalEscalation": false,
       "unclaimedCapabilities": [],
       "overClaimed": false
+    },
+    {
+      "harnessId": "lite.harness.subprocess",
+      "family": "subprocess",
+      "name": "lite-subprocess",
+      "revision": "v1",
+      "declarationDigest": "d6cabcd6b48b1dd5a6793852426395e2e5fb2dd27541e37142f59f0863412a12",
+      "declaredCapabilities": [
+        "harness.subprocess.exec"
+      ],
+      "claimedCapabilities": [
+        "harness.subprocess.exec"
+      ],
+      "effectClasses": [
+        "process-exec"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [
+        "AdapterFamily { family: \"git-worktree\", revision: \"lite.workspace.adapter.v1\" }",
+        "AdapterFamily { family: \"existing-read-only\", revision: \"lite.workspace.adapter.v1\" }"
+      ],
+      "workspace": {
+        "workspace": "write"
+      },
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": false,
+      "readProjection": false,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
     }
   ],
-  "contentDigest": "464425de86bd2e8d83a922acca26f909b75e6dc54715097c387cd960fa49af8d"
+  "contentDigest": "b8e7f411eb7c2aea31ee50c0c208d224d51ab336ba74951e31010358ffaf87c3"
 }

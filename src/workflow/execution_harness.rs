@@ -143,6 +143,7 @@ pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
             content_digest: None,
         }
         .sealed(),
+        crate::workflow::subprocess_harness::subprocess_declaration(),
     ]
 }
 
@@ -704,6 +705,14 @@ impl<'a> HarnessDispatch<'a> {
     /// Number of governed calls this dispatch has issued.
     pub fn calls(&self) -> usize {
         self.calls
+    }
+
+    /// The governed request's known-secret list. This is the authoritative
+    /// source for redaction: the capability that this dispatch invokes is
+    /// entitled to redaction with these values (the runner applies the same
+    /// list at gate 7).
+    pub fn known_secrets(&self) -> &[String] {
+        &self.known_secrets
     }
 
     /// The authority-surface gate. Public so conformance can prove the
