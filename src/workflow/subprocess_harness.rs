@@ -993,11 +993,21 @@ fn spawn_contained(
     stdout_w: winapi::shared::ntdef::HANDLE,
     stderr_w: winapi::shared::ntdef::HANDLE,
 ) -> Result<SpawnedChild> {
+    use winapi::shared::ntdef::HANDLE;
     use winapi::um::fileapi::CreateFileW;
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
     use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
-    use winapi::um::processthreadsapi::{CreateProcessW, ResumeThread, STARTUPINFOW};
-    use winapi::um::winbase::{CREATE_NO_WINDOW, CREATE_SUSPENDED, STARTF_USESTDHANDLES};
+    use winapi::um::processthreadsapi::{
+        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+        ResumeThread, UpdateProcThreadAttribute,
+    };
+    use winapi::um::winbase::{
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW,
+    };
+    /// The `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` value (Win32
+    /// PROC_THREAD_ATTRIBUTE_NUMBER 0x00020000 | 2); not named in winapi 0.3.
+    const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 
     // A null-device stdin keeps the child from blocking on inherited input.
     // Inheritable so CreateProcessW can actually hand it to the child.
@@ -1027,12 +1037,65 @@ fn spawn_contained(
         anyhow::bail!("cannot open NUL device for subprocess stdin");
     }
 
-    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = nul;
-    startup.hStdOutput = stdout_w;
-    startup.hStdError = stderr_w;
+    // Explicit handle allowlist for the child process: exactly stdin
+    // (NUL), stdout (pipe write), stderr (pipe write) — nothing else,
+    // even if the parent process holds other inheritable handles.
+    let mut size: usize = 0;
+    let _ = unsafe {
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size as *mut _)
+    };
+    let mut attr_bytes = vec![0u8; size];
+    let attr_ok = unsafe {
+        InitializeProcThreadAttributeList(
+            attr_bytes.as_mut_ptr() as *mut _,
+            1,
+            0,
+            &mut size as *mut _,
+        )
+    };
+    if attr_ok == 0 {
+        unsafe {
+            CloseHandle(stdout_w);
+            CloseHandle(stderr_w);
+            CloseHandle(nul);
+        };
+        anyhow::bail!(
+            "subprocess containment unavailable: InitializeProcThreadAttributeList failed ({})",
+            std::io::Error::last_os_error()
+        );
+    }
+    let inherited = [nul, stdout_w, stderr_w];
+    let list_ok = unsafe {
+        UpdateProcThreadAttribute(
+            attr_bytes.as_mut_ptr() as *mut _,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherited.as_ptr() as *mut _,
+            std::mem::size_of::<[HANDLE; 3]>(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if list_ok == 0 {
+        unsafe {
+            DeleteProcThreadAttributeList(attr_bytes.as_mut_ptr() as *mut _);
+            CloseHandle(stdout_w);
+            CloseHandle(stderr_w);
+            CloseHandle(nul);
+        };
+        anyhow::bail!(
+            "subprocess containment unavailable: UpdateProcThreadAttribute failed ({})",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    let mut startup_ex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    startup_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup_ex.StartupInfo.hStdInput = nul;
+    startup_ex.StartupInfo.hStdOutput = stdout_w;
+    startup_ex.StartupInfo.hStdError = stderr_w;
+    startup_ex.lpAttributeList = attr_bytes.as_mut_ptr() as *mut _;
 
     let mut command_line = build_command_line(exe, argv);
     let cwd_wide: Vec<u16> = std::ffi::OsStr::new(cwd)
@@ -1048,13 +1111,16 @@ fn spawn_contained(
             command_line.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            1, // inherit handles (our stdio write ends only)
-            CREATE_SUSPENDED | CREATE_NO_WINDOW,
+            1, // inherit handles (attribute list restricts to stdin/stdout/stderr only)
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
             std::ptr::null_mut(),
             cwd_wide.as_ptr(),
-            &startup as *const STARTUPINFOW as *mut _,
+            &mut startup_ex as *mut STARTUPINFOEXW as *mut _,
             &mut process_info,
         )
+    };
+    unsafe {
+        DeleteProcThreadAttributeList(attr_bytes.as_mut_ptr() as *mut _);
     };
     if created == 0 {
         let error = std::io::Error::last_os_error();
@@ -1109,10 +1175,16 @@ fn spawn_contained(
         CloseHandle(thread_handle);
     };
     if resumed == u32::MAX {
-        anyhow::bail!(
-            "subprocess resume failed: {}",
-            std::io::Error::last_os_error()
-        );
+        let error = std::io::Error::last_os_error();
+        // The thread is still suspended and the child never ran: terminate
+        // it now, then return. Dropping `containment` below would also kill
+        // the tree via JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, but we close the
+        // process handle explicitly so this failure path leaks nothing.
+        unsafe {
+            winapi::um::processthreadsapi::TerminateProcess(process_handle, 1);
+            CloseHandle(process_handle);
+        }
+        anyhow::bail!("subprocess resume failed: {error}");
     }
     Ok(SpawnedChild::Windows {
         process: WinProcess {
