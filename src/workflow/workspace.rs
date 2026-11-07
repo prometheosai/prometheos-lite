@@ -690,10 +690,53 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         }
         let path = self.worktree_path(manifest);
         if path.exists() {
-            anyhow::bail!(
-                "workspace path {} already exists: refusing to reuse or fall back",
-                path.display()
-            );
+            // Interrupted-acquisition recovery: a prior `acquire` may have
+            // completed `git worktree add` but crashed before persisting
+            // `AcquiredWorkspace`. Resume that exact worktree ONLY if it is
+            // a git working copy whose toplevel is this deterministic path
+            // and whose HEAD equals the manifest's pinned revision.
+            // Anything else fails closed without deleting the leftover,
+            // without adopting foreign data, and without touching the
+            // source checkout (no fallback path exists).
+            let actual = match head_revision(&path) {
+                Ok(r) => r,
+                Err(_) => {
+                    anyhow::bail!(
+                        "interrupted acquisition leftover at {} is not a git working copy: refusing to reuse (manual cleanup required)",
+                        path.display()
+                    );
+                }
+            };
+            let top = match toplevel(&path) {
+                Ok(t) => t,
+                Err(_) => {
+                    anyhow::bail!(
+                        "interrupted acquisition leftover at {} is not a git working copy: refusing to reuse (manual cleanup required)",
+                        path.display()
+                    );
+                }
+            };
+            let top_canon = std::fs::canonicalize(&top).unwrap_or(top);
+            let path_canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if top_canon != path_canon {
+                anyhow::bail!(
+                    "interrupted acquisition leftover at {} resolves to a different toplevel: refusing to reuse",
+                    path.display()
+                );
+            }
+            if actual != manifest.base_revision {
+                anyhow::bail!(
+                    "{}: interrupted acquisition leftover HEAD {} != pinned {} (workspace path already exists: refusing to reuse or fall back)",
+                    WorkspaceRefError::StaleRevision,
+                    actual,
+                    manifest.base_revision
+                );
+            }
+            return Ok(AcquiredWorkspace {
+                manifest: manifest.clone(),
+                root: path,
+                revision: actual,
+            });
         }
         std::fs::create_dir_all(path.parent().expect("parent exists"))?;
         // Pin the worktree to the EXACT requested revision. If this fails,
@@ -713,10 +756,39 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
             return Err(e).context("worktree acquisition failed (fail closed)");
         }
+        // Verify the pin on disk: never trust the manifest copy. A HEAD
+        // mismatch means git did not check out what was asked for; fail
+        // closed and remove the just-created worktree.
+        let actual = match head_revision(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = run_git(
+                    &self.source_repo,
+                    &["worktree", "remove", "--force", &path.to_string_lossy()],
+                );
+                let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+                return Err(e).context(
+                    "worktree acquisition failed: created worktree HEAD unreadable (fail closed)",
+                );
+            }
+        };
+        if actual != manifest.base_revision {
+            let _ = run_git(
+                &self.source_repo,
+                &["worktree", "remove", "--force", &path.to_string_lossy()],
+            );
+            let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+            anyhow::bail!(
+                "{}: created worktree HEAD {} != pinned {}",
+                WorkspaceRefError::StaleRevision,
+                actual,
+                manifest.base_revision
+            );
+        }
         Ok(AcquiredWorkspace {
             manifest: manifest.clone(),
             root: path,
-            revision: manifest.base_revision.clone(),
+            revision: actual,
         })
     }
 
@@ -1377,5 +1449,123 @@ mod tests {
         let head_before = repo.head();
         assert_eq!(repo.head(), head_before);
         assert!(!repo.0.join("_ws/ws-fb").exists());
+    }
+
+    #[test]
+    fn interrupted_acquisition_resumes_exact_revision() {
+        // #171 interrupted-acquisition recovery (real git worktree): the
+        // first acquire completes the worktree add but the handle is lost
+        // (crash between add and durable persist). A second acquire with
+        // the SAME manifest must recover the existing worktree at the exact
+        // pinned revision instead of failing forever on "already exists".
+        let repo = TempRepo::new("intres");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "intres", &rev);
+        let first = adapter
+            .acquire(&manifest)
+            .expect("first acquire creates worktree");
+        assert_eq!(first.revision, rev);
+        let first_root = first.root.clone();
+        // Marker proves the second acquire reuses the same worktree.
+        std::fs::write(first_root.join("interrupted.marker"), "left-from-crash\n").unwrap();
+        drop(first); // crash: no cleanup, handle lost
+        assert!(first_root.exists());
+        let head_before = repo.head();
+
+        let recovered = adapter
+            .acquire(&manifest)
+            .expect("interrupted acquisition must resume at exact revision");
+        assert_eq!(recovered.root, first_root);
+        assert_eq!(recovered.revision, rev);
+        assert!(recovered.root.join("interrupted.marker").exists());
+        let actual = {
+            let o = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&recovered.root)
+                .output()
+                .unwrap();
+            assert!(o.status.success());
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        assert_eq!(actual, rev);
+        assert_eq!(
+            repo.head(),
+            head_before,
+            "source checkout must be untouched"
+        );
+        adapter
+            .cleanup(recovered, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("cleanup");
+    }
+
+    #[test]
+    fn interrupted_acquisition_stale_leftover_fails_closed() {
+        // Leftover from an interrupted acquire at an OLDER pin must NOT be
+        // adopted for a manifest claiming a NEWER revision, must not be
+        // deleted automatically, and must not fall back to the source.
+        let repo = TempRepo::new("intstale");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let old = repo.head();
+        let manifest_old = writable_manifest(&repo.0, "intstale", &old);
+        let acquired = adapter.acquire(&manifest_old).unwrap();
+        let leftover = acquired.root.clone();
+        drop(acquired); // interrupted: leftover remains at `old`
+        std::fs::write(repo.0.join("a.txt"), "two\n").unwrap();
+        {
+            let st = Command::new("git")
+                .args(["commit", "-aqm", "c2"])
+                .current_dir(&repo.0)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        let newer = repo.head();
+        let manifest_new = writable_manifest(&repo.0, "intstale", &newer);
+        let head_before = repo.head();
+        let err = adapter.acquire(&manifest_new).unwrap_err().to_string();
+        assert!(
+            err.contains("stale") || err.contains("already exists") || err.contains("revision"),
+            "stale leftover must fail closed, got: {err}"
+        );
+        assert!(leftover.exists(), "leftover must not be deleted on failure");
+        assert_eq!(
+            repo.head(),
+            head_before,
+            "source checkout must be untouched"
+        );
+    }
+
+    #[test]
+    fn interrupted_acquisition_non_git_leftover_fails_closed() {
+        // A plain non-git directory at the deterministic worktree path
+        // (e.g. partial mkdir before crash, or foreign data) must fail
+        // closed without deletion or adoption.
+        let repo = TempRepo::new("intnongit");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "intnongit", &rev);
+        let path = repo.0.join("_ws/ws-intnongit/worktree");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("foreign.txt"), "not-a-worktree\n").unwrap();
+        let err = adapter.acquire(&manifest).unwrap_err().to_string();
+        assert!(
+            err.contains("already exists") || err.contains("interrupted"),
+            "{err}"
+        );
+        assert!(
+            path.join("foreign.txt").exists(),
+            "foreign data must not be deleted"
+        );
     }
 }
