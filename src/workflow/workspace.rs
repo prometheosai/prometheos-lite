@@ -330,90 +330,114 @@ impl std::fmt::Display for WorkspaceRefError {
 
 /// Exclusive owner for one git-worktree workspace identity.
 ///
-/// The claim is an atomic `create_new` on `owner.lock` inside the
+/// The claim is an OS-backed exclusive lock on `owner.lock` inside the
 /// workspace-id directory (sibling of `worktree`, never inside the git
-/// checkout). The file carries the owner PID. While the owner is alive a
-/// second `acquire` in any process sees the file plus a live PID and must
-/// refuse. If the owner crashed after leaving the file, the PID is
-/// verified dead before the stale claim is reclaimed (one retry). The last
-/// guard drop removes the claim; `AcquiredWorkspace` holds it via `Arc` so
-/// clones share (not multiply) ownership until all handles drop.
+/// checkout), acquired through the existing [`crate::workflow::evaluate::WorkflowFileLock`]
+/// primitive (`flock` on Unix, `LockFileEx` on Windows). The lock file is
+/// never truncated, deleted, or read: it carries no payload and no PID. A
+/// crash releases the OS lock automatically, so recovery after a crash never
+/// needs stale-lock deletion, and a recycled PID can never be mistaken for
+/// proof that a workspace is free. Dropping the last guard unlocks our own
+/// handle only; it cannot delete a successor's claim.
+///
+/// Cross-process exclusion comes from the OS lock. Same-process exclusion is
+/// layered on top for Windows, where `LockFileEx` is per-process: a process
+/// wide registry of held lock paths refuses a second claim from any thread
+/// of this process. `AcquiredWorkspace` holds the guard via `Arc` so clones
+/// share (not multiply) ownership until all handles drop.
 #[derive(Debug)]
 struct WorkspaceOwnerLock {
-    path: std::path::PathBuf,
+    /// Canonical lock path; the registry key for in-process exclusion.
+    key: std::path::PathBuf,
+    /// OS lock handle; dropping it releases the OS lock.
+    _os_lock: crate::workflow::evaluate::WorkflowFileLock,
+}
+
+/// Process-wide set of workspace owner locks currently held by this process.
+///
+/// Windows `LockFileEx` locks are per-process, so on Windows two threads of
+/// one process could otherwise hold the same OS lock. This registry makes
+/// same-process exclusion hold on every platform. Unix `flock` is per open
+/// file description, so the OS lock alone would suffice; the registry is
+/// harmless there.
+fn owner_registry() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 impl Drop for WorkspaceOwnerLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Release only our own in-process claim. The OS handle (`_os_lock`)
+        // unlocks on drop. The lock file is deliberately never unlinked, so
+        // a late drop cannot delete a successor's claim: ownership is the
+        // held handle, never the file's existence or contents.
+        if let Ok(mut registry) = owner_registry().lock() {
+            registry.remove(&self.key);
+        }
     }
 }
 
-/// Whether `pid` names a currently running process. Own-PID counts as
-/// running (re-entrant acquire in the same process is still concurrent).
-fn process_is_running(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
+/// Registry key for one owner lock path: the canonical parent directory
+/// joined with the lock file name, so equivalent spellings of the same
+/// directory share one exclusion entry.
+fn owner_lock_key(lock_path: &std::path::Path) -> std::path::PathBuf {
+    match lock_path.parent() {
+        Some(parent) => canonical_path(parent).join(
+            lock_path
+                .file_name()
+                .expect("owner lock path always names a file"),
+        ),
+        None => lock_path.to_path_buf(),
     }
-    if pid == 0 {
-        return false;
-    }
-    let system = sysinfo::System::new_all();
-    system.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
 
-/// Claim (or, when the previous owner is proven dead, reclaim) the exclusive
-/// owner lock for one workspace identity. Bounded policy: refuse while a
-/// live owner holds the lock; at most one stale-reclaim retry; corrupt or
-/// unreadable lock files fail closed (never deleted, never adopted).
+/// Claim the exclusive OS-backed owner lock for one workspace identity.
+///
+/// Bounded no-wait policy (mirrors the previous live-owner refusal):
+/// returns `Err` — fail closed — while another owner holds the lock, whether
+/// in this process (registry) or in another process (OS lock). There is no
+/// stale-claim deletion and no PID liveness check: a leftover lock file from
+/// a crashed owner is unheld and immediately claimable, and no concurrent
+/// claimant's lock can ever be removed by observing stale metadata.
+//
+// SAFETY of the `#[allow]` below: `WorkflowFileLock` is not `Sync` on
+// Windows (its `OVERLAPPED` is plain data but not declared `Send`/`Sync`).
+// The `Arc` never actually crosses threads: `AcquiredWorkspace` could not
+// be moved to another thread while holding it (the compiler rejects any
+// such use), and the `Arc` only gives clone-sharing within the owning
+// thread. So the `Arc`-with-non-`Send`/`Sync` warning has no runtime case.
+#[allow(clippy::arc_with_non_send_sync)]
 fn claim_owner_lock(lock_path: &std::path::Path) -> Result<std::sync::Arc<WorkspaceOwnerLock>> {
-    use std::io::Write as _;
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut reclaimed = false;
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_path)
-        {
-            Ok(mut file) => {
-                let pid = std::process::id();
-                if let Err(e) = writeln!(file, "{pid}") {
-                    drop(file);
-                    let _ = std::fs::remove_file(lock_path);
-                    return Err(e).context("workspace owner lock write failed (fail closed)");
-                }
-                let _ = file.flush();
-                return Ok(std::sync::Arc::new(WorkspaceOwnerLock {
-                    path: lock_path.to_path_buf(),
-                }));
+    let key = owner_lock_key(lock_path);
+    {
+        let mut registry = owner_registry().lock().map_err(|_| {
+            anyhow::anyhow!("workspace ownership registry unavailable (fail closed)")
+        })?;
+        if !registry.insert(key.clone()) {
+            anyhow::bail!("workspace owned by an active process: refusing concurrent acquisition");
+        }
+    }
+    match crate::workflow::evaluate::WorkflowFileLock::try_acquire_at(lock_path) {
+        Ok(Some(os_lock)) => Ok(std::sync::Arc::new(WorkspaceOwnerLock {
+            key,
+            _os_lock: os_lock,
+        })),
+        Ok(None) => {
+            if let Ok(mut registry) = owner_registry().lock() {
+                registry.remove(&key);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let content = std::fs::read_to_string(lock_path).context(
-                    "workspace owner lock unreadable (possible active owner): refusing concurrent acquisition",
-                )?;
-                let pid: u32 = content.trim().parse().context(
-                    "workspace owner lock corrupt (possible active owner): refusing concurrent acquisition",
-                )?;
-                if process_is_running(pid) {
-                    anyhow::bail!(
-                        "workspace owned by active process {pid}: refusing concurrent acquisition"
-                    );
-                }
-                if reclaimed {
-                    anyhow::bail!(
-                        "workspace owner lock repeatedly contended: refusing concurrent acquisition"
-                    );
-                }
-                // Stale owner proven dead: remove and retry once.
-                let _ = std::fs::remove_file(lock_path);
-                reclaimed = true;
+            anyhow::bail!("workspace owned by an active process: refusing concurrent acquisition");
+        }
+        Err(e) => {
+            if let Ok(mut registry) = owner_registry().lock() {
+                registry.remove(&key);
             }
-            Err(e) => {
-                return Err(e).context("workspace owner lock failed (fail closed)");
-            }
+            Err(e).context("workspace owner lock failed (fail closed)")
         }
     }
 }
@@ -470,9 +494,11 @@ pub struct AcquiredWorkspace {
     pub root: std::path::PathBuf,
     /// Revision actually validated at acquisition time.
     pub revision: String,
-    /// Exclusive owner claim (git-worktree acquires). Shared via `Arc`
-    /// across clones; the lock file is removed when the last handle drops.
-    /// Never read directly — the exclusivity is the `Drop` side effect.
+    /// Exclusive owner claim (git-worktree acquires and recovers). Shared
+    /// via `Arc` across clones; ownership is released (OS unlock + registry
+    /// removal, never file deletion) when the last handle drops. Never read
+    /// directly — the exclusivity is the `Drop` side effect. `None` only for
+    /// read-only workspaces, which cleanup never removes.
     #[allow(dead_code)]
     owner_lock: Option<std::sync::Arc<WorkspaceOwnerLock>>,
 }
@@ -829,11 +855,14 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             }
         }
         let path = self.worktree_path(manifest);
-        // Exclusive recovery ownership: claim (or reclaim when the previous
-        // owner is proven dead) before any existing-path decision. A live
-        // owner refuses here; stale claims are reclaimed in the helper.
-        // Foreign/failed paths drop this guard (deleting owner.lock) and
-        // never delete the leftover worktree.
+        // Exclusive ownership BEFORE any existing-path decision: the OS lock
+        // covers the whole check-then-act window, so two processes racing
+        // this acquisition get exactly one winner. While a live owner holds
+        // the lock this refuses. A leftover lock FILE from a crashed owner
+        // needs no reclaim logic: the OS lock was released by the OS at
+        // crash time and the file is never deleted or read.
+        // Foreign/failed paths drop this guard (unlocking, never deleting
+        // owner.lock) and never delete the leftover worktree.
         let owner_lock = claim_owner_lock(
             &path
                 .parent()
@@ -895,8 +924,10 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         std::fs::create_dir_all(path.parent().expect("parent exists"))?;
         // Pin the worktree to the EXACT requested revision. If this fails,
         // the error propagates — there is deliberately NO fallback to the
-        // source checkout — and any created directories are removed so
-        // failed acquisitions leave no residue.
+        // source checkout — and the created worktree directory is removed
+        // so failed acquisitions leave no worktree residue. The workspace
+        // parent (which holds `owner.lock`) is never removed: the lock file
+        // is never deleted, by a failed acquisition or otherwise.
         if let Err(e) = run_git(
             &self.source_repo,
             &[
@@ -907,7 +938,7 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                 &manifest.base_revision,
             ],
         ) {
-            let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+            let _ = std::fs::remove_dir_all(&path);
             return Err(e).context("worktree acquisition failed (fail closed)");
         }
         // Verify the pin on disk: never trust the manifest copy. A HEAD
@@ -920,7 +951,7 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                     &self.source_repo,
                     &["worktree", "remove", "--force", &path.to_string_lossy()],
                 );
-                let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+                let _ = std::fs::remove_dir_all(&path);
                 return Err(e).context(
                     "worktree acquisition failed: created worktree HEAD unreadable (fail closed)",
                 );
@@ -931,7 +962,7 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                 &self.source_repo,
                 &["worktree", "remove", "--force", &path.to_string_lossy()],
             );
-            let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+            let _ = std::fs::remove_dir_all(&path);
             anyhow::bail!(
                 "{}: created worktree HEAD {} != pinned {}",
                 WorkspaceRefError::StaleRevision,
@@ -944,7 +975,7 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                 &self.source_repo,
                 &["worktree", "remove", "--force", &path.to_string_lossy()],
             );
-            let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+            let _ = std::fs::remove_dir_all(&path);
             return Err(e);
         }
         Ok(AcquiredWorkspace {
@@ -976,6 +1007,16 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         preserve: &PreservationSet,
         evidence_dir: &std::path::Path,
     ) -> Result<CleanupReport> {
+        // Cleanup is an ownership operation: only the handle that actually
+        // holds the exclusive claim may tear the worktree down. An ownerless
+        // handle (e.g. a recovered inspection handout, or a forged value)
+        // must never be able to remove a live workspace.
+        if acquired.owner_lock.is_none() {
+            anyhow::bail!(
+                "cleanup refused: workspace {} is not owned by the caller (ownerless handle)",
+                acquired.manifest.workspace_id
+            );
+        }
         let preserved = preserve_files(&acquired, preserve, evidence_dir)?;
         // Workspace teardown is unconditional AFTER preservation succeeds:
         // workspaces are ephemeral execution sandboxes; durable artifacts
@@ -1023,6 +1064,19 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         // contentDigest (the manifest's own digest). Substitution hard-fails
         // here; it is never a remap candidate.
         reference.verify_manifest_attestation(manifest)?;
+        // Deterministic path: recovery may only resume the exact worktree
+        // this manifest resolves to. A different path is a hard failure
+        // (never a remap candidate): resuming an unexpected checkout would
+        // silently re-base authority onto an unverified tree.
+        let deterministic = self.worktree_path(manifest);
+        if canonical_path(expected_root) != canonical_path(&deterministic) {
+            anyhow::bail!(
+                "recovery refused: expected_root {} is not the deterministic worktree path {} for workspace {}",
+                expected_root.display(),
+                deterministic.display(),
+                manifest.workspace_id
+            );
+        }
         if !expected_root.exists() {
             return reject_or_remap(remap, WorkspaceRefError::Missing);
         }
@@ -1047,11 +1101,31 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
         if actual != actual_expected {
             return reject_or_remap(remap, WorkspaceRefError::StaleRevision);
         }
+        // Repository attachment: the checkout to resume must be THIS
+        // adapter's registered worktree of the authority-bound source repo,
+        // exactly as interrupted-acquisition resume requires. A foreign
+        // clone that merely shares commits is a hard failure (never a
+        // remap candidate), and the foreign data is left untouched.
+        verify_attached_to_source(&self.source_repo, expected_root)?;
+        // Ownership gate — the SAME exclusive claim `acquire` takes, and it
+        // is taken only here, at the moment a writable owner is about to be
+        // handed out. Validation above never touches ownership, so a failed
+        // recovery cannot remove (or observe) an active owner's lock, and
+        // remap outcomes carry no workspace and claim nothing: a remapped
+        // caller must still `acquire` (which claims) before it can run.
+        // A contended claim fails closed with `Err`, exactly as in
+        // `acquire`.
+        let owner_lock = claim_owner_lock(
+            &deterministic
+                .parent()
+                .expect("workspace parent exists")
+                .join("owner.lock"),
+        )?;
         Ok(RecoveryOutcome::Resumed(Box::new(AcquiredWorkspace {
             manifest: manifest.clone(),
             root: expected_root.to_path_buf(),
             revision: actual,
-            owner_lock: None,
+            owner_lock: Some(owner_lock),
         })))
     }
 }
@@ -1510,14 +1584,26 @@ mod tests {
             outcome2,
             RecoveryOutcome::RemappedUnderAuthority(_)
         ));
-        // The honest pair still resumes cleanly.
-        let outcome3 = adapter
-            .recover(&acquired.root, &reference, &manifest, None)
-            .unwrap();
-        assert!(matches!(outcome3, RecoveryOutcome::Resumed(_)));
-        adapter
-            .cleanup(acquired, &PreservationSet::default(), &repo.0.join("_ev"))
-            .ok();
+        // The honest pair resumes cleanly — but only once the original owner
+        // releases the workspace: while `acquired` is alive the same
+        // exclusive claim refuses a competing recovery (FIX 1), so the
+        // owner is released first, the honest pair resumes WITH a claim,
+        // and the recovered owner cleans up.
+        let root = acquired.root.clone();
+        assert!(
+            adapter.recover(&root, &reference, &manifest, None).is_err(),
+            "competing recovery must refuse while the owner is active"
+        );
+        drop(acquired); // release ownership; worktree stays on disk
+        let outcome3 = adapter.recover(&root, &reference, &manifest, None).unwrap();
+        match outcome3 {
+            RecoveryOutcome::Resumed(w) => {
+                adapter
+                    .cleanup(*w, &PreservationSet::default(), &repo.0.join("_ev2"))
+                    .unwrap();
+            }
+            other => panic!("expected Resumed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1614,7 +1700,11 @@ mod tests {
         assert!(adapter.acquire(&manifest).is_err());
         let head_before = repo.head();
         assert_eq!(repo.head(), head_before);
-        assert!(!repo.0.join("_ws/ws-fb").exists());
+        // No worktree residue: the claim itself creates the workspace
+        // directory (owner.lock lives there), and the lock file is never
+        // deleted — least of all on failure. Only the worktree subdirectory
+        // must be gone, and the source checkout must be untouched.
+        assert!(!repo.0.join("_ws/ws-fb/worktree").exists());
     }
 
     #[test]
@@ -1807,7 +1897,7 @@ mod tests {
         assert_eq!(first.revision, rev);
         let err = adapter.acquire(&manifest).unwrap_err().to_string();
         assert!(
-            err.contains("owned by active process") || err.contains("concurrent"),
+            err.contains("owned by an active process") || err.contains("concurrent"),
             "concurrent acquire must be refused, got: {err}"
         );
         // First owner still owns the workspace and its work continues.
@@ -1823,5 +1913,306 @@ mod tests {
         adapter
             .cleanup(recovered, &PreservationSet::default(), &repo.0.join("_ev"))
             .expect("cleanup");
+    }
+
+    #[test]
+    fn concurrent_recover_while_acquired_refused_then_recovers_with_ownership() {
+        // FIX 1 regression: recovery must hold the same exclusive claim as
+        // acquisition. While the first owner is active, a recover of the
+        // exact same reference must refuse and must not disturb the owner;
+        // after release, recover succeeds WITH ownership and cleanup works.
+        let repo = TempRepo::new("recown");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "recown", &rev);
+        let reference = manifest.to_reference();
+        let first = adapter
+            .acquire(&manifest)
+            .expect("first owner must acquire the workspace");
+        let root = first.root.clone();
+
+        // Competing recovery while the first owner is active: refusal.
+        let err = adapter
+            .recover(&root, &reference, &manifest, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("owned by an active process") || err.contains("concurrent"),
+            "concurrent recover must refuse, got: {err}"
+        );
+        // The first owner is untouched and still valid.
+        adapter.validate(&first).expect("first owner still valid");
+        assert!(root.exists());
+
+        drop(first);
+        // After release, recovery succeeds and HOLDS a real claim: a second
+        // recovery while the recovered handle is live must refuse.
+        let recovered = match adapter
+            .recover(&root, &reference, &manifest, None)
+            .expect("recover after release must resume")
+        {
+            RecoveryOutcome::Resumed(w) => *w,
+            other => panic!("expected Resumed, got {other:?}"),
+        };
+        assert_eq!(recovered.revision, rev);
+        assert!(adapter.recover(&root, &reference, &manifest, None).is_err());
+        // The recovered owner can clean up; the worktree is removed.
+        adapter
+            .cleanup(recovered, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("recovered owner cleanup");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn failed_recovery_preserves_active_owner_claim() {
+        // A failed recovery must never remove an active owner's lock: a
+        // stale-revision recovery attempt while the owner is live rejects
+        // (and touches no ownership state), and the owner still validates.
+        let repo = TempRepo::new("failrec");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "failrec", &rev);
+        let first = adapter
+            .acquire(&manifest)
+            .expect("first owner must acquire the workspace");
+        let lock_file = repo.0.join("_ws/ws-failrec/owner.lock");
+        assert!(lock_file.exists(), "owner lock file must exist");
+
+        // Drifted reference/manifest pair: recovery rejects as stale BEFORE
+        // any ownership interaction.
+        let drifted_manifest = writable_manifest(&repo.0, "failrec", &"e".repeat(40));
+        let drifted_ref = drifted_manifest.to_reference();
+        let outcome = adapter
+            .recover(&first.root, &drifted_ref, &drifted_manifest, None)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RecoveryOutcome::Rejected(WorkspaceRefError::StaleRevision)
+        ));
+
+        // The active owner's claim is intact: lock file present, owner valid,
+        // and a competing acquisition still refuses.
+        assert!(
+            lock_file.exists(),
+            "failed recovery must not remove the lock"
+        );
+        adapter.validate(&first).expect("owner still valid");
+        let err = adapter.acquire(&manifest).unwrap_err();
+        assert!(err.to_string().contains("concurrent"));
+        adapter
+            .cleanup(first, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("owner cleanup");
+    }
+
+    #[test]
+    fn recover_rejects_non_deterministic_path() {
+        // Recovery must verify the deterministic worktree path: a checkout
+        // at an unexpected path is refused and its content is untouched.
+        let repo = TempRepo::new("pathrec");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "pathrec", &rev);
+        let reference = manifest.to_reference();
+        let stray = repo.0.join("_ws/stray/worktree");
+        std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        let st = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                repo.0.to_string_lossy().as_ref(),
+                stray.to_string_lossy().as_ref(),
+            ])
+            .status()
+            .unwrap();
+        assert!(st.success(), "stray clone must be created");
+        let err = adapter
+            .recover(&stray, &reference, &manifest, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("deterministic"),
+            "non-deterministic path must hard-fail, got: {err}"
+        );
+        assert!(
+            stray.join("a.txt").exists(),
+            "stray checkout must be untouched"
+        );
+        // No ownership was taken by the failed recovery: a legitimate
+        // acquire of the deterministic workspace still succeeds.
+        let acquired = adapter.acquire(&manifest).expect("legit acquire");
+        adapter
+            .cleanup(acquired, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("cleanup");
+    }
+
+    #[test]
+    fn recover_rejects_foreign_clone_attachment() {
+        // Recovery must verify repository attachment: a foreign clone at the
+        // deterministic path (same HEAD, different git common directory) is
+        // refused, left untouched, and never adopted.
+        let repo = TempRepo::new("foreignrec");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "foreignrec", &rev);
+        let reference = manifest.to_reference();
+        let path = parent.join("ws-foreignrec").join("worktree");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let st = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                repo.0.to_string_lossy().as_ref(),
+                path.to_string_lossy().as_ref(),
+            ])
+            .status()
+            .unwrap();
+        assert!(st.success(), "foreign clone must be created");
+        let head_before = repo.head();
+        let err = adapter
+            .recover(&path, &reference, &manifest, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("attached")
+                || err.contains("registered")
+                || err.contains("common directory"),
+            "foreign attachment must hard-fail, got: {err}"
+        );
+        assert!(
+            path.join("a.txt").exists(),
+            "foreign clone must not be deleted"
+        );
+        assert_eq!(
+            repo.head(),
+            head_before,
+            "source checkout must be untouched"
+        );
+    }
+
+    #[test]
+    fn cleanup_refuses_ownerless_handle() {
+        // Cleanup is an ownership operation: a handle that does not hold
+        // the exclusive claim must never tear down a live workspace.
+        let repo = TempRepo::new("unown");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "unown", &rev);
+        let first = adapter
+            .acquire(&manifest)
+            .expect("first owner must acquire the workspace");
+        let root = first.root.clone();
+        // Forge an ownerless handle over the SAME live worktree (in-module
+        // test only; the field is private to this module).
+        let forged = AcquiredWorkspace {
+            manifest: manifest.clone(),
+            root: root.clone(),
+            revision: rev.clone(),
+            owner_lock: None,
+        };
+        let err = adapter
+            .cleanup(forged, &PreservationSet::default(), &repo.0.join("_ev"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ownerless"), "got: {err}");
+        assert!(
+            root.exists(),
+            "live worktree must survive ownerless cleanup"
+        );
+        adapter.validate(&first).expect("owner still valid");
+        adapter
+            .cleanup(first, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("owner cleanup");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn owner_lock_file_content_is_never_interpreted() {
+        // FIX 2: the lock file carries no payload and no PID. Junk content
+        // (e.g. from a crashed legacy writer) must not be read as liveness
+        // proof: acquisition succeeds because no OS lock is held, and the
+        // file is left exactly as found.
+        let repo = TempRepo::new("junklock");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "junklock", &rev);
+        let lock_file = parent.join("ws-junklock").join("owner.lock");
+        std::fs::create_dir_all(lock_file.parent().unwrap()).unwrap();
+        std::fs::write(&lock_file, b"garbage-bytes-not-a-pid\n").unwrap();
+        let acquired = adapter
+            .acquire(&manifest)
+            .expect("unheld lock file content must not block acquisition");
+        assert_eq!(acquired.revision, rev);
+        // While held, confirm via metadata (not content: on Windows the
+        // locked byte range is unreadable, exactly as lock.rs documents)
+        // that the file was not truncated.
+        assert_eq!(
+            std::fs::metadata(&lock_file).unwrap().len(),
+            b"garbage-bytes-not-a-pid\n".len() as u64,
+            "lock file must not be truncated"
+        );
+        adapter
+            .cleanup(acquired, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("cleanup");
+        assert!(lock_file.exists(), "cleanup must not delete the lock file");
+        assert_eq!(
+            std::fs::read(&lock_file).unwrap(),
+            b"garbage-bytes-not-a-pid\n",
+            "lock file content must be left as found"
+        );
+    }
+
+    #[test]
+    fn stale_lock_file_after_crash_is_claimable_and_never_deleted() {
+        // FIX 2 crash recovery: a lock file left behind by a dead owner
+        // (no OS lock held) is claimable without any stale-deletion step,
+        // and the file itself survives the whole lifecycle.
+        let repo = TempRepo::new("stalefile");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "stalefile", &rev);
+        let lock_file = parent.join("ws-stalefile").join("owner.lock");
+        // Simulate a crashed owner's residue: file exists, nothing holds it.
+        std::fs::create_dir_all(lock_file.parent().unwrap()).unwrap();
+        std::fs::write(&lock_file, b"").unwrap();
+        let first = adapter
+            .acquire(&manifest)
+            .expect("crash residue must be claimable");
+        drop(first); // owner gone; lock file remains
+        assert!(lock_file.exists(), "drop must not delete the lock file");
+        let second = adapter
+            .acquire(&manifest)
+            .expect("reacquisition after release must succeed");
+        let err = adapter.acquire(&manifest).unwrap_err();
+        assert!(err.to_string().contains("concurrent"));
+        adapter
+            .cleanup(second, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("cleanup");
+        assert!(lock_file.exists(), "cleanup must not delete the lock file");
     }
 }

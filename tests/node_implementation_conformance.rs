@@ -805,13 +805,13 @@ fn recovery_with_original_manifest_succeeds_when_head_revision_set() {
 
     // Recover with the ORIGINAL manifest (base_revision = pre-commit).
     // Both checks pass: ref.baseRevision == manifest.baseRevision AND
-    // actual HEAD == ref.headRevision.
-    let outcome = adapter.recover(
-        &acquired.root,
-        &ref_with_head,
-        &manifest, // original: base_revision = pre-commit
-        None,
-    );
+    // actual HEAD == ref.headRevision. Recovery takes the SAME exclusive
+    // ownership claim as acquisition (#171 FIX 1), so the original
+    // acquired handle is released first: while it is alive a competing
+    // recovery must refuse.
+    let root = acquired.root.clone();
+    drop(acquired);
+    let outcome = adapter.recover(&root, &ref_with_head, &manifest, None);
     match outcome.unwrap() {
         RecoveryOutcome::Resumed(a) => {
             assert_eq!(a.revision, post_commit);
