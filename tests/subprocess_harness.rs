@@ -89,6 +89,18 @@ fn dispatch<'a>(
     HarnessDispatch::new(harness, m, r, vec![], runner)
 }
 
+/// A governed dispatch carrying request-scoped known secrets — the
+/// authoritative redaction boundary for a run.
+fn dispatch_with_secrets<'a>(
+    harness: &'a dyn ExecutionHarness,
+    m: &'a NodeManifestV1,
+    r: &'a LocalRestrictions,
+    runner: &'a mut NodeRunner,
+    secrets: Vec<String>,
+) -> HarnessDispatch<'a> {
+    HarnessDispatch::new(harness, m, r, secrets, runner)
+}
+
 fn step(args: serde_json::Value) -> HarnessStep {
     HarnessStep {
         step_id: "step-1".to_string(),
@@ -192,6 +204,45 @@ fn credential_fixture() -> (&'static str, Vec<String>) {
 
 fn version_args() -> serde_json::Value {
     serde_json::json!({"exe": "cargo", "argv": ["--version"]})
+}
+
+/// A fixture printing a deterministic burst of lines and exiting quickly.
+fn burst_payload_fixture() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "1..2000 | ForEach-Object { Write-Output \"PAYLOAD-$_\" }".to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "sh",
+            vec![
+                "-c".to_string(),
+                "i=1; while [ $i -le 2000 ]; do printf \"PAYLOAD-%s\\n\" $i; i=$((i+1)); done"
+                    .to_string(),
+            ],
+        )
+    }
+}
+
+fn expected_burst_payload() -> String {
+    #[cfg(windows)]
+    let nl = "\r\n";
+    #[cfg(not(windows))]
+    let nl = "\n";
+    let mut out = (1..=2000u32)
+        .map(|i| format!("PAYLOAD-{i}"))
+        .collect::<Vec<_>>()
+        .join(nl);
+    out.push_str(nl);
+    out
 }
 
 /// A fixture printing an arbitrary opaque secret token on stdout.
@@ -1036,5 +1087,133 @@ async fn opaque_known_secret_redacted_before_persistence() {
             let text = String::from_utf8_lossy(&decoded);
             assert!(!text.contains(canary), "canary in decoded evidence: {text}");
         }
+    }
+}
+
+/// R4 — an opaque secret that exists ONLY in the governed request must not
+/// reach decoded persisted evidence: the handler redacts with the
+/// request's list, not an independent config list.
+#[tokio::test]
+async fn request_scoped_opaque_secret_redacted() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let canary = "OPAQUE-CANARY-1234-no-regex-shape";
+    let (exe, argv) = opaque_secret_fixture();
+    // Deliberately NO known secrets in the registration-time config — the
+    // secret arrives only via the governed dispatch.
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, vec![canary.to_string()]);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect("request-scoped opaque secret still succeeds")
+    };
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output must remain valid JSON");
+    assert_eq!(parsed["success"], true);
+    let stdout = stdout_of(&outcome.output);
+    assert!(
+        !stdout.contains(canary),
+        "canary leaked into stdout: {stdout}"
+    );
+    assert!(stdout.contains("<redacted>"), "redacted marker: {stdout}");
+    // The persisted, gate-7-processed evidence must not expose the canary
+    // in plaintext NOR in reversible encoding.
+    assert!(
+        !outcome.output.contains(canary),
+        "canary persisted in evidence: {}",
+        outcome.output
+    );
+    for value in [
+        parsed["stdoutHex"].as_str().unwrap(),
+        parsed["stderrHex"].as_str().unwrap(),
+    ] {
+        if let Some(decoded) = decode_hex(value) {
+            let text = String::from_utf8_lossy(&decoded);
+            assert!(!text.contains(canary), "canary in decoded evidence: {text}");
+        }
+    }
+}
+
+/// R4 — capture completion is verified before evidence is sealed: a
+/// fast-exiting process cannot leave un-captured pipe data, and success
+/// is only reported with finished drains.
+#[tokio::test]
+async fn quick_exit_capture_is_exact() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (exe, argv) = burst_payload_fixture();
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect("burst succeeds")
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output must be valid JSON");
+    assert_eq!(
+        parsed["success"], true,
+        "child succeeded: {}",
+        outcome.output
+    );
+    let stdout = stdout_of(&outcome.output);
+    assert_eq!(
+        stdout,
+        expected_burst_payload(),
+        "capture must be exact; got {} bytes",
+        stdout.len()
+    );
+}
+
+/// R4 — fast exits observe pipe EOF on both streams and repeated runs do
+/// not leak handles (each invocation closes its parent pipe write ends on
+/// every path).
+#[tokio::test]
+async fn eof_observed_and_repeated_runs_do_not_leak() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let config = SubprocessConfig::default();
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    for i in 0..=20 {
+        let mut runner = runner_for(
+            config.clone(),
+            root.path().to_path_buf(),
+            &[SUBPROCESS_EXEC_CAPABILITY],
+        );
+        let outcome = {
+            let mut d = dispatch(&harness, &m, &r, &mut runner);
+            harness
+                .run(step(version_args()), &mut d)
+                .await
+                .expect("run succeeds")
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outcome.output).expect("output is JSON");
+        assert_eq!(
+            parsed["success"], true,
+            "run {i} succeeded: {}",
+            outcome.output
+        );
     }
 }

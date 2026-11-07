@@ -707,6 +707,14 @@ impl<'a> HarnessDispatch<'a> {
         self.calls
     }
 
+    /// The governed request's known-secret list. This is the authoritative
+    /// source for redaction: the capability that this dispatch invokes is
+    /// entitled to redaction with these values (the runner applies the same
+    /// list at gate 7).
+    pub fn known_secrets(&self) -> &[String] {
+        &self.known_secrets
+    }
+
     /// The authority-surface gate. Public so conformance can prove the
     /// refusal point itself, and so callers can pre-check a step.
     pub fn ensure_declared(&self, capability: &str) -> Result<()> {

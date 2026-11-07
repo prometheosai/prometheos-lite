@@ -262,8 +262,18 @@ impl ExecutionHarness for SubprocessHarness {
         dispatch: &mut HarnessDispatch<'_>,
     ) -> Result<HarnessOutcome> {
         // The ONLY effect path: `call` refuses capabilities outside this
-        // harness's declaration before any process can exist.
-        let run_outcome = dispatch.call(&step.capability, step.args.clone(), &step.step_id)?;
+        // harness's declaration before any process can exist. The governed
+        // request's known secrets ride along so the handler redacts them
+        // verbatim — the redaction boundary is authoritative, not config
+        // folklore.
+        let mut args = step.args.clone();
+        if let Some(map) = args.as_object_mut() {
+            map.insert(
+                "knownSecrets".to_string(),
+                serde_json::json!(dispatch.known_secrets()),
+            );
+        }
+        let run_outcome = dispatch.call(&step.capability, args, &step.step_id)?;
         let output = run_outcome.output.clone();
 
         // The child result is machine-readable JSON produced by the handler.
@@ -383,6 +393,7 @@ pub fn subprocess_capability(config: SubprocessConfig, workspace_root: PathBuf) 
 // ---------------------------------------------------------------------------
 
 /// Drain state behind one pipe: bounded retention, total byte count.
+#[derive(Clone)]
 struct DrainState {
     retained: Vec<u8>,
     total: u64,
@@ -445,14 +456,11 @@ impl DrainHandle {
         self.state.lock().expect("drain state").total
     }
 
-    /// Join the reader, waiting a bounded grace for EOF (all writers died
-    /// with the contained tree). If it did not finish, the thread is left
-    /// detached and the snapshot reflects what was read — containment
-    /// failure must never turn into a hang.
-    fn join_with_grace(mut self) {
-        if self.joined {
-            return;
-        }
+    /// Wait for EOF (all writers died with the contained tree), then
+    /// return the final drain state — retained bytes, total, done. The
+    /// caller must verify `done` before sealing evidence; an unfinished
+    /// drain is a failure, never a silent success.
+    fn finish(mut self) -> DrainState {
         self.joined = true;
         let started = Instant::now();
         loop {
@@ -461,9 +469,10 @@ impl DrainHandle {
             }
             std::thread::sleep(POLL);
         }
-        if started.elapsed() <= Duration::from_millis(2000) {
+        if self.snapshot().2 {
             let _ = self.handle.join();
         }
+        self.state.lock().expect("drain state").clone()
     }
 }
 
@@ -711,7 +720,15 @@ impl SpawnedChild {
             #[cfg(unix)]
             SpawnedChild::Unix { containment, .. } => containment.sweep_on_normal(),
             #[cfg(windows)]
-            SpawnedChild::Windows { containment, .. } => containment.sweep_on_normal(),
+            SpawnedChild::Windows {
+                containment,
+                process,
+            } => {
+                containment.sweep_on_normal();
+                // The process has already exited: release its handle now
+                // rather than leaking it per invocation.
+                process.clone().finish();
+            }
         }
     }
 }
@@ -977,7 +994,7 @@ fn spawn_contained(
     stderr_w: winapi::shared::ntdef::HANDLE,
 ) -> Result<SpawnedChild> {
     use winapi::um::fileapi::CreateFileW;
-    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
     use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
     use winapi::um::processthreadsapi::{CreateProcessW, ResumeThread, STARTUPINFOW};
     use winapi::um::winbase::{CREATE_NO_WINDOW, CREATE_SUSPENDED, STARTF_USESTDHANDLES};
@@ -1002,6 +1019,13 @@ fn spawn_contained(
             std::ptr::null_mut(),
         )
     };
+    if nul.is_null() || nul == INVALID_HANDLE_VALUE {
+        unsafe {
+            CloseHandle(stdout_w);
+            CloseHandle(stderr_w);
+        };
+        anyhow::bail!("cannot open NUL device for subprocess stdin");
+    }
 
     let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
     startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -1039,9 +1063,21 @@ fn spawn_contained(
                 CloseHandle(nul);
             };
         }
+        unsafe {
+            CloseHandle(stdout_w);
+            CloseHandle(stderr_w);
+        };
         anyhow::bail!("subprocess spawn failed for executable {exe:?}: {error}");
     }
 
+    // Parent's own copies of the stdio write ends and the NUL stdin can go
+    // now: the child holds its inherited copies, and keeping ours open
+    // would block EOF for the drain threads forever.
+    unsafe {
+        CloseHandle(stdout_w);
+        CloseHandle(stderr_w);
+        CloseHandle(nul);
+    }
     // Copy the (out, err) finished captures.
     let process_handle = process_info.hProcess;
     let thread_handle = process_info.hThread;
@@ -1153,7 +1189,10 @@ fn run_subprocess_guarded(
         );
     }
     for key in obj.keys() {
-        if !matches!(key.as_str(), "exe" | "argv" | "cwd" | "timeoutMs") {
+        if !matches!(
+            key.as_str(),
+            "exe" | "argv" | "cwd" | "timeoutMs" | "knownSecrets"
+        ) {
             anyhow::bail!("subprocess argument {key:?} is not supported");
         }
     }
@@ -1185,6 +1224,33 @@ fn run_subprocess_guarded(
                 .ok_or_else(|| anyhow::anyhow!("subprocess argument \"cwd\" must be a string"))
         })
         .transpose()?;
+    let request_known_secrets: Vec<String> = obj
+        .get("knownSecrets")
+        .map(|v| {
+            let arr = v.as_array().ok_or_else(|| {
+                anyhow::anyhow!("subprocess argument \"knownSecrets\" must be an array of strings")
+            })?;
+            if arr.len() > 256 {
+                anyhow::bail!("subprocess argument \"knownSecrets\" exceeds the entry limit");
+            }
+            let mut out = Vec::with_capacity(arr.len());
+            let mut total = 0usize;
+            for item in arr {
+                let s = item.as_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "subprocess argument \"knownSecrets\" must be an array of strings"
+                    )
+                })?;
+                total += s.len();
+                if total > 128 * 1024 {
+                    anyhow::bail!("subprocess argument \"knownSecrets\" exceeds the size limit");
+                }
+                out.push(s.to_string());
+            }
+            Ok(out)
+        })
+        .transpose()?
+        .unwrap_or_default();
     let timeout_ms = obj
         .get("timeoutMs")
         .map(|v| {
@@ -1244,28 +1310,40 @@ fn run_subprocess_guarded(
     };
     let duration_ms = started.elapsed().as_millis() as u64;
 
-    // The direct child exited: sweep any stragglers it left behind before
-    // trusting the result, then close the resource budget accounting.
+    // The direct child exited: sweep any stragglers it left behind, then
+    // verify capture completion BEFORE taking the evidence snapshot. Every
+    // writer died with the contained tree, so EOF is guaranteed-measurable:
+    // a drain that did not finish within the grace is a failure, never a
+    // silent empty or partial capture.
     child.sweep_on_normal();
-    let (stdout_bytes, stdout_total, _) = stdout_drain.snapshot();
-    let (stderr_bytes, stderr_total, _) = stderr_drain.snapshot();
-    if stdout_total + stderr_total > config.max_output_bytes as u64 {
+    let stdout_state = stdout_drain.finish();
+    let stderr_state = stderr_drain.finish();
+    if !stdout_state.done || !stderr_state.done {
+        anyhow::bail!("subprocess output capture did not complete");
+    }
+    if stdout_state.total + stderr_state.total > config.max_output_bytes as u64 {
         anyhow::bail!(
             "subprocess output exceeded the configured budget of {} bytes",
             config.max_output_bytes
         );
     }
-    stdout_drain.join_with_grace();
-    stderr_drain.join_with_grace();
 
     // Structured redaction before encoding (R3.2): the shared policy —
     // known secrets verbatim first, then credential patterns — runs on the
     // captured VALUES, which are then hex-encoded into the document. Gate-7
     // patterns cannot match hex text, so the JSON grammar survives
-    // redaction and only redacted data is persisted.
-    let redactor = Redactor::with_known_secrets(Redactor::new(), &config.known_secrets);
-    let stdout_text = redactor.redact(&String::from_utf8_lossy(&stdout_bytes));
-    let stderr_text = redactor.redact(&String::from_utf8_lossy(&stderr_bytes));
+    // redaction and only redacted data is persisted. The effective secret
+    // list binds the governed request's secrets (passed through the args)
+    // with the registration-time ones, so the boundary is authoritative.
+    let mut secrets = config.known_secrets.clone();
+    for secret in &request_known_secrets {
+        if !secrets.contains(secret) {
+            secrets.push(secret.clone());
+        }
+    }
+    let redactor = Redactor::with_known_secrets(Redactor::new(), &secrets);
+    let stdout_text = redactor.redact(&String::from_utf8_lossy(&stdout_state.retained));
+    let stderr_text = redactor.redact(&String::from_utf8_lossy(&stderr_state.retained));
     let exit_code = Some(status);
 
     Ok(serde_json::json!({
