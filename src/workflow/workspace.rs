@@ -328,6 +328,141 @@ impl std::fmt::Display for WorkspaceRefError {
     }
 }
 
+/// Exclusive owner for one git-worktree workspace identity.
+///
+/// The claim is an atomic `create_new` on `owner.lock` inside the
+/// workspace-id directory (sibling of `worktree`, never inside the git
+/// checkout). The file carries the owner PID. While the owner is alive a
+/// second `acquire` in any process sees the file plus a live PID and must
+/// refuse. If the owner crashed after leaving the file, the PID is
+/// verified dead before the stale claim is reclaimed (one retry). The last
+/// guard drop removes the claim; `AcquiredWorkspace` holds it via `Arc` so
+/// clones share (not multiply) ownership until all handles drop.
+#[derive(Debug)]
+struct WorkspaceOwnerLock {
+    path: std::path::PathBuf,
+}
+
+impl Drop for WorkspaceOwnerLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether `pid` names a currently running process. Own-PID counts as
+/// running (re-entrant acquire in the same process is still concurrent).
+fn process_is_running(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    if pid == 0 {
+        return false;
+    }
+    let system = sysinfo::System::new_all();
+    system.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
+/// Claim (or, when the previous owner is proven dead, reclaim) the exclusive
+/// owner lock for one workspace identity. Bounded policy: refuse while a
+/// live owner holds the lock; at most one stale-reclaim retry; corrupt or
+/// unreadable lock files fail closed (never deleted, never adopted).
+fn claim_owner_lock(lock_path: &std::path::Path) -> Result<std::sync::Arc<WorkspaceOwnerLock>> {
+    use std::io::Write as _;
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut reclaimed = false;
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+        {
+            Ok(mut file) => {
+                let pid = std::process::id();
+                if let Err(e) = writeln!(file, "{pid}") {
+                    drop(file);
+                    let _ = std::fs::remove_file(lock_path);
+                    return Err(e).context("workspace owner lock write failed (fail closed)");
+                }
+                let _ = file.flush();
+                return Ok(std::sync::Arc::new(WorkspaceOwnerLock {
+                    path: lock_path.to_path_buf(),
+                }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let content = std::fs::read_to_string(lock_path).context(
+                    "workspace owner lock unreadable (possible active owner): refusing concurrent acquisition",
+                )?;
+                let pid: u32 = content.trim().parse().context(
+                    "workspace owner lock corrupt (possible active owner): refusing concurrent acquisition",
+                )?;
+                if process_is_running(pid) {
+                    anyhow::bail!(
+                        "workspace owned by active process {pid}: refusing concurrent acquisition"
+                    );
+                }
+                if reclaimed {
+                    anyhow::bail!(
+                        "workspace owner lock repeatedly contended: refusing concurrent acquisition"
+                    );
+                }
+                // Stale owner proven dead: remove and retry once.
+                let _ = std::fs::remove_file(lock_path);
+                reclaimed = true;
+            }
+            Err(e) => {
+                return Err(e).context("workspace owner lock failed (fail closed)");
+            }
+        }
+    }
+}
+
+/// Canonical git common directory of a checkout.
+fn git_common_dir(repo: &std::path::Path) -> Result<std::path::PathBuf> {
+    let s = run_git(repo, &["rev-parse", "--git-common-dir"])?;
+    let p = std::path::PathBuf::from(s.trim());
+    Ok(if p.is_absolute() { p } else { repo.join(p) })
+}
+
+fn canonical_path(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Prove `path` is a registered worktree of this adapter's source repo:
+/// the worktree's git common directory equals the source's, and
+/// `git worktree list --porcelain` from the source names `path`.
+/// Rejects an unrelated clone that merely shares commits and directory.
+fn verify_attached_to_source(source_repo: &std::path::Path, path: &std::path::Path) -> Result<()> {
+    let worktree_common = canonical_path(&git_common_dir(path)?);
+    let source_common = canonical_path(&git_common_dir(source_repo)?);
+    if worktree_common != source_common {
+        anyhow::bail!(
+            "worktree at {} is not attached to the expected source repository (git common directory mismatch: refusing to reuse)",
+            path.display()
+        );
+    }
+    let listing = run_git(source_repo, &["worktree", "list", "--porcelain"])?;
+    let want = canonical_path(path);
+    let mut registered = false;
+    for line in listing.lines() {
+        let Some(rest) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        if canonical_path(std::path::Path::new(rest.trim())) == want {
+            registered = true;
+            break;
+        }
+    }
+    if !registered {
+        anyhow::bail!(
+            "worktree at {} is not registered as a worktree of the expected source repository: refusing to reuse",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// An acquired, validated workspace handed to execution.
 #[derive(Debug, Clone)]
 pub struct AcquiredWorkspace {
@@ -335,6 +470,11 @@ pub struct AcquiredWorkspace {
     pub root: std::path::PathBuf,
     /// Revision actually validated at acquisition time.
     pub revision: String,
+    /// Exclusive owner claim (git-worktree acquires). Shared via `Arc`
+    /// across clones; the lock file is removed when the last handle drops.
+    /// Never read directly — the exclusivity is the `Drop` side effect.
+    #[allow(dead_code)]
+    owner_lock: Option<std::sync::Arc<WorkspaceOwnerLock>>,
 }
 
 impl AcquiredWorkspace {
@@ -689,12 +829,24 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             }
         }
         let path = self.worktree_path(manifest);
+        // Exclusive recovery ownership: claim (or reclaim when the previous
+        // owner is proven dead) before any existing-path decision. A live
+        // owner refuses here; stale claims are reclaimed in the helper.
+        // Foreign/failed paths drop this guard (deleting owner.lock) and
+        // never delete the leftover worktree.
+        let owner_lock = claim_owner_lock(
+            &path
+                .parent()
+                .expect("workspace parent exists")
+                .join("owner.lock"),
+        )?;
         if path.exists() {
             // Interrupted-acquisition recovery: a prior `acquire` may have
             // completed `git worktree add` but crashed before persisting
             // `AcquiredWorkspace`. Resume that exact worktree ONLY if it is
-            // a git working copy whose toplevel is this deterministic path
-            // and whose HEAD equals the manifest's pinned revision.
+            // a git working copy whose toplevel is this deterministic path,
+            // whose HEAD equals the manifest's pinned revision, AND which
+            // is attached to (and registered with) THIS source repository.
             // Anything else fails closed without deleting the leftover,
             // without adopting foreign data, and without touching the
             // source checkout (no fallback path exists).
@@ -732,10 +884,12 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                     manifest.base_revision
                 );
             }
+            verify_attached_to_source(&self.source_repo, &path)?;
             return Ok(AcquiredWorkspace {
                 manifest: manifest.clone(),
                 root: path,
                 revision: actual,
+                owner_lock: Some(owner_lock),
             });
         }
         std::fs::create_dir_all(path.parent().expect("parent exists"))?;
@@ -785,10 +939,19 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
                 manifest.base_revision
             );
         }
+        if let Err(e) = verify_attached_to_source(&self.source_repo, &path) {
+            let _ = run_git(
+                &self.source_repo,
+                &["worktree", "remove", "--force", &path.to_string_lossy()],
+            );
+            let _ = std::fs::remove_dir_all(path.parent().expect("parent exists"));
+            return Err(e);
+        }
         Ok(AcquiredWorkspace {
             manifest: manifest.clone(),
             root: path,
             revision: actual,
+            owner_lock: Some(owner_lock),
         })
     }
 
@@ -888,6 +1051,7 @@ impl WorkspaceAdapter for GitWorktreeWorkspace {
             manifest: manifest.clone(),
             root: expected_root.to_path_buf(),
             revision: actual,
+            owner_lock: None,
         })))
     }
 }
@@ -956,6 +1120,7 @@ impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
             manifest: manifest.clone(),
             root: path,
             revision: actual,
+            owner_lock: None,
         })
     }
 
@@ -1033,6 +1198,7 @@ impl WorkspaceAdapter for ExistingReadOnlyWorkspace {
             manifest: manifest.clone(),
             root: expected_root.to_path_buf(),
             revision: actual,
+            owner_lock: None,
         })))
     }
 }
@@ -1567,5 +1733,95 @@ mod tests {
             path.join("foreign.txt").exists(),
             "foreign data must not be deleted"
         );
+    }
+
+    #[test]
+    fn foreign_clone_same_head_refused() {
+        // REPAIR A: a foreign clone sharing the commit SHA but not
+        // attached to (or registered with) THIS source repo must be
+        // refused, even at the deterministic path with matching HEAD.
+        let repo = TempRepo::new("foreign");
+        let parent = repo.0.join("_ws");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: parent.clone(),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "foreign", &rev);
+        let path = parent.join("ws-foreign").join("worktree");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let st = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                repo.0.to_string_lossy().as_ref(),
+                path.to_string_lossy().as_ref(),
+            ])
+            .status()
+            .unwrap();
+        assert!(st.success(), "foreign clone must be created");
+        // Sanity: the foreign clone carries the same HEAD.
+        {
+            let o = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            assert!(o.status.success());
+            assert_eq!(String::from_utf8_lossy(&o.stdout).trim().to_string(), rev);
+        }
+        let head_before = repo.head();
+        let err = adapter.acquire(&manifest).unwrap_err().to_string();
+        assert!(
+            err.contains("attached")
+                || err.contains("registered")
+                || err.contains("common directory"),
+            "foreign clone must be refused with attachment proof, got: {err}"
+        );
+        assert!(
+            path.join("a.txt").exists(),
+            "foreign clone must not be deleted on refusal"
+        );
+        assert_eq!(
+            repo.head(),
+            head_before,
+            "source checkout must be untouched"
+        );
+    }
+
+    #[test]
+    fn second_acquire_while_first_owner_active_refused() {
+        // REPAIR B: while the first AcquiredWorkspace owner is alive, a
+        // second acquire of the same workspace identity must refuse
+        // (bounded no-wait policy), even at the exact pinned revision.
+        let repo = TempRepo::new("conc");
+        let adapter = GitWorktreeWorkspace {
+            parent_dir: repo.0.join("_ws"),
+            source_repo: repo.0.clone(),
+        };
+        let rev = repo.head();
+        let manifest = writable_manifest(&repo.0, "conc", &rev);
+        let first = adapter
+            .acquire(&manifest)
+            .expect("first owner must acquire the workspace");
+        assert_eq!(first.revision, rev);
+        let err = adapter.acquire(&manifest).unwrap_err().to_string();
+        assert!(
+            err.contains("owned by active process") || err.contains("concurrent"),
+            "concurrent acquire must be refused, got: {err}"
+        );
+        // First owner still owns the workspace and its work continues.
+        adapter.validate(&first).expect("first owner still valid");
+        let head_before = repo.head();
+        drop(first);
+        // After owner release, interrupted recovery succeeds.
+        let recovered = adapter
+            .acquire(&manifest)
+            .expect("acquire after owner release must recover");
+        assert_eq!(recovered.revision, rev);
+        assert_eq!(repo.head(), head_before);
+        adapter
+            .cleanup(recovered, &PreservationSet::default(), &repo.0.join("_ev"))
+            .expect("cleanup");
     }
 }
