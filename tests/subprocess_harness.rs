@@ -245,6 +245,28 @@ fn expected_burst_payload() -> String {
     out
 }
 
+/// A fixture that attempts to write a magic token into the given (integer)
+/// handle value, printing WROTE on success and REFUSED otherwise.
+fn sentinel_probe_fixture(handle_value: i64) -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class W32 {{ [DllImport(\"kernel32.dll\")] public static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped); }}' | Out-Null; $bytes = [Text.Encoding]::ASCII.GetBytes('SENTINEL_TOKEN'); $written = 0; $r = [W32]::WriteFile([IntPtr]{handle_value}, $bytes, $bytes.Length, [ref]$written, [IntPtr]::Zero); if ($r -ne 0 -and $written -gt 0) {{ Write-Output 'WROTE' }} else {{ Write-Output 'REFUSED' }}"
+                ),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        ("echo", vec!["REFUSED".to_string()])
+    }
+}
+
 /// A fixture printing an arbitrary opaque secret token on stdout.
 fn opaque_secret_fixture() -> (&'static str, Vec<String>) {
     #[cfg(windows)]
@@ -1182,6 +1204,156 @@ async fn quick_exit_capture_is_exact() {
         expected_burst_payload(),
         "capture must be exact; got {} bytes",
         stdout.len()
+    );
+}
+
+/// Handle-inheritance isolation (R4-P1-C): an unrelated inheritable handle
+/// created by the parent must NOT be usable to reach the child — the
+/// attribute list whitelist carries only the three intended stdio handles.
+/// The child attempts to write a magic token through the shared handle
+/// value; the write token (or its absence) on the sentinel pipe is
+/// decisive.
+#[cfg(windows)]
+#[tokio::test]
+async fn unrelated_sentinel_handle_not_inherited() {
+    use winapi::shared::minwindef::{BOOL, DWORD};
+    use winapi::shared::ntdef::HANDLE;
+    use winapi::um::handleapi::{CloseHandle, SetHandleInformation};
+    use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
+    use winapi::um::winbase::HANDLE_FLAG_INHERIT;
+
+    // CreatePipe (namedpipeapi is not vendored in this crate).
+    unsafe extern "system" {
+        fn CreatePipe(
+            hReadPipe: *mut HANDLE,
+            hWritePipe: *mut HANDLE,
+            lpSecurityAttributes: *mut SECURITY_ATTRIBUTES,
+            dwSize: DWORD,
+        ) -> BOOL;
+    }
+
+    let root = tempfile::tempdir().expect("tempdir");
+
+    // Self-pipe with an inheritable write end. Inherited handles preserve
+    // their values across CreateProcessW, so if the whitelist failed, the
+    // child could write into this pipe through the same value.
+    let mut read = std::ptr::null_mut();
+    let mut write = std::ptr::null_mut();
+    let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+    sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+    sa.bInheritHandle = 1;
+    let ok = unsafe { CreatePipe(&mut read, &mut write, &mut sa as *mut _, 0) };
+    assert_ne!(ok, 0, "CreatePipe must succeed");
+    unsafe { SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0) };
+    let sentinel_value = write as isize;
+
+    let (exe, argv) = sentinel_probe_fixture(sentinel_value.try_into().unwrap());
+    let config = SubprocessConfig::default().allowed_executables(vec![exe.to_string()]);
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[SUBPROCESS_EXEC_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(serde_json::json!({"exe": exe, "argv": argv})), &mut d)
+            .await
+            .expect("sentinel probe succeeds")
+    };
+    let stdout = stdout_of(&outcome.output);
+    // The token must never surface anywhere visible: not in the captured
+    // stdout (which would mean the child wrote through a handle that
+    // inherited its value or aliased a surviving writable object), and not
+    // in the sentinel pipe.
+    assert!(
+        !stdout.contains("SENTINEL_TOKEN"),
+        "sentinel token leaked into captured output: {stdout}"
+    );
+
+    // The sentinel pipe itself must have received nothing: a token here is
+    // proof the child really wrote through an inherited handle. The child
+    // has already exited, so a blocking read terminates at EOF after the
+    // parent closes its own write copy.
+    unsafe {
+        CloseHandle(write);
+    };
+    let mut buf = vec![0u8; 64];
+    let mut read_n: u32 = 0;
+    let _got = unsafe {
+        winapi::um::fileapi::ReadFile(
+            read,
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+            &mut read_n,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(
+        read_n,
+        0,
+        "no bytes may leak into the sentinel pipe; read_n={read_n}, got={_got}, bytes={:?}",
+        &buf[..read_n.min(64) as usize]
+    );
+    unsafe {
+        CloseHandle(read);
+    }
+}
+
+/// Windows handle hygiene: the process handle count does not drift across
+/// repeated invocations (each run's pipes, jobs, and stdio handles are
+/// closed on success and failure paths).
+#[cfg(windows)]
+#[tokio::test]
+async fn process_handle_count_stable_over_repeated_runs() {
+    use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessHandleCount};
+
+    let count_now = || {
+        let mut n: u32 = 0;
+        let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) };
+        assert_ne!(ok, 0, "GetProcessHandleCount failed");
+        n
+    };
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let config = SubprocessConfig::default();
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+
+    let run_once = |config: SubprocessConfig| {
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[SUBPROCESS_EXEC_CAPABILITY],
+        );
+        futures::executor::block_on(async {
+            harness
+                .run(
+                    step(version_args()),
+                    &mut dispatch(&harness, &m, &r, &mut runner),
+                )
+                .await
+                .expect("run succeeds")
+        })
+    };
+
+    // Warm-up so one-time caches do not count as drift.
+    for _ in 0..3 {
+        run_once(config.clone());
+    }
+    let before = count_now();
+    for _ in 0..=20 {
+        run_once(config.clone());
+    }
+    let after = count_now();
+    assert!(
+        (after as i64) - (before as i64) <= 2,
+        "process handle count drifted: {before} -> {after}"
     );
 }
 
