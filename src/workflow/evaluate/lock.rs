@@ -51,13 +51,18 @@ pub struct WorkflowFileLock {
     _path: PathBuf,
 }
 
+impl std::fmt::Debug for WorkflowFileLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowFileLock")
+            .field("path", &self._path)
+            .finish_non_exhaustive()
+    }
+}
+
 impl WorkflowFileLock {
     /// Block until the exclusive lock for `name` in `repo` is acquired.
     pub fn acquire(repo: &Path, name: &str) -> Result<Self> {
-        let path = lock_path_for(repo, name);
-        let file = open_lock_file(&path)?;
-        lock_exclusive(&file, &path)?;
-        Ok(Self::from_locked(file, path))
+        Self::acquire_at(&lock_path_for(repo, name))
     }
 
     /// Try to acquire the exclusive lock without blocking.
@@ -66,10 +71,27 @@ impl WorkflowFileLock {
     /// caller should wait and re-try rather than treating this as an error).
     /// Returns `Err` for any other I/O failure.
     pub fn try_acquire(repo: &Path, name: &str) -> Result<Option<Self>> {
-        let path = lock_path_for(repo, name);
-        let file = open_lock_file(&path)?;
-        match try_lock_exclusive(&file, &path)? {
-            true => Ok(Some(Self::from_locked(file, path))),
+        Self::try_acquire_at(&lock_path_for(repo, name))
+    }
+
+    /// Block until the exclusive lock on an explicit file path is acquired.
+    ///
+    /// Same OS semantics as [`Self::acquire`], for callers whose lock file
+    /// does not live under a repository's `.prometheos` directory (e.g. a
+    /// workspace owner lock). The file is never truncated or deleted.
+    pub fn acquire_at(path: &Path) -> Result<Self> {
+        let file = open_lock_file(path)?;
+        lock_exclusive(&file, path)?;
+        Ok(Self::from_locked(file, path.to_path_buf()))
+    }
+
+    /// Try to acquire the exclusive lock on an explicit file path without
+    /// blocking. Returns `Ok(None)` while another process holds it, `Err`
+    /// for any other I/O failure. The file is never truncated or deleted.
+    pub fn try_acquire_at(path: &Path) -> Result<Option<Self>> {
+        let file = open_lock_file(path)?;
+        match try_lock_exclusive(&file, path)? {
+            true => Ok(Some(Self::from_locked(file, path.to_path_buf()))),
             false => Ok(None),
         }
     }
