@@ -55,11 +55,18 @@ pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
 /// Canonical harness declarations owned by the implementation.
 ///
 /// These are the authoritative source declarations from which the capability
-/// catalog is generated. They represent the harness declaration seam families
-/// (native, protocol) and correspond to the adapter implementations in the
-/// conformance tests. There is no production HarnessRegistry in src/; these
-/// declarations are the implementation-owned inventory, not a registry of
-/// production executables.
+/// catalog is generated. Two entries are REAL production adapters — the
+/// native workspace-inspection harness (`lite.harness.native.inspect`, via
+/// [`crate::workflow::native_harness::native_declaration`]) and the
+/// subprocess harness (`lite.harness.subprocess`, via
+/// [`crate::workflow::subprocess_harness::subprocess_declaration`]). The
+/// remaining entries are the declaration seam families (native probe,
+/// protocol relay) exercised by the conformance-test fixtures; they are not
+/// claimed as production behavior.
+///
+/// The catalog fixture tests register these declarations through the
+/// fail-closed [`HarnessRegistry::register`] path, so an inventory that
+/// cannot register cannot produce a committed catalog.
 pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
     use crate::workflow::soma::capability::Locality;
     vec![
@@ -143,6 +150,7 @@ pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
             content_digest: None,
         }
         .sealed(),
+        crate::workflow::native_harness::native_declaration(),
         crate::workflow::subprocess_harness::subprocess_declaration(),
     ]
 }
