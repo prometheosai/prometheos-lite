@@ -29,6 +29,7 @@ mod common;
 
 const NODE_ID: &str = "native-inspect-step";
 const CANARY: &str = "test-secret-deep-41";
+const CONFIG_CANARY: &str = "cfg-known-secret-777";
 
 fn manifest() -> NodeManifestV1 {
     NodeManifestV1::parse_json(
@@ -690,4 +691,340 @@ fn selection_refuses_incompatible_workspace_adapter_revision() {
         err.to_string().contains("HSEL-"),
         "expected a selection refusal code, got: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FIX A regressions: handle-based confinement
+// ---------------------------------------------------------------------------
+
+fn make_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+/// A symlink inside the workspace that points at another workspace file is
+/// an authorized file and stays inspectable. The digest must be of the link
+/// TARGET (the file the opened handle refers to), proving the confinement
+/// check validated the handle that was actually hashed.
+#[tokio::test]
+async fn internal_symlink_to_inside_file_remains_inspectable() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    let payload = b"internal target payload\n";
+    std::fs::write(acquired.root.join("real.txt"), payload).unwrap();
+    make_symlink(
+        std::path::Path::new("real.txt"),
+        &acquired.root.join("link-inside.txt"),
+    )
+    .unwrap();
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let harness = NativeHarness::new();
+    let outcome = run_inspect(&harness, step("link-inside.txt"), &mut runner)
+        .await
+        .expect("internal symlink to an inside file inspects");
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.output).expect("output is JSON");
+    assert_eq!(parsed["path"], serde_json::json!("link-inside.txt"));
+    assert_eq!(
+        parsed["sha256"],
+        serde_json::json!(sha256_hex(payload)),
+        "digest must be of the symlink target the opened handle refers to"
+    );
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(payload.len() as u64));
+}
+
+/// Adversarial race: a symlink target that flips between an inside file and
+/// an outside file while it is inspected. Every attempt must either refuse
+/// or hash the inside bytes — outside bytes must never be hashed, however
+/// the swap interleaves with the open.
+#[tokio::test]
+async fn concurrent_symlink_swap_never_hashes_outside_bytes() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    let inside_bytes = b"inside-authorized-bytes\n";
+    let outside_bytes = b"outside-secret-bytes\n";
+    std::fs::write(acquired.root.join("inside.txt"), inside_bytes).unwrap();
+    let outside_path = _dir.path().join("outside-secret.txt");
+    std::fs::write(&outside_path, outside_bytes).unwrap();
+    let inside_sha = sha256_hex(inside_bytes);
+    let outside_sha = sha256_hex(outside_bytes);
+    make_symlink(
+        std::path::Path::new("inside.txt"),
+        &acquired.root.join("swap.txt"),
+    )
+    .unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = {
+        let stop = Arc::clone(&stop);
+        let link = acquired.root.join("swap.txt");
+        let inside_target = std::path::PathBuf::from("inside.txt");
+        let outside_target = outside_path.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_file(&link);
+                make_symlink(&outside_target, &link).ok();
+                let _ = std::fs::remove_file(&link);
+                make_symlink(&inside_target, &link).ok();
+            }
+        })
+    };
+    let mut inside_results = 0usize;
+    let mut escapes = 0usize;
+    let mut missing = 0usize;
+    let mut other_errs = 0usize;
+    for attempt in 0..60 {
+        let mut runner = runner_for(
+            NativeInspectConfig::default(),
+            acquired.root.clone(),
+            &[NATIVE_INSPECT_CAPABILITY],
+        );
+        let harness = NativeHarness::new();
+        match run_inspect(&harness, step("swap.txt"), &mut runner).await {
+            Ok(outcome) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&outcome.output).expect("output is JSON");
+                assert_eq!(
+                    parsed["sha256"],
+                    serde_json::json!(inside_sha),
+                    "attempt {attempt}: only inside bytes may be hashed"
+                );
+                assert_ne!(parsed["sha256"], serde_json::json!(outside_sha.clone()));
+                inside_results += 1;
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.contains(&outside_sha),
+                    "attempt {attempt}: outside bytes must never be hashed: {msg}"
+                );
+                assert!(
+                    !msg.contains("outside-secret-bytes"),
+                    "attempt {attempt}: outside content must never surface: {msg}"
+                );
+                if msg.contains("escapes the workspace") {
+                    escapes += 1;
+                } else if msg.contains("does not exist") {
+                    missing += 1;
+                } else {
+                    other_errs += 1;
+                }
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    flipper.join().expect("flipper joins");
+    assert!(
+        inside_results + escapes >= 10,
+        "race test was not meaningfully exercised (inside: {inside_results}, escapes: {escapes}, missing: {missing}, other: {other_errs})"
+    );
+}
+
+/// A symlink loop cannot be confined or verified; it fails closed with a
+/// typed refusal rather than hanging or following the loop.
+#[tokio::test]
+async fn symlink_loop_refuses() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    make_symlink(
+        std::path::Path::new("loop.txt"),
+        &acquired.root.join("loop.txt"),
+    )
+    .unwrap();
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let harness = NativeHarness::new();
+    let err = run_inspect(&harness, step("loop.txt"), &mut runner)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("native inspection"),
+        "a symlink loop must fail closed with a typed refusal, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX B regressions: structure-aware redaction
+// ---------------------------------------------------------------------------
+
+/// A credential-shaped filename is redacted in the structured result, and
+/// the result stays valid JSON with the digest and byte count preserved.
+#[tokio::test]
+async fn credential_shaped_filename_returns_valid_redacted_json() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    let payload = b"credential filename payload\n";
+    let filename = "Bearer TOKabc99.txt";
+    std::fs::write(acquired.root.join(filename), payload).unwrap();
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let harness = NativeHarness::new();
+    let outcome = run_inspect(&harness, step(filename), &mut runner)
+        .await
+        .expect("inspection succeeds");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output stays valid JSON");
+    // The token alphabet runs on for the extension too, so the `.txt`
+    // falls inside the redacted token; the shape, not the extension, is
+    // the point of the fixture.
+    assert_eq!(parsed["path"], serde_json::json!("Bearer <redacted>"));
+    assert_eq!(
+        parsed["sha256"],
+        serde_json::json!(sha256_hex(payload)),
+        "verified digest must be preserved"
+    );
+    assert_eq!(
+        parsed["sizeBytes"],
+        serde_json::json!(payload.len() as u64),
+        "verified byte count must be preserved"
+    );
+    assert!(
+        !outcome.output.contains("TOKabc99"),
+        "the credential token must never persist"
+    );
+}
+
+/// An opaque request-scoped secret embedded in a filename is redacted via
+/// the governed dispatch secret route, without breaking JSON.
+#[tokio::test]
+async fn opaque_request_secret_in_filename_is_redacted() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    let payload = b"opaque secret filename payload\n";
+    let filename = format!("report-{CANARY}.txt");
+    std::fs::write(acquired.root.join(&filename), payload).unwrap();
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let harness = NativeHarness::new();
+    let m = manifest();
+    let r = restrictions();
+    let outcome = {
+        let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, vec![CANARY.to_string()]);
+        harness
+            .run(step(filename), &mut d)
+            .await
+            .expect("inspection succeeds")
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output stays valid JSON");
+    assert_eq!(parsed["path"], serde_json::json!("report-<redacted>.txt"));
+    assert_eq!(parsed["sha256"], serde_json::json!(sha256_hex(payload)));
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(payload.len() as u64));
+    assert!(
+        !outcome.output.contains(CANARY),
+        "persisted output must be secret-free"
+    );
+}
+
+/// The same guarantee through the configured-secrets route.
+#[tokio::test]
+async fn configured_secret_in_filename_is_redacted() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    let payload = b"config secret payload\n";
+    let filename = format!("cfg-{CONFIG_CANARY}.txt");
+    std::fs::write(acquired.root.join(&filename), payload).unwrap();
+    let config = NativeInspectConfig::default().known_secrets(vec![CONFIG_CANARY.to_string()]);
+    let mut runner = runner_for(config, acquired.root.clone(), &[NATIVE_INSPECT_CAPABILITY]);
+    let harness = NativeHarness::new();
+    let outcome = run_inspect(&harness, step(&filename), &mut runner)
+        .await
+        .expect("inspection succeeds");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output stays valid JSON");
+    assert_eq!(parsed["path"], serde_json::json!("cfg-<redacted>.txt"));
+    assert_eq!(parsed["sha256"], serde_json::json!(sha256_hex(payload)));
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(payload.len() as u64));
+    assert!(
+        !outcome.output.contains(CONFIG_CANARY),
+        "persisted output must be secret-free"
+    );
+}
+
+/// JSON-special characters (backslash separators, apostrophes, ampersands,
+/// equals signs) survive serialization and parse back exactly.
+#[tokio::test]
+async fn json_special_characters_do_not_break_serialization() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    std::fs::create_dir_all(acquired.root.join("subdir")).unwrap();
+    std::fs::write(acquired.root.join("subdir").join("hello.txt"), "x\n").unwrap();
+    std::fs::write(acquired.root.join("o'brien&copy=final.txt"), "y\n").unwrap();
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let harness = NativeHarness::new();
+    let outcome = run_inspect(&harness, step("subdir\\hello.txt"), &mut runner)
+        .await
+        .expect("backslash path inspects");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output stays valid JSON");
+    assert_eq!(parsed["path"], serde_json::json!("subdir\\hello.txt"));
+    assert_eq!(parsed["sha256"], serde_json::json!(sha256_hex(b"x\n")));
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(2u64));
+
+    // A fresh runner (the runner is idempotent on step id — caching is
+    // correct behavior, so the second inspection gets its own runner).
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let outcome = run_inspect(&harness, step("o'brien&copy=final.txt"), &mut runner)
+        .await
+        .expect("apostrophe name inspects");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("output stays valid JSON");
+    assert_eq!(parsed["path"], serde_json::json!("o'brien&copy=final.txt"));
+    assert_eq!(parsed["sha256"], serde_json::json!(sha256_hex(b"y\n")));
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(2u64));
+}
+
+/// The inspected filename carries secrets from BOTH governed routes; the
+/// persisted result document is parseable and carries neither.
+#[tokio::test]
+async fn persisted_output_is_secret_free() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    let payload = b"dual secret payload\n";
+    let filename = format!("doc-{CANARY}-{CONFIG_CANARY}.txt");
+    std::fs::write(acquired.root.join(&filename), payload).unwrap();
+    let config = NativeInspectConfig::default().known_secrets(vec![CONFIG_CANARY.to_string()]);
+    let mut runner = runner_for(config, acquired.root.clone(), &[NATIVE_INSPECT_CAPABILITY]);
+    let harness = NativeHarness::new();
+    let m = manifest();
+    let r = restrictions();
+    let outcome = {
+        let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, vec![CANARY.to_string()]);
+        harness
+            .run(step(&filename), &mut d)
+            .await
+            .expect("inspection succeeds")
+    };
+    assert!(!outcome.output.contains(CANARY));
+    assert!(!outcome.output.contains(CONFIG_CANARY));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("persisted output parses as JSON");
+    assert_eq!(
+        parsed["path"],
+        serde_json::json!("doc-<redacted>-<redacted>.txt")
+    );
+    assert_eq!(parsed["sha256"], serde_json::json!(sha256_hex(payload)));
+    assert_eq!(parsed["sizeBytes"], serde_json::json!(payload.len() as u64));
 }

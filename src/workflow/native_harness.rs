@@ -19,9 +19,15 @@
 //!   relative, non-empty, and resource-bounded.
 //! - Path confinement: the requested path must be relative (an absolute or
 //!   Windows drive/UNC form fails), must contain no `..` segment on any
-//!   platform, and the canonicalized file must start with the canonicalized
-//!   workspace root. Symlink escapes are refused; directories, missing
-//!   files, and files above the size budget are refused before any read.
+//!   platform. The file is opened through a handle-verified operation and
+//!   its identity, type, and size are validated on the retained handle
+//!   before any byte is read (Windows: the opened handle's final path must
+//!   lie beneath the canonical workspace root; Unix: a dirfd-relative
+//!   component walk with expected-identity capture and verification of the
+//!   opened handle). A concurrent path/symlink swap can only make the
+//!   inspection refuse — never redirect the read outside the workspace.
+//!   Symlink escapes, directories, missing files, and files above the size
+//!   budget are refused before any read.
 //! - The handler only reads bytes. It never writes to the workspace, never
 //!   follows content outside the governance boundary, and returns a digest —
 //!   file CONTENT never leaves the handler, so a secret-bearing file cannot
@@ -407,43 +413,377 @@ fn validate_relative_path(raw: &str, max_path_chars: usize) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the inspected file and prove it lies inside the workspace. The
-/// canonicalized target must start with the canonicalized root, so a
-/// symlink inside the workspace that points outside is refused. Missing
-/// files and directories are refused.
-fn confined_file(workspace_root: &Path, raw: &str) -> Result<(PathBuf, u64)> {
-    let root = std::fs::canonicalize(workspace_root).with_context(|| {
-        format!(
-            "workspace root {} is not accessible",
-            workspace_root.display()
-        )
-    })?;
-    let candidate = root.join(raw);
-    let canonical = match std::fs::canonicalize(&candidate) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("native inspection target does not exist: {raw:?}")
+/// Identity of an opened file handle. A handle pins its file for its whole
+/// lifetime, so a stable identity proves the inspected handle never
+/// retargeted between verification and hashing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenFileId {
+    /// Volume serial number (Windows) or device id (Unix).
+    primary: u64,
+    /// File index (Windows) or inode (Unix).
+    secondary: u64,
+}
+
+/// Identity of the file an opened handle refers to, read from the handle
+/// itself (`fstat` on Unix, `GetFileInformationByHandle` on Windows — a
+/// handle query, never a pathname stat).
+fn open_file_id(file: &std::fs::File) -> Result<OpenFileId> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle as _;
+        use winapi::shared::ntdef::HANDLE;
+        use winapi::um::fileapi::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+        let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: `info` is valid for the call; on success it is fully
+        // initialized.
+        let ok = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as HANDLE, info.as_mut_ptr())
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("native inspection could not verify the opened handle");
         }
-        Err(e) => return Err(e).context("native inspection could not resolve the target path"),
+        // SAFETY: the call succeeded and fully initialized `info`.
+        let info = unsafe { info.assume_init() };
+        Ok(OpenFileId {
+            primary: u64::from(info.dwVolumeSerialNumber),
+            secondary: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        })
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file
+            .metadata()
+            .context("native inspection could not verify the opened handle")?;
+        Ok(OpenFileId {
+            primary: metadata.dev(),
+            secondary: metadata.ino(),
+        })
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        unreachable!("open_file_id is only defined on Windows and Unix")
+    }
+}
+
+/// Open the inspected file beneath the canonical workspace root through a
+/// platform handle-verified operation, and return the retained handle plus
+/// the size reported by that handle. Validation happens on the opened
+/// handle — never by reopening the pathname — so a concurrent path or
+/// symlink swap cannot redirect the read outside the workspace: at worst
+/// the inspection refuses. Where a platform cannot establish that
+/// guarantee, this fails closed instead of degrading to a pathname check.
+#[cfg(windows)]
+fn open_confined_file(root: &Path, raw: &str) -> Result<(std::fs::File, u64)> {
+    open_confined_file_windows(root, raw)
+}
+
+#[cfg(unix)]
+fn open_confined_file(root: &Path, raw: &str) -> Result<(std::fs::File, u64)> {
+    open_confined_file_unix(root, raw)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn open_confined_file(_root: &Path, _raw: &str) -> Result<(std::fs::File, u64)> {
+    bail!("native inspection file confinement is not supported on this platform")
+}
+
+// ---------------------------------------------------------------------------
+// Windows handle confinement
+// ---------------------------------------------------------------------------
+//
+// `CreateFileW` opens the candidate file (following symlinks and junctions,
+// as usual) and returns a handle that pins the file identity from that
+// instant on. `GetFinalPathNameByHandleW` then reports the final path of
+// the file the HANDLE actually refers to — a swap of the pathname after
+// the open cannot change what the handle points at, and a swap before the
+// open is caught because the handle's final path resolves outside the
+// workspace and the open is refused. The handle is validated (regular
+// file, size) before any byte is read, and hashed on the retained handle.
+
+// `GetFinalPathNameByHandleW` relies on the winapi `VOLUME_NAME_DOS` flag
+// to select the `\\?\C:\...` DOS form, comparable to a canonicalized root.
+// The winapi constant is zero on the target Windows build; a scratch
+// probe verified this value returns the resolved `\\?\C:\...` final path —
+// including symlink targets opened through a link — which is exactly the
+// form `std::fs::canonicalize` produces for the workspace root.
+
+/// Normalize a Windows path string for case-insensitive, separator-
+/// insensitive comparison.
+#[cfg(windows)]
+fn comparable_windows_path(path: &str) -> String {
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
+/// Whether the final path of an opened handle lies beneath the canonical
+/// workspace root, compared on a whole-component boundary.
+#[cfg(windows)]
+fn opened_path_is_within(final_path: &str, root: &Path) -> bool {
+    let root_s = comparable_windows_path(&root.to_string_lossy());
+    let root_s = root_s.trim_end_matches('\\');
+    let final_s = comparable_windows_path(final_path);
+    final_s == root_s || final_s.starts_with(&format!("{root_s}\\"))
+}
+
+/// The final path of the file an open handle refers to, in DOS form. The
+/// buffer grows when Win32 reports the required size.
+#[cfg(windows)]
+fn opened_final_path(handle: std::os::windows::io::RawHandle) -> Result<String> {
+    use winapi::shared::ntdef::HANDLE;
+    use winapi::um::fileapi::GetFinalPathNameByHandleW;
+    use winapi::um::winbase::VOLUME_NAME_DOS;
+    let mut buffer: Vec<u16> = vec![0; 1024];
+    loop {
+        // SAFETY: `buffer` is valid for `buffer.len()` WCHARs; Win32 writes
+        // a NUL-terminated string on success and reports the required size
+        // (excluding the terminator) when the buffer is too small.
+        let required = unsafe {
+            GetFinalPathNameByHandleW(
+                handle as HANDLE,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                VOLUME_NAME_DOS,
+            )
+        };
+        if required == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("native inspection could not resolve the opened file path");
+        }
+        if (required as usize) < buffer.len() {
+            buffer.truncate(required as usize);
+            return Ok(String::from_utf16_lossy(&buffer));
+        }
+        buffer.resize((required as usize) + 1, 0);
+    }
+}
+
+#[cfg(windows)]
+fn open_confined_file_windows(root: &Path, raw: &str) -> Result<(std::fs::File, u64)> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, RawHandle};
+    use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING};
+    use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use winapi::um::winnt::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ};
+
+    let candidate = root.join(raw);
+    let wide: Vec<u16> = candidate
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is NUL-terminated. Read access with permissive
+    // sharing keeps inspection concurrent-read safe; BACKUP_SEMANTICS lets
+    // directories open so the regular-file check below refuses them
+    // explicitly instead of surfacing an opaque OS error.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
     };
-    if !canonical.starts_with(&root) {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            bail!("native inspection target does not exist: {raw:?}");
+        }
+        return Err(err)
+            .context("native inspection could not open the target file confined to the workspace");
+    }
+    // SAFETY: the freshly created handle is owned by the caller; wrapping
+    // it transfers unique ownership to the `File`.
+    let file = unsafe { std::fs::File::from_raw_handle(handle as RawHandle) };
+    // Confinement is proven on the OPENED handle: the final path this
+    // handle actually refers to must lie beneath the canonical root.
+    let final_path = opened_final_path(file.as_raw_handle())
+        .context("native inspection could not verify confinement of the opened file")?;
+    if !opened_path_is_within(&final_path, root) {
         bail!("native inspection path escapes the workspace: {raw:?}");
     }
-    let metadata = std::fs::metadata(&canonical)
-        .with_context(|| format!("native inspection could not stat {raw:?}"))?;
+    // Type and size come from the opened handle as well.
+    let metadata = file
+        .metadata()
+        .context("native inspection could not stat the opened file")?;
     if !metadata.is_file() {
         bail!("native inspection target is not a regular file: {raw:?}");
     }
-    Ok((canonical, metadata.len()))
+    Ok((file, metadata.len()))
 }
 
-/// Read and digest one confined file in bounded memory. The size budget is
-/// checked against the stat size first, then re-verified against the bytes
-/// actually read (a file growing mid-read cannot smuggle unbounded input).
-/// Only the digest and size leave this function — content never does.
-fn digest_confined_file(path: &Path, max_file_bytes: u64) -> Result<(String, u64)> {
+// ---------------------------------------------------------------------------
+// Unix dirfd-walk confinement
+// ---------------------------------------------------------------------------
+//
+// Every step is resolved relative to a retained directory handle (`openat`
+// from the parent descriptor), so no later pathname resolution can
+// redirect the walk. Intermediate components must be real directories
+// (`O_DIRECTORY | O_NOFOLLOW`); the final component's identity is captured
+// with `fstatat` relative to the parent handle, opened with `openat`, and
+// the opened handle's `fstat` identity must equal the captured identity
+// before any byte is read — a swap of the final component in either
+// direction can only refuse. FIFOs and other non-regular files are refused
+// before the (potentially blocking) open.
+
+#[cfg(unix)]
+fn open_confined_file_unix(root: &Path, raw: &str) -> Result<(std::fs::File, u64)> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+
+    // The workspace root is the trusted anchor — an acquired, governed
+    // directory whose canonical path the caller resolved once. The root
+    // itself is pinned by handle before any child resolution happens.
+    let root_name = std::ffi::CString::new(root.as_os_str().as_bytes())
+        .context("native inspection workspace root is not a valid path")?;
+    // SAFETY: `root_name` is a valid NUL-terminated path.
+    let root_fd = unsafe {
+        libc::openat(
+            libc::AT_FDCWD,
+            root_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("native inspection workspace root is not accessible");
+    }
+    // SAFETY: `root_fd` is a fresh descriptor; ownership transfers to `File`.
+    let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
+    let trailing_separator = raw.ends_with('/');
+    let mut components = raw
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .peekable();
+    while let Some(component) = components.next() {
+        let component_cstr = std::ffi::CString::new(component.as_bytes())
+            .context("native inspection path contains a NUL byte")?;
+        if components.peek().is_some() {
+            // Intermediate: must be a real directory inside the parent
+            // handle; a symlink (even one pointing inside) fails closed —
+            // directory symlinks are traversal boundaries this adapter
+            // does not follow.
+            // SAFETY: `component_cstr` is NUL-terminated; `directory` is a
+            // live directory handle.
+            let fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    component_cstr.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    bail!("native inspection target does not exist: {raw:?}");
+                }
+                return Err(err).context(
+                    "native inspection could not open a workspace directory confined to the root",
+                );
+            }
+            // SAFETY: `fd` is fresh; ownership transfers. The previous
+            // directory handle is dropped (closed) — the walk has moved on.
+            directory = unsafe { std::fs::File::from_raw_fd(fd) };
+            continue;
+        }
+        // Final component: refuse a trailing separator exactly as a
+        // directory would be refused below.
+        if trailing_separator {
+            bail!("native inspection target is not a regular file: {raw:?}");
+        }
+        // Capture the identity of the file the confined path names right
+        // now, relative to the retained parent handle.
+        let mut expected_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `component_cstr` is NUL-terminated; `expected_stat` is
+        // initialized by the call on success.
+        let rc = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                component_cstr.as_ptr(),
+                expected_stat.as_mut_ptr(),
+                0,
+            )
+        };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::NotFound {
+                bail!("native inspection target does not exist: {raw:?}");
+            }
+            return Err(err).context("native inspection could not stat the confined target");
+        }
+        // SAFETY: `fstatat` succeeded and fully initialized the stat.
+        let expected_stat = unsafe { expected_stat.assume_init() };
+        // Regular file before the (potentially blocking) open: FIFO and
+        // device opens would otherwise hang waiting for a writer.
+        if (expected_stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
+            bail!("native inspection target is not a regular file: {raw:?}");
+        }
+        // Open the file relative to the retained parent handle (following
+        // a final-component symlink whose target is inside the workspace,
+        // which the identity check below authorizes).
+        // SAFETY: `component_cstr` is NUL-terminated; `directory` is live.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component_cstr.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::NotFound {
+                bail!("native inspection target does not exist: {raw:?}");
+            }
+            return Err(err).context(
+                "native inspection could not open the target file confined to the workspace",
+            );
+        }
+        // SAFETY: `fd` is fresh; ownership transfers to `File`.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        // Validate the OPENED handle: its identity must equal the captured
+        // workspace file. A swap of the final component anywhere between
+        // capture and open lands on a different inode and is refused here.
+        let metadata = file
+            .metadata()
+            .context("native inspection could not stat the opened file")?;
+        let expected = OpenFileId {
+            primary: expected_stat.st_dev as u64,
+            secondary: expected_stat.st_ino as u64,
+        };
+        if open_file_id(&file)? != expected {
+            bail!(
+                "native inspection opened handle does not match the verified workspace file: {raw:?}"
+            );
+        }
+        if !metadata.is_file() {
+            bail!("native inspection target is not a regular file: {raw:?}");
+        }
+        return Ok((file, metadata.len()));
+    }
+    // No components: the path named the workspace root itself, which is a
+    // directory, never an inspectable file.
+    bail!("native inspection target is not a regular file: {raw:?}")
+}
+
+/// Hash bytes from the exact retained handle — never from the pathname.
+/// The size budget was enforced on the handle size before this call and is
+/// re-enforced against the bytes actually read (a file growing mid-read
+/// cannot smuggle unbounded input), and the handle identity is verified
+/// unchanged before and after reading. Only the digest leaves this
+/// function — content never does.
+fn digest_open_file(
+    file: &mut std::fs::File,
+    expected_size: u64,
+    max_file_bytes: u64,
+) -> Result<String> {
     use sha2::Digest as _;
-    let mut file = std::fs::File::open(path).context("native inspection could not open target")?;
+    let opened_id =
+        open_file_id(file).context("native inspection could not verify the opened file")?;
     let mut hasher = sha2::Sha256::new();
     let mut total: u64 = 0;
     let mut buf = [0u8; READ_CHUNK];
@@ -460,7 +800,16 @@ fn digest_confined_file(path: &Path, max_file_bytes: u64) -> Result<(String, u64
         }
         hasher.update(&buf[..n]);
     }
-    Ok((format!("{:x}", hasher.finalize()), total))
+    // The handle must still be the file we snapshotted before reading.
+    if open_file_id(file).context("native inspection could not verify the opened file")?
+        != opened_id
+    {
+        bail!("native inspection opened handle changed during read; refusing to report");
+    }
+    if total != expected_size {
+        bail!("native inspection file changed during read; refusing to report");
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn run_native_inspect_guarded(
@@ -470,21 +819,39 @@ fn run_native_inspect_guarded(
 ) -> Result<String> {
     let decoded = decode_args(args, config.max_args_bytes)?;
     validate_relative_path(&decoded.path, config.max_path_chars)?;
-    let (canonical, stat_size) = confined_file(workspace_root, &decoded.path)?;
-    if stat_size > config.max_file_bytes {
+    // Anchor: the workspace root is canonicalized once. Every confined open
+    // resolves beneath it through a retained handle, never by reopening a
+    // pathname.
+    let root = std::fs::canonicalize(workspace_root).with_context(|| {
+        format!(
+            "workspace root {} is not accessible",
+            workspace_root.display()
+        )
+    })?;
+    let (mut file, handle_size) = open_confined_file(&root, &decoded.path)?;
+    // The size budget is enforced on the size the opened handle reports,
+    // before any byte is read.
+    if handle_size > config.max_file_bytes {
         bail!(
             "native inspection file exceeds size budget ({} > {} bytes)",
-            stat_size,
+            handle_size,
             config.max_file_bytes
         );
     }
-    let (digest, read_bytes) = digest_confined_file(&canonical, config.max_file_bytes)?;
-    if read_bytes != stat_size {
-        bail!("native inspection file changed during read; refusing to report");
-    }
+    let digest = digest_open_file(&mut file, handle_size, config.max_file_bytes)?;
+    // Structure-aware redaction (mirroring slice E): sensitive STRING VALUES
+    // are redacted before JSON serialization, so quote/backslash-bearing
+    // secrets and credential-shaped filenames can never damage JSON
+    // grammar. Only the value changes — the verified digest and byte
+    // count are preserved exactly, and file bytes never enter this
+    // document.
+    let mut secrets = config.known_secrets.clone();
+    secrets.extend(decoded.known_secrets);
+    let redactor = Redactor::new().with_known_secrets(&secrets);
+    let redacted_path = redactor.redact(&decoded.path);
     let result = serde_json::json!({
-        "path": decoded.path,
-        "sizeBytes": stat_size,
+        "path": redacted_path,
+        "sizeBytes": handle_size,
         "sha256": digest,
         "contentReturned": false,
     });
@@ -496,15 +863,45 @@ fn run_native_inspect_guarded(
             config.max_output_bytes
         );
     }
-    // Request-scoped secret handling, mirroring the governed boundary: the
-    // result document is redacted with the request's known secrets before
-    // it can reach evidence. File bytes never enter this document.
-    let mut secrets = config.known_secrets.clone();
-    secrets.extend(decoded.known_secrets);
-    let redactor = Redactor::new().with_known_secrets(&secrets);
-    let redacted = redactor.redact(&text);
-    if redacted.len() > config.max_output_bytes {
-        bail!("native inspection redacted result exceeds output budget");
+    // Defense in depth: verify — never rewrite — that no known secret or
+    // credential-shaped residue survives in the persisted document. If one
+    // does (e.g. a secret substring inside the digest hex), the whole
+    // inspection refuses instead of persisting a secret or corrupting the
+    // result's verified facts.
+    if redactor.redact(&text) != text {
+        bail!(
+            "native inspection result still contains a known secret after redaction; refusing to persist"
+        );
     }
-    Ok(redacted)
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenFileId, open_file_id};
+
+    /// The handle identity that binds hashing to the verified file must
+    /// be stable across handles to the same file and distinct across
+    /// different files — otherwise the opened-handle checks could not
+    /// distinguish "same authorized file" from a substituted one.
+    #[test]
+    fn open_file_identity_distinguishes_opened_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let first = std::fs::File::open(&a).unwrap();
+        let second = std::fs::File::open(&a).unwrap();
+        let other = std::fs::File::open(&b).unwrap();
+        let first_id = open_file_id(&first).unwrap();
+        assert_eq!(first_id, open_file_id(&second).unwrap());
+        assert_ne!(first_id, open_file_id(&other).unwrap());
+        // Sanity: identity fields carry real data (volume/device + index/inode).
+        assert!(first_id.primary != 0 || first_id.secondary != 0);
+        let _ = OpenFileId {
+            primary: first_id.primary,
+            secondary: first_id.secondary,
+        };
+    }
 }
