@@ -43,6 +43,7 @@ pub mod onboarding;
 pub mod policy;
 pub mod portable_state;
 pub mod projection;
+pub mod protocol_harness;
 pub mod redaction;
 pub mod repo_index;
 pub mod retention;

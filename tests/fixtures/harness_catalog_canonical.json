@@ -116,6 +116,47 @@
       "overClaimed": false
     },
     {
+      "harnessId": "lite.harness.protocol.bridge",
+      "family": "protocol-bridged",
+      "name": "lite-protocol-bridge",
+      "revision": "v1",
+      "declarationDigest": "99830f5c335f7287872a2f9d0dc4312dfe5779fdfd8678555575b1a34fa36773",
+      "declaredCapabilities": [
+        "harness.protocol.bridge"
+      ],
+      "claimedCapabilities": [
+        "harness.protocol.bridge"
+      ],
+      "effectClasses": [
+        "process-exec"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [
+        "AdapterFamily { family: \"git-worktree\", revision: \"lite.workspace.adapter.v1\" }",
+        "AdapterFamily { family: \"existing-read-only\", revision: \"lite.workspace.adapter.v1\" }"
+      ],
+      "workspace": {
+        "workspace": "write"
+      },
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": false,
+      "readProjection": false,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    },
+    {
       "harnessId": "lite.harness.subprocess",
       "family": "subprocess",
       "name": "lite-subprocess",
@@ -157,5 +198,5 @@
       "overClaimed": false
     }
   ],
-  "contentDigest": "589c4cd73c7da18d500066dc7c57ed0f44d1cb3a4b516b8cfe40d4713288ba9d"
+  "contentDigest": "2ab0eaab19a2ae6deb34ac527c862f19233ba6018c68bff5420f7737efcc447e"
 }

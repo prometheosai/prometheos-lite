@@ -86,7 +86,7 @@ pub const SUBPROCESS_IDENTITY_NAME: &str = "lite-subprocess";
 pub const SUBPROCESS_REVISION: &str = "v1";
 
 /// Poll interval for the child wait loop.
-const POLL: Duration = Duration::from_millis(5);
+pub(crate) const POLL: Duration = Duration::from_millis(5);
 /// Settle time for tree quiescence after termination / group sweeps.
 const SETTLE: Duration = Duration::from_millis(100);
 /// Buffer retain cap per stream equals the output budget; streams are
@@ -394,10 +394,10 @@ pub fn subprocess_capability(config: SubprocessConfig, workspace_root: PathBuf) 
 
 /// Drain state behind one pipe: bounded retention, total byte count.
 #[derive(Clone)]
-struct DrainState {
-    retained: Vec<u8>,
-    total: u64,
-    done: bool,
+pub(crate) struct DrainState {
+    pub(crate) retained: Vec<u8>,
+    pub(crate) total: u64,
+    pub(crate) done: bool,
 }
 
 /// A bounded in-memory drain of one child pipe.
@@ -407,7 +407,10 @@ struct DrainState {
 /// pipe (no file ever exists), so disk usage is zero by construction and
 /// fast writers cannot allocate unbounded memory: retention saturates at
 /// `retain_cap` and excess is dropped after counting.
-fn spawn_drain<R: Read + Send + 'static>(mut reader: R, retain_cap: usize) -> DrainHandle {
+pub(crate) fn spawn_drain<R: Read + Send + 'static>(
+    mut reader: R,
+    retain_cap: usize,
+) -> DrainHandle {
     let state = Arc::new(Mutex::new(DrainState {
         retained: Vec::new(),
         total: 0,
@@ -439,7 +442,7 @@ fn spawn_drain<R: Read + Send + 'static>(mut reader: R, retain_cap: usize) -> Dr
     }
 }
 
-struct DrainHandle {
+pub(crate) struct DrainHandle {
     state: Arc<Mutex<DrainState>>,
     handle: std::thread::JoinHandle<()>,
     joined: bool,
@@ -447,12 +450,12 @@ struct DrainHandle {
 
 impl DrainHandle {
     /// Snapshot (retained text, total bytes, drain done).
-    fn snapshot(&self) -> (Vec<u8>, u64, bool) {
+    pub(crate) fn snapshot(&self) -> (Vec<u8>, u64, bool) {
         let state = self.state.lock().expect("drain state");
         (state.retained.clone(), state.total, state.done)
     }
 
-    fn total(&self) -> u64 {
+    pub(crate) fn total(&self) -> u64 {
         self.state.lock().expect("drain state").total
     }
 
@@ -460,7 +463,7 @@ impl DrainHandle {
     /// return the final drain state — retained bytes, total, done. The
     /// caller must verify `done` before sealing evidence; an unfinished
     /// drain is a failure, never a silent success.
-    fn finish(mut self) -> DrainState {
+    pub(crate) fn finish(mut self) -> DrainState {
         self.joined = true;
         let started = Instant::now();
         loop {
@@ -480,7 +483,8 @@ impl DrainHandle {
 // Process-tree containment (R1)
 // ---------------------------------------------------------------------------
 
-/// Owned process-tree containment for one child invocation.
+/// Owned process-tree containment for one child invocation (shared primitive
+/// reused by the protocol-bridged harness; see slice G).
 ///
 /// - Windows: a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
 ///   created before spawn and assigned to the SUSPENDED child process
@@ -492,7 +496,7 @@ impl DrainHandle {
 ///
 /// If containment cannot be established, the caller kills and reaps the
 /// child and fails closed — never proceeds uncontained.
-struct Containment {
+pub(crate) struct Containment {
     #[cfg(windows)]
     job: Option<winapi::shared::ntdef::HANDLE>,
     /// Process group id once spawned (Unix only): equals the child's pid
@@ -649,8 +653,9 @@ impl Drop for Containment {
 // Child process handle (platform spawn + wait)
 // ---------------------------------------------------------------------------
 
-/// A running governed child + its tree containment.
-enum SpawnedChild {
+/// A running governed child + its tree containment (shared primitive reused
+/// by the protocol-bridged harness).
+pub(crate) enum SpawnedChild {
     #[cfg(unix)]
     Unix {
         child: std::process::Child,
@@ -663,15 +668,81 @@ enum SpawnedChild {
     },
 }
 
+/// Parent-side writer for the child's stdin pipe (protocol bridge only).
+///
+/// The subprocess harness never needs this (its child stdin is NUL); the
+/// protocol bridge writes one bounded request envelope and then closes the
+/// write end so the worker sees EOF framing. The writer is not inheritable
+/// by the child: only the pipe's read end is handed to the worker.
+pub(crate) enum BridgeStdinWriter {
+    #[cfg(unix)]
+    Unix(std::fs::File),
+    #[cfg(windows)]
+    Windows(winapi::shared::ntdef::HANDLE),
+}
+
+impl BridgeStdinWriter {
+    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        #[cfg(unix)]
+        use std::io::Write as _;
+        match self {
+            #[cfg(unix)]
+            BridgeStdinWriter::Unix(file) => file
+                .write_all(bytes)
+                .map_err(|e| anyhow::anyhow!("stdin write failed: {e}")),
+            #[cfg(windows)]
+            BridgeStdinWriter::Windows(handle) => {
+                use winapi::shared::minwindef::DWORD;
+                use winapi::um::fileapi::WriteFile;
+                let mut written_total = 0usize;
+                while written_total < bytes.len() {
+                    let mut written: DWORD = 0;
+                    let ok = unsafe {
+                        WriteFile(
+                            *handle,
+                            bytes[written_total..].as_ptr() as *const _,
+                            (bytes.len() - written_total) as DWORD,
+                            &mut written,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if ok == 0 {
+                        return Err(anyhow::anyhow!(
+                            "stdin write failed: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    if written == 0 {
+                        anyhow::bail!("stdin write made no progress");
+                    }
+                    written_total += written as usize;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn close(self) {
+        match self {
+            #[cfg(unix)]
+            BridgeStdinWriter::Unix(file) => drop(file),
+            #[cfg(windows)]
+            BridgeStdinWriter::Windows(handle) => unsafe {
+                winapi::um::handleapi::CloseHandle(handle);
+            },
+        }
+    }
+}
+
 #[cfg(windows)]
 #[derive(Clone)]
-struct WinProcess {
+pub(crate) struct WinProcess {
     process: winapi::shared::ntdef::HANDLE,
 }
 
 impl SpawnedChild {
     /// Poll once: `None` = still running, `Some(exit code)` = exited.
-    fn try_wait(&mut self) -> Option<i32> {
+    pub(crate) fn try_wait(&mut self) -> Option<i32> {
         #[cfg(unix)]
         {
             match self {
@@ -695,7 +766,7 @@ impl SpawnedChild {
     }
 
     /// Terminate the tree (containment) and reap the direct child.
-    fn terminate_and_reap(&mut self) {
+    pub(crate) fn terminate_and_reap(&mut self) {
         match self {
             #[cfg(unix)]
             SpawnedChild::Unix { child, containment } => {
@@ -715,7 +786,7 @@ impl SpawnedChild {
     }
 
     /// Sweep descendants after normal direct-child exit.
-    fn sweep_on_normal(&mut self) {
+    pub(crate) fn sweep_on_normal(&mut self) {
         match self {
             #[cfg(unix)]
             SpawnedChild::Unix { containment, .. } => containment.sweep_on_normal(),
@@ -817,15 +888,46 @@ mod win_pipe {
         let _ = unsafe { SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0) };
         Some((PixReader::new(read), write))
     }
+
+    /// Create a stdin pipe for the protocol bridge: (child read end,
+    /// parent write end). The child read end is inheritable so
+    /// CreateProcessW can hand it to the worker; the parent write end is
+    /// explicitly non-inheritable so the worker can never hold a duplicate
+    /// write end that would break EOF semantics.
+    pub fn create_stdin_pipe() -> Option<(HANDLE, HANDLE)> {
+        use winapi::shared::minwindef::TRUE;
+        use winapi::um::handleapi::{CloseHandle, SetHandleInformation};
+        use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
+        use winapi::um::winbase::HANDLE_FLAG_INHERIT;
+
+        let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.bInheritHandle = TRUE;
+        let mut read = std::ptr::null_mut();
+        let mut write = std::ptr::null_mut();
+        let ok = unsafe { CreatePipe(&mut read, &mut write, &mut sa as *mut _, 0) };
+        if ok == 0 || read.is_null() || write.is_null() {
+            if !read.is_null() {
+                unsafe { CloseHandle(read) };
+            }
+            if !write.is_null() {
+                unsafe { CloseHandle(write) };
+            }
+            return None;
+        }
+        // Parent-only write end: never inherited by the child.
+        let _ = unsafe { SetHandleInformation(write, HANDLE_FLAG_INHERIT, 0) };
+        Some((read, write))
+    }
 }
 
 /// Windows HANDLE-backed pipe reader for the drain threads.
 #[cfg(windows)]
-struct PixReader(winapi::shared::ntdef::HANDLE);
+pub(crate) struct PixReader(winapi::shared::ntdef::HANDLE);
 
 #[cfg(windows)]
 impl PixReader {
-    fn new(handle: winapi::shared::ntdef::HANDLE) -> Self {
+    pub(crate) fn new(handle: winapi::shared::ntdef::HANDLE) -> Self {
         Self(handle)
     }
 }
@@ -875,7 +977,9 @@ impl Drop for PixReader {
 /// Resolve the governed workspace root or refuse. The root must exist on
 /// every invocation: workspaces are ephemeral, and a missing root must
 /// never silently fall back to any other directory.
-fn governed_root(workspace_root: &Path) -> Result<PathBuf> {
+///
+/// Shared by the subprocess and protocol-bridged harnesses.
+pub(crate) fn governed_root(workspace_root: &Path) -> Result<PathBuf> {
     if !workspace_root.is_dir() {
         anyhow::bail!(
             "governed workspace root {} is missing; refusing to fall back to another directory",
@@ -893,7 +997,9 @@ fn governed_root(workspace_root: &Path) -> Result<PathBuf> {
 /// Resolve the child working directory inside the governed root. Relative
 /// sub-directories are joined and canonicalized; the result must remain
 /// within the canonical root and must exist. Anything else refuses.
-fn child_cwd(canonical_root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
+///
+/// Shared by the subprocess and protocol-bridged harnesses.
+pub(crate) fn child_cwd(canonical_root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
     let Some(cwd) = cwd else {
         return Ok(canonical_root.to_path_buf());
     };
@@ -922,8 +1028,10 @@ fn child_cwd(canonical_root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
 /// Pipe endpoints created for one invocation. Readers feed the drain
 /// threads; writers are handed to the child and its copies are closed by
 /// the parent immediately after a successful spawn so EOF is exact.
+///
+/// Shared by the subprocess and protocol-bridged harnesses.
 #[cfg(unix)]
-fn make_pipe() -> Result<(std::fs::File, std::fs::File)> {
+pub(crate) fn make_pipe() -> Result<(std::fs::File, std::fs::File)> {
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         anyhow::bail!(
@@ -940,7 +1048,7 @@ fn make_pipe() -> Result<(std::fs::File, std::fs::File)> {
 }
 
 #[cfg(windows)]
-fn make_pipe() -> Result<(PixReader, winapi::shared::ntdef::HANDLE)> {
+pub(crate) fn make_pipe() -> Result<(PixReader, winapi::shared::ntdef::HANDLE)> {
     win_pipe::create_pipe().ok_or_else(|| {
         anyhow::anyhow!(
             "cannot create subprocess pipe: {}",
@@ -949,20 +1057,35 @@ fn make_pipe() -> Result<(PixReader, winapi::shared::ntdef::HANDLE)> {
     })
 }
 
+/// Spawn a contained child. `want_stdin_pipe` selects the protocol-bridge
+/// stdin exchange (piped stdin with a parent-side writer) versus the
+/// subprocess harness's null stdin. The containment primitive (session +
+/// process group on Unix, Job Object on Windows) is shared; only the
+/// stdin channel differs.
 #[cfg(unix)]
-fn spawn_contained(
+pub(crate) fn spawn_contained(
     exe: &str,
     argv: &[String],
     cwd: &Path,
     stdout_w: std::fs::File,
     stderr_w: std::fs::File,
-) -> Result<SpawnedChild> {
+    want_stdin_pipe: bool,
+) -> Result<(SpawnedChild, Option<BridgeStdinWriter>)> {
     use std::os::unix::io::FromRawFd as _;
     use std::os::unix::process::CommandExt as _;
+    let (stdin_stdio, stdin_writer) = if want_stdin_pipe {
+        let (stdin_r, stdin_w) = make_pipe()?;
+        (
+            std::process::Stdio::from(stdin_r),
+            Some(BridgeStdinWriter::Unix(stdin_w)),
+        )
+    } else {
+        (std::process::Stdio::null(), None)
+    };
     let mut cmd = std::process::Command::new(exe);
     cmd.args(argv)
         .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_stdio)
         .stdout(std::process::Stdio::from(stdout_w))
         .stderr(std::process::Stdio::from(stderr_w));
     // New session + process group: the child's pid becomes the group id so
@@ -982,17 +1105,18 @@ fn spawn_contained(
     };
     let mut containment = Containment::new();
     containment.arm(&mut child)?;
-    Ok(SpawnedChild::Unix { child, containment })
+    Ok((SpawnedChild::Unix { child, containment }, stdin_writer))
 }
 
 #[cfg(windows)]
-fn spawn_contained(
+pub(crate) fn spawn_contained(
     exe: &str,
     argv: &[String],
     cwd: &Path,
     stdout_w: winapi::shared::ntdef::HANDLE,
     stderr_w: winapi::shared::ntdef::HANDLE,
-) -> Result<SpawnedChild> {
+    want_stdin_pipe: bool,
+) -> Result<(SpawnedChild, Option<BridgeStdinWriter>)> {
     use winapi::shared::ntdef::HANDLE;
     use winapi::um::fileapi::CreateFileW;
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -1009,37 +1133,60 @@ fn spawn_contained(
     /// PROC_THREAD_ATTRIBUTE_NUMBER 0x00020000 | 2); not named in winapi 0.3.
     const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 
-    // A null-device stdin keeps the child from blocking on inherited input.
-    // Inheritable so CreateProcessW can actually hand it to the child.
-    let nul_name: Vec<u16> = std::ffi::OsStr::new("NUL")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut nul_sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
-    nul_sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
-    nul_sa.bInheritHandle = 1;
-    let nul = unsafe {
-        CreateFileW(
-            nul_name.as_ptr(),
-            0x80000000, // GENERIC_READ
-            0x00000003, // FILE_SHARE_READ | FILE_SHARE_WRITE
-            &mut nul_sa as *mut _,
-            3,    // OPEN_EXISTING
-            0x80, // FILE_ATTRIBUTE_NORMAL
-            std::ptr::null_mut(),
-        )
-    };
-    if nul.is_null() || nul == INVALID_HANDLE_VALUE {
-        unsafe {
-            CloseHandle(stdout_w);
-            CloseHandle(stderr_w);
+    // Child stdin: either a null device (subprocess harness — keeps the
+    // child from blocking on inherited input) or a protocol pipe read end
+    // (bridge harness — the parent holds the non-inheritable write end and
+    // sends one bounded request). The child handle is inheritable so
+    // CreateProcessW can hand it to the child; the parent's own copy is
+    // closed right after a successful create, exactly as the stdout/stderr
+    // write ends are.
+    let (stdin_child, stdin_parent_write): (HANDLE, Option<HANDLE>) = if want_stdin_pipe {
+        match win_pipe::create_stdin_pipe() {
+            Some((read_handle, write_handle)) => (read_handle, Some(write_handle)),
+            None => {
+                unsafe {
+                    CloseHandle(stdout_w);
+                    CloseHandle(stderr_w);
+                }
+                anyhow::bail!(
+                    "cannot create protocol stdin pipe: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+    } else {
+        let nul_name: Vec<u16> = std::ffi::OsStr::new("NUL")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut nul_sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        nul_sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        nul_sa.bInheritHandle = 1;
+        let nul = unsafe {
+            CreateFileW(
+                nul_name.as_ptr(),
+                0x80000000, // GENERIC_READ
+                0x00000003, // FILE_SHARE_READ | FILE_SHARE_WRITE
+                &mut nul_sa as *mut _,
+                3,    // OPEN_EXISTING
+                0x80, // FILE_ATTRIBUTE_NORMAL
+                std::ptr::null_mut(),
+            )
         };
-        anyhow::bail!("cannot open NUL device for subprocess stdin");
-    }
+        if nul.is_null() || nul == INVALID_HANDLE_VALUE {
+            unsafe {
+                CloseHandle(stdout_w);
+                CloseHandle(stderr_w);
+            }
+            anyhow::bail!("cannot open NUL device for subprocess stdin");
+        }
+        (nul, None)
+    };
 
     // Explicit handle allowlist for the child process: exactly stdin
-    // (NUL), stdout (pipe write), stderr (pipe write) — nothing else,
-    // even if the parent process holds other inheritable handles.
+    // (NUL or protocol pipe read end), stdout (pipe write), stderr (pipe
+    // write) — nothing else, even if the parent holds other inheritable
+    // handles. The protocol parent write end is deliberately NOT listed.
     let mut size: usize = 0;
     let _ = unsafe {
         InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size as *mut _)
@@ -1057,14 +1204,17 @@ fn spawn_contained(
         unsafe {
             CloseHandle(stdout_w);
             CloseHandle(stderr_w);
-            CloseHandle(nul);
-        };
+            CloseHandle(stdin_child);
+            if let Some(w) = stdin_parent_write {
+                CloseHandle(w);
+            }
+        }
         anyhow::bail!(
             "subprocess containment unavailable: InitializeProcThreadAttributeList failed ({})",
             std::io::Error::last_os_error()
         );
     }
-    let inherited = [nul, stdout_w, stderr_w];
+    let inherited = [stdin_child, stdout_w, stderr_w];
     let list_ok = unsafe {
         UpdateProcThreadAttribute(
             attr_bytes.as_mut_ptr() as *mut _,
@@ -1081,8 +1231,11 @@ fn spawn_contained(
             DeleteProcThreadAttributeList(attr_bytes.as_mut_ptr() as *mut _);
             CloseHandle(stdout_w);
             CloseHandle(stderr_w);
-            CloseHandle(nul);
-        };
+            CloseHandle(stdin_child);
+            if let Some(w) = stdin_parent_write {
+                CloseHandle(w);
+            }
+        }
         anyhow::bail!(
             "subprocess containment unavailable: UpdateProcThreadAttribute failed ({})",
             std::io::Error::last_os_error()
@@ -1092,7 +1245,7 @@ fn spawn_contained(
     let mut startup_ex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup_ex.StartupInfo.hStdInput = nul;
+    startup_ex.StartupInfo.hStdInput = stdin_child;
     startup_ex.StartupInfo.hStdOutput = stdout_w;
     startup_ex.StartupInfo.hStdError = stderr_w;
     startup_ex.lpAttributeList = attr_bytes.as_mut_ptr() as *mut _;
@@ -1124,25 +1277,29 @@ fn spawn_contained(
     };
     if created == 0 {
         let error = std::io::Error::last_os_error();
-        if !nul.is_null() {
+        if !stdin_child.is_null() {
             unsafe {
-                CloseHandle(nul);
+                CloseHandle(stdin_child);
             };
         }
         unsafe {
             CloseHandle(stdout_w);
             CloseHandle(stderr_w);
+            if let Some(w) = stdin_parent_write {
+                CloseHandle(w);
+            }
         };
         anyhow::bail!("subprocess spawn failed for executable {exe:?}: {error}");
     }
 
-    // Parent's own copies of the stdio write ends and the NUL stdin can go
-    // now: the child holds its inherited copies, and keeping ours open
-    // would block EOF for the drain threads forever.
+    // Parent's own copies of the stdio handles can go now: the child holds
+    // its inherited copies, and keeping ours open would block EOF forever.
+    // The protocol stdin parent write end is the exception — it stays open
+    // so the bridge can send its request, and is returned to the caller.
     unsafe {
         CloseHandle(stdout_w);
         CloseHandle(stderr_w);
-        CloseHandle(nul);
+        CloseHandle(stdin_child);
     }
     // Copy the (out, err) finished captures.
     let process_handle = process_info.hProcess;
@@ -1165,6 +1322,9 @@ fn spawn_contained(
             winapi::um::processthreadsapi::TerminateProcess(process_handle, 1);
             CloseHandle(process_handle);
             CloseHandle(thread_handle);
+            if let Some(w) = stdin_parent_write {
+                CloseHandle(w);
+            }
         }
         return Err(anyhow::anyhow!(
             "subprocess containment unavailable: job assignment failed; process never ran"
@@ -1183,15 +1343,22 @@ fn spawn_contained(
         unsafe {
             winapi::um::processthreadsapi::TerminateProcess(process_handle, 1);
             CloseHandle(process_handle);
+            if let Some(w) = stdin_parent_write {
+                CloseHandle(w);
+            }
         }
         anyhow::bail!("subprocess resume failed: {error}");
     }
-    Ok(SpawnedChild::Windows {
-        process: WinProcess {
-            process: process_handle,
+    let stdin_writer = stdin_parent_write.map(BridgeStdinWriter::Windows);
+    Ok((
+        SpawnedChild::Windows {
+            process: WinProcess {
+                process: process_handle,
+            },
+            containment,
         },
-        containment,
-    })
+        stdin_writer,
+    ))
 }
 
 /// Build the Windows command line (exe + argv) with MSVC C-runtime
@@ -1351,7 +1518,12 @@ fn run_subprocess_guarded(
     // ---- Pipes + contained spawn. ----
     let (out_r, out_w) = make_pipe()?;
     let (err_r, err_w) = make_pipe()?;
-    let mut child = spawn_contained(exe, &argv, &cwd_path, out_w, err_w)?;
+    let (mut child, stdin_writer) = spawn_contained(
+        exe, &argv, &cwd_path, out_w, err_w, /*want_stdin_pipe=*/ false,
+    )?;
+    // The subprocess harness never needs a stdin channel; its child stdin
+    // is NUL (spawned without a pipe).
+    assert!(stdin_writer.is_none());
 
     let stdout_drain = spawn_drain(out_r, config.max_output_bytes);
     let stderr_drain = spawn_drain(err_r, config.max_output_bytes);
