@@ -444,7 +444,13 @@ async fn symlink_escape_refuses() {
         .await
         .unwrap_err()
         .to_string();
+    // Windows follows the symlink and refuses the escape on the opened
+    // handle's final path; Unix never follows it and refuses it as a
+    // final-component symlink under its strict no-follow policy.
+    #[cfg(windows)]
     assert!(err.contains("escapes the workspace"), "got: {err}");
+    #[cfg(unix)]
+    assert!(err.contains("not a regular file"), "got: {err}");
     // The outside file was not read into evidence.
     assert!(!err.contains("outside secret"));
 }
@@ -711,7 +717,10 @@ fn make_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Re
 /// A symlink inside the workspace that points at another workspace file is
 /// an authorized file and stays inspectable. The digest must be of the link
 /// TARGET (the file the opened handle refers to), proving the confinement
-/// check validated the handle that was actually hashed.
+/// check validated the handle that was actually hashed. (Windows follows
+/// the symlink and verifies the opened handle's resolved final path;
+/// Unix deliberately refuses final symlinks instead — see below.)
+#[cfg(windows)]
 #[tokio::test]
 async fn internal_symlink_to_inside_file_remains_inspectable() {
     let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
@@ -739,6 +748,36 @@ async fn internal_symlink_to_inside_file_remains_inspectable() {
         "digest must be of the symlink target the opened handle refers to"
     );
     assert_eq!(parsed["sizeBytes"], serde_json::json!(payload.len() as u64));
+}
+
+/// Unix is intentionally stricter than Windows: a final-component symlink
+/// is refused (strict no-follow policy) rather than followed — even when
+/// its target is inside the workspace. Failing closed on the boundary is
+/// the policy; the non-symlink file stays inspectable either way.
+#[cfg(unix)]
+#[tokio::test]
+async fn internal_symlink_refuses_strict_nofollow_on_unix() {
+    let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
+    std::fs::write(acquired.root.join("real.txt"), "x\n").unwrap();
+    make_symlink(
+        std::path::Path::new("real.txt"),
+        &acquired.root.join("link-inside.txt"),
+    )
+    .unwrap();
+    let mut runner = runner_for(
+        NativeInspectConfig::default(),
+        acquired.root.clone(),
+        &[NATIVE_INSPECT_CAPABILITY],
+    );
+    let harness = NativeHarness::new();
+    let err = run_inspect(&harness, step("link-inside.txt"), &mut runner)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not a regular file"),
+        "a final-component symlink must be refused on Unix, got: {err}"
+    );
 }
 
 /// Adversarial race: a symlink target that flips between an inside file and
@@ -781,6 +820,10 @@ async fn concurrent_symlink_swap_never_hashes_outside_bytes() {
     };
     let mut inside_results = 0usize;
     let mut escapes = 0usize;
+    // On Unix the swapped link is a final-component symlink, which the
+    // strict no-follow policy refuses (not a regular file) — that refusal
+    // is also a confinement outcome, as it is never an outside hash.
+    let mut nofollow_refusals = 0usize;
     let mut missing = 0usize;
     let mut other_errs = 0usize;
     for attempt in 0..60 {
@@ -814,6 +857,8 @@ async fn concurrent_symlink_swap_never_hashes_outside_bytes() {
                 );
                 if msg.contains("escapes the workspace") {
                     escapes += 1;
+                } else if msg.contains("not a regular file") {
+                    nofollow_refusals += 1;
                 } else if msg.contains("does not exist") {
                     missing += 1;
                 } else {
@@ -825,8 +870,8 @@ async fn concurrent_symlink_swap_never_hashes_outside_bytes() {
     stop.store(true, Ordering::Relaxed);
     flipper.join().expect("flipper joins");
     assert!(
-        inside_results + escapes >= 10,
-        "race test was not meaningfully exercised (inside: {inside_results}, escapes: {escapes}, missing: {missing}, other: {other_errs})"
+        inside_results + escapes + nofollow_refusals >= 10,
+        "race test was not meaningfully exercised (inside: {inside_results}, escapes: {escapes}, nofollow refusals: {nofollow_refusals}, missing: {missing}, other: {other_errs})"
     );
 }
 

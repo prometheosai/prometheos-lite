@@ -22,9 +22,12 @@
 //!   platform. The file is opened through a handle-verified operation and
 //!   its identity, type, and size are validated on the retained handle
 //!   before any byte is read (Windows: the opened handle's final path must
-//!   lie beneath the canonical workspace root; Unix: a dirfd-relative
-//!   component walk with expected-identity capture and verification of the
-//!   opened handle). A concurrent path/symlink swap can only make the
+//!   lie beneath the canonical workspace root, following symlinks whose
+//!   resolved target is inside it; Unix: a dirfd-relative component walk
+//!   with a strict no-follow policy — a final-component symlink is refused
+//!   rather than followed — plus expected-identity capture and
+//!   verification of the opened handle). Unix is intentionally stricter
+//!   than Windows here. A concurrent path/symlink swap can only make the
 //!   inspection refuse — never redirect the read outside the workspace.
 //!   Symlink escapes, directories, missing files, and files above the size
 //!   budget are refused before any read.
@@ -624,8 +627,11 @@ fn open_confined_file_windows(root: &Path, raw: &str) -> Result<(std::fs::File, 
 // Every step is resolved relative to a retained directory handle (`openat`
 // from the parent descriptor), so no later pathname resolution can
 // redirect the walk. Intermediate components must be real directories
-// (`O_DIRECTORY | O_NOFOLLOW`); the final component's identity is captured
-// with `fstatat` relative to the parent handle, opened with `openat`, and
+// (`O_DIRECTORY | O_NOFOLLOW`). The final component is handled with a
+// strict no-follow policy: its identity is captured with `fstatat` using
+// `AT_SYMLINK_NOFOLLOW` (a final symlink is refused as not-a-regular-file
+// instead of being followed), it is opened with `O_NOFOLLOW` (so a swap
+// between capture and open cannot retarget the open onto a symlink), and
 // the opened handle's `fstat` identity must equal the captured identity
 // before any byte is read — a swap of the final component in either
 // direction can only refuse. FIFOs and other non-regular files are refused
@@ -696,8 +702,12 @@ fn open_confined_file_unix(root: &Path, raw: &str) -> Result<(std::fs::File, u64
         if trailing_separator {
             bail!("native inspection target is not a regular file: {raw:?}");
         }
-        // Capture the identity of the file the confined path names right
-        // now, relative to the retained parent handle.
+        // Capture the identity of the confined path's final component
+        // WITHOUT following a symlink there — `AT_SYMLINK_NOFOLLOW` stats
+        // the component itself, so a final symlink is refused below
+        // instead of being resolved (a resolved target outside the
+        // workspace must never be inspected, not even when the captured
+        // identity happens to match the followed target).
         let mut expected_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: `component_cstr` is NUL-terminated; `expected_stat` is
         // initialized by the call on success.
@@ -706,7 +716,7 @@ fn open_confined_file_unix(root: &Path, raw: &str) -> Result<(std::fs::File, u64
                 directory.as_raw_fd(),
                 component_cstr.as_ptr(),
                 expected_stat.as_mut_ptr(),
-                0,
+                libc::AT_SYMLINK_NOFOLLOW,
             )
         };
         if rc != 0 {
@@ -723,15 +733,16 @@ fn open_confined_file_unix(root: &Path, raw: &str) -> Result<(std::fs::File, u64
         if (expected_stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
             bail!("native inspection target is not a regular file: {raw:?}");
         }
-        // Open the file relative to the retained parent handle (following
-        // a final-component symlink whose target is inside the workspace,
-        // which the identity check below authorizes).
+        // Open the file relative to the retained parent handle WITHOUT
+        // following symlinks: between the capture above and this open, a
+        // swap that placed a symlink at the final component fails here
+        // (ELOOP) instead of retargeting the open onto the link target.
         // SAFETY: `component_cstr` is NUL-terminated; `directory` is live.
         let fd = unsafe {
             libc::openat(
                 directory.as_raw_fd(),
                 component_cstr.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
         if fd < 0 {
