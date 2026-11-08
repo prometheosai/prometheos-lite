@@ -39,6 +39,47 @@
       "overClaimed": false
     },
     {
+      "harnessId": "lite.harness.native.inspect",
+      "family": "native",
+      "name": "lite-native-inspect",
+      "revision": "v1",
+      "declarationDigest": "2c4cd9c1952b2c8957c9ee8bb2da9e7a3aece068cabe7f1a745e8d397ee34b99",
+      "declaredCapabilities": [
+        "harness.native.inspect"
+      ],
+      "claimedCapabilities": [
+        "harness.native.inspect"
+      ],
+      "effectClasses": [
+        "filesystem-read"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [
+        "AdapterFamily { family: \"git-worktree\", revision: \"lite.workspace.adapter.v1\" }",
+        "AdapterFamily { family: \"existing-read-only\", revision: \"lite.workspace.adapter.v1\" }"
+      ],
+      "workspace": {
+        "workspace": "read"
+      },
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": false,
+      "readProjection": true,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    },
+    {
       "harnessId": "lite.harness.protocol",
       "family": "protocol-bridged",
       "name": "lite-protocol",
@@ -116,5 +157,5 @@
       "overClaimed": false
     }
   ],
-  "contentDigest": "b8e7f411eb7c2aea31ee50c0c208d224d51ab336ba74951e31010358ffaf87c3"
+  "contentDigest": "589c4cd73c7da18d500066dc7c57ed0f44d1cb3a4b516b8cfe40d4713288ba9d"
 }
