@@ -115,6 +115,32 @@ fn step(input: serde_json::Value) -> HarnessStep {
     }
 }
 
+/// Step with explicit worker argv (P1 regression hooks `--never-read` /
+/// `--exit-now` select worker behavior that never touches stdin).
+fn step_with_argv(argv: Vec<String>, input: serde_json::Value) -> HarnessStep {
+    HarnessStep {
+        step_id: "step-1".to_string(),
+        capability: PROTOCOL_BRIDGE_CAPABILITY.to_string(),
+        args: serde_json::json!({"exe": worker_exe(), "argv": argv, "input": input}),
+    }
+}
+
+/// Large-but-valid input: envelope larger than the OS pipe capacity on both
+/// Windows (4 KiB) and Unix (64 KiB), below raised message budgets.
+fn large_input() -> serde_json::Value {
+    serde_json::json!({"mode": "echo", "payload": "X".repeat(150_000)})
+}
+
+fn large_config() -> ProtocolBridgeConfig {
+    let mut cfg = ProtocolBridgeConfig::default()
+        .allowed_executables(vec![worker_exe()])
+        .max_request_bytes(256 * 1024)
+        .max_response_bytes(256 * 1024)
+        .max_output_bytes(256 * 1024);
+    cfg.max_args_bytes = 256 * 1024;
+    cfg
+}
+
 fn is_hex64(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
@@ -941,4 +967,162 @@ async fn stale_state_and_wrong_revision_resume_refuse() {
     let err = futures::executor::block_on(harness.resume(&foreign, &digest))
         .expect_err("foreign checkpoint refuses");
     assert!(err.to_string().contains("was exported by"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// P1 — supervised stdin write (blocking-write lifecycle repair)
+// ---------------------------------------------------------------------------
+
+/// P1a — A non-reading worker cannot block the invocation: deadline covers
+/// spawn, write, and wait; the blocked writer is terminated and joined.
+#[tokio::test]
+async fn non_reading_worker_times_out_promptly() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = large_config().timeout_ms(10_000);
+    let mut runner = runner_for(
+        cfg,
+        root.path().to_path_buf(),
+        &[PROTOCOL_BRIDGE_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let started = Instant::now();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        // Large envelope (> OS pipe capacity, < raised budgets) into a
+        // worker that never reads stdin: the writer blocks mid-write and
+        // must be killed/joined by the deadline, not hang forever.
+        let mut stuck = step_with_argv(vec!["--never-read".to_string()], large_input());
+        stuck.args["timeoutMs"] = serde_json::json!(500);
+        harness
+            .run(stuck, &mut d)
+            .await
+            .expect_err("non-reading worker must time out")
+    };
+    let elapsed = started.elapsed();
+    assert!(
+        err.to_string().contains("timed out"),
+        "deadline must fire during blocked write, got: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "must return promptly, wall time: {elapsed:?}"
+    );
+    assert!(runner.journal().is_empty(), "refusals never journal");
+}
+
+/// P1b — Cancellation works during a blocked stdin write.
+#[tokio::test]
+async fn non_reading_worker_cancellation_unblocks_write() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cfg = large_config().timeout_ms(60_000).cancel(cancel.clone());
+    let mut runner = runner_for(
+        cfg,
+        root.path().to_path_buf(),
+        &[PROTOCOL_BRIDGE_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let started = Instant::now();
+    let err = std::thread::scope(|scope| {
+        let harness_ref = &harness;
+        let mut d = dispatch(harness_ref, &m, &r, &mut runner);
+        let handle = scope.spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(harness_ref.run(
+                    step_with_argv(vec!["--never-read".to_string()], large_input()),
+                    &mut d,
+                ))
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        cancel.store(true, Ordering::Relaxed);
+        handle.join().expect("run thread")
+    })
+    .expect_err("cancellation must refuse during blocked write");
+    let elapsed = started.elapsed();
+    assert!(
+        err.to_string().contains("cancelled"),
+        "cancel must fire during blocked write, got: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "must return promptly, wall time: {elapsed:?}"
+    );
+    assert!(runner.journal().is_empty());
+}
+
+/// P1c — Early worker exit (broken pipe) terminates and reaps the child.
+#[tokio::test]
+async fn early_worker_exit_broken_pipe_cleanup() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = large_config().timeout_ms(10_000);
+    let mut runner = runner_for(
+        cfg,
+        root.path().to_path_buf(),
+        &[PROTOCOL_BRIDGE_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let started = Instant::now();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        // Large request into a worker that exits immediately without
+        // reading: the writer breaks (EPIPE) or the child exits; either
+        // way the invocation ends promptly with the child reaped.
+        harness
+            .run(
+                step_with_argv(vec!["--exit-now".to_string()], large_input()),
+                &mut d,
+            )
+            .await
+            .expect_err("early exit must refuse")
+    };
+    let elapsed = started.elapsed();
+    let message = err.to_string();
+    assert!(
+        message.contains("stdin failed") || message.contains("exited with code"),
+        "broken-pipe or exit refusal, got: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "must return promptly, wall time: {elapsed:?}"
+    );
+    assert!(runner.journal().is_empty());
+}
+
+/// P1d — A large request still succeeds when the worker does read stdin
+/// (the supervised writer completes promptly; no regression).
+#[tokio::test]
+async fn large_request_succeeds_when_worker_reads() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = large_config();
+    let mut runner = runner_for(
+        cfg,
+        root.path().to_path_buf(),
+        &[PROTOCOL_BRIDGE_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(large_input()), &mut d)
+            .await
+            .expect("large read request succeeds")
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("result JSON parses");
+    let echoed = parsed["output"]["echoed"]["payload"]
+        .as_str()
+        .expect("echoed payload");
+    assert_eq!(echoed.len(), 150_000, "full payload round-tripped");
+    assert_eq!(runner.journal().len(), 1);
 }

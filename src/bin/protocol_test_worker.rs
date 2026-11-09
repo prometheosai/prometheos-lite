@@ -24,6 +24,20 @@ use std::io::{Read, Write};
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
 fn main() {
+    // P1 regression hooks (slice-G repair): argv-selected modes that NEVER
+    // read stdin, so the handler's supervised writer faces a truly
+    // non-cooperative pipe (unlike input-mode `sleep`, which drains stdin
+    // first). `--never-read` holds the process open without touching stdin;
+    // `--exit-now` terminates immediately without reading.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--never-read") {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        std::process::exit(0);
+    }
+    if args.iter().any(|a| a == "--exit-now") {
+        eprintln!("protocol-test-worker: forced immediate exit without reading stdin");
+        std::process::exit(3);
+    }
     // Read stdin fully (handler closes stdin after the single write, so EOF
     // is the framing). Bounded: excess is a hard failure.
     let mut buf = vec![0u8; 0];

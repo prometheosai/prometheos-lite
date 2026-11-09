@@ -681,6 +681,14 @@ pub(crate) enum BridgeStdinWriter {
     Windows(winapi::shared::ntdef::HANDLE),
 }
 
+// The stdin write end is an OS handle owned exclusively by this wrapper
+// and used from exactly one thread at a time (the supervised writer
+// thread). Moving it across the spawn boundary is safe: the main thread
+// never touches it concurrently, and the writer thread closes it before
+// exiting.
+#[cfg(windows)]
+unsafe impl Send for BridgeStdinWriter {}
+
 impl BridgeStdinWriter {
     pub(crate) fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         #[cfg(unix)]

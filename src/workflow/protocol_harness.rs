@@ -678,6 +678,12 @@ fn run_protocol_bridge_guarded(
         );
     }
 
+    // ---- Deadline covers the WHOLE lifecycle (spawn, write, wait), so an
+    // uncooperative worker cannot consume unbounded time before supervision
+    // starts. The stdin write below is supervised by this deadline. ----
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(timeout_ms);
+
     // ---- Pipes + contained spawn with protocol stdin. Reuses the slice-E
     // containment primitive; only the stdin/stdout exchange is new. ----
     let (out_r, out_w) = make_pipe()?;
@@ -692,41 +698,100 @@ fn run_protocol_bridge_guarded(
     let stdout_drain = spawn_drain(out_r, config.max_output_bytes);
     let stderr_drain = spawn_drain(err_r, config.max_output_bytes);
 
-    // ---- Single-request write, then close stdin (EOF framing). The
-    // request is bounded to the pipe capacity in practice, so this write
-    // cannot block past the worker's read; a worker that exits early
-    // breaks the pipe and refuses below. ----
+    // ---- Single supervised request write (EOF framing), on ONE managed
+    // writer thread, joined on EVERY exit path. A blocking write is
+    // unavoidable for bounded pipes, so supervision is done by containing
+    // it: the deadline/cancel/budget loop below fires while the writer is
+    // blocked, terminates the owned tree (closing every stdin read end, so
+    // the blocked write returns with EPIPE), and joins the writer. No
+    // detached thread, no leaked handle, no descendant survives. ----
     let mut wire = request_text.into_bytes();
     wire.push(b'\n');
-    stdin_writer
-        .write_all(&wire)
-        .context("protocol request write to worker stdin failed")?;
-    stdin_writer.close();
+    let writer_handle = std::thread::spawn(move || {
+        let result = stdin_writer.write_all(&wire);
+        stdin_writer.close();
+        result
+    });
+    let mut writer_handle = Some(writer_handle);
+    let mut writer_result: Option<Result<()>> = None;
 
-    // ---- Deadline / cancellation / budget loop. ----
-    let started = Instant::now();
-    let deadline = started + Duration::from_millis(timeout_ms);
+    // ---- Deadline / cancellation / budget loop (started before spawn). ----
     let status = loop {
         if let Some(status) = child.try_wait() {
             break status;
         }
         if config.cancel.load(Ordering::Relaxed) {
             child.terminate_and_reap();
+            if let Some(handle) = writer_handle.take() {
+                let _ = handle.join();
+            }
+            let _ = stdout_drain.finish();
+            let _ = stderr_drain.finish();
             anyhow::bail!("protocol bridge cancelled");
         }
         if Instant::now() >= deadline {
             child.terminate_and_reap();
+            if let Some(handle) = writer_handle.take() {
+                let _ = handle.join();
+            }
+            let _ = stdout_drain.finish();
+            let _ = stderr_drain.finish();
             anyhow::bail!("protocol bridge timed out after {timeout_ms}ms");
         }
         if stdout_drain.total() + stderr_drain.total() > config.max_output_bytes as u64 {
             child.terminate_and_reap();
+            if let Some(handle) = writer_handle.take() {
+                let _ = handle.join();
+            }
+            let _ = stdout_drain.finish();
+            let _ = stderr_drain.finish();
             anyhow::bail!(
                 "protocol bridge output exceeded the configured budget of {} bytes",
                 config.max_output_bytes
             );
         }
+        // Writer finished early (broken pipe: worker closed/exited the
+        // stdin side). Fail promptly with the tree reaped; a successful
+        // writer simply means the request is sent and the child will
+        // respond (or hang until the deadline).
+        if writer_handle
+            .as_ref()
+            .map(|h| h.is_finished())
+            .unwrap_or(false)
+        {
+            let handle = writer_handle.take().expect("writer handle present");
+            writer_result = Some(match handle.join() {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("stdin writer thread panicked")),
+            });
+            if let Some(Err(_)) = writer_result {
+                child.terminate_and_reap();
+                let _ = stdout_drain.finish();
+                let _ = stderr_drain.finish();
+                anyhow::bail!("protocol request write to worker stdin failed");
+            }
+        }
         std::thread::sleep(POLL);
     };
+
+    // The direct worker exited: the writer must be done or unblocked by the
+    // exit; join it (no leak). A broken pipe here means the worker exited
+    // before consuming the request — a typed failure with the child already
+    // reaped above.
+    if let Some(handle) = writer_handle.take() {
+        writer_result = Some(match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("stdin writer thread panicked")),
+        });
+    }
+    if let Some(Err(write_error)) = writer_result {
+        child.sweep_on_normal();
+        let _ = stdout_drain.finish();
+        let _ = stderr_drain.finish();
+        return Err(anyhow::anyhow!(
+            "protocol request write to worker stdin failed: {write_error}"
+        ));
+    }
 
     // The direct worker exited: sweep stragglers, then verify capture
     // completion before Sealing evidence.
