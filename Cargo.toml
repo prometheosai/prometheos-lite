@@ -71,6 +71,15 @@ axum-test = "15.0"
 name = "prometheos"
 path = "src/main.rs"
 
+# Deterministic half of the slice-G protocol-bridge test fixture: a real
+# worker process that speaks the `lite.protocol.bridge` v1 envelope over
+# stdin/stdout. Built by `cargo test` so integration tests exercise an
+# actual process boundary via CARGO_BIN_EXE_protocol_test_worker. It is
+# NOT a production adapter and claims no external protocol support.
+[[bin]]
+name = "protocol_test_worker"
+path = "src/bin/protocol_test_worker.rs"
+
 [features]
 default = []
 legacy = []  # Enable legacy agent/core modules for backward compatibility
