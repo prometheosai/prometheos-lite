@@ -1126,3 +1126,81 @@ async fn large_request_succeeds_when_worker_reads() {
     assert_eq!(echoed.len(), 150_000, "full payload round-tripped");
     assert_eq!(runner.journal().len(), 1);
 }
+
+/// P1-descendant — Direct child exits while a descendant holds stdin:
+/// descendants are swept before the writer join, so the invocation returns
+/// promptly with no journal and no leaked descendant.
+///
+/// What the old (pre-repair) order got wrong: `try_wait` broke on direct
+/// exit, the code joined the still-blocked writer (pipe full, descendant
+/// not reading, direct worker gone), and `sweep_on_normal` never ran —
+/// the join hung forever. The repaired `quiesce_and_join` sweeps first,
+/// closing the descendant-held read end so the writer unblocks with
+/// EPIPE. A hang here would stall this test (and the suite) indefinitely,
+/// so prompt return is itself the proof of ordering.
+#[tokio::test]
+async fn inherited_stdin_descendant_is_swept_before_writer_join() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = large_config().timeout_ms(10_000);
+    let mut runner = runner_for(
+        cfg,
+        root.path().to_path_buf(),
+        &[PROTOCOL_BRIDGE_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let started = Instant::now();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        // Large envelope (> OS pipe capacity) into a worker that spawns a
+        // non-reading descendant holding inherited stdin, then exits
+        // immediately without reading. The writer blocks mid-write with
+        // no direct reader; only a pre-join sweep can unblock it.
+        harness
+            .run(
+                step_with_argv(vec!["--spawn-holder".to_string()], large_input()),
+                &mut d,
+            )
+            .await
+            .expect_err("descendant-held pipe must refuse promptly")
+    };
+    let elapsed = started.elapsed();
+    let message = err.to_string();
+    assert!(
+        message.contains("stdin failed"),
+        "descendant sweep must unblock the writer into a broken-pipe refusal, got: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "must return promptly (pre-repair: hang), wall time: {elapsed:?}"
+    );
+    assert!(
+        runner.journal().is_empty(),
+        "rejected exchanges never journal"
+    );
+    // The descendant was terminated by the sweep: a second invocation with
+    // a fresh runner still succeeds, proving no poisoned state, and the
+    // 30 s sleeper cannot hold the workspace lock or pipe afterwards.
+    let mut runner = runner_for(
+        large_config(),
+        root.path().to_path_buf(),
+        &[PROTOCOL_BRIDGE_CAPABILITY],
+    );
+    let outcome = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(large_input()), &mut d)
+            .await
+            .expect("fresh exchange after sweep succeeds")
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&outcome.output).expect("result JSON parses");
+    assert_eq!(
+        parsed["output"]["echoed"]["payload"]
+            .as_str()
+            .unwrap()
+            .len(),
+        150_000
+    );
+}
