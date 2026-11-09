@@ -38,6 +38,22 @@ fn main() {
         eprintln!("protocol-test-worker: forced immediate exit without reading stdin");
         std::process::exit(3);
     }
+    // Descendant-pipe regression hook: spawn a self-descendant that holds the
+    // stdin read end without consuming it, then exit immediately WITHOUT
+    // waiting. The direct worker exits while a descendant retains the pipe
+    // read end; the handler must sweep descendants BEFORE joining the writer.
+    // Self-spawn is portable (no shell) and deterministic: handles are
+    // duplicated at process creation, before the parent exits.
+    if args.iter().any(|a| a == "--spawn-holder") {
+        let exe = std::env::current_exe().expect("current exe");
+        let _ = std::process::Command::new(exe)
+            .arg("--never-read")
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        std::process::exit(0);
+    }
     // Read stdin fully (handler closes stdin after the single write, so EOF
     // is the framing). Bounded: excess is a hard failure.
     let mut buf = vec![0u8; 0];
