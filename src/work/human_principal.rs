@@ -394,6 +394,19 @@ mod platform {
         // preconditions; they cannot be substituted by caller-supplied data.
         let effective_raw = unsafe { libc::geteuid() };
         let real_raw = unsafe { libc::getuid() };
+        identity_from_uids(real_raw, effective_raw)
+    }
+
+    /// Resolve the session identity from an explicit (real, effective) uid
+    /// pair. `session_identity` is exactly this over the live process uids;
+    /// the pair form makes the three refusal/success paths unit-testable
+    /// without setuid subprocesses (a real different-euid process cannot be
+    /// created portably from a test). Semantics are unchanged: mismatch
+    /// (escalation) refuses, empty/missing passwd refuses, never an
+    /// environment fallback.
+    // `pub(crate)`: unit-testable from the sibling test module (privacy is
+    // per-module; a private fn in `platform` is invisible to `tests`).
+    pub(crate) fn identity_from_uids(real_raw: u32, effective_raw: u32) -> Result<String> {
         if real_raw != effective_raw {
             anyhow::bail!(
                 "this process runs with an effective uid that differs from its real uid \
@@ -741,6 +754,48 @@ mod tests {
             "the session identity must not come from the environment"
         );
         assert_ne!(probed, "spoofed-user");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_unix_uid_pair_resolves_to_the_passwd_name() {
+        use super::platform::identity_from_uids;
+        // SAFETY: uid getters are thread-safe syscall wrappers.
+        let real = unsafe { libc::getuid() };
+        let effective = unsafe { libc::geteuid() };
+        let identity = identity_from_uids(real, effective).expect("valid uid resolves");
+        assert!(!identity.trim().is_empty());
+        assert_eq!(identity, session_identity().expect("live identity"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_passwd_entry_is_a_typed_refusal() {
+        use super::platform::identity_from_uids;
+        // A uid with no passwd entry must refuse (empty collection or
+        // missing entry on a populated list both land here), never fall
+        // back to an environment name.
+        let err = identity_from_uids(999_999, 999_999).expect_err("unregistered uid must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("passwd entry"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_effective_uid_mismatch_is_refused() {
+        use super::platform::identity_from_uids;
+        // A setuid-style pair (real uid with a different effective uid)
+        // refuses before any passwd lookup, even when the effective uid
+        // exists: attributing it would be a privilege escalation.
+        let real = unsafe { libc::getuid() };
+        let other = if real == 0 { 1 } else { 0 };
+        let err = identity_from_uids(real, other).expect_err("uid mismatch must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("privilege escalation"), "{msg}");
+        // And the mismatch refuses even for an unregistered effective uid
+        // (precedence: escalation check runs before lookup).
+        let err = identity_from_uids(0, 999_999).expect_err("mismatch takes precedence");
+        assert!(format!("{err:#}").contains("privilege escalation"), "{err}");
     }
 
     #[cfg(unix)]

@@ -1040,6 +1040,7 @@ pub(crate) fn child_cwd(canonical_root: &Path, cwd: Option<&str>) -> Result<Path
 /// Shared by the subprocess and protocol-bridged harnesses.
 #[cfg(unix)]
 pub(crate) fn make_pipe() -> Result<(std::fs::File, std::fs::File)> {
+    use std::os::unix::io::FromRawFd as _;
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         anyhow::bail!(
@@ -1079,7 +1080,6 @@ pub(crate) fn spawn_contained(
     stderr_w: std::fs::File,
     want_stdin_pipe: bool,
 ) -> Result<(SpawnedChild, Option<BridgeStdinWriter>)> {
-    use std::os::unix::io::FromRawFd as _;
     use std::os::unix::process::CommandExt as _;
     let (stdin_stdio, stdin_writer) = if want_stdin_pipe {
         let (stdin_r, stdin_w) = make_pipe()?;
@@ -1099,12 +1099,18 @@ pub(crate) fn spawn_contained(
     // New session + process group: the child's pid becomes the group id so
     // the group contains every descendant (except those that re-setpgid,
     // which process-group containment fundamentally cannot govern).
-    cmd.pre_exec(|| {
-        if unsafe { libc::setsid() } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    });
+    // SAFETY: `pre_exec` became an unsafe fn in Rust 1.99 (the closure
+    // runs in the forked child and must maintain async-signal-safety).
+    // `libc::setsid()` is async-signal-safe and touches no shared state,
+    // so the call upholds the safety contract.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    };
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
