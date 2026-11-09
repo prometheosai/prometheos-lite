@@ -66,7 +66,8 @@ use crate::workflow::soma::capability::{
 };
 use crate::workflow::soma::profile::Boundaries;
 use crate::workflow::subprocess_harness::{
-    child_cwd, governed_root, make_pipe, spawn_contained, spawn_drain,
+    DrainHandle, DrainState, SpawnedChild, child_cwd, governed_root, make_pipe, spawn_contained,
+    spawn_drain,
 };
 use crate::workflow::workspace::ADAPTER_REVISION;
 
@@ -561,6 +562,47 @@ fn parse_id(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Resu
     Ok(s.to_string())
 }
 
+/// Single quiesce-and-join cleanup for EVERY terminal path.
+///
+/// Invariant (descendant-pipe fix): owned-tree teardown runs BEFORE the
+/// potentially blocking writer join, so a descendant that inherited the
+/// stdin read end can never keep the writer blocked after the direct child
+/// exits. Callers pass `force_terminate` for live-child kills
+/// (cancel/timeout/budget) and `sweep_on_normal` semantics for the
+/// direct-child-exited path; both close every stdin read end inside the
+/// owned tree (Unix process group SIGKILL / Windows job close) before the
+/// join. Drains finish last (EOF after tree death). The writer result, when
+/// present, is recorded in `writer_result`; drain states are returned for
+/// the success path and discarded on refusal paths.
+fn quiesce_and_join(
+    child: &mut SpawnedChild,
+    force_terminate: bool,
+    writer_handle: &mut Option<std::thread::JoinHandle<Result<()>>>,
+    writer_result: &mut Option<Result<()>>,
+    stdout_drain: DrainHandle,
+    stderr_drain: DrainHandle,
+) -> (DrainState, DrainState) {
+    // 1. Owned-tree teardown FIRST: terminates/sweeps every descendant and
+    //    closes every stdin read end, unblocking a blocked writer.
+    if force_terminate {
+        child.terminate_and_reap();
+    } else {
+        child.sweep_on_normal();
+    }
+    // 2. Writer join SECOND: now bounded by tree death, never indefinite.
+    if let Some(handle) = writer_handle.take() {
+        *writer_result = Some(match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("stdin writer thread panicked")),
+        });
+    }
+    // 3. Drain finish LAST: EOF is guaranteed-measurable once every writer
+    //    died with the contained tree.
+    let stdout_state = stdout_drain.finish();
+    let stderr_state = stderr_drain.finish();
+    (stdout_state, stderr_state)
+}
+
 /// One governed protocol-bridge invocation behind gates 1-4; gates 6-9
 /// seal its JSON result document.
 fn run_protocol_bridge_guarded(
@@ -721,39 +763,45 @@ fn run_protocol_bridge_guarded(
             break status;
         }
         if config.cancel.load(Ordering::Relaxed) {
-            child.terminate_and_reap();
-            if let Some(handle) = writer_handle.take() {
-                let _ = handle.join();
-            }
-            let _ = stdout_drain.finish();
-            let _ = stderr_drain.finish();
+            quiesce_and_join(
+                &mut child,
+                true,
+                &mut writer_handle,
+                &mut writer_result,
+                stdout_drain,
+                stderr_drain,
+            );
             anyhow::bail!("protocol bridge cancelled");
         }
         if Instant::now() >= deadline {
-            child.terminate_and_reap();
-            if let Some(handle) = writer_handle.take() {
-                let _ = handle.join();
-            }
-            let _ = stdout_drain.finish();
-            let _ = stderr_drain.finish();
+            quiesce_and_join(
+                &mut child,
+                true,
+                &mut writer_handle,
+                &mut writer_result,
+                stdout_drain,
+                stderr_drain,
+            );
             anyhow::bail!("protocol bridge timed out after {timeout_ms}ms");
         }
         if stdout_drain.total() + stderr_drain.total() > config.max_output_bytes as u64 {
-            child.terminate_and_reap();
-            if let Some(handle) = writer_handle.take() {
-                let _ = handle.join();
-            }
-            let _ = stdout_drain.finish();
-            let _ = stderr_drain.finish();
+            quiesce_and_join(
+                &mut child,
+                true,
+                &mut writer_handle,
+                &mut writer_result,
+                stdout_drain,
+                stderr_drain,
+            );
             anyhow::bail!(
                 "protocol bridge output exceeded the configured budget of {} bytes",
                 config.max_output_bytes
             );
         }
         // Writer finished early (broken pipe: worker closed/exited the
-        // stdin side). Fail promptly with the tree reaped; a successful
-        // writer simply means the request is sent and the child will
-        // respond (or hang until the deadline).
+        // stdin side while still running). Fail promptly with the tree
+        // reaped; a successful writer simply means the request is sent
+        // and the child will respond (or hang until the deadline).
         if writer_handle
             .as_ref()
             .map(|h| h.is_finished())
@@ -765,39 +813,43 @@ fn run_protocol_bridge_guarded(
                 Err(_) => Err(anyhow::anyhow!("stdin writer thread panicked")),
             });
             if let Some(Err(_)) = writer_result {
-                child.terminate_and_reap();
-                let _ = stdout_drain.finish();
-                let _ = stderr_drain.finish();
+                quiesce_and_join(
+                    &mut child,
+                    true,
+                    &mut writer_handle,
+                    &mut writer_result,
+                    stdout_drain,
+                    stderr_drain,
+                );
                 anyhow::bail!("protocol request write to worker stdin failed");
             }
         }
         std::thread::sleep(POLL);
     };
 
-    // The direct worker exited: the writer must be done or unblocked by the
-    // exit; join it (no leak). A broken pipe here means the worker exited
-    // before consuming the request — a typed failure with the child already
-    // reaped above.
-    if let Some(handle) = writer_handle.take() {
-        writer_result = Some(match handle.join() {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!("stdin writer thread panicked")),
-        });
-    }
+    // The direct worker exited. Sweep/kill every owned descendant FIRST
+    // (closing every stdin read end, including an inherited one a
+    // descendant may still hold), THEN join the writer. A broken pipe
+    // here means the worker exited before consuming the request — a
+    // typed failure with the child already reaped above. The drain
+    // states returned by the helper are the capture completion
+    // evidence for the success path.
+    let (stdout_state, stderr_state) = quiesce_and_join(
+        &mut child,
+        false,
+        &mut writer_handle,
+        &mut writer_result,
+        stdout_drain,
+        stderr_drain,
+    );
     if let Some(Err(write_error)) = writer_result {
-        child.sweep_on_normal();
-        let _ = stdout_drain.finish();
-        let _ = stderr_drain.finish();
         return Err(anyhow::anyhow!(
             "protocol request write to worker stdin failed: {write_error}"
         ));
     }
 
-    // The direct worker exited: sweep stragglers, then verify capture
-    // completion before Sealing evidence.
-    child.sweep_on_normal();
-    let stdout_state = stdout_drain.finish();
-    let stderr_state = stderr_drain.finish();
+    // The direct worker exited: verify capture completion before
+    // sealing evidence.
     if !stdout_state.done || !stderr_state.done {
         anyhow::bail!("protocol bridge output capture did not complete");
     }
