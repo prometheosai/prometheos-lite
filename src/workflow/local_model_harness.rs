@@ -394,6 +394,13 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// promptly even while the socket is blocked in a blocking read/write.
 const IO_POLL: Duration = Duration::from_millis(50);
 
+/// Aggregate request budget: maximum number of messages accepted in one
+/// inference request.
+const MAX_MESSAGES: usize = 32;
+/// Aggregate request budget: maximum serialized size of the request body
+/// (including the envelope keys), enforced before any transport.
+const MAX_REQUEST_BYTES: usize = 32 * 1024;
+
 /// A validated, strict endpoint: lowercase `http` scheme, no credentials,
 /// no query or fragment, numeric loopback destination (127.0.0.0/8 or ::1;
 /// `localhost` normalized to 127.0.0.1), explicit or default port 80, and a
@@ -1069,6 +1076,23 @@ fn run_local_model_guarded(
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("local model argument \"messages\" must be an array"))?;
+    if messages.len() > MAX_MESSAGES {
+        return Ok(governed_failure(
+            "request-budget-exceeded",
+            format!(
+                "local model request exceeded the aggregate message budget of {MAX_MESSAGES} messages"
+            ),
+        ));
+    }
+    let aggregate_messages_bytes: usize = messages.iter().map(|m| m.to_string().len()).sum();
+    if aggregate_messages_bytes > MAX_REQUEST_BYTES {
+        return Ok(governed_failure(
+            "request-budget-exceeded",
+            format!(
+                "local model request exceeded the aggregate message budget of {MAX_REQUEST_BYTES} bytes"
+            ),
+        ));
+    }
     for message in messages {
         let message_object = message
             .as_object()
@@ -1099,11 +1123,39 @@ fn run_local_model_guarded(
         .and_then(Value::as_u64)
         .filter(|t| *t >= 1 && *t <= 8192)
         .unwrap_or(1024);
-    let timeout_ms = obj
-        .get("timeoutMs")
-        .and_then(Value::as_u64)
-        .filter(|ms| *ms >= 1)
-        .unwrap_or(config.timeout_ms);
+    if config.timeout_ms == 0 {
+        return Ok(governed_failure(
+            "invalid-config",
+            "local model operator-configured timeout is zero".to_string(),
+        ));
+    }
+    let timeout_ms = match obj.get("timeoutMs") {
+        None => config.timeout_ms,
+        Some(value) => {
+            let Some(ms) = value.as_u64() else {
+                return Ok(governed_failure(
+                    "invalid-timeout",
+                    "local model argument \"timeoutMs\" must be a positive integer".to_string(),
+                ));
+            };
+            if ms == 0 {
+                return Ok(governed_failure(
+                    "invalid-timeout",
+                    "local model argument \"timeoutMs\" must be at least 1".to_string(),
+                ));
+            }
+            if ms > config.timeout_ms {
+                return Ok(governed_failure(
+                    "invalid-timeout",
+                    format!(
+                        "local model argument \"timeoutMs\" exceeds the configured timeout ceiling of {} ms",
+                        config.timeout_ms
+                    ),
+                ));
+            }
+            ms
+        }
+    };
     let timeout = Duration::from_millis(timeout_ms);
     let mut secrets = config.known_secrets.clone();
     if let Some(arr) = obj.get("knownSecrets").and_then(Value::as_array) {
@@ -1132,7 +1184,14 @@ fn run_local_model_guarded(
         map.insert("response_format".to_string(), response_format.clone());
     }
     let body_text = serde_json::to_string(&body_value).context("local model request serializes")?;
-    let latency_ms = started.elapsed().as_millis() as u64;
+    if body_text.len() > MAX_REQUEST_BYTES {
+        return Ok(governed_failure(
+            "request-budget-exceeded",
+            format!(
+                "local model request exceeded the aggregate request budget of {MAX_REQUEST_BYTES} bytes"
+            ),
+        ));
+    }
     let json_mode = obj
         .get("responseFormat")
         .and_then(Value::as_object)
@@ -1147,6 +1206,9 @@ fn run_local_model_guarded(
         config.max_output_bytes,
         &config.cancel,
     );
+    // Measure actual elapsed time after the inference completes; measuring
+    // before the transport would record ~0 regardless of real latency.
+    let latency_ms = started.elapsed().as_millis() as u64;
     let result_value = match outcome {
         Ok(response) => build_local_model_success(
             &response,
