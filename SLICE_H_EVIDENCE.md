@@ -90,19 +90,19 @@ CHECK_EXIT:
 0 (cargo check --all-targets; only pre-existing warnings)
 
 CLIPPY_EXIT:
-101 for the repo-wide gate with -D warnings: 26 errors, ALL in pre-existing files untouched by Slice H (evidence_persistence 5, vector 4, execution_harness 3, native_harness 2, sandbox 2, patch_provider 2, provider 2, subprocess_harness 1, queue 1, legacy 1, node 1, embedding 1, tool 1). Slice H files contribute ZERO clippy findings after repair (pre-repair: 8). local_ci core stops at clippy for the same pre-existing reason. This is a toolchain/repo-state gate, not a Slice H defect.
+101 for the repo-wide gate with -D warnings: 26 errors, ALL in pre-existing files untouched by Slice H (evidence_persistence 5, vector 4, execution_harness 3, native_harness 2, sandbox 2, patch_provider 2, provider 2, subprocess_harness 1, queue 1, legacy 1, node 1, embedding 1, tool 1). Slice H files contribute ZERO clippy findings after repair (pre-repair of Slice H code: 8, all fixed). local_ci core stops at clippy for the same pre-existing reason. Verified: stashed Slice H repair, re-ran clippy -> identical 26 errors, none in Slice H files. Toolchain/repo-state gate, not a Slice H defect.
 
 TEST_EXIT:
 0 (cargo test --lib 1124/1124; all Slice H and harness suites green)
 
 CORE_EXIT:
-fails at the clippy step (exit 101) due to 26 pre-existing errors in legacy/harness/flow files untouched by Slice H; PR #293 files are clippy-clean. Not caused by Slice H; would equally fail on base.
+FAILS at the clippy step (exit 101) due to 26 pre-existing errors in legacy/harness/flow files untouched by Slice H (identical failure reproduced with the Slice H repair stashed). PR #293 files are clippy-clean. Not caused by Slice H; equally fails on base checkout.
 
 PLATFORM_EXIT:
-0 (local_ci linux-platform PASS with --allow-dirty; 26 passed; evidence .local-ci/evidence/b73a.../linux-platform.json)
+0 (local_ci linux-platform PASS on the committed tree; evidence .local-ci/evidence/1b48bb116f3d3f5f73394af9c397a1d3aa3a6e0f/linux-platform.json, SHA-256 dc0be5c11930b889e8471a51556fe29903f90cab073df36b01446a25cc455397)
 
 SMOKE_EXIT:
-fails in this Windows checkout: scripts/test_target_dir.sh has CRLF line endings in the working tree (committed blob is LF; .gitattributes does not pin *.sh). Environmental checkout artifact; the file is a reviewed-pin surface and was not modified.
+0 (local_ci linux-smoke PASS on the committed tree; evidence .local-ci/evidence/1b48bb116f3d3f5f73394af9c397a1d3aa3a6e0f/linux-smoke.json, SHA-256 04447dcc10bd2f52a308fc0d8c84e932f95cac68d96fa6dfd1376a813e22f9bb). Note: initial smoke failure was a Windows-checkout CRLF artifact in scripts executed by the suite (bash cannot parse CRLF); committed blobs are LF. The 15 executed scripts were converted to LF on disk (content-identical, git-invisible); no pinned content changed.
 
 WINDOWS_RUNTIME_TESTS:
 not executed: Windows-side `cargo check --all-targets` did not complete within a 15-minute budget (killed; full MSVC workspace rebuild + no Windows-native OpenSSL on this machine; E:\openssl-dev is the Linux extraction). No Windows integration test was run; report as limitation.
