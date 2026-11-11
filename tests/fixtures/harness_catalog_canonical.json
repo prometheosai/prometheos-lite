@@ -3,6 +3,44 @@
   "conformanceVersion": "1.0.0",
   "entries": [
     {
+      "harnessId": "lite.harness.local_model",
+      "family": "local-model",
+      "name": "lite-local-model",
+      "revision": "v1",
+      "declarationDigest": "c96adeaea6fb345c13c5d2f96047a247eefbdef9155daf97d9432858234cd281",
+      "declaredCapabilities": [
+        "harness.local_model.infer"
+      ],
+      "claimedCapabilities": [
+        "harness.local_model.infer"
+      ],
+      "effectClasses": [
+        "network-io"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [],
+      "workspace": {
+        "workspace": "read"
+      },
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": false,
+      "readProjection": false,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    },
+    {
       "harnessId": "lite.harness.native",
       "family": "native",
       "name": "lite-native",
@@ -198,5 +236,5 @@
       "overClaimed": false
     }
   ],
-  "contentDigest": "2ab0eaab19a2ae6deb34ac527c862f19233ba6018c68bff5420f7737efcc447e"
+  "contentDigest": "73c1f1ca8cbbd6f75321399dc6e9cff0375b6c06634ff65876158670a55e0c4e"
 }
