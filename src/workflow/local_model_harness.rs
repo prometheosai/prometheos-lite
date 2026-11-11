@@ -283,7 +283,13 @@ impl ExecutionHarness for LocalModelHarness {
         if parsed.get("success").and_then(Value::as_bool) != Some(true)
             || parsed.get("status").and_then(Value::as_str) != Some("ok")
         {
-            anyhow::bail!("local model inference did not succeed: {output}");
+            // Never reflect the raw output (it may carry attacker-influenced
+            // or secret-adjacent text); the typed status is sufficient.
+            let status = parsed
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            anyhow::bail!("local model inference did not succeed (status {status})");
         }
 
         let events = vec![
@@ -378,44 +384,160 @@ pub fn local_model_capability(config: LocalModelConfig, workspace_root: PathBuf)
 }
 
 // ---------------------------------------------------------------------------
-// Network boundary (loopback-only, deadline, bytes, cancellation, redaction)
+// Network boundary (strict endpoint contract, one end-to-end deadline,
+// bounded reads during IO, cooperative cancellation, redaction)
 // ---------------------------------------------------------------------------
 
-/// Endpoint host must be loopback-only by default (operator allowlist is the
-/// boundary; no environment-driven endpoint substitution happens here — the
-/// endpoint arrives only through the governed args).
-fn is_loopback_host(host: &str) -> bool {
-    let h = host.trim_start_matches('[').trim_end_matches(']');
-    h == "127.0.0.1" || h == "localhost" || h == "::1"
+/// Hard cap on response headers, enforced DURING the read, not afterward.
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+/// Short IO poll quantum so the deadline and cancellation take effect
+/// promptly even while the socket is blocked in a blocking read/write.
+const IO_POLL: Duration = Duration::from_millis(50);
+
+/// A validated, strict endpoint: lowercase `http` scheme, no credentials,
+/// no query or fragment, numeric loopback destination (127.0.0.0/8 or ::1;
+/// `localhost` normalized to 127.0.0.1), explicit or default port 80, and a
+/// validated absolute-path prefix that is preserved in the request path.
+#[derive(Debug, Clone)]
+struct EndpointParts {
+    ip: std::net::IpAddr,
+    port: u16,
+    /// Validated absolute-path prefix ("/v1" or "" for the root). No `.`/`..`
+    /// segments, no unsafe characters.
+    base_path: String,
+    /// Display form for the HTTP `Host` header.
+    host_header: String,
 }
 
-/// Split `scheme://host:port[/path]` into (host, port).
-fn endpoint_host_port(endpoint: &str) -> std::result::Result<(String, u16), String> {
-    let rest = endpoint
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let (authority, _path) = match rest.split_once('/') {
-        Some((a, p)) => (a, p),
-        None => (rest, ""),
+/// Strict endpoint validation (fail closed). DNS names other than
+/// `localhost` are refused; HTTPS endpoints are refused because TLS is not
+/// implemented. Credentials, query strings and fragments are rejected.
+fn parse_endpoint(endpoint: &str) -> std::result::Result<EndpointParts, LocalModelFailure> {
+    let rest = endpoint.trim();
+    if !rest.starts_with("http://") {
+        let scheme = rest.split('/').next().unwrap_or("");
+        if scheme.eq_ignore_ascii_case("https:") {
+            return Err(LocalModelFailure::new(
+                "unsupported-scheme",
+                "local model endpoint uses plain http only; TLS endpoints are refused",
+            ));
+        }
+        return Err(LocalModelFailure::new(
+            "unsupported-scheme",
+            "local model endpoint must use the lowercase 'http' scheme",
+        ));
+    }
+    let rest = &rest["http://".len()..];
+    if rest.contains('@') || rest.contains('?') || rest.contains('#') {
+        return Err(LocalModelFailure::new(
+            "invalid-endpoint",
+            "local model endpoint must not contain credentials, a query string or a fragment",
+        ));
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
     };
     let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
-        // IPv6 literal: [::1]:8080
-        let end = stripped
-            .find(']')
-            .ok_or("local model endpoint has a malformed IPv6 host")?;
+        let end = stripped.find(']').ok_or_else(|| {
+            LocalModelFailure::new(
+                "invalid-endpoint",
+                "local model endpoint has a malformed IPv6 host",
+            )
+        })?;
         let host = stripped[..end].to_string();
-        let port: u16 = if let Some((p, _)) = stripped[end + 1..].split_once(':') {
-            p.parse().unwrap_or(80)
-        } else {
+        let after = &stripped[end + 1..];
+        let port: u16 = if let Some(p) = after.strip_prefix(':') {
+            p.parse().map_err(|_| {
+                LocalModelFailure::new("invalid-endpoint", "local model endpoint port is not valid")
+            })?
+        } else if after.is_empty() {
             80
+        } else {
+            return Err(LocalModelFailure::new(
+                "invalid-endpoint",
+                "local model endpoint is malformed after the IPv6 host",
+            ));
         };
         (host, port)
     } else {
-        let (host, port_str) = authority.rsplit_once(':').unwrap_or((authority, "80"));
-        (host.to_string(), port_str.parse().unwrap_or(80))
+        match authority.rsplit_once(':') {
+            Some((h, p)) => {
+                let port: u16 = p.parse().map_err(|_| {
+                    LocalModelFailure::new(
+                        "invalid-endpoint",
+                        "local model endpoint port is not valid",
+                    )
+                })?;
+                (h.to_string(), port)
+            }
+            None => (authority.to_string(), 80),
+        }
     };
-    Ok((host, port))
+    if host.is_empty() {
+        return Err(LocalModelFailure::new(
+            "invalid-endpoint",
+            "local model endpoint has an empty host",
+        ));
+    }
+    let ip: std::net::IpAddr = if host.eq_ignore_ascii_case("localhost") {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    } else {
+        host.parse().map_err(|_| {
+            LocalModelFailure::new(
+                "nonlocal-endpoint",
+                "local model endpoint host must be a numeric loopback address; DNS names are refused",
+            )
+        })?
+    };
+    let loopback = match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    };
+    if !loopback {
+        return Err(LocalModelFailure::new(
+            "nonlocal-endpoint",
+            "local model endpoint is not loopback-only; refusing the network effect",
+        ));
+    }
+    if port == 0 {
+        return Err(LocalModelFailure::new(
+            "invalid-endpoint",
+            "local model endpoint port 0 is not valid",
+        ));
+    }
+    if !path.starts_with('/') {
+        return Err(LocalModelFailure::new(
+            "invalid-endpoint",
+            "local model endpoint path is not absolute",
+        ));
+    }
+    let prefix = path.trim_end_matches('/').to_string();
+    if !prefix.is_empty() {
+        for seg in prefix.split('/').skip(1) {
+            if seg.is_empty() || seg == "." || seg == ".." {
+                return Err(LocalModelFailure::new(
+                    "invalid-endpoint",
+                    "local model endpoint path contains an empty or dot segment",
+                ));
+            }
+            if !seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            {
+                return Err(LocalModelFailure::new(
+                    "invalid-endpoint",
+                    "local model endpoint path contains unsafe characters",
+                ));
+            }
+        }
+    }
+    Ok(EndpointParts {
+        ip,
+        port,
+        base_path: prefix,
+        host_header: format!("{ip}:{port}"),
+    })
 }
 
 /// Find the first occurrence of `needle` in `haystack` (byte-wise).
@@ -438,141 +560,221 @@ fn local_model_io_failure(error: std::io::Error) -> LocalModelFailure {
     )
 }
 
-/// One bounded OpenAI-compatible chat-completions exchange over the local
-/// transport: loopback-only destination, configured deadline, bounded response
-/// bytes, cooperative cancellation.
-fn local_http_infer(
-    endpoint: &str,
-    body: &str,
-    timeout: Duration,
-    max_response_bytes: usize,
+/// Send `data` with the invocation deadline and cooperative cancellation
+/// honoured between socket write quanta.
+fn write_with_deadline(
+    stream: &mut TcpStream,
+    data: &[u8],
+    deadline: Instant,
     cancel: &AtomicBool,
-) -> std::result::Result<String, LocalModelFailure> {
-    let (host, port) =
-        endpoint_host_port(endpoint).map_err(|e| LocalModelFailure::new("invalid-endpoint", e))?;
-    if !is_loopback_host(&host) {
+) -> std::result::Result<(), LocalModelFailure> {
+    stream.set_write_timeout(Some(IO_POLL)).map_err(|error| {
+        LocalModelFailure::new(
+            "timeout",
+            format!("local model write timeout could not be applied: {error}"),
+        )
+    })?;
+    let mut sent = 0usize;
+    while sent < data.len() {
+        if Instant::now() >= deadline {
+            return Err(LocalModelFailure::new(
+                "timeout",
+                "local model inference timed out",
+            ));
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(LocalModelFailure::new(
+                "cancelled",
+                "local model inference cancelled",
+            ));
+        }
+        match stream.write(&data[sent..]) {
+            Ok(0) => {
+                return Err(LocalModelFailure::new(
+                    "transport-error",
+                    "local model inference request write made no progress",
+                ));
+            }
+            Ok(n) => sent += n,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(error) => return Err(local_model_io_failure(error)),
+        }
+    }
+    Ok(())
+}
+
+/// Parsed response headers: `(head_end, content_length)` where `head_end` is
+/// the byte offset of the body (end of the blank line) and `content_length`
+/// is the declared body size.
+fn try_parse_headers(
+    response: &[u8],
+    max_response_bytes: usize,
+    total_cap: usize,
+) -> std::result::Result<Option<(usize, usize)>, LocalModelFailure> {
+    let Some(pos) = find_bytes(response, b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let first_crlf = find_bytes(response, b"\r\n").ok_or_else(|| {
+        LocalModelFailure::new(
+            "invalid-response",
+            "local model response is missing a status line",
+        )
+    })?;
+    let status_line = String::from_utf8_lossy(&response[..first_crlf]).into_owned();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| {
+            LocalModelFailure::new(
+                "invalid-response",
+                "local model response has a malformed status line",
+            )
+        })?;
+    if !(200..300).contains(&status_code) {
         return Err(LocalModelFailure::new(
-            "nonlocal-endpoint",
+            "unexpected-http-response",
+            format!("local model endpoint returned HTTP {status_code}"),
+        ));
+    }
+    let head_end = pos.checked_add(4).ok_or_else(|| {
+        LocalModelFailure::new(
+            "invalid-response",
+            "local model response declares an overflowing header",
+        )
+    })?;
+    let head = String::from_utf8_lossy(&response[..pos]).into_owned();
+    let mut declared: Option<usize> = None;
+    for line in head.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("content-length")
+        {
+            if declared.is_some() {
+                return Err(LocalModelFailure::new(
+                    "invalid-response",
+                    "local model response declares content-length more than once",
+                ));
+            }
+            let parsed: usize = value.trim().parse().map_err(|_| {
+                LocalModelFailure::new(
+                    "invalid-response",
+                    "local model response declares a non-numeric content-length",
+                )
+            })?;
+            declared = Some(parsed);
+        }
+    }
+    let cl = declared.ok_or_else(|| {
+        LocalModelFailure::new(
+            "invalid-response",
+            "local model response is missing content-length",
+        )
+    })?;
+    if cl > max_response_bytes {
+        return Err(LocalModelFailure::new(
+            "oversized-response",
             format!(
-                "local model endpoint {endpoint:?} is not loopback-only; refusing the network effect"
+                "local model response declared a body of {cl} bytes, above the configured budget of {max_response_bytes} bytes"
             ),
         ));
     }
-    if cancel.load(Ordering::SeqCst) {
+    let total = head_end.checked_add(cl).ok_or_else(|| {
+        LocalModelFailure::new(
+            "invalid-response",
+            "local model response declares an overflowing content-length",
+        )
+    })?;
+    if total > total_cap {
         return Err(LocalModelFailure::new(
-            "cancelled",
-            "local model inference cancelled before the network effect",
+            "oversized-response",
+            "local model response exceeded the configured budget",
         ));
     }
-    let mut stream = TcpStream::connect((host.as_str(), port)).map_err(|e| {
-        let status = if e.kind() == std::io::ErrorKind::TimedOut {
-            "timeout"
-        } else {
-            "connection-refused"
-        };
-        LocalModelFailure::new(
-            status,
-            format!("local model inference connect to {endpoint} failed: {e}"),
-        )
-    })?;
-    stream.set_read_timeout(Some(timeout)).map_err(|e| {
-        LocalModelFailure::new(
-            "timeout",
-            format!("local model read timeout could not be applied: {e}"),
-        )
-    })?;
-    stream.set_write_timeout(Some(timeout)).map_err(|e| {
-        LocalModelFailure::new(
-            "timeout",
-            format!("local model write timeout could not be applied: {e}"),
-        )
-    })?;
-    let head = format!(
-        "POST /chat/completions HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: prometheos-lite\r\n\r\n",
-        body.len()
-    );
-    stream
-        .write_all(head.as_bytes())
-        .map_err(local_model_io_failure)?;
-    stream
-        .write_all(body.as_bytes())
-        .map_err(local_model_io_failure)?;
-    stream.flush().map_err(local_model_io_failure)?;
-    read_local_model_response(&mut stream, timeout, max_response_bytes)
+    Ok(Some((head_end, cl)))
 }
 
-/// Read one bounded HTTP/1.1 response: headers + content-length body, with
-/// the configured deadline and response budget enforced.
-fn read_local_model_response(
+/// Read one bounded HTTP/1.1 response with the invocation deadline and
+/// cooperative cancellation honoured between read quanta. Headers are
+/// bounded by [`MAX_HEADER_BYTES`] and the body by `max_response_bytes`;
+/// both limits are enforced BEFORE any byte is appended.
+fn read_with_deadline(
     stream: &mut TcpStream,
-    timeout: Duration,
+    deadline: Instant,
+    cancel: &AtomicBool,
     max_response_bytes: usize,
 ) -> std::result::Result<String, LocalModelFailure> {
-    let deadline = Instant::now() + timeout;
+    stream.set_read_timeout(Some(IO_POLL)).map_err(|error| {
+        LocalModelFailure::new(
+            "timeout",
+            format!("local model read timeout could not be applied: {error}"),
+        )
+    })?;
+    let total_cap = MAX_HEADER_BYTES.saturating_add(max_response_bytes);
     let mut response: Vec<u8> = Vec::new();
     let mut header_end: Option<usize> = None;
     let mut content_length: Option<usize> = None;
-    let mut received: usize = 0;
     let mut buf = [0u8; 8192];
     loop {
         if Instant::now() >= deadline {
             return Err(LocalModelFailure::new(
                 "timeout",
-                format!("local model inference timed out"),
+                "local model inference timed out",
             ));
         }
-        if let (Some(he), Some(cl)) = (header_end, content_length) {
-            if received >= he + cl {
-                break;
-            }
-        }
-        let n = stream.read(&mut buf).map_err(local_model_io_failure)?;
-        if n == 0 {
+        if cancel.load(Ordering::SeqCst) {
             return Err(LocalModelFailure::new(
-                "truncated-response",
-                "local model response ended before the declared body arrived",
+                "cancelled",
+                "local model inference cancelled",
             ));
         }
-        response.extend_from_slice(&buf[..n]);
-        received += n;
-        if header_end.is_none() {
-            if let Some(pos) = find_bytes(&response, b"\r\n\r\n") {
-                let first_crlf = find_bytes(&response, b"\r\n").ok_or_else(|| {
-                    LocalModelFailure::new(
-                        "invalid-response",
-                        "local model response is missing a status line",
-                    )
-                })?;
-                let status_line = String::from_utf8_lossy(&response[..first_crlf]).into_owned();
-                let status_code = status_line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .ok_or_else(|| {
-                        LocalModelFailure::new(
-                            "invalid-response",
-                            "local model response has a malformed status line",
-                        )
-                    })?;
-                if !(200..300).contains(&status_code) {
+        if let (Some(he), Some(cl)) = (header_end, content_length)
+            && response.len() >= he.saturating_add(cl)
+        {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                return Err(LocalModelFailure::new(
+                    "truncated-response",
+                    "local model response ended before the declared body arrived",
+                ));
+            }
+            Ok(n) => {
+                if header_end.is_none() {
+                    if response.len().saturating_add(n) > MAX_HEADER_BYTES {
+                        return Err(LocalModelFailure::new(
+                            "oversized-header",
+                            "local model response headers exceeded the configured bound",
+                        ));
+                    }
+                } else if response.len().saturating_add(n) > total_cap {
                     return Err(LocalModelFailure::new(
-                        "unexpected-http-response",
-                        format!("local model endpoint returned HTTP {status_code}"),
+                        "oversized-response",
+                        "local model response exceeded the configured budget",
                     ));
                 }
-                header_end = Some(pos + 4);
-                let head = String::from_utf8_lossy(&response[..pos]).into_owned();
-                for line in head.split('\n') {
-                    let line = line.trim_end_matches('\r');
-                    if let Some((key, value)) = line.split_once(':') {
-                        if key.trim().eq_ignore_ascii_case("content-length") {
-                            if let Ok(parsed) = value.trim().parse::<usize>() {
-                                content_length = Some(parsed);
-                            }
-                        }
-                    }
+                response.extend_from_slice(&buf[..n]);
+                if header_end.is_none()
+                    && let Some((he, cl)) =
+                        try_parse_headers(&response, max_response_bytes, total_cap)?
+                {
+                    header_end = Some(he);
+                    content_length = Some(cl);
                 }
             }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(error) => return Err(local_model_io_failure(error)),
         }
     }
     let header_end = header_end.ok_or_else(|| {
@@ -587,22 +789,86 @@ fn read_local_model_response(
             "local model response is missing content-length",
         )
     })?;
-    if received < header_end + content_length {
-        return Err(LocalModelFailure::new(
-            "truncated-response",
-            "local model response body was truncated",
-        ));
-    }
-    let body = &response[header_end..header_end + content_length];
-    if body.len() > max_response_bytes {
-        return Err(LocalModelFailure::new(
-            "oversized-response",
-            format!(
-                "local model response exceeded the configured budget of {max_response_bytes} bytes"
-            ),
-        ));
-    }
+    let body = &response[header_end..header_end.saturating_add(content_length)];
     Ok(String::from_utf8_lossy(body).into_owned())
+}
+
+/// One bounded OpenAI-compatible chat-completions exchange over the local
+/// transport: strict loopback-only destination, ONE end-to-end deadline,
+/// bounded response bytes enforced during reads, cooperative cancellation
+/// honoured during connect/write/read.
+fn local_http_infer(
+    endpoint: &str,
+    body: &str,
+    timeout: Duration,
+    max_response_bytes: usize,
+    cancel: &AtomicBool,
+) -> std::result::Result<String, LocalModelFailure> {
+    let ep = parse_endpoint(endpoint)?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(LocalModelFailure::new(
+            "cancelled",
+            "local model inference cancelled before the network effect",
+        ));
+    }
+    let deadline = Instant::now() + timeout;
+    // Initiate the connection in polled quanta so both the deadline and
+    // cancellation take effect during connect.
+    let addr = std::net::SocketAddr::new(ep.ip, ep.port);
+    let mut stream = loop {
+        if Instant::now() >= deadline {
+            return Err(LocalModelFailure::new(
+                "timeout",
+                "local model inference timed out",
+            ));
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(LocalModelFailure::new(
+                "cancelled",
+                "local model inference cancelled",
+            ));
+        }
+        match std::net::TcpStream::connect_timeout(&addr, IO_POLL) {
+            Ok(s) => break s,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(error) => {
+                let status = if error.kind() == std::io::ErrorKind::TimedOut {
+                    "timeout"
+                } else {
+                    "connection-refused"
+                };
+                return Err(LocalModelFailure::new(
+                    status,
+                    format!("local model inference connect to {addr} failed: {error}"),
+                ));
+            }
+        }
+    };
+    stream.set_nodelay(true).map_err(|error| {
+        LocalModelFailure::new(
+            "transport-error",
+            format!("local model inference socket could not be configured: {error}"),
+        )
+    })?;
+    let request_path = if ep.base_path.is_empty() {
+        "/chat/completions".to_string()
+    } else {
+        format!("{}/chat/completions", ep.base_path)
+    };
+    let head = format!(
+        "POST {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: prometheos-lite\r\n\r\n",
+        ep.host_header,
+        body.len()
+    );
+    write_with_deadline(&mut stream, head.as_bytes(), deadline, cancel)?;
+    write_with_deadline(&mut stream, body.as_bytes(), deadline, cancel)?;
+    stream.flush().map_err(local_model_io_failure)?;
+    read_with_deadline(&mut stream, deadline, cancel, max_response_bytes)
 }
 
 /// Recursively redact every string leaf of a JSON value with `redactor`.
@@ -655,16 +921,13 @@ fn build_local_model_success(
     let parsed: Value = serde_json::from_str(response).map_err(|_| {
         LocalModelFailure::new(
             "invalid-json",
-            format!("local model response was not valid JSON: {response}"),
+            "local model response was not valid JSON".to_string(),
         )
     })?;
     if parsed.get("model").and_then(Value::as_str) != Some(model) {
         return Err(LocalModelFailure::new(
             "model-mismatch",
-            format!(
-                "local model responded with model {:?}, expected {model:?}",
-                parsed.get("model").and_then(Value::as_str)
-            ),
+            "local model responded with a different model than the configured one".to_string(),
         ));
     }
     let choices = parsed
@@ -676,7 +939,7 @@ fn build_local_model_success(
                 "local model response is missing the choices array",
             )
         })?;
-    let choice = choices.get(0).ok_or_else(|| {
+    let choice = choices.first().ok_or_else(|| {
         LocalModelFailure::new(
             "invalid-response",
             "local model response is missing choices[0]",
@@ -701,7 +964,7 @@ fn build_local_model_success(
         serde_json::from_str::<Value>(content_str).map_err(|_| {
             LocalModelFailure::new(
                 "invalid-structured-output",
-                format!("local model structured output was not valid JSON: {content_str}"),
+                "local model structured output was not valid JSON".to_string(),
             )
         })?
     } else {
@@ -845,10 +1108,11 @@ fn run_local_model_guarded(
     let mut secrets = config.known_secrets.clone();
     if let Some(arr) = obj.get("knownSecrets").and_then(Value::as_array) {
         for item in arr {
-            if let Some(secret) = item.as_str() {
-                if !secret.is_empty() && !secrets.iter().any(|e| e == secret) {
-                    secrets.push(secret.to_string());
-                }
+            if let Some(secret) = item.as_str()
+                && !secret.is_empty()
+                && !secrets.iter().any(|e| e == secret)
+            {
+                secrets.push(secret.to_string());
             }
         }
     }
@@ -862,10 +1126,10 @@ fn run_local_model_guarded(
         "messages": messages,
         "max_tokens": max_tokens,
     });
-    if let Some(response_format) = obj.get("responseFormat") {
-        if let serde_json::Value::Object(map) = &mut body_value {
-            map.insert("response_format".to_string(), response_format.clone());
-        }
+    if let Some(response_format) = obj.get("responseFormat")
+        && let serde_json::Value::Object(map) = &mut body_value
+    {
+        map.insert("response_format".to_string(), response_format.clone());
     }
     let body_text = serde_json::to_string(&body_value).context("local model request serializes")?;
     let latency_ms = started.elapsed().as_millis() as u64;

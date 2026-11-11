@@ -8,11 +8,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::thread::JoinHandle;
 
 use prometheos_lite::workflow::execution_harness::{
     ExecutionHarness, HarnessDispatch, HarnessFamily, HarnessOutcome, HarnessRegistry, HarnessStep,
@@ -275,7 +274,7 @@ async fn local_model_http_fixture_round_trip_through_governed_dispatch() {
         parsed["output"]["content"]["usage"]["totalTokens"],
         json!(11)
     );
-    assert!(parsed["output"]["latencyMs"].as_u64().unwrap() >= 0);
+    assert!(parsed["output"]["latencyMs"].is_u64());
     assert_eq!(parsed["output"]["requestId"], json!("req-step-1"));
     assert_eq!(parsed["output"]["correlationId"], json!("step-1"));
     server.join().expect("server thread joins");
@@ -743,5 +742,602 @@ async fn local_model_secret_redaction_before_persistence() {
         parsed["output"]["content"]["content"],
         json!(format!("echo {REDACTED_PLACEHOLDER}"))
     );
+    server.join().expect("server thread joins");
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial, real-socket tests (bounded IO, strict endpoint, secret safety)
+// ---------------------------------------------------------------------------
+
+/// Raw-socket HTTP fixture: binds an ephemeral loopback port, reads the full
+/// request head, and replies with the exact `raw_response` bytes.
+fn spawn_local_model_server_raw(raw_response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("raw fixture bind");
+    let addr = listener.local_addr().expect("raw fixture addr");
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut head = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match socket.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head.extend_from_slice(&tmp[..n]);
+                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let head_text = String::from_utf8_lossy(&head).into_owned();
+            let content_length = head_text
+                .lines()
+                .find_map(|l| l.split_once(':'))
+                .and_then(|(k, v)| {
+                    k.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            let mut body_buf = vec![0u8; content_length];
+            let mut read = 0;
+            while read < content_length {
+                match socket.read(&mut body_buf[read..]) {
+                    Ok(0) => break,
+                    Ok(n) => read += n,
+                    Err(_) => break,
+                }
+            }
+            let _ = socket.write_all(&raw_response);
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    });
+    (format!("http://127.0.0.1:{}/v1", addr.port()), handle)
+}
+
+/// Raw-socket HTTP fixture: streams `bytes` without a header terminator and
+/// never responds; used to exercise the header bound.
+fn spawn_local_model_server_unbounded(bytes: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("unbounded fixture bind");
+    let addr = listener.local_addr().expect("unbounded fixture addr");
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut head = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match socket.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head.extend_from_slice(&tmp[..n]);
+                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = socket.write_all(&bytes);
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+    (format!("http://127.0.0.1:{}/v1", addr.port()), handle)
+}
+
+/// Slow-trickle fixture: sends the complete head first, then `body_prefix`
+/// followed by one byte every `delay` until `total_bytes` are sent; used to
+/// exercise the end-to-end deadline and blocked-read cancellation.
+fn spawn_local_model_server_trickle(
+    body_prefix: Vec<u8>,
+    total_bytes: usize,
+    delay: Duration,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("trickle fixture bind");
+    let addr = listener.local_addr().expect("trickle fixture addr");
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut head = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match socket.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head.extend_from_slice(&tmp[..n]);
+                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                total_bytes
+            );
+            if socket.write_all(response.as_bytes()).is_err() {
+                return;
+            }
+            if socket.write_all(&body_prefix).is_err() {
+                return;
+            }
+            let mut sent = body_prefix.len();
+            while sent < total_bytes {
+                if socket.write_all(b"x").is_err() {
+                    return;
+                }
+                sent += 1;
+                std::thread::sleep(delay);
+            }
+        }
+    });
+    (format!("http://127.0.0.1:{}/v1", addr.port()), handle)
+}
+
+/// Path-recording fixture: captures the request line for assertions.
+fn spawn_local_model_server_recording() -> (
+    String,
+    Arc<std::sync::Mutex<String>>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("recording fixture bind");
+    let addr = listener.local_addr().expect("recording fixture addr");
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+    let body = serde_json::json!({
+        "id": "chatcmpl-local-fixture",
+        "object": "chat.completion",
+        "model": MODEL,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    })
+    .to_string();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match socket.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let head_text = String::from_utf8_lossy(&buf).into_owned();
+            let request_line = head_text.lines().next().unwrap_or("").to_string();
+            *captured_clone.lock().unwrap() = request_line;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes());
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    });
+    (
+        format!("http://127.0.0.1:{}/v1", addr.port()),
+        captured,
+        handle,
+    )
+}
+
+#[tokio::test]
+async fn local_model_refuses_unlimited_header_stream() {
+    let junk = vec![b'a'; 24 * 1024];
+    let (endpoint, server) = spawn_local_model_server_unbounded(junk);
+    let config = local_model_config(endpoint.clone(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("unbounded streamed header must be refused")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("oversized-header"), "unexpected error: {msg}");
+    drop(server);
+}
+
+#[tokio::test]
+async fn local_model_refuses_oversized_declared_content_length() {
+    let mut raw_bytes =
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n".to_vec();
+    raw_bytes.extend_from_slice(&vec![b'x'; 4096]);
+    let (endpoint, server) = spawn_local_model_server_raw(raw_bytes);
+    let config = local_model_config(endpoint.clone(), MODEL).max_output_bytes(64);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("oversized declared content-length must be refused before reading the body")
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("oversized-response"),
+        "unexpected error: {msg}"
+    );
+    server.join().expect("server thread joins");
+}
+
+#[tokio::test]
+async fn local_model_refuses_conflicting_content_length() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10\r\nContent-Length: 20\r\nConnection: close\r\n\r\n01234567890123456789".to_vec();
+    let (endpoint, server) = spawn_local_model_server_raw(raw);
+    let config = local_model_config(endpoint.clone(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("conflicting content-length must be refused")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("invalid-response"), "unexpected error: {msg}");
+    server.join().expect("server thread joins");
+}
+
+#[tokio::test]
+async fn local_model_refuses_missing_content_length() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\nnope"
+        .to_vec();
+    let (endpoint, server) = spawn_local_model_server_raw(raw);
+    let config = local_model_config(endpoint.clone(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("missing content-length must be refused")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("invalid-response"), "unexpected error: {msg}");
+    server.join().expect("server thread joins");
+}
+
+#[tokio::test]
+async fn local_model_slow_trickle_response_times_out() {
+    let (endpoint, server) = spawn_local_model_server_trickle(
+        b"{\"choices\":[{".to_vec(),
+        512,
+        Duration::from_millis(100),
+    );
+    let config = local_model_config(endpoint.clone(), MODEL).timeout_ms(300);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("slow-trickle local model response must hit the deadline")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("timeout"), "unexpected error: {msg}");
+    drop(server);
+}
+
+#[tokio::test]
+async fn local_model_cancellation_during_blocked_read() {
+    // Server sends headers and a 4-byte prefix of a long body, then stalls.
+    let body_prefix = b"{\"ch".to_vec();
+    let (endpoint, server) =
+        spawn_local_model_server_trickle(body_prefix, 4096, Duration::from_secs(3600));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_trigger = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        cancel_trigger.store(true, Ordering::SeqCst);
+    });
+    let config = local_model_config(endpoint.clone(), MODEL)
+        .timeout_ms(30_000)
+        .cancel(cancel);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("cancellation during a blocked read must interrupt the inference")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("cancelled"), "unexpected error: {msg}");
+    drop(server);
+}
+
+#[tokio::test]
+async fn local_model_refuses_https_endpoint() {
+    let config = local_model_config("https://127.0.0.1:8080/v1".to_string(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(
+                step(inference_args("https://127.0.0.1:8080/v1", MODEL)),
+                &mut d,
+            )
+            .await
+            .expect_err("https endpoints must be refused until TLS is implemented")
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unsupported-scheme"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn local_model_refuses_credentials_and_query_and_fragment() {
+    for endpoint in [
+        "http://user:pass@127.0.0.1:8080/v1",
+        "http://127.0.0.1:8080/v1?token=abc",
+        "http://127.0.0.1:8080/v1#frag",
+    ] {
+        let config = local_model_config(endpoint.to_string(), MODEL);
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[LOCAL_MODEL_INFER_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let err = {
+            let mut d = dispatch(&harness, &m, &r, &mut runner);
+            harness
+                .run(step(inference_args(endpoint, MODEL)), &mut d)
+                .await
+                .expect_err("endpoint with credentials, query or fragment must be refused")
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid-endpoint"),
+            "endpoint {endpoint:?}: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_model_refuses_path_traversal() {
+    let config = local_model_config("http://127.0.0.1:8080/../secret".to_string(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(
+                step(inference_args("http://127.0.0.1:8080/../secret", MODEL)),
+                &mut d,
+            )
+            .await
+            .expect_err("path traversal must be refused")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("invalid-endpoint"), "unexpected error: {msg}");
+}
+
+#[tokio::test]
+async fn local_model_refuses_invalid_ports() {
+    for endpoint in [
+        "http://127.0.0.1:99999/v1",
+        "http://127.0.0.1:abc/v1",
+        "http://127.0.0.1:/v1",
+        "http://127.0.0.1:0/v1",
+    ] {
+        let config = local_model_config(endpoint.to_string(), MODEL);
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[LOCAL_MODEL_INFER_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let err = {
+            let mut d = dispatch(&harness, &m, &r, &mut runner);
+            harness
+                .run(step(inference_args(endpoint, MODEL)), &mut d)
+                .await
+                .expect_err("invalid port must be refused")
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid-endpoint"),
+            "endpoint {endpoint:?}: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_model_preserves_v1_path_in_request() {
+    let (endpoint, captured, server) = spawn_local_model_server_recording();
+    let config = local_model_config(endpoint.clone(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect("governed local model inference succeeds");
+    }
+    let request_line = captured.lock().unwrap().clone();
+    assert!(
+        request_line.starts_with("POST /v1/chat/completions "),
+        "recorded request line: {request_line:?}"
+    );
+    server.join().expect("server thread joins");
+}
+
+#[tokio::test]
+async fn local_model_secret_in_malformed_response_not_reflected() {
+    let secret = "PROMETHEOS_TEST_SECRET_DO_NOT_PERSIST_9f83c0ffee";
+    let body = format!("this is not json {secret} trailing bytes");
+    let raw = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes();
+    let (endpoint, server) = spawn_local_model_server_raw(raw);
+    let config = local_model_config(endpoint.clone(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let err = {
+        let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, vec![secret.to_string()]);
+        harness
+            .run(step(inference_args(&endpoint, MODEL)), &mut d)
+            .await
+            .expect_err("secret-bearing malformed response must be refused")
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("invalid-json"), "unexpected error: {msg}");
+    assert!(!msg.contains(secret), "secret leaked in error: {msg}");
+    server.join().expect("server thread joins");
+}
+
+#[tokio::test]
+async fn local_model_secret_in_failed_structured_output_not_reflected() {
+    let secret = "PROMETHEOS_TEST_SECRET_DO_NOT_PERSIST_9f83c0ffee";
+    let content = format!("not valid json {secret}");
+    let (endpoint, server) = spawn_local_model_server(
+        Some(
+            serde_json::json!({
+                "id": "chatcmpl-local-fixture",
+                "object": "chat.completion",
+                "model": MODEL,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
+            .to_string(),
+        ),
+        200,
+    );
+    let config = local_model_config(endpoint.clone(), MODEL);
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[LOCAL_MODEL_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let args = json!({
+        "model": MODEL,
+        "endpoint": endpoint,
+        "messages": [{"role": "user", "content": "hi"}],
+        "maxTokens": 64,
+        "responseFormat": {"type": "json_object"},
+    });
+    let err = {
+        let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, vec![secret.to_string()]);
+        harness
+            .run(step(args), &mut d)
+            .await
+            .expect_err("secret-bearing structured output must be refused")
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("invalid-structured-output"),
+        "unexpected error: {msg}"
+    );
+    assert!(!msg.contains(secret), "secret leaked in error: {msg}");
     server.join().expect("server thread joins");
 }
