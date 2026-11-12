@@ -1007,8 +1007,15 @@ async fn configured_secret_in_filename_is_redacted() {
 #[tokio::test]
 async fn json_special_characters_do_not_break_serialization() {
     let (_dir, _adapter, _manifest, acquired) = workspace_fixture();
-    std::fs::create_dir_all(acquired.root.join("subdir")).unwrap();
-    std::fs::write(acquired.root.join("subdir").join("hello.txt"), "x\n").unwrap();
+    // Windows treats `\` as a separator; on Unix a backslash is a valid
+    // filename character, so the literal name is what gets inspected there.
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(acquired.root.join("subdir")).unwrap();
+        std::fs::write(acquired.root.join("subdir").join("hello.txt"), "x\n").unwrap();
+    }
+    #[cfg(not(windows))]
+    std::fs::write(acquired.root.join("subdir\\hello.txt"), "x\n").unwrap();
     std::fs::write(acquired.root.join("o'brien&copy=final.txt"), "y\n").unwrap();
     let mut runner = runner_for(
         NativeInspectConfig::default(),
