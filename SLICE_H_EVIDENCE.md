@@ -7,7 +7,7 @@ PREVIOUS_HEAD (reviewed):
 7046762b37247cac14ea3901820f7a44285e865d
 
 NEW_REMOTE_HEAD_SHA:
-cd01c6ad4ee11c41d5c20626d3b799a1699a8b8f (plus this evidence-update commit; exact SHA recorded in PR)
+cd01c6ad4ee11c41d5c20626d3b799a1699a8b8f (repair) + 6f8fbef (evidence); final remote head recorded at push time
 
 PR_URL:
 https://github.com/prometheosai/prometheos-lite/pull/293
