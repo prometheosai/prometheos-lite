@@ -8,7 +8,7 @@ with a certificate chain anchored in the embedded test CA. It is NOT a real
 remote provider and proves transport behavior only.
 
 Behavior is selected by environment variables:
-  REMOTE_SERVICE_FIXTURE_MODE     ok | ok-no-usage | model-mismatch |
+  REMOTE_SERVICE_FIXTURE_MODE     ok | ok-no-usage | ok-json | model-mismatch |
                                   missing-model | malformed | oversize |
                                   redirect | status-500 | slow | secret-echo
                                   | require-auth
@@ -185,6 +185,12 @@ def chat_response():
         model = None
     else:
         model = MODEL
+    if MODE == "ok-json":
+        content = json.dumps({"answer": 42})
+    elif MODE == "secret-echo":
+        content = ECHO_KEY + " fixture response"
+    else:
+        content = "fixture response"
     payload = {
         "id": "chatcmpl-fixture",
         "object": "chat.completion",
@@ -195,7 +201,7 @@ def chat_response():
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": ECHO_KEY + " fixture response" if MODE == "secret-echo" else "fixture response",
+                    "content": content,
                 },
                 "finish_reason": "stop",
             }

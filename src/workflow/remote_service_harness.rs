@@ -60,6 +60,9 @@ const MAX_MESSAGES: usize = 32;
 /// Aggregate request budget: maximum serialized size of the request body
 /// (including the envelope keys), enforced before any transport.
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
+/// Default operator ceiling on generated output tokens. Bounded on purpose;
+/// operators may raise or lower it via `max_output_tokens`.
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4096;
 
 /// Configuration for the governed remote-service handler.
 ///
@@ -92,6 +95,10 @@ pub struct RemoteServiceConfig {
     pub timeout_ms: u64,
     /// Connect-phase deadline, capped below `timeout_ms`.
     pub connect_timeout_ms: u64,
+    /// Operator ceiling on the `max_tokens` the provider may generate per
+    /// invocation. Requests above the ceiling are refused before any network
+    /// effect. Defaults to a bounded value; invalid (zero) fails closed.
+    pub max_output_tokens: u64,
     /// Hard budget, in bytes, of the remote response body accepted per
     /// invocation.
     pub max_output_bytes: usize,
@@ -119,6 +126,7 @@ impl Default for RemoteServiceConfig {
             api_key: String::new(),
             timeout_ms: 30_000,
             connect_timeout_ms: 10_000,
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             max_output_bytes: 256 * 1024,
             extra_root_certs_pem: Vec::new(),
             allow_private_destinations: false,
@@ -149,6 +157,11 @@ impl RemoteServiceConfig {
 
     pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = max_output_tokens;
         self
     }
 
@@ -316,6 +329,14 @@ impl ExecutionHarness for RemoteServiceHarness {
         step: HarnessStep,
         dispatch: &mut HarnessDispatch<'_>,
     ) -> Result<HarnessOutcome> {
+        // The step identifier flows into the governed request, the persisted
+        // evidence and the correlation ids; bound it before it reaches any
+        // of those surfaces.
+        if step.step_id.chars().count() > 512 {
+            anyhow::bail!(
+                "remote service step identifier exceeds the 512 character bound; refusing before dispatch"
+            );
+        }
         // The ONLY effect path: `call` refuses capabilities outside this
         // harness's declaration before any network effect can occur. The
         // governed request's known secrets and the correlation identities
@@ -779,22 +800,27 @@ fn validate_allowlist(
     }
 }
 
-/// Resolve the endpoint host once, validate every resolved address against
-/// the destination policy, and return exactly those addresses for pinning.
-/// A mixed public/private answer set is refused outright.
-fn resolve_validated(
-    endpoint: &ValidatedEndpoint,
+/// Resolver abstraction so the resolution lifecycle is injectable and
+/// deterministically testable. The production resolver uses the platform
+/// resolver (`getaddrinfo` via `ToSocketAddrs`).
+pub(crate) trait AddressResolver: Send {
+    fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
+}
+
+pub(crate) struct SystemResolver;
+
+impl AddressResolver for SystemResolver {
+    fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        (host, port).to_socket_addrs().map(|a| a.collect())
+    }
+}
+
+/// Validate a full candidate address set (fail closed on ANY refused
+/// address; mixed authorized/unauthorized sets are rejected outright).
+fn validate_addresses(
+    mut addrs: Vec<SocketAddr>,
     allow_private_destinations: bool,
 ) -> std::result::Result<Vec<SocketAddr>, RemoteServiceFailure> {
-    let mut addrs: Vec<SocketAddr> = (endpoint.host.as_str(), endpoint.port)
-        .to_socket_addrs()
-        .map_err(|_| {
-            RemoteServiceFailure::new(
-                "dns-refused",
-                "remote service host could not be resolved; refusing the network effect",
-            )
-        })?
-        .collect();
     if addrs.is_empty() {
         return Err(RemoteServiceFailure::new(
             "dns-refused",
@@ -818,6 +844,74 @@ fn resolve_validated(
         }
     }
     Ok(addrs)
+}
+
+/// Resolve the endpoint host with a hard budget, inside the invocation
+/// deadline. The blocking OS resolver runs on ONE dedicated thread with a
+/// capacity-1 channel; the calling worker wakes at most every 50ms to check
+/// the budget and the cooperative cancellation flag, and validates the FULL
+/// answer set before any connection is pinned. A resolution exceeding the
+/// budget is abandoned and refused — the underlying `getaddrinfo(3)` call may
+/// keep running in that single detached thread until the OS returns (one
+/// thread per abandoned resolution, never retried, never looping); a
+/// synchronous interruption of an in-flight resolver syscall is NOT claimed.
+fn resolve_with_budget(
+    resolver: Box<dyn AddressResolver>,
+    host: &str,
+    port: u16,
+    budget: Duration,
+    cancel: &AtomicBool,
+    allow_private_destinations: bool,
+) -> std::result::Result<Vec<SocketAddr>, RemoteServiceFailure> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<SocketAddr>>>(1);
+    let owned_host = host.to_string();
+    let _resolver_thread = std::thread::Builder::new()
+        .name("prometheos-resolver".to_string())
+        .spawn(move || {
+            let outcome = resolver.resolve(&owned_host, port);
+            // Capacity is 1: this can never block, even if the waiter was
+            // abandoned after a timeout.
+            let _ = tx.try_send(outcome);
+        })
+        .map_err(|_| {
+            RemoteServiceFailure::new(
+                "dns-refused",
+                "remote service resolver thread could not be spawned; refusing the network effect",
+            )
+        })?;
+    let started = Instant::now();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(RemoteServiceFailure::new(
+                "cancelled",
+                "remote service inference cancelled during resolution",
+            ));
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= budget {
+            return Err(RemoteServiceFailure::new(
+                "timeout",
+                "remote service host resolution exceeded the invocation deadline",
+            ));
+        }
+        let wait = Duration::from_millis(50).min(budget - elapsed);
+        match rx.recv_timeout(wait) {
+            Ok(Ok(addrs)) => return validate_addresses(addrs, allow_private_destinations),
+            Ok(Err(_)) => {
+                return Err(RemoteServiceFailure::new(
+                    "dns-refused",
+                    "remote service host could not be resolved; refusing the network effect",
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(RemoteServiceFailure::new(
+                    "dns-refused",
+                    "remote service resolver thread terminated abnormally; refusing the network effect",
+                ));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -957,16 +1051,45 @@ enum TransportOutcome {
 /// existing runtime, and a nested runtime panics; the isolated thread never
 /// does. The whole lifecycle (connect, write, read) is bounded by `timeout`
 /// and abortable via `cancel` (observed every [`CANCEL_POLL`]).
+/// Invocation lifecycle executed on ONE dedicated OS thread: DNS resolution
+/// (budget-bounded, cancellation-observable), client construction with the
+/// validated addresses pinned, then one bounded connect/write/read round
+/// trip under the same deadline. `deadline` is measured by the caller from
+/// the start of the governed invocation; resolution consumes from the same
+/// budget, so an unresponsive resolver can never stall past it.
 fn blocking_roundtrip(
-    client: reqwest::Client,
+    client_builder_endpoint: ValidatedEndpoint,
+    config: RemoteServiceConfig,
     url: String,
     body_bytes: Vec<u8>,
     api_key: String,
     max_output_bytes: usize,
-    timeout: Duration,
+    deadline: std::time::Instant,
     cancel: Arc<AtomicBool>,
 ) -> TransportOutcome {
+    let allow_private_destinations = config.allow_private_destinations;
     let handle = std::thread::spawn(move || {
+        // ---- DNS, budget-bounded and cancellable ----------------------
+        let dns_budget = deadline.saturating_duration_since(std::time::Instant::now());
+        if dns_budget.is_zero() {
+            return TransportOutcome::TimedOut;
+        }
+        let pinned = match resolve_with_budget(
+            Box::new(SystemResolver),
+            &client_builder_endpoint.host,
+            client_builder_endpoint.port,
+            dns_budget,
+            &cancel,
+            allow_private_destinations,
+        ) {
+            Ok(pinned) => pinned,
+            Err(failure) => return TransportOutcome::Result(Err(failure)),
+        };
+        // ---- Client construction, bound to the pinned addresses -------
+        let client = match build_client(&client_builder_endpoint, &pinned, &config) {
+            Ok(client) => client,
+            Err(failure) => return TransportOutcome::Result(Err(failure)),
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build();
@@ -980,9 +1103,13 @@ fn blocking_roundtrip(
             }
         };
         runtime.block_on(async move {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return TransportOutcome::TimedOut;
+            }
             let work = async move {
                 tokio::time::timeout(
-                    timeout,
+                    remaining,
                     send_and_read(&client, url, body_bytes, &api_key, max_output_bytes),
                 )
                 .await
@@ -1229,23 +1356,105 @@ fn run_remote_service_guarded(config: &RemoteServiceConfig, args: &Value) -> Res
             ));
         }
     }
-    let timeout_ms = obj
-        .get("timeoutMs")
-        .and_then(Value::as_u64)
-        .map(|t| t.clamp(1, config.timeout_ms.min(3_600_000)))
-        .unwrap_or(config.timeout_ms);
-
-    let known_secrets: Vec<String> = obj
-        .get("knownSecrets")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // ---- Operator configuration must be valid before ANY other work.
+    // An invalid operator ceiling fails closed here — before argument
+    // interpretation, before any preflight, before any network effect.
+    if config.timeout_ms == 0 {
+        return Ok(governed_failure(
+            "invalid-config",
+            "operator timeout ceiling is not a positive integer; refusing",
+        ));
+    }
+    if config.max_output_tokens == 0 {
+        return Ok(governed_failure(
+            "invalid-config",
+            "operator token ceiling is not a positive integer; refusing",
+        ));
+    }
+    // ---- Governed preflight: no network effect before this point. ------
+    // Everything below is pure validation; the only network effect is the
+    // bounded, cancellable resolution+request lifecycle that follows it.
+    let timeout_ms = match obj.get("timeoutMs") {
+        None => config.timeout_ms,
+        Some(value) => match value.as_u64() {
+            Some(t) if (1..=config.timeout_ms).contains(&t) => t,
+            _ => {
+                return Ok(governed_failure(
+                    "invalid-timeout",
+                    "timeoutMs must be a positive integer no greater than the operator-configured ceiling",
+                ));
+            }
+        },
+    };
+    // ---- Governed token budget: exactly the operator ceiling, never more.
+    let max_tokens = match obj.get("maxTokens") {
+        None => None,
+        Some(value) => match value.as_u64() {
+            Some(t) if (1..=config.max_output_tokens).contains(&t) => Some(t),
+            _ => {
+                return Ok(governed_failure(
+                    "invalid-token-budget",
+                    "maxTokens must be a positive integer no greater than the operator-configured ceiling",
+                ));
+            }
+        },
+    };
+    // ---- Structured-output schema: exactly one accepted value, fail closed.
+    let json_mode = match obj.get("responseFormat") {
+        None => false,
+        Some(Value::String(format)) if format == "json_object" => true,
+        Some(_) => {
+            return Ok(governed_failure(
+                "invalid-response-format",
+                "responseFormat must be exactly \"json_object\" when supplied",
+            ));
+        }
+    };
+    // ---- Bounded correlation/request identifiers. ----------------------
+    for (key, value) in obj {
+        if matches!(key.as_str(), "requestId" | "correlationId" | "stepId") {
+            match value {
+                Value::String(s) if !s.is_empty() && s.chars().count() <= 512 => {}
+                _ => {
+                    return Ok(governed_failure(
+                        "invalid-identifier",
+                        format!("{key} must be a non-empty string of at most 512 characters"),
+                    ));
+                }
+            }
+        }
+    }
+    // ---- Bounded known secrets. ----------------------------------------
+    let known_secrets: Vec<String> = match obj.get("knownSecrets") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => {
+            if items.len() > 32 {
+                return Ok(governed_failure(
+                    "invalid-secrets",
+                    "knownSecrets accepts at most 32 known secret values",
+                ));
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::String(s) if !s.is_empty() && s.len() <= 4096 => out.push(s.clone()),
+                    _ => {
+                        return Ok(governed_failure(
+                            "invalid-secrets",
+                            "knownSecrets entries must be non-empty strings of at most 4096 bytes",
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        Some(_) => {
+            return Ok(governed_failure(
+                "invalid-secrets",
+                "knownSecrets must be an array of strings",
+            ));
+        }
+    };
     let mut redactor_secrets = known_secrets;
     redactor_secrets.extend(config.known_secrets.clone());
     if !config.api_key.is_empty() {
@@ -1253,7 +1462,11 @@ fn run_remote_service_guarded(config: &RemoteServiceConfig, args: &Value) -> Res
     }
     let redactor = Redactor::new().with_known_secrets(&redactor_secrets);
 
-    // ---- Governed preflight (before any network effect) -----------------
+    // ---- Deadline starts here; DNS is inside it -----------------------
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(timeout_ms);
+
+    // ---- Governed preflight (still no network effect) -----------------
     let endpoint = match parse_endpoint(&config.endpoint, config.allow_private_destinations) {
         Ok(endpoint) => endpoint,
         Err(failure) => return Ok(governed_failure(&failure.status, failure.message)),
@@ -1261,17 +1474,8 @@ fn run_remote_service_guarded(config: &RemoteServiceConfig, args: &Value) -> Res
     if let Err(failure) = validate_allowlist(&endpoint, &config.allowed_hosts) {
         return Ok(governed_failure(&failure.status, failure.message));
     }
-    let pinned = match resolve_validated(&endpoint, config.allow_private_destinations) {
-        Ok(addrs) => addrs,
-        Err(failure) => return Ok(governed_failure(&failure.status, failure.message)),
-    };
-    let client = match build_client(&endpoint, &pinned, config) {
-        Ok(client) => client,
-        Err(failure) => return Ok(governed_failure(&failure.status, failure.message)),
-    };
 
     // ---- Wire request (OpenAI-compatible chat completions) --------------
-    let max_tokens = obj.get("maxTokens").and_then(Value::as_u64);
     let mut request_body = json!({
         "model": model,
         "messages": messages,
@@ -1280,8 +1484,6 @@ fn run_remote_service_guarded(config: &RemoteServiceConfig, args: &Value) -> Res
     if let Some(mt) = max_tokens {
         request_body["max_tokens"] = json!(mt);
     }
-    let response_format = obj.get("responseFormat").and_then(Value::as_str);
-    let json_mode = response_format == Some("json_object");
     if json_mode {
         request_body["response_format"] = json!({"type": "json_object"});
     }
@@ -1326,19 +1528,22 @@ fn run_remote_service_guarded(config: &RemoteServiceConfig, args: &Value) -> Res
         .unwrap_or("step")
         .to_string();
 
-    let started = Instant::now();
+    // The effective timeout (task may only narrow the operator ceiling)
+    // governs the whole lifecycle, including DNS.
+    let mut effective_config = config.clone();
+    effective_config.timeout_ms = timeout_ms;
     let cancel = config.cancel.clone();
-    let timeout = Duration::from_millis(timeout_ms);
     let api_key = config.api_key.clone();
     let max_output_bytes = config.max_output_bytes;
     let latency_ms;
     let select_outcome = blocking_roundtrip(
-        client,
+        endpoint,
+        effective_config,
         url,
         body_bytes,
         api_key,
         max_output_bytes,
-        timeout,
+        deadline,
         cancel,
     );
     match select_outcome {
@@ -1599,5 +1804,124 @@ mod destination_policy_tests {
         assert!(validate_allowlist(&endpoint8443, &["api.example.com".to_string()]).is_err());
         assert!(validate_allowlist(&endpoint8443, &["api.example.com:8443".to_string()]).is_ok());
         assert!(validate_allowlist(&endpoint8443, &["api.example.com:443".to_string()]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resolution_lifecycle_tests {
+    use super::*;
+
+    struct FakeResolver {
+        addrs: Option<Vec<SocketAddr>>,
+        delay: std::time::Duration,
+    }
+
+    impl AddressResolver for FakeResolver {
+        fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            if !self.delay.is_zero() {
+                std::thread::sleep(self.delay);
+            }
+            self.addrs
+                .clone()
+                .ok_or_else(|| std::io::Error::other("resolver error"))
+        }
+    }
+
+    fn resolve_with(
+        addrs: Option<Vec<SocketAddr>>,
+        delay: std::time::Duration,
+        budget: std::time::Duration,
+        allow_private: bool,
+    ) -> std::result::Result<Vec<SocketAddr>, RemoteServiceFailure> {
+        let cancel = AtomicBool::new(false);
+        resolve_with_budget(
+            Box::new(FakeResolver { addrs, delay }),
+            "host.internal",
+            443,
+            budget,
+            &cancel,
+            allow_private,
+        )
+    }
+
+    #[test]
+    fn resolution_budget_covers_full_answer_set() {
+        let public = || SocketAddr::new("1.1.1.1".parse().unwrap(), 443);
+        let ok = resolve_with(
+            Some(vec![public(), public()]),
+            Duration::ZERO,
+            Duration::from_secs(1),
+            false,
+        );
+        assert!(ok.is_ok());
+        // Mixed public/private: refused outright.
+        let mixed = resolve_with(
+            Some(vec![
+                public(),
+                SocketAddr::new("10.0.0.8".parse().unwrap(), 443),
+            ]),
+            Duration::ZERO,
+            Duration::from_secs(1),
+            false,
+        );
+        assert_eq!(mixed.unwrap_err().status, "destination-refused");
+        // Metadata answer under the private-destination policy: still refused.
+        let metadata = resolve_with(
+            Some(vec![SocketAddr::new(
+                "169.254.169.254".parse().unwrap(),
+                80,
+            )]),
+            Duration::ZERO,
+            Duration::from_secs(1),
+            true,
+        );
+        assert_eq!(metadata.unwrap_err().status, "destination-refused");
+        // Resolver error / empty answer: refused.
+        let err = resolve_with(None, Duration::ZERO, Duration::from_secs(1), false);
+        assert_eq!(err.unwrap_err().status, "dns-refused");
+        let empty = resolve_with(Some(vec![]), Duration::ZERO, Duration::from_secs(1), false);
+        assert_eq!(empty.unwrap_err().status, "dns-refused");
+        // Private answer accepted only under the explicit operator policy.
+        let private_ok = resolve_with(
+            Some(vec![SocketAddr::new("192.168.1.9".parse().unwrap(), 8080)]),
+            Duration::ZERO,
+            Duration::from_secs(1),
+            true,
+        );
+        assert!(private_ok.is_ok());
+    }
+
+    #[test]
+    fn resolution_timeout_and_cancellation() {
+        // A resolver stuck beyond the budget is abandoned and refused, not
+        // waited on indefinitely.
+        let started = std::time::Instant::now();
+        let timed = resolve_with(
+            Some(vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 443)]),
+            Duration::from_secs(30),
+            Duration::from_millis(150),
+            false,
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(timed.unwrap_err().status, "timeout");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "budget bounds the wait ({elapsed:?})"
+        );
+
+        // Cancellation interrupts the wait without touching the resolver.
+        let cancel = AtomicBool::new(true);
+        let cancelled = resolve_with_budget(
+            Box::new(FakeResolver {
+                addrs: Some(vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 443)]),
+                delay: Duration::from_secs(30),
+            }),
+            "host.internal",
+            443,
+            Duration::from_secs(30),
+            &cancel,
+            false,
+        );
+        assert_eq!(cancelled.unwrap_err().status, "cancelled");
     }
 }

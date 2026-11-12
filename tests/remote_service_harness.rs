@@ -818,3 +818,391 @@ async fn remote_service_secret_is_not_reflected_on_failure() -> Result<()> {
     assert!(!text.contains("fake-secret-key-12345"));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Strict task timeout policy (reject before ANY DNS/network effect)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remote_service_task_timeout_zero_is_refused() {
+    let (_fixture, config) = fixture_with_mode("ok");
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 16,
+        "timeoutMs": 0,
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("timeoutMs=0 must be refused");
+    assert_eq!(status_of(&err), "invalid-timeout");
+    // The fixture is not spawned by this test; remote wire coverage above
+    // proves the governed path runs end-to-end when validation passes.
+}
+
+#[tokio::test]
+async fn remote_service_task_timeout_over_ceiling_is_refused() {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.timeout_ms(1000); // operator ceiling: 1s
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 16,
+        "timeoutMs": 10_000, // over the ceiling
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("over-ceiling timeoutMs must be refused");
+    assert_eq!(status_of(&err), "invalid-timeout");
+    assert_eq!(fixture.hit_count(), 0, "no DNS/network effect may occur");
+}
+
+#[tokio::test]
+async fn remote_service_task_timeout_non_integer_forms_are_refused() {
+    for bad in [
+        json!(1.5),
+        json!("300"),
+        json!(true),
+        json!(null),
+        json!(-1),
+    ] {
+        let (_fixture, config) = fixture_with_mode("ok");
+        let root = tempfile::tempdir().expect("workspace tempdir");
+        let args = json!({
+            "model": MODEL,
+            "endpoint": config.endpoint.clone(),
+            "messages": [{"role": "user", "content": "say hello"}],
+            "maxTokens": 16,
+            "timeoutMs": bad,
+        });
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[REMOTE_SERVICE_INFER_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        let err = harness
+            .run(step(args), &mut d)
+            .await
+            .expect_err("non-integer timeoutMs must be refused");
+        assert_eq!(
+            status_of(&err),
+            "invalid-timeout",
+            "input {bad} must refuse"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_service_task_timeout_shorter_than_ceiling_is_allowed() {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.timeout_ms(30_000);
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 16,
+        "timeoutMs": 1000, // shorter than the ceiling: allowed
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let outcome = harness
+        .run(step(args), &mut d)
+        .await
+        .expect("shorter timeout within ceiling must succeed");
+    let output: Value = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(fixture.hit_count(), 1);
+}
+
+#[tokio::test]
+async fn remote_service_operator_timeout_zero_config_refused() {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.timeout_ms(0); // invalid operator configuration
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let err = run_governed_inference(config, root.path().to_path_buf(), vec![])
+        .await
+        .expect_err("zero operator timeout ceiling must fail closed");
+    assert_eq!(status_of(&err), "invalid-config");
+    assert_eq!(fixture.hit_count(), 0, "no network effect may occur");
+}
+
+#[tokio::test]
+async fn remote_service_operator_token_zero_config_refused() {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.max_output_tokens(0); // invalid operator configuration
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let err = run_governed_inference(config, root.path().to_path_buf(), vec![])
+        .await
+        .expect_err("zero operator token ceiling must fail closed");
+    assert_eq!(status_of(&err), "invalid-config");
+    assert_eq!(fixture.hit_count(), 0, "no network effect may occur");
+}
+
+// ---------------------------------------------------------------------------
+// Governed token budget (operator ceiling; never exceeded; never invented)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remote_service_max_tokens_over_ceiling_is_refused() {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.max_output_tokens(64); // operator ceiling: 64
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 65, // over the ceiling
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("over-ceiling maxTokens must be refused");
+    assert_eq!(status_of(&err), "invalid-token-budget");
+    assert_eq!(fixture.hit_count(), 0, "no network effect may occur");
+}
+
+#[tokio::test]
+async fn remote_service_max_tokens_invalid_forms_are_refused() {
+    for bad in [json!(0), json!(1.5), json!("100"), json!(true), json!(null)] {
+        let (_fixture, config) = fixture_with_mode("ok");
+        let root = tempfile::tempdir().expect("workspace tempdir");
+        let args = json!({
+            "model": MODEL,
+            "endpoint": config.endpoint.clone(),
+            "messages": [{"role": "user", "content": "say hello"}],
+            "maxTokens": bad,
+        });
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[REMOTE_SERVICE_INFER_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        let err = harness
+            .run(step(args), &mut d)
+            .await
+            .expect_err("invalid maxTokens must be refused");
+        assert_eq!(
+            status_of(&err),
+            "invalid-token-budget",
+            "input {bad} must refuse"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_service_max_tokens_at_ceiling_is_allowed() {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.max_output_tokens(64);
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 64,
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let outcome = harness
+        .run(step(args), &mut d)
+        .await
+        .expect("maxTokens at the ceiling must succeed");
+    let output: Value = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(fixture.hit_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// responseFormat and identifier validation (fail closed before any effect)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remote_service_response_format_garbage_is_refused() {
+    for bad in [
+        json!("json"),
+        json!("text"),
+        json!(true),
+        json!(123),
+        json!({"type": "json_object"}),
+    ] {
+        let (_fixture, config) = fixture_with_mode("ok");
+        let root = tempfile::tempdir().expect("workspace tempdir");
+        let args = json!({
+            "model": MODEL,
+            "endpoint": config.endpoint.clone(),
+            "messages": [{"role": "user", "content": "say hello"}],
+            "maxTokens": 16,
+            "responseFormat": bad,
+        });
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[REMOTE_SERVICE_INFER_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        let err = harness
+            .run(step(args), &mut d)
+            .await
+            .expect_err("unsupported responseFormat must be refused");
+        assert_eq!(
+            status_of(&err),
+            "invalid-response-format",
+            "input {bad} must refuse"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_service_response_format_json_object_is_accepted() {
+    let (fixture, config) = fixture_with_mode("ok-json");
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 16,
+        "responseFormat": "json_object",
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let outcome = harness
+        .run(step(args), &mut d)
+        .await
+        .expect("json_object responseFormat must be accepted");
+    let output: Value = serde_json::from_str(&outcome.output).unwrap();
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(fixture.hit_count(), 1);
+}
+
+#[tokio::test]
+async fn remote_service_step_identifier_too_long_is_refused() {
+    let (_fixture, config) = fixture_with_mode("ok");
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let config_endpoint = config.endpoint.clone();
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let oversized = HarnessStep {
+        step_id: "s".repeat(513),
+        capability: REMOTE_SERVICE_INFER_CAPABILITY.to_string(),
+        args: inference_args(&config_endpoint),
+    };
+    let err = harness
+        .run(oversized, &mut d)
+        .await
+        .expect_err("over-long step identifier must be refused before dispatch");
+    assert!(
+        format!("{err:#}").contains("step identifier exceeds"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn remote_service_connection_budget_includes_dns() {
+    // Fixture takes 10s; a 250ms task deadline must fire from within the
+    // resolution+request lifecycle, not after it.
+    let (fixture, config) = fixture_with_mode("slow");
+    let config = config.timeout_ms(30_000);
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": config.endpoint.clone(),
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 16,
+        "timeoutMs": 1500,
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[REMOTE_SERVICE_INFER_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let started = std::time::Instant::now();
+    let err = {
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        harness
+            .run(step(args), &mut d)
+            .await
+            .expect_err("slow fixture must hit the 250ms deadline")
+    };
+    let elapsed = started.elapsed();
+    assert_eq!(status_of(&err), "timeout");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "deadline must fire inside the lifecycle, not after it ({elapsed:?})"
+    );
+    assert_eq!(fixture.hit_count(), 1);
+}
