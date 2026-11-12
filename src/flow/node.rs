@@ -75,6 +75,9 @@ pub trait Node: Send + Sync {
     fn prep(&self, state: &SharedState) -> Result<Input>;
 
     /// Execute with prepared input, produce output
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn exec(&self, input: Input) -> Result<Output>;
 
     /// Post-process: update SharedState with output, return Action for next transition

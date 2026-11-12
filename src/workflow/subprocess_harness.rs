@@ -1042,11 +1042,35 @@ pub(crate) fn child_cwd(canonical_root: &Path, cwd: Option<&str>) -> Result<Path
 pub(crate) fn make_pipe() -> Result<(std::fs::File, std::fs::File)> {
     use std::os::unix::io::FromRawFd as _;
     let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    // The pipe fds must carry FD_CLOEXEC: without it the child inherits the
+    // PARENT-side copies (e.g. the bridge's stdin write end) across exec, so
+    // the worker never sees EOF on stdin and the supervised exchange hangs
+    // until the deadline. Stdio::from hand-off only dup2s the fd destined
+    // for the child; sibling ends stay open in the child without CLOEXEC.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
         anyhow::bail!(
             "cannot create subprocess pipe: {}",
             std::io::Error::last_os_error()
         );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let failed = unsafe {
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC) == -1
+                || libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC) == -1
+        };
+        if failed {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            anyhow::bail!("cannot set FD_CLOEXEC on subprocess pipe: {err}");
+        }
     }
     Ok(unsafe {
         (
@@ -1111,14 +1135,14 @@ pub(crate) fn spawn_contained(
             Ok(())
         })
     };
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
             anyhow::bail!("subprocess spawn failed for executable {exe:?}: {error}")
         }
     };
     let mut containment = Containment::new();
-    containment.arm(&mut child)?;
+    containment.arm(&child)?;
     Ok((SpawnedChild::Unix { child, containment }, stdin_writer))
 }
 

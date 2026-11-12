@@ -162,6 +162,9 @@ pub trait PatchProvider: Send + Sync {
     ///
     /// # Returns
     /// * `GenerateResponse` - One or more candidate patches
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse>;
 
     /// Repair failed patches based on failure context
@@ -171,6 +174,9 @@ pub trait PatchProvider: Send + Sync {
     ///
     /// # Returns
     /// * `RepairResponse` - Repaired edits or empty if repair not possible
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn repair(&self, _request: RepairRequest) -> anyhow::Result<RepairResponse> {
         Ok(RepairResponse {
             repaired_edits: Vec::new(),

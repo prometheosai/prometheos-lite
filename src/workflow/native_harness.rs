@@ -763,8 +763,8 @@ fn open_confined_file_unix(root: &Path, raw: &str) -> Result<(std::fs::File, u64
             .metadata()
             .context("native inspection could not stat the opened file")?;
         let expected = OpenFileId {
-            primary: expected_stat.st_dev as u64,
-            secondary: expected_stat.st_ino as u64,
+            primary: expected_stat.st_dev,
+            secondary: expected_stat.st_ino,
         };
         if open_file_id(&file)? != expected {
             bail!(

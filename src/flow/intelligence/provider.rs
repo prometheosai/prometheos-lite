@@ -76,9 +76,15 @@ pub struct ProviderMetadata {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Generate a completion from the given prompt.
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn generate(&self, prompt: &str) -> Result<String>;
 
     /// Generate a completion with streaming support.
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn generate_stream(&self, prompt: &str, callback: StreamCallback) -> Result<String>;
 
     /// Get the provider name

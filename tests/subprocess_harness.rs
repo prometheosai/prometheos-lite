@@ -245,28 +245,6 @@ fn expected_burst_payload() -> String {
     out
 }
 
-/// A fixture that attempts to write a magic token into the given (integer)
-/// handle value, printing WROTE on success and REFUSED otherwise.
-fn sentinel_probe_fixture(handle_value: i64) -> (&'static str, Vec<String>) {
-    #[cfg(windows)]
-    {
-        (
-            "powershell",
-            vec![
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                format!(
-                    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class W32 {{ [DllImport(\"kernel32.dll\")] public static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped); }}' | Out-Null; $bytes = [Text.Encoding]::ASCII.GetBytes('SENTINEL_TOKEN'); $written = 0; $r = [W32]::WriteFile([IntPtr]{handle_value}, $bytes, $bytes.Length, [ref]$written, [IntPtr]::Zero); if ($r -ne 0 -and $written -gt 0) {{ Write-Output 'WROTE' }} else {{ Write-Output 'REFUSED' }}"
-                ),
-            ],
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        ("echo", vec!["REFUSED".to_string()])
-    }
-}
-
 /// A fixture printing an arbitrary opaque secret token on stdout.
 fn opaque_secret_fixture() -> (&'static str, Vec<String>) {
     #[cfg(windows)]

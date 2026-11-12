@@ -15,10 +15,14 @@ use crate::harness::{
 /// P0-HARNESS-009: Evidence persistence contract for audit trail
 #[async_trait]
 pub trait EvidenceSink {
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
     /// Persist a single evidence entry to durable storage
+    #[allow(clippy::double_must_use)]
     async fn persist_entry(&self, work_context_id: &str, entry: EvidenceEntry) -> Result<()>;
 
     /// Persist an artifact to durable storage
+    #[allow(clippy::double_must_use)]
     async fn persist_artifact(
         &self,
         work_context_id: &str,
@@ -26,6 +30,7 @@ pub trait EvidenceSink {
     ) -> Result<()>;
 
     /// Persist multiple evidence entries in batch
+    #[allow(clippy::double_must_use)]
     async fn persist_batch(
         &self,
         work_context_id: &str,
@@ -38,9 +43,11 @@ pub trait EvidenceSink {
     }
 
     /// Retrieve evidence entries for a work context
+    #[allow(clippy::double_must_use)]
     async fn retrieve_entries(&self, work_context_id: &str) -> Result<Vec<EvidenceEntry>>;
 
     /// Retrieve artifacts for a work context
+    #[allow(clippy::double_must_use)]
     async fn retrieve_artifacts(&self, work_context_id: &str) -> Result<Vec<HarnessArtifact>>;
 }
 

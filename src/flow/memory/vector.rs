@@ -7,16 +7,22 @@ use std::collections::HashMap;
 /// Vector search backend trait for pluggable similarity search
 #[async_trait]
 pub trait VectorSearchBackend: Send + Sync {
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
     /// Add a vector to the index
+    #[allow(clippy::double_must_use)]
     async fn add_vector(&mut self, id: String, vector: Vec<f32>) -> Result<()>;
 
     /// Search for similar vectors
+    #[allow(clippy::double_must_use)]
     async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>>;
 
     /// Remove a vector from the index
+    #[allow(clippy::double_must_use)]
     async fn remove_vector(&mut self, id: &str) -> Result<()>;
 
     /// Get the total number of vectors in the index
+    #[allow(clippy::double_must_use)]
     async fn count(&self) -> Result<usize>;
 }
 
