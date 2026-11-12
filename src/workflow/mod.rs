@@ -46,6 +46,7 @@ pub mod portable_state;
 pub mod projection;
 pub mod protocol_harness;
 pub mod redaction;
+pub mod remote_service_harness;
 pub mod repo_index;
 pub mod retention;
 pub mod schema;
