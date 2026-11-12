@@ -1111,7 +1111,7 @@ pub(crate) fn spawn_contained(
             Ok(())
         })
     };
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
             anyhow::bail!("subprocess spawn failed for executable {exe:?}: {error}")

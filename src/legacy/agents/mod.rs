@@ -27,6 +27,9 @@ pub use reviewer::ReviewerAgent;
 pub trait Agent: Send + Sync {
     fn name(&self) -> &str;
 
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn run(&self, input: &str) -> Result<String>;
 }
 

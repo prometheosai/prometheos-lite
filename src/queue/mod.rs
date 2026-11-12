@@ -88,6 +88,9 @@ impl Job {
 /// Job executor trait - defines how jobs are executed
 #[async_trait::async_trait]
 pub trait JobExecutor: Send + Sync {
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn execute(&self, job: &Job) -> Result<serde_json::Value>;
 }
 

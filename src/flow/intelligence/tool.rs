@@ -548,6 +548,9 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool with the given input
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn call(&self, input: ToolInput) -> Result<ToolOutput>;
 
     /// Get the tool's input schema (optional)

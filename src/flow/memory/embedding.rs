@@ -8,6 +8,9 @@ use reqwest::Client;
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Generate an embedding for the given text
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
+    #[allow(clippy::double_must_use)]
     async fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
     /// Get the dimension of the embedding vectors

@@ -644,16 +644,22 @@ pub trait ExecutionHarness: Send + Sync {
     /// The sealed declaration this implementation owns.
     fn declaration(&self) -> &HarnessDeclarationV1;
 
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
     /// Execute one bounded step. Every effect must reach
     /// [`HarnessDispatch::call`].
+    #[allow(clippy::double_must_use)]
     async fn run(
         &self,
         step: HarnessStep,
         dispatch: &mut HarnessDispatch<'_>,
     ) -> Result<HarnessOutcome>;
 
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
     /// Export a portable continuation binding. The default REFUSES: an
     /// adapter that does not declare `checkpointExport` has no checkpoint.
+    #[allow(clippy::double_must_use)]
     async fn checkpoint(
         &self,
         _outcome: &HarnessOutcome,
@@ -665,9 +671,12 @@ pub trait ExecutionHarness: Send + Sync {
         )
     }
 
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
     /// Verify a checkpoint against this implementation and the supplied
     /// portable state digest. The default REFUSES: an adapter that does not
     /// declare resume support cannot continue a run.
+    #[allow(clippy::double_must_use)]
     async fn resume(
         &self,
         _checkpoint: &HarnessCheckpointV1,

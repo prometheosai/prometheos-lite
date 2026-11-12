@@ -249,7 +249,10 @@ impl StructuredCommand {
 /// ⚠️ WARNING: This provides command filtering only, NOT process isolation.
 /// Commands run directly on the host with the privileges of the PrometheOS process.
 pub trait CommandRuntime: Send + Sync {
+    // The async-trait macro emits a redundant #[must_use] on every method;
+    // the returned future is already must_use.
     /// Run a command from a raw string with policy enforcement
+    #[allow(clippy::double_must_use)]
     async fn run_command(
         &self,
         repo_root: &Path,
@@ -258,6 +261,7 @@ pub trait CommandRuntime: Send + Sync {
     ) -> Result<CommandResult>;
 
     /// Run a structured command with separate program and args (recommended API)
+    #[allow(clippy::double_must_use)]
     async fn run_structured_command(
         &self,
         repo_root: &Path,
