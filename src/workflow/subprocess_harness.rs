@@ -1118,7 +1118,7 @@ pub(crate) fn spawn_contained(
         }
     };
     let mut containment = Containment::new();
-    containment.arm(&mut child)?;
+    containment.arm(&child)?;
     Ok((SpawnedChild::Unix { child, containment }, stdin_writer))
 }
 
