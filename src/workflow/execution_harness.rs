@@ -158,6 +158,7 @@ pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
         crate::workflow::subprocess_harness::subprocess_declaration(),
         crate::workflow::protocol_harness::protocol_declaration(),
         crate::workflow::local_model_harness::local_model_declaration(),
+        crate::workflow::remote_service_harness::remote_service_declaration(),
     ]
 }
 

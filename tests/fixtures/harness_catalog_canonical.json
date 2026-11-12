@@ -195,6 +195,42 @@
       "overClaimed": false
     },
     {
+      "harnessId": "lite.harness.remote_service",
+      "family": "remote-service",
+      "name": "lite-remote-service",
+      "revision": "v1",
+      "declarationDigest": "3750bb3315ee34142e8e62eb87c1641feaddbaa31ae600e7c6abdf6ea73292bb",
+      "declaredCapabilities": [
+        "harness.remote_service.infer"
+      ],
+      "claimedCapabilities": [
+        "harness.remote_service.infer"
+      ],
+      "effectClasses": [
+        "network-io"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [],
+      "workspace": null,
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "remote",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": false,
+      "readProjection": false,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    },
+    {
       "harnessId": "lite.harness.subprocess",
       "family": "subprocess",
       "name": "lite-subprocess",
@@ -236,5 +272,5 @@
       "overClaimed": false
     }
   ],
-  "contentDigest": "73c1f1ca8cbbd6f75321399dc6e9cff0375b6c06634ff65876158670a55e0c4e"
+  "contentDigest": "3afeef2aefd1532227c0077f0537d0e75306c6fd0b8e6c32f5bac8fb08432e00"
 }
