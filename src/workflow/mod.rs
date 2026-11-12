@@ -30,6 +30,7 @@ pub mod graph_parallel;
 pub mod graph_resume;
 pub mod graph_state;
 pub mod graph_suspend;
+pub mod local_model_harness;
 pub mod memory_contracts;
 pub mod native_harness;
 pub mod node_contracts;

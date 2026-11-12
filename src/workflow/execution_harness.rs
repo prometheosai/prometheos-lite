@@ -55,13 +55,15 @@ pub const HARNESS_SCHEMA_VERSION: &str = "1.0.0";
 /// Canonical harness declarations owned by the implementation.
 ///
 /// These are the authoritative source declarations from which the capability
-/// catalog is generated. Three entries are REAL production adapters — the
+/// catalog is generated. Four entries are REAL production adapters — the
 /// native workspace-inspection harness (`lite.harness.native.inspect`, via
 /// [`crate::workflow::native_harness::native_declaration`]), the subprocess
 /// harness (`lite.harness.subprocess`, via
-/// [`crate::workflow::subprocess_harness::subprocess_declaration`]), and the
+/// [`crate::workflow::subprocess_harness::subprocess_declaration`]), the
 /// protocol-bridged harness (`lite.harness.protocol.bridge`, via
-/// [`crate::workflow::protocol_harness::protocol_declaration`]). The
+/// [`crate::workflow::protocol_harness::protocol_declaration`]), and the
+/// governed local-model harness (`lite.harness.local_model`, via
+/// [`crate::workflow::local_model_harness::local_model_declaration`]). The
 /// remaining entries are the declaration seam families (native probe,
 /// protocol relay) exercised by the conformance-test fixtures; they are not
 /// claimed as production behavior.
@@ -155,6 +157,7 @@ pub fn canonical_harness_declarations() -> Vec<HarnessDeclarationV1> {
         crate::workflow::native_harness::native_declaration(),
         crate::workflow::subprocess_harness::subprocess_declaration(),
         crate::workflow::protocol_harness::protocol_declaration(),
+        crate::workflow::local_model_harness::local_model_declaration(),
     ]
 }
 
