@@ -16,6 +16,8 @@ Behavior is selected by environment variables:
   REMOTE_SERVICE_FIXTURE_COUNT_FILE  when set, each request appends a line
   REMOTE_SERVICE_FIXTURE_API_KEY  secret for secret-echo / require-auth
   REMOTE_SERVICE_FIXTURE_EXPECT_AUTH  expected "Bearer <key>" for require-auth
+  REMOTE_SERVICE_FIXTURE_REQUEST_LOG  when set, each POST body is appended as
+                                      one line of JSON for wire assertions
 
 Prints `PORT=<port>` on stdout once listening; runs until killed by the
 parent test process.
@@ -160,6 +162,7 @@ CERT_KIND = os.environ.get("REMOTE_SERVICE_FIXTURE_CERT", "server")
 COUNT_FILE = os.environ.get("REMOTE_SERVICE_FIXTURE_COUNT_FILE", "")
 EXPECT_AUTH = os.environ.get("REMOTE_SERVICE_FIXTURE_EXPECT_AUTH", "")
 ECHO_KEY = os.environ.get("REMOTE_SERVICE_FIXTURE_API_KEY", "")
+REQUEST_LOG = os.environ.get("REMOTE_SERVICE_FIXTURE_REQUEST_LOG", "")
 MODEL = "tiny-remote-model"
 
 
@@ -168,6 +171,15 @@ def record_hit() -> None:
         try:
             with open(COUNT_FILE, "a", encoding="utf-8") as handle:
                 handle.write("hit\n")
+        except OSError:
+            pass
+
+
+def record_request(body: bytes) -> None:
+    if REQUEST_LOG:
+        try:
+            with open(REQUEST_LOG, "a", encoding="utf-8") as handle:
+                handle.write(body.decode("utf-8", "replace") + "\n")
         except OSError:
             pass
 
@@ -236,7 +248,8 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
-        self.rfile.read(length)
+        body = self.rfile.read(length) if length > 0 else b""
+        record_request(body)
         if MODE == "slow":
             time.sleep(10)
         if self.path == "/v1/chat/completions":

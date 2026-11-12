@@ -21,6 +21,17 @@
 //! with active cooperative cancellation, and redaction before persistence.
 //! Capability declarations never grant authority; unsupported combinations
 //! refuse before any effect.
+//!
+//! Known limitation (stated, not claimed): no separately verified,
+//! application-enforced bound exists for HTTP response *header* bytes —
+//! `reqwest` 0.12 exposes no supported hard cap for the HTTP/1 header
+//! block (the body budget does not bound it either). Response headers are
+//! bounded only by the underlying hyper defaults, and the response body is
+//! hard-capped by the configured budget; no total-response-byte bound is
+//! claimed. Synchronous interruption of an in-flight `getaddrinfo(3)` call
+//! is not possible on any platform; resolution is budget-bounded on the
+//! waiting side and abandoned resolutions occupy one shared process-wide
+//! resolver permit each until the OS call returns.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -455,22 +466,19 @@ impl ExecutionHarness for RemoteServiceHarness {
 /// acquired workspace root (unused beyond the governed contract).
 ///
 /// The handler is `Fn` (reusable across invocations); each invocation is
-/// independently bounded and validated. `workspace_root` must be the
-/// governed workspace root for the work; the handler never touches the
-/// filesystem, this parameter only preserves the shared capability contract.
+/// independently bounded and validated. `maxTokens` is deliberately NOT a
+/// required argument: an omitted `maxTokens` uses the operator-configured
+/// ceiling, which is always present on the wire.
 pub fn remote_service_capability(
     config: RemoteServiceConfig,
     workspace_root: PathBuf,
 ) -> Capability {
-    Capability::deterministic(
-        &["model", "endpoint", "messages", "maxTokens"],
-        move |args| {
-            let config = config.clone();
-            let workspace_root = workspace_root.clone();
-            let _ = workspace_root;
-            run_remote_service_guarded(&config, args)
-        },
-    )
+    Capability::deterministic(&["model", "endpoint", "messages"], move |args| {
+        let config = config.clone();
+        let workspace_root = workspace_root.clone();
+        let _ = workspace_root;
+        run_remote_service_guarded(&config, args)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -815,6 +823,66 @@ impl AddressResolver for SystemResolver {
     }
 }
 
+/// Process-wide hard cap on in-flight resolver operations, shared across
+/// every `RemoteServiceHarness` instance. A permit is acquired BEFORE the
+/// resolver thread is spawned and is owned by THAT thread until its
+/// blocking OS resolver call returns — a caller that times out or cancels
+/// never frees a permit a blocked resolver still holds. No queuing, no
+/// retries, no fallback resolver; requests past capacity fail closed
+/// without spawning threads.
+#[derive(Clone)]
+pub(crate) struct ResolverCapacity {
+    slots: Arc<std::sync::Mutex<usize>>,
+}
+
+impl ResolverCapacity {
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            slots: Arc::new(std::sync::Mutex::new(max)),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<ResolverPermit> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if *slots == 0 {
+            None
+        } else {
+            *slots -= 1;
+            Some(ResolverPermit {
+                slots: Arc::clone(&self.slots),
+            })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remaining(&self) -> usize {
+        *self.slots.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Released exactly once, when the resolver thread that owns it drops it —
+/// i.e. after the blocking OS call beneath it has returned.
+struct ResolverPermit {
+    slots: Arc<std::sync::Mutex<usize>>,
+}
+
+impl Drop for ResolverPermit {
+    fn drop(&mut self) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        *slots = slots.saturating_add(1);
+    }
+}
+
+/// The process-wide resolver capacity shared across all harness instances.
+/// Deliberately a constant; tests construct their own `ResolverCapacity`.
+pub(crate) const MAX_IN_FLIGHT_RESOLVERS: usize = 32;
+
+fn global_resolver_capacity() -> ResolverCapacity {
+    static GLOBAL: std::sync::LazyLock<ResolverCapacity> =
+        std::sync::LazyLock::new(|| ResolverCapacity::new(MAX_IN_FLIGHT_RESOLVERS));
+    GLOBAL.clone()
+}
+
 /// Validate a full candidate address set (fail closed on ANY refused
 /// address; mixed authorized/unauthorized sets are rejected outright).
 fn validate_addresses(
@@ -862,16 +930,27 @@ fn resolve_with_budget(
     budget: Duration,
     cancel: &AtomicBool,
     allow_private_destinations: bool,
+    capacity: &ResolverCapacity,
 ) -> std::result::Result<Vec<SocketAddr>, RemoteServiceFailure> {
+    // Fail closed BEFORE spawning when the global capacity is exhausted.
+    let permit = capacity.try_acquire().ok_or_else(|| {
+        RemoteServiceFailure::new(
+            "capacity-refused",
+            "remote service resolver capacity is exhausted; refusing the network effect",
+        )
+    })?;
     let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<SocketAddr>>>(1);
     let owned_host = host.to_string();
     let _resolver_thread = std::thread::Builder::new()
         .name("prometheos-resolver".to_string())
         .spawn(move || {
             let outcome = resolver.resolve(&owned_host, port);
-            // Capacity is 1: this can never block, even if the waiter was
-            // abandoned after a timeout.
+            // Capacity is 1: try_send can never block, even if the waiter
+            // was abandoned after a timeout or cancellation.
             let _ = tx.try_send(outcome);
+            // The permit is released here, when the blocking OS resolver
+            // call has actually returned — not when the caller gave up.
+            drop(permit);
         })
         .map_err(|_| {
             RemoteServiceFailure::new(
@@ -1081,6 +1160,7 @@ fn blocking_roundtrip(
             dns_budget,
             &cancel,
             allow_private_destinations,
+            &global_resolver_capacity(),
         ) {
             Ok(pinned) => pinned,
             Err(failure) => return TransportOutcome::Result(Err(failure)),
@@ -1476,14 +1556,16 @@ fn run_remote_service_guarded(config: &RemoteServiceConfig, args: &Value) -> Res
     }
 
     // ---- Wire request (OpenAI-compatible chat completions) --------------
+    // Every outgoing request carries the effective, positive, bounded
+    // max_tokens: the task's validated value if supplied, otherwise the
+    // operator ceiling. It is never omitted, never increased beyond either.
+    let effective_max_tokens = max_tokens.unwrap_or(config.max_output_tokens);
     let mut request_body = json!({
         "model": model,
         "messages": messages,
         "stream": false,
+        "max_tokens": effective_max_tokens,
     });
-    if let Some(mt) = max_tokens {
-        request_body["max_tokens"] = json!(mt);
-    }
     if json_mode {
         request_body["response_format"] = json!({"type": "json_object"});
     }
@@ -1810,6 +1892,7 @@ mod destination_policy_tests {
 #[cfg(test)]
 mod resolution_lifecycle_tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     struct FakeResolver {
         addrs: Option<Vec<SocketAddr>>,
@@ -1841,6 +1924,7 @@ mod resolution_lifecycle_tests {
             budget,
             &cancel,
             allow_private,
+            &ResolverCapacity::new(MAX_IN_FLIGHT_RESOLVERS),
         )
     }
 
@@ -1921,7 +2005,234 @@ mod resolution_lifecycle_tests {
             Duration::from_secs(30),
             &cancel,
             false,
+            &ResolverCapacity::new(MAX_IN_FLIGHT_RESOLVERS),
         );
         assert_eq!(cancelled.unwrap_err().status, "cancelled");
+    }
+
+    // ---------------------------------------------------------------------
+    // Global resolver capacity: hard cap, fail-closed saturation, recovery
+    // ---------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct GateResolver {
+        entered: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+        answer: Vec<SocketAddr>,
+    }
+
+    impl AddressResolver for GateResolver {
+        fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            while !self.released.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(self.answer.clone())
+        }
+    }
+
+    fn gate(answer: Vec<SocketAddr>) -> (GateResolver, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        let entered = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        (
+            GateResolver {
+                entered: Arc::clone(&entered),
+                released: Arc::clone(&released),
+                answer,
+            },
+            entered,
+            released,
+        )
+    }
+
+    fn wait_for(cond: &dyn Fn() -> bool) {
+        for _ in 0..10_000 {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("condition never became true");
+    }
+
+    #[test]
+    fn resolver_capacity_enforces_hard_cap_and_recovers() {
+        let capacity = ResolverCapacity::new(2);
+        let answer = vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 443)];
+        let (resolver, entered, released) = gate(answer);
+
+        let run_blocked = |capacity: ResolverCapacity, resolver: GateResolver| {
+            move || {
+                resolve_with_budget(
+                    Box::new(resolver),
+                    "blocked.internal",
+                    443,
+                    Duration::from_secs(30),
+                    &AtomicBool::new(false),
+                    false,
+                    &capacity,
+                )
+            }
+        };
+        let w1 = std::thread::spawn(run_blocked(capacity.clone(), resolver.clone()));
+        let w2 = std::thread::spawn(run_blocked(capacity.clone(), resolver.clone()));
+
+        wait_for(&|| entered.load(Ordering::SeqCst) == 2);
+        assert_eq!(
+            capacity.remaining(),
+            0,
+            "two blocked resolvers hold both permits"
+        );
+
+        // A third resolution must be refused promptly, without spawning.
+        let started = std::time::Instant::now();
+        let refusal = resolve_with_budget(
+            Box::new(resolver.clone()),
+            "blocked.internal",
+            443,
+            Duration::from_secs(30),
+            &AtomicBool::new(false),
+            false,
+            &capacity,
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(refusal.unwrap_err().status, "capacity-refused");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "capacity refusal must be prompt ({elapsed:?})"
+        );
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            2,
+            "no third resolver thread spawned"
+        );
+
+        // Completing the blocked resolvers releases their permits.
+        released.store(true, Ordering::SeqCst);
+        assert!(w1.join().unwrap().is_ok());
+        assert!(w2.join().unwrap().is_ok());
+        wait_for(&|| capacity.remaining() == 2);
+
+        // Capacity is available again: a new resolution may proceed.
+        let ok = resolve_with_budget(
+            Box::new(FakeResolver {
+                addrs: Some(vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 443)]),
+                delay: Duration::ZERO,
+            }),
+            "host.internal",
+            443,
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            false,
+            &capacity,
+        );
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn resolver_timeout_and_cancellation_do_not_release_permits() {
+        let answer = vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 443)];
+        // Timeout: caller gives up while the resolver remains blocked; the
+        // permit must stay with the resolver until it returns.
+        let capacity = ResolverCapacity::new(1);
+        let (resolver, entered, released) = gate(answer.clone());
+        let timed = resolve_with_budget(
+            Box::new(resolver),
+            "blocked.internal",
+            443,
+            Duration::from_millis(150),
+            &AtomicBool::new(false),
+            false,
+            &capacity,
+        );
+        assert_eq!(timed.unwrap_err().status, "timeout");
+        wait_for(&|| entered.load(Ordering::SeqCst) == 1);
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            capacity.remaining(),
+            0,
+            "timed-out caller must not free the permit"
+        );
+        let refused = resolve_with_budget(
+            Box::new(FakeResolver {
+                addrs: Some(answer),
+                delay: Duration::ZERO,
+            }),
+            "host.internal",
+            443,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+            false,
+            &capacity,
+        );
+        assert_eq!(refused.unwrap_err().status, "capacity-refused");
+        released.store(true, Ordering::SeqCst);
+        wait_for(&|| capacity.remaining() == 1);
+
+        // Cancellation: same retention semantics — the waiting caller's
+        // cancellation does not free a permit a blocked resolver holds.
+        let capacity = ResolverCapacity::new(1);
+        let (resolver, entered, released) =
+            gate(vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 443)]);
+        let cancel = AtomicBool::new(true); // preset: observed immediately
+        let cancelled = resolve_with_budget(
+            Box::new(resolver),
+            "blocked.internal",
+            443,
+            Duration::from_secs(30),
+            &cancel,
+            false,
+            &capacity,
+        );
+        assert_eq!(cancelled.unwrap_err().status, "cancelled");
+        wait_for(&|| entered.load(Ordering::SeqCst) == 1);
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            capacity.remaining(),
+            0,
+            "cancellation must not free a permit a blocked resolver holds"
+        );
+        released.store(true, Ordering::SeqCst);
+        wait_for(&|| capacity.remaining() == 1);
+    }
+
+    #[test]
+    fn resolver_capacity_slot_released_after_error_and_forbidden() {
+        let capacity = ResolverCapacity::new(1);
+        // Resolver error: permit released after the OS call returned.
+        let err = resolve_with_budget(
+            Box::new(FakeResolver {
+                addrs: None,
+                delay: Duration::ZERO,
+            }),
+            "host.internal",
+            443,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+            false,
+            &capacity,
+        );
+        assert_eq!(err.unwrap_err().status, "dns-refused");
+        wait_for(&|| capacity.remaining() == 1);
+
+        // Forbidden answer set: permit released; capacity reusable; no
+        // connection can be pinned to refused addresses.
+        let refused = resolve_with_budget(
+            Box::new(FakeResolver {
+                addrs: Some(vec![SocketAddr::new(
+                    "169.254.169.254".parse().unwrap(),
+                    80,
+                )]),
+                delay: Duration::ZERO,
+            }),
+            "metadata.internal",
+            80,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+            true,
+            &capacity,
+        );
+        assert_eq!(refused.unwrap_err().status, "destination-refused");
+        wait_for(&|| capacity.remaining() == 1);
     }
 }

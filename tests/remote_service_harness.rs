@@ -163,6 +163,7 @@ struct FixtureGuard {
     endpoint: String,
     base_host_port: String,
     count_file: PathBuf,
+    request_log: PathBuf,
     child: Child,
     _tmp: tempfile::TempDir,
 }
@@ -176,6 +177,16 @@ impl FixtureGuard {
             std::thread::sleep(Duration::from_millis(25));
         }
         0
+    }
+
+    /// Parse the last logged request body (the wire payload), if any.
+    fn last_request(&self) -> Option<Value> {
+        let contents = std::fs::read_to_string(&self.request_log).ok()?;
+        let line = contents.lines().last()?.trim();
+        if line.is_empty() {
+            return None;
+        }
+        serde_json::from_str(line).ok()
     }
 }
 
@@ -192,6 +203,7 @@ impl Drop for FixtureGuard {
 fn spawn_fixture(mode: &str, cert: Option<&str>, expect_auth: Option<&str>) -> FixtureGuard {
     let tmp = tempfile::tempdir().expect("fixture tempdir");
     let count_file = tmp.path().join("hits");
+    let request_log = tmp.path().join("requests");
     let script = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/remote_service_fixture.py"
@@ -200,6 +212,7 @@ fn spawn_fixture(mode: &str, cert: Option<&str>, expect_auth: Option<&str>) -> F
     cmd.arg(script)
         .env("REMOTE_SERVICE_FIXTURE_MODE", mode)
         .env("REMOTE_SERVICE_FIXTURE_COUNT_FILE", &count_file)
+        .env("REMOTE_SERVICE_FIXTURE_REQUEST_LOG", &request_log)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(cert) = cert {
@@ -226,6 +239,7 @@ fn spawn_fixture(mode: &str, cert: Option<&str>, expect_auth: Option<&str>) -> F
         endpoint: format!("https://{host_port}/v1"),
         base_host_port: host_port,
         count_file,
+        request_log,
         child,
         _tmp: tmp,
     }
@@ -1205,4 +1219,120 @@ async fn remote_service_connection_budget_includes_dns() {
         "deadline must fire inside the lifecycle, not after it ({elapsed:?})"
     );
     assert_eq!(fixture.hit_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Wire verification: effective max_tokens on the serialized request
+// ---------------------------------------------------------------------------
+
+fn inference_args_without_max_tokens(endpoint: &str) -> Value {
+    json!({
+        "model": MODEL,
+        "endpoint": endpoint,
+        "messages": [{"role": "user", "content": "say hello"}],
+    })
+}
+
+async fn run_governed_args(
+    config: RemoteServiceConfig,
+    workspace_root: PathBuf,
+    args: Value,
+) -> Result<HarnessOutcome> {
+    let mut runner = runner_for(config, workspace_root, &[REMOTE_SERVICE_INFER_CAPABILITY]);
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, vec![]);
+    harness.run(step(args), &mut d).await
+}
+
+#[tokio::test]
+async fn remote_service_omitted_max_tokens_uses_operator_ceiling() -> Result<()> {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.max_output_tokens(128);
+    let endpoint = config.endpoint.clone();
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = inference_args_without_max_tokens(&endpoint);
+    let outcome = run_governed_args(config, root.path().to_path_buf(), args).await?;
+    let output: Value = serde_json::from_str(&outcome.output)?;
+    assert_eq!(output["success"], json!(true));
+    let wire = fixture
+        .last_request()
+        .expect("the fixture logged the wire request");
+    assert_eq!(
+        wire["max_tokens"],
+        json!(128),
+        "an omitted task maxTokens must yield the operator ceiling on the wire"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_service_omitted_max_tokens_uses_default_operator_ceiling() -> Result<()> {
+    let (fixture, config) = fixture_with_mode("ok"); // default ceiling: 4096
+    let endpoint = config.endpoint.clone();
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = inference_args_without_max_tokens(&endpoint);
+    let outcome = run_governed_args(config, root.path().to_path_buf(), args).await?;
+    let output: Value = serde_json::from_str(&outcome.output)?;
+    assert_eq!(output["success"], json!(true));
+    let wire = fixture
+        .last_request()
+        .expect("the fixture logged the wire request");
+    assert_eq!(
+        wire["max_tokens"],
+        json!(4096),
+        "the default operator ceiling must be present on the wire"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_service_explicit_shorter_max_tokens_is_used_on_wire() -> Result<()> {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.max_output_tokens(4096);
+    let endpoint = config.endpoint.clone();
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": endpoint,
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 100,
+    });
+    let outcome = run_governed_args(config, root.path().to_path_buf(), args).await?;
+    let output: Value = serde_json::from_str(&outcome.output)?;
+    assert_eq!(output["success"], json!(true));
+    let wire = fixture
+        .last_request()
+        .expect("the fixture logged the wire request");
+    assert_eq!(
+        wire["max_tokens"],
+        json!(100),
+        "a shorter task budget is sent as-is"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_service_over_ceiling_max_tokens_refused_before_network() -> Result<()> {
+    let (fixture, config) = fixture_with_mode("ok");
+    let config = config.max_output_tokens(64);
+    let endpoint = config.endpoint.clone();
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "model": MODEL,
+        "endpoint": endpoint,
+        "messages": [{"role": "user", "content": "say hello"}],
+        "maxTokens": 65,
+    });
+    let err = run_governed_args(config, root.path().to_path_buf(), args)
+        .await
+        .expect_err("over-ceiling maxTokens must refuse");
+    assert_eq!(status_of(&err), "invalid-token-budget");
+    assert_eq!(fixture.hit_count(), 0, "no network effect may occur");
+    assert!(
+        fixture.last_request().is_none(),
+        "the fixture must never see an out-of-budget request"
+    );
+    Ok(())
 }
