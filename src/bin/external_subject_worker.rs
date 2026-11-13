@@ -28,6 +28,12 @@
 //!
 //! argv: `--record-file <path>` logs each method name to the file, one per
 //! line (used by tests to prove what the adapter actually sent).
+//! `--record-pid=<path>` writes the worker PID to the file at startup.
+//! Broken-structured-output hooks: `--missing-model` (completion without
+//! `model`), `--missing-content` (completion without `content`),
+//! `--missing-model-hang` / `--missing-content-hang` (same responses, then
+//! hold the process open so tests can verify it is reaped),
+//! `--flood-short` (answer with 5000 short newline-delimited error lines).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -69,6 +75,14 @@ fn main() {
             record_file = Some(PathBuf::from(p));
         }
     }
+    if let Some(p) = args.iter().find_map(|a| a.strip_prefix("--record-pid=")) {
+        let _ = std::fs::write(p, format!("pid {}", std::process::id()));
+    }
+    let missing_model = args.iter().any(|a| a == "--missing-model");
+    let missing_model_hang = args.iter().any(|a| a == "--missing-model-hang");
+    let missing_content = args.iter().any(|a| a == "--missing-content");
+    let missing_content_hang = args.iter().any(|a| a == "--missing-content-hang");
+    let flood_short = args.iter().any(|a| a == "--flood-short");
     let bad_server_name = args.iter().any(|a| a == "--bad-server-name");
     let no_completions = args.iter().any(|a| a == "--no-completions");
     let bad_protocol_version = args.iter().any(|a| a == "--bad-protocol-version");
@@ -192,6 +206,54 @@ fn main() {
                             "model": DEFAULT_MODEL,
                         },
                     }));
+                    continue;
+                }
+                if flood_short {
+                    // Many short newline-delimited error lines: the adapter's
+                    // reader must stop at its message-count ceiling without
+                    // blocking on a full channel.
+                    let mut out = std::io::stdout();
+                    for _ in 0..5000 {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"jsonrpc":"2.0","id":"flood","error":{{"code":-32603,"message":"x"}}}}"#
+                        );
+                    }
+                    let _ = out.flush();
+                    continue;
+                }
+                if missing_model {
+                    respond(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "content": [{ "type": "text", "text": "fixture completion" }] },
+                    }));
+                    continue;
+                }
+                if missing_model_hang {
+                    respond(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "content": [{ "type": "text", "text": "fixture completion" }] },
+                    }));
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    continue;
+                }
+                if missing_content {
+                    respond(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "model": DEFAULT_MODEL },
+                    }));
+                    continue;
+                }
+                if missing_content_hang {
+                    respond(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "model": DEFAULT_MODEL },
+                    }));
+                    std::thread::sleep(std::time::Duration::from_secs(30));
                     continue;
                 }
                 if malformed {

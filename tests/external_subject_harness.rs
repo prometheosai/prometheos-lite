@@ -688,3 +688,260 @@ async fn external_subject_model_swap_is_refused() -> Result<()> {
     assert_eq!(status_of(&err), "model-mismatch");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle repair: bounded/blocked channels, post-spawn cleanup, config
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn external_subject_flood_short_messages_are_bounded() {
+    let config = config_for_fixture().timeout_ms(30_000);
+    let started = std::time::Instant::now();
+    let args = json!({
+        "exe": worker_exe(),
+        "argv": ["--flood-short"],
+        "prompt": "say hello",
+    });
+    let err = run_governed(config, args)
+        .await
+        .expect_err("a flooding subject must refuse");
+    let elapsed = started.elapsed();
+    assert_eq!(status_of(&err), "invalid-response");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "a flooding subject must be bound by the lifecycle, not by the OS pipe ({elapsed:?})"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_subject_missing_model_reaps_hung_process() -> Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("pid");
+    let config = config_for_fixture().timeout_ms(30_000);
+    let started = std::time::Instant::now();
+    let args = json!({
+        "exe": worker_exe(),
+        "argv": ["--missing-model-hang", format!("--record-pid={}", pid_file.to_string_lossy())],
+        "prompt": "say hello",
+    });
+    let err = run_governed(config, args)
+        .await
+        .expect_err("a completion missing model must be refused");
+    let elapsed = started.elapsed();
+    assert_eq!(status_of(&err), "invalid-response");
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    // The subject deliberately stays alive after its broken response; the
+    // governed teardown must reap it regardless.
+    for _ in 0..100 {
+        if pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid_text = std::fs::read_to_string(&pid_file)?;
+    let pid: u32 = pid_text
+        .trim()
+        .strip_prefix("pid ")
+        .and_then(|p| p.parse().ok())
+        .expect("pid file carries the worker pid");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "fixture process {pid} must not survive a refusal"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_subject_missing_content_reaps_hung_process() -> Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("pid");
+    let config = config_for_fixture().timeout_ms(30_000);
+    let started = std::time::Instant::now();
+    let args = json!({
+        "exe": worker_exe(),
+        "argv": ["--missing-content-hang", format!("--record-pid={}", pid_file.to_string_lossy())],
+        "prompt": "say hello",
+    });
+    let err = run_governed(config, args)
+        .await
+        .expect_err("a completion missing content must be refused");
+    let elapsed = started.elapsed();
+    assert_eq!(status_of(&err), "invalid-response");
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    for _ in 0..100 {
+        if pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid_text = std::fs::read_to_string(&pid_file)?;
+    let pid: u32 = pid_text
+        .trim()
+        .strip_prefix("pid ")
+        .and_then(|p| p.parse().ok())
+        .expect("pid file carries the worker pid");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "fixture process {pid} must not survive a refusal"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_subject_non_reading_child_with_large_prompt_times_out() -> Result<()> {
+    let config = config_for_fixture().timeout_ms(2_000);
+    let started = std::time::Instant::now();
+    let args = json!({
+        "exe": worker_exe(),
+        "argv": ["--never-read"],
+        "prompt": "a".repeat(30_000),
+    });
+    let err = run_governed(config, args)
+        .await
+        .expect_err("a silent child must hit the deadline");
+    let elapsed = started.elapsed();
+    assert_eq!(status_of(&err), "timeout");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the lifecycle must be bound by the deadline ({elapsed:?})"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_subject_invalid_argv_shapes_refused() {
+    for bad in [
+        json!("not-an-array"),
+        json!(["ok", 5]),
+        json!(["ok", true]),
+        json!(["ok", null]),
+        json!({"0": "ok"}),
+    ] {
+        let config = config_for_fixture();
+        let root = tempfile::tempdir().expect("workspace tempdir");
+        let args = json!({
+            "exe": worker_exe(),
+            "argv": bad,
+            "prompt": "say hello",
+        });
+        let mut runner = runner_for(
+            config,
+            root.path().to_path_buf(),
+            &[EXTERNAL_SUBJECT_COMPLETION_CAPABILITY],
+        );
+        let harness = harness();
+        let m = manifest();
+        let r = restrictions();
+        let mut d = dispatch(&harness, &m, &r, &mut runner);
+        let err = harness
+            .run(step(args), &mut d)
+            .await
+            .expect_err("invalid argv shapes must refuse");
+        assert_eq!(status_of(&err), "invalid-argv", "input {bad} must refuse");
+    }
+}
+
+#[tokio::test]
+async fn external_subject_too_many_known_secrets_is_refused() {
+    // Secrets flow through the dispatch boundary, which always carries
+    // strings; the handler enforces count and byte-length bounds there.
+    let secrets: Vec<String> = (0..33).map(|i| format!("secret-{i}")).collect();
+    let config = config_for_fixture();
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "exe": worker_exe(),
+        "prompt": "say hello",
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[EXTERNAL_SUBJECT_COMPLETION_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, secrets);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("over-count known secrets must refuse");
+    assert_eq!(status_of(&err), "invalid-secrets");
+}
+
+#[tokio::test]
+async fn external_subject_oversized_known_secret_is_refused() {
+    let secrets = vec!["x".repeat(4097)];
+    let config = config_for_fixture();
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "exe": worker_exe(),
+        "prompt": "say hello",
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[EXTERNAL_SUBJECT_COMPLETION_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch_with_secrets(&harness, &m, &r, &mut runner, secrets);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("overlong known secret must refuse");
+    assert_eq!(status_of(&err), "invalid-secrets");
+}
+
+#[tokio::test]
+async fn external_subject_operator_timeout_misconfiguration_refused() {
+    let mut config = config_for_fixture();
+    config.default_timeout_ms = 500;
+    config.max_timeout_ms = 100; // default exceeds operator maximum
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "exe": worker_exe(),
+        "prompt": "say hello",
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[EXTERNAL_SUBJECT_COMPLETION_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("default timeout above the operator maximum must fail closed");
+    assert_eq!(status_of(&err), "invalid-config");
+}
+
+#[tokio::test]
+async fn external_subject_zero_operator_timeout_refused() {
+    let mut config = config_for_fixture();
+    config.default_timeout_ms = 0;
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let args = json!({
+        "exe": worker_exe(),
+        "prompt": "say hello",
+    });
+    let mut runner = runner_for(
+        config,
+        root.path().to_path_buf(),
+        &[EXTERNAL_SUBJECT_COMPLETION_CAPABILITY],
+    );
+    let harness = harness();
+    let m = manifest();
+    let r = restrictions();
+    let mut d = dispatch(&harness, &m, &r, &mut runner);
+    let err = harness
+        .run(step(args), &mut d)
+        .await
+        .expect_err("a zero operator timeout must fail closed");
+    assert_eq!(status_of(&err), "invalid-config");
+}

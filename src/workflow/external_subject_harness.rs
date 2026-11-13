@@ -422,11 +422,19 @@ fn line_reader(
     let mut f = reader_file;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut byte = [0u8; 1];
+    let mut lines_seen: usize = 0;
+    // Hard message-count ceiling: any subject that emits more lines than the
+    // protocol requires is refused; we never queue unboundedly and never
+    // block on a full channel.
     loop {
         match std::io::Read::read(&mut f, &mut byte) {
             Ok(0) => {
                 if !buf.is_empty() {
-                    let _ = tx.try_send(MessageEvent::Line(std::mem::take(&mut buf)));
+                    if lines_seen < MAX_MESSAGES {
+                        let _ = tx.try_send(MessageEvent::Line(std::mem::take(&mut buf)));
+                    } else {
+                        let _ = tx.try_send(MessageEvent::ReadFailed);
+                    }
                 }
                 let _ = tx.try_send(MessageEvent::Eof);
                 return;
@@ -434,7 +442,20 @@ fn line_reader(
             Ok(_) => {
                 if byte[0] == b'\n' {
                     let line = std::mem::take(&mut buf);
-                    let _ = tx.send(MessageEvent::Line(line));
+                    lines_seen += 1;
+                    if lines_seen > MAX_MESSAGES {
+                        // Flooding: stop reading, flag the overflow, and let
+                        // the caller decide via the channel contents.
+                        let _ = tx.try_send(MessageEvent::ReadFailed);
+                        return;
+                    }
+                    // Non-blocking send. On a full channel the reader stops
+                    // reading and exits; the caller treats the message-count
+                    // overflow as a typed refusal. No blocked reader thread,
+                    // no unbounded queue.
+                    if tx.try_send(MessageEvent::Line(line)).is_err() {
+                        return;
+                    }
                     continue;
                 }
                 buf.push(byte[0]);
@@ -510,24 +531,83 @@ fn read_json_message(
 fn teardown_tree(
     child: &mut SpawnedChild,
     reader_thread: &mut Option<std::thread::JoinHandle<()>>,
+    stdin_writer: &mut Option<BoundedStdinWriter>,
     stderr_drain: crate::workflow::subprocess_harness::DrainHandle,
     force: bool,
 ) {
-    if force {
+    // 1) Stop feeding the writer: the writer thread then drops the child's
+    //    stdin once it sees the closed channel.
+    if let Some(writer) = stdin_writer.take() {
+        let (tx, join) = (writer.tx, writer.join);
+        drop(tx);
+        // 2) Tear down the tree first so the child's read end of our stdin
+        //    pipe closes and any blocked write returns with EPIPE.
+        if force {
+            child.terminate_and_reap();
+        } else {
+            child.sweep_on_normal();
+        }
+        // 3) Join the writer; after tree teardown it cannot block.
+        if let Some(handle) = join {
+            let _ = handle.join();
+        }
+    } else if force {
         child.terminate_and_reap();
     } else {
         child.sweep_on_normal();
     }
+    // 4) Join the stdout reader (exits on EOF, read failure, or message
+    //    overflow).
     if let Some(handle) = reader_thread.take() {
         let _ = handle.join();
     }
     let _ = stderr_drain.finish();
 }
 
-fn write_line(
-    writer: &mut BridgeStdinWriter,
+/// Bounded writer for the subject's stdin. The write itself happens on a
+/// dedicated thread fed by a bounded channel (never more queued messages
+/// than the protocol uses); the caller waits for the writer's ack with the
+/// invocation deadline and the cancellation flag both honoured.
+struct BoundedStdinWriter {
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    ack_rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    join: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+
+fn spawn_stdin_writer(writer: BridgeStdinWriter) -> BoundedStdinWriter {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);
+    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(3);
+    let join = std::thread::spawn(move || -> Result<(), String> {
+        let mut writer = writer;
+        while let Ok(bytes) = rx.recv() {
+            match writer.write_all(&bytes) {
+                Ok(()) => {
+                    let _ = ack_tx.try_send(Ok(()));
+                }
+                Err(e) => {
+                    let err = e.to_string();
+                    let _ = ack_tx.try_send(Err(err.clone()));
+                    return Err(err);
+                }
+            }
+        }
+        // Channel closed: drop the writer (closing the child's stdin).
+        drop(writer);
+        Ok(())
+    });
+    BoundedStdinWriter {
+        tx,
+        ack_rx,
+        join: Some(join),
+    }
+}
+
+fn send_line(
+    writer: &BoundedStdinWriter,
     payload: &Value,
-) -> std::result::Result<(), ExternalSubjectFailure> {
+    deadline: Instant,
+    cancel: &AtomicBool,
+) -> Result<(), ExternalSubjectFailure> {
     let mut wire = serde_json::to_vec(payload).map_err(|_| {
         ExternalSubjectFailure::new(
             "invalid-request",
@@ -535,12 +615,43 @@ fn write_line(
         )
     })?;
     wire.push(b'\n');
-    writer.write_all(&wire).map_err(|e| {
-        ExternalSubjectFailure::new(
-            "transport-error",
-            format!("external subject stdin write failed: {e}"),
-        )
-    })
+    writer.tx.send(wire).map_err(|_| {
+        ExternalSubjectFailure::new("transport-error", "stdin writer no longer accepts messages")
+    })?;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(ExternalSubjectFailure::new(
+                "timeout",
+                "external subject did not consume the request within the deadline",
+            ));
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ExternalSubjectFailure::new(
+                "cancelled",
+                "external subject invocation cancelled during write",
+            ));
+        }
+        match writer
+            .ack_rx
+            .recv_timeout((deadline - now).min(Duration::from_millis(10)))
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(_)) => {
+                return Err(ExternalSubjectFailure::new(
+                    "transport-error",
+                    "external subject stdin write failed",
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ExternalSubjectFailure::new(
+                    "transport-error",
+                    "stdin writer terminated abnormally",
+                ));
+            }
+        }
+    }
 }
 
 fn jsonrpc_error_message(error: &serde_json::Map<String, Value>) -> String {
@@ -591,7 +702,7 @@ fn run_external_subject_guarded(
         ) {
             return Ok(governed_failure(
                 "unsupported-argument",
-                format!("external subject argument {key:?} is not supported"),
+                "external subject argument is not supported",
             ));
         }
     }
@@ -604,34 +715,36 @@ fn run_external_subject_guarded(
         .ok_or_else(|| {
             anyhow::anyhow!("external subject argument \"exe\" must be a non-empty string")
         })?;
-    let argv: Vec<String> = obj
-        .get("argv")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    if argv.len() > 16 || argv.iter().any(|a| a.len() > 1024) {
-        return Ok(governed_failure(
-            "invalid-argv",
-            "external subject argv exceeds the argument-count or argument-length bound",
-        ));
-    }
-    if argv.len()
-        != obj
-            .get("argv")
-            .and_then(Value::as_array)
-            .map(|a| a.len())
-            .unwrap_or(0)
-    {
-        return Ok(governed_failure(
-            "invalid-argv",
-            "external subject argv must be an array of strings",
-        ));
-    }
+    let argv: Vec<String> = match obj.get("argv") {
+        None => Vec::new(),
+        Some(Value::Array(arr)) => {
+            if arr.len() > 16 {
+                return Ok(governed_failure(
+                    "invalid-argv",
+                    "external subject argv exceeds the argument-count bound",
+                ));
+            }
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item {
+                    Value::String(s) if s.len() <= 1024 => out.push(s.clone()),
+                    _ => {
+                        return Ok(governed_failure(
+                            "invalid-argv",
+                            "external subject argv must be an array of strings with bounded length entries",
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        Some(_) => {
+            return Ok(governed_failure(
+                "invalid-argv",
+                "external subject argv must be an array of strings",
+            ));
+        }
+    };
     let prompt = obj
         .get("prompt")
         .and_then(Value::as_str)
@@ -653,10 +766,13 @@ fn run_external_subject_guarded(
             format!("external subject arguments exceeded the budget of {MAX_REQUEST_BYTES} bytes"),
         ));
     }
-    if config.default_timeout_ms == 0 || config.max_timeout_ms == 0 {
+    if config.default_timeout_ms == 0
+        || config.max_timeout_ms == 0
+        || config.default_timeout_ms > config.max_timeout_ms
+    {
         return Ok(governed_failure(
             "invalid-config",
-            "operator timeout configuration is not positive; refusing",
+            "operator timeout configuration is invalid; refusing",
         ));
     }
     let timeout_ms = match obj.get("timeoutMs") {
@@ -678,7 +794,7 @@ fn run_external_subject_guarded(
                 _ => {
                     return Ok(governed_failure(
                         "invalid-identifier",
-                        format!("{key} must be a non-empty string of at most 512 characters"),
+                        "correlation identifiers must be non-empty strings of at most 512 characters".to_string(),
                     ));
                 }
             }
@@ -693,11 +809,19 @@ fn run_external_subject_guarded(
                     "knownSecrets accepts at most 32 known secret values",
                 ));
             }
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::String(s) if !s.is_empty() && s.len() <= 4096 => out.push(s.clone()),
+                    _ => {
+                        return Ok(governed_failure(
+                            "invalid-secrets",
+                            "knownSecrets entries must be non-empty strings of at most 4096 bytes",
+                        ));
+                    }
+                }
+            }
+            out
         }
         Some(_) => {
             return Ok(governed_failure(
@@ -721,7 +845,7 @@ fn run_external_subject_guarded(
     if !config.allowed_executables.iter().any(|a| a == &exe) {
         return Ok(governed_failure(
             "allowlist-refused",
-            format!("external subject executable {exe:?} is not allowlisted"),
+            "external subject executable is not allowlisted".to_string(),
         ));
     }
     // ---- Workspace binding (no fallback). ----
@@ -741,19 +865,29 @@ fn run_external_subject_guarded(
     let (err_r, err_w) = make_pipe()?;
     let (mut child, stdin_writer) = spawn_contained(&exe, &argv, &cwd, out_w, err_w, true)
         .context("external subject spawn failed")?;
-    let mut stdin_writer = stdin_writer
-        .ok_or_else(|| anyhow::anyhow!("external subject spawn returned no stdin channel"))?;
+    let stdin_writer = spawn_stdin_writer(
+        stdin_writer
+            .ok_or_else(|| anyhow::anyhow!("external subject spawn returned no stdin channel"))?,
+    );
+    let mut stdin_writer = Some(stdin_writer);
     let err_drain = spawn_drain(err_r, MAX_STDERR_BYTES);
 
     let line_cap = config.max_output_bytes.min(MAX_RESPONSE_LINE_BYTES);
     let (tx, rx) = std::sync::mpsc::sync_channel(MAX_MESSAGES + 1);
     let mut reader_thread = Some(std::thread::spawn(move || line_reader(out_r, line_cap, tx)));
 
-    // Failure path helper: tear the tree down before classifying.
+    // Failure path helper: tear the tree down before classifying. Every
+    // post-spawn error path goes through teardown; there is no bypass.
     macro_rules! refuse {
         ($failure:expr) => {{
             let failure: ExternalSubjectFailure = $failure;
-            teardown_tree(&mut child, &mut reader_thread, err_drain, true);
+            teardown_tree(
+                &mut child,
+                &mut reader_thread,
+                &mut stdin_writer,
+                err_drain,
+                true,
+            );
             return Ok(governed_failure(&failure.status, failure.message));
         }};
     }
@@ -770,7 +904,12 @@ fn run_external_subject_guarded(
             "capabilities": { "completions": {} },
         },
     });
-    if let Err(failure) = write_line(&mut stdin_writer, &init_request) {
+    if let Err(failure) = send_line(
+        stdin_writer.as_ref().expect("writer present"),
+        &init_request,
+        deadline,
+        &config.cancel,
+    ) {
         refuse!(failure);
     }
     let init_response = match read_json_message(&rx, deadline, &config.cancel) {
@@ -845,7 +984,12 @@ fn run_external_subject_guarded(
         "method": "completion/complete",
         "params": { "prompt": prompt },
     });
-    if let Err(failure) = write_line(&mut stdin_writer, &completion_request) {
+    if let Err(failure) = send_line(
+        stdin_writer.as_ref().expect("writer present"),
+        &completion_request,
+        deadline,
+        &config.cancel,
+    ) {
         refuse!(failure);
     }
     let completion_response = match read_json_message(&rx, deadline, &config.cancel) {
@@ -882,28 +1026,36 @@ fn run_external_subject_guarded(
             ));
         }
     };
-    let model = comp_result
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("external subject completion response is missing model"))?;
+    let model = match comp_result.get("model").and_then(Value::as_str) {
+        Some(m) => m.to_string(),
+        None => {
+            refuse!(ExternalSubjectFailure::new(
+                "invalid-response",
+                "external subject completion response is missing model",
+            ));
+        }
+    };
     if model != config.expected_model {
-        teardown_tree(&mut child, &mut reader_thread, err_drain, true);
-        return Ok(governed_failure(
+        refuse!(ExternalSubjectFailure::new(
             "model-mismatch",
             "external subject responded with a different model than the configured one",
         ));
     }
-    let choice_text = comp_result
+    let choice_text = match comp_result
         .get("content")
         .and_then(Value::as_array)
         .and_then(|a| a.first())
         .and_then(|c| c.get("text"))
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            anyhow::anyhow!("external subject completion response is missing content")
-        })?;
+    {
+        Some(t) => t.to_string(),
+        None => {
+            refuse!(ExternalSubjectFailure::new(
+                "invalid-response",
+                "external subject completion response is missing content",
+            ));
+        }
+    };
     let usage_raw = comp_result.get("usage").cloned().unwrap_or(Value::Null);
     let usage = json!({
         "promptTokens": usage_raw.get("promptTokens").and_then(Value::as_u64),
@@ -913,8 +1065,15 @@ fn run_external_subject_guarded(
     let latency_ms = started.elapsed().as_millis() as u64;
 
     // ---- Signal EOF and reap the tree. ----
-    drop(stdin_writer);
+    if let Some(writer) = stdin_writer.take() {
+        let (tx, join) = (writer.tx, writer.join);
+        drop(tx); // channel closes: the writer drops the child's stdin
+        if let Some(handle) = join {
+            let _ = handle.join();
+        }
+    }
     if let Err(failure) = wait_or_reap(&mut child, &mut reader_thread, &config.cancel, deadline) {
+        teardown_tree(&mut child, &mut reader_thread, &mut None, err_drain, true);
         return Ok(governed_failure(&failure.status, failure.message));
     }
     let _ = err_drain.finish();
@@ -986,5 +1145,76 @@ fn wait_for_exit_helper(
             ));
         }
         std::thread::sleep(MESSAGE_POLL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded stdin writer: a pipe without a reader never hangs the caller
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod bounded_writer_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_stdin_write_times_out_and_is_joined() {
+        use std::os::unix::io::FromRawFd;
+        // A pipe whose read end is never read and never closed until the end
+        // of the test fills after 64 KiB; a 1 MiB write then blocks
+        // deterministically. The bounded writer must report the deadline,
+        // never hang.
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        let out_w = unsafe { std::fs::File::from_raw_fd(write_fd) };
+
+        let writer = spawn_stdin_writer(BridgeStdinWriter::Unix(out_w));
+        let cancel = AtomicBool::new(false);
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        let payload = json!({"jsonrpc": "2.0", "id": "blk-1", "method": "initialize", "params": { "pad": "a".repeat(1_000_000) }});
+        let err = super::send_line(&writer, &payload, deadline, &cancel)
+            .expect_err("a blocked write must hit the deadline");
+        assert_eq!(err.status, "timeout");
+
+        // Close the read end: the blocked write returns EPIPE, the writer
+        // thread exits and joins cleanly.
+        unsafe { libc::close(read_fd) };
+        drop(writer.tx);
+        let joined = writer
+            .join
+            .expect("writer join handle")
+            .join()
+            .expect("writer thread joins");
+        assert!(joined.is_err(), "EPIPE must be reported by the writer");
+    }
+
+    #[test]
+    fn cancellation_reports_cancelled_before_write_completes() {
+        use std::os::unix::io::FromRawFd;
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        let out_w = unsafe { std::fs::File::from_raw_fd(write_fd) };
+
+        let writer = spawn_stdin_writer(BridgeStdinWriter::Unix(out_w));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let payload = json!({"jsonrpc": "2.0", "id": "blk-2", "method": "initialize", "params": { "pad": "a".repeat(1_000_000) }});
+        let cancel_clone = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            super::send_line(&writer, &payload, deadline, &cancel_clone)
+        });
+        // Let the writer reach the blocked write, then cancel.
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.store(true, Ordering::SeqCst);
+        let err = handle.join().expect("send_line thread joins");
+        assert_eq!(
+            err.expect_err("cancelled during a blocked write").status,
+            "cancelled"
+        );
+
+        unsafe { libc::close(read_fd) };
     }
 }
