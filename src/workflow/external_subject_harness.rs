@@ -414,12 +414,11 @@ enum MessageEvent {
     ReadFailed,
 }
 
-fn line_reader(
-    reader_file: std::fs::File,
+fn line_reader<R: std::io::Read>(
+    mut reader_file: R,
     line_cap: usize,
     tx: std::sync::mpsc::SyncSender<MessageEvent>,
 ) {
-    let mut f = reader_file;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut byte = [0u8; 1];
     let mut lines_seen: usize = 0;
@@ -427,7 +426,7 @@ fn line_reader(
     // protocol requires is refused; we never queue unboundedly and never
     // block on a full channel.
     loop {
-        match std::io::Read::read(&mut f, &mut byte) {
+        match std::io::Read::read(&mut reader_file, &mut byte) {
             Ok(0) => {
                 if !buf.is_empty() {
                     if lines_seen < MAX_MESSAGES {
@@ -591,8 +590,9 @@ fn spawn_stdin_writer(writer: BridgeStdinWriter) -> BoundedStdinWriter {
                 }
             }
         }
-        // Channel closed: drop the writer (closing the child's stdin).
-        drop(writer);
+        // Channel closed: close the child's stdin explicitly. On Windows the
+        // raw handle carries no Drop, so dropping alone would leak it.
+        writer.close();
         Ok(())
     });
     BoundedStdinWriter {
@@ -615,8 +615,19 @@ fn send_line(
         )
     })?;
     wire.push(b'\n');
-    writer.tx.send(wire).map_err(|_| {
-        ExternalSubjectFailure::new("transport-error", "stdin writer no longer accepts messages")
+    // Bounded, fail-closed submission: never block the caller on a full or
+    // disconnected bounded queue. The queue holds at most three wire
+    // messages; two are queued per invocation, so a full queue here means
+    // an unexpected internal state and is refused rather than waited on.
+    writer.tx.try_send(wire).map_err(|e| match e {
+        std::sync::mpsc::TrySendError::Full(_) => ExternalSubjectFailure::new(
+            "stdin-queue-full",
+            "stdin writer bounded queue is unexpectedly full; refusing to block",
+        ),
+        std::sync::mpsc::TrySendError::Disconnected(_) => ExternalSubjectFailure::new(
+            "transport-error",
+            "stdin writer no longer accepts messages",
+        ),
     })?;
     loop {
         let now = Instant::now();
@@ -1152,7 +1163,7 @@ fn wait_for_exit_helper(
 // Bounded stdin writer: a pipe without a reader never hangs the caller
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod bounded_writer_tests {
     use super::*;
 
@@ -1202,19 +1213,80 @@ mod bounded_writer_tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let payload = json!({"jsonrpc": "2.0", "id": "blk-2", "method": "initialize", "params": { "pad": "a".repeat(1_000_000) }});
-        let cancel_clone = Arc::clone(&cancel);
-        let handle = std::thread::spawn(move || {
-            super::send_line(&writer, &payload, deadline, &cancel_clone)
+        let err = std::thread::scope(|scope| {
+            let cancel_clone = Arc::clone(&cancel);
+            let handle =
+                scope.spawn(|| super::send_line(&writer, &payload, deadline, &cancel_clone));
+            // Let the writer reach the blocked write, then cancel.
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.store(true, Ordering::SeqCst);
+            handle.join().expect("send_line thread joins")
         });
-        // Let the writer reach the blocked write, then cancel.
-        std::thread::sleep(Duration::from_millis(50));
-        cancel.store(true, Ordering::SeqCst);
-        let err = handle.join().expect("send_line thread joins");
         assert_eq!(
             err.expect_err("cancelled during a blocked write").status,
             "cancelled"
         );
 
+        // Unblock the pipe: the blocked write returns EPIPE and the writer
+        // thread exits. Join it explicitly; a passing cancellation test must
+        // not quietly detach the writer it verified against.
         unsafe { libc::close(read_fd) };
+        let (tx, join) = (writer.tx, writer.join);
+        drop(tx);
+        let joined = join
+            .expect("writer join handle")
+            .join()
+            .expect("writer thread joins");
+        assert!(joined.is_err(), "EPIPE must be reported by the writer");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression coverage for bounded, fail-closed channel submission
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod send_line_fail_closed_tests {
+    use super::*;
+
+    fn stub_writer(capacity: usize) -> (BoundedStdinWriter, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(capacity);
+        let (_ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        (
+            BoundedStdinWriter {
+                tx,
+                ack_rx,
+                join: None,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn send_line_refuses_a_full_bounded_queue() {
+        let (writer, _rx) = stub_writer(1);
+        // Occupy the only slot and keep the receiver alive; never drain it.
+        writer
+            .tx
+            .try_send(b"occupied".to_vec())
+            .expect("seed the bounded queue");
+        let cancel = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let payload = json!({"jsonrpc": "2.0", "id": "full-1", "method": "initialize"});
+        let err = super::send_line(&writer, &payload, deadline, &cancel)
+            .expect_err("a full bounded queue must be refused fail-closed");
+        assert_eq!(err.status, "stdin-queue-full");
+    }
+
+    #[test]
+    fn send_line_refuses_a_disconnected_writer() {
+        let (writer, rx) = stub_writer(1);
+        drop(rx); // simulate the writer thread having terminated
+        let cancel = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let payload = json!({"jsonrpc": "2.0", "id": "disc-1", "method": "initialize"});
+        let err = super::send_line(&writer, &payload, deadline, &cancel)
+            .expect_err("a disconnected stdin writer must be refused fail-closed");
+        assert_eq!(err.status, "transport-error");
     }
 }
