@@ -202,6 +202,23 @@ fn credential_fixture() -> (&'static str, Vec<String>) {
     }
 }
 
+/// A Windows-only fixture that tries to write a token through an arbitrary
+/// raw handle value. Used to prove an unrelated inheritable handle created
+/// by the parent is NOT usable by the child.
+#[cfg(windows)]
+fn sentinel_probe_fixture(sentinel: i64) -> (&'static str, Vec<String>) {
+    // One-liner executed by powershell: compiles a tiny P/Invoke wrapper
+    // and calls WriteFile on the raw handle value supplied by the test.
+    // Prints nothing when the write fails (the expected, governed case).
+    let script = format!(
+        "$code='using System;using System.Runtime.InteropServices;public static class SentinelProbe{{[DllImport(\"kernel32.dll\",SetLastError=true)]public static extern bool WriteFile(IntPtr hFile,byte[] buffer,uint nNumberOfBytesToWrite,out uint lpNumberOfBytesWritten,IntPtr lpOverlapped);}}' ; Add-Type -TypeDefinition $code ; $written=[uint32]0 ; $bytes=[System.Text.Encoding]::ASCII.GetBytes('SENTINEL_TOKEN') ; [SentinelProbe]::WriteFile([IntPtr]{sentinel},$bytes,[uint32]$bytes.Length,[ref]$written,[IntPtr]::Zero) | Out-Null"
+    );
+    (
+        "powershell",
+        vec!["-NoProfile".to_string(), "-Command".to_string(), script],
+    )
+}
+
 fn version_args() -> serde_json::Value {
     serde_json::json!({"exe": "cargo", "argv": ["--version"]})
 }

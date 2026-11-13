@@ -80,6 +80,14 @@ path = "src/main.rs"
 name = "protocol_test_worker"
 path = "src/bin/protocol_test_worker.rs"
 
+# Deterministic external coding-agent compatibility subject (issue #154,
+# slice J): a separate JSON-RPC 2.0 process proving the governed boundary
+# drives a separately developed subject. NOT a real third-party agent; claims
+# no Claude Code / Codex / ACP compatibility.
+[[bin]]
+name = "external_subject_worker"
+path = "src/bin/external_subject_worker.rs"
+
 [features]
 default = []
 legacy = []  # Enable legacy agent/core modules for backward compatibility
