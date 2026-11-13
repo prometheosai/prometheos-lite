@@ -3,6 +3,44 @@
   "conformanceVersion": "1.0.0",
   "entries": [
     {
+      "harnessId": "lite.harness.external_subject",
+      "family": "protocol-bridged",
+      "name": "lite-external-subject",
+      "revision": "v1",
+      "declarationDigest": "e5d85921db4950f332287a5fc977a297f8d999f5c550b3e23269faed2ffd7409",
+      "declaredCapabilities": [
+        "harness.external_subject.completion"
+      ],
+      "claimedCapabilities": [
+        "harness.external_subject.completion"
+      ],
+      "effectClasses": [
+        "process-exec"
+      ],
+      "specVersions": [
+        "1.2.0"
+      ],
+      "adapterFamilies": [],
+      "workspace": {
+        "workspace": "read"
+      },
+      "maxStructuredInput": null,
+      "maxStructuredOutput": null,
+      "budgetCeilings": null,
+      "locality": "local",
+      "checkpointExport": true,
+      "checkpointImport": true,
+      "resumeSupport": true,
+      "eventStreaming": false,
+      "readProjection": false,
+      "privacyClasses": [],
+      "evidenceAttachment": true,
+      "validation": true,
+      "approvalEscalation": false,
+      "unclaimedCapabilities": [],
+      "overClaimed": false
+    },
+    {
       "harnessId": "lite.harness.local_model",
       "family": "local-model",
       "name": "lite-local-model",
@@ -272,5 +310,5 @@
       "overClaimed": false
     }
   ],
-  "contentDigest": "3afeef2aefd1532227c0077f0537d0e75306c6fd0b8e6c32f5bac8fb08432e00"
+  "contentDigest": "bb1d137b3a03829041aad60199e1bede5bf113a967b19c86a3c3a2cafacaf30a"
 }
