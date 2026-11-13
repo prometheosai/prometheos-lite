@@ -104,6 +104,64 @@ fn step(args: Value) -> HarnessStep {
     }
 }
 
+/// Read one HTTP request: the head text (through the blank line) and exactly
+/// the declared `Content-Length` body bytes. Bytes that arrived together
+/// with the head are carried into the body — reading them from the socket
+/// again would block forever, which was the fixture's intermittent Windows
+/// failure mode. Missing/unparseable Content-Length yields an empty body.
+fn read_http_request<R: std::io::Read>(reader: &mut R) -> Option<(String, Vec<u8>)> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let head_end = loop {
+        match reader.read(&mut tmp) {
+            Ok(0) => return None,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            }
+            Err(_) => return None,
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let content_length = parse_content_length(&head);
+    let mut body = buf.split_off(head_end);
+    let already = body.len();
+    if already >= content_length {
+        body.truncate(content_length);
+        return Some((head, body));
+    }
+    body.resize(content_length, 0);
+    let mut read = already;
+    while read < content_length {
+        match reader.read(&mut body[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(_) => break,
+        }
+    }
+    body.truncate(read);
+    Some((head, body))
+}
+
+/// Parse the `Content-Length` header of an HTTP head. The head's first
+/// colon-bearing line is `Host`, so scanning for a colon is not enough —
+/// search every header line, match the key case-insensitively, and ignore
+/// lines that carry no parsable value. A missing or unparseable header
+/// yields 0 (body ignored), matching the previous fixture contract.
+fn parse_content_length(head: &str) -> usize {
+    head.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0)
+}
+
 /// Local HTTP fixture server: binds an ephemeral loopback port and answers
 /// one OpenAI-compatible chat-completions style JSON response per connection.
 /// `None` body keeps the connection open without responding (timeout tests).
@@ -111,7 +169,7 @@ fn spawn_local_model_server(
     response_body: Option<String>,
     status_code: u16,
 ) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("local model fixture bind");
     let addr = listener.local_addr().expect("local model fixture addr");
@@ -128,61 +186,15 @@ fn spawn_local_model_server(
                     continue;
                 }
             };
-            // Read request: headers until \r\n\r\n
-            let mut head_buf = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                let n = socket.read(&mut tmp);
-                match n {
-                    Ok(0) => {
-                        eprintln!("SERVER: Client closed connection");
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("SERVER: Read error: {:?}", e);
-                        break;
-                    }
-                    Ok(n) => {
-                        head_buf.extend_from_slice(&tmp[..n]);
-                        if head_buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
+            let (head, body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => {
+                    eprintln!("SERVER: No request received");
+                    continue;
                 }
-            }
-            if head_buf.is_empty() {
-                eprintln!("SERVER: No headers received");
-                continue;
-            }
-            let head = String::from_utf8_lossy(&head_buf).into_owned();
+            };
             eprintln!("SERVER: Received request:\n{}", head);
-            let content_length = head
-                .lines()
-                .find_map(|l| l.split_once(':'))
-                .and_then(|(k, v)| {
-                    k.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| v.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            eprintln!("SERVER: Content-Length: {}", content_length);
-            // Read body
-            if content_length > 0 {
-                let mut body_buf = vec![0u8; content_length];
-                let mut read = 0;
-                while read < content_length {
-                    match socket.read(&mut body_buf[read..]) {
-                        Ok(0) => break,
-                        Err(e) => {
-                            eprintln!("SERVER: Body read error: {:?}", e);
-                            break;
-                        }
-                        Ok(n) => read += n,
-                    }
-                }
-                eprintln!("SERVER: Read body bytes: {}", read);
-            }
+            eprintln!("SERVER: Read body bytes: {}", body.len());
             if let Some(ref response_body) = response_body_clone {
                 let response = format!(
                     "HTTP/1.1 {status_code} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -752,46 +764,16 @@ async fn local_model_secret_redaction_before_persistence() {
 /// Raw-socket HTTP fixture: binds an ephemeral loopback port, reads the full
 /// request head, and replies with the exact `raw_response` bytes.
 fn spawn_local_model_server_raw(raw_response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("raw fixture bind");
     let addr = listener.local_addr().expect("raw fixture addr");
     let handle = std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
-            let mut head = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                match socket.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        head.extend_from_slice(&tmp[..n]);
-                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let head_text = String::from_utf8_lossy(&head).into_owned();
-            let content_length = head_text
-                .lines()
-                .find_map(|l| l.split_once(':'))
-                .and_then(|(k, v)| {
-                    k.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| v.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            let mut body_buf = vec![0u8; content_length];
-            let mut read = 0;
-            while read < content_length {
-                match socket.read(&mut body_buf[read..]) {
-                    Ok(0) => break,
-                    Ok(n) => read += n,
-                    Err(_) => break,
-                }
-            }
+            let (_head, _body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => return,
+            };
             let _ = socket.write_all(&raw_response);
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
@@ -802,26 +784,16 @@ fn spawn_local_model_server_raw(raw_response: Vec<u8>) -> (String, std::thread::
 /// Raw-socket HTTP fixture: streams `bytes` without a header terminator and
 /// never responds; used to exercise the header bound.
 fn spawn_local_model_server_unbounded(bytes: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("unbounded fixture bind");
     let addr = listener.local_addr().expect("unbounded fixture addr");
     let handle = std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
-            let mut head = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                match socket.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        head.extend_from_slice(&tmp[..n]);
-                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+            let (_head, _body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => return,
+            };
             let _ = socket.write_all(&bytes);
             std::thread::sleep(Duration::from_secs(5));
         }
@@ -837,26 +809,16 @@ fn spawn_local_model_server_trickle(
     total_bytes: usize,
     delay: Duration,
 ) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("trickle fixture bind");
     let addr = listener.local_addr().expect("trickle fixture addr");
     let handle = std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
-            let mut head = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                match socket.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        head.extend_from_slice(&tmp[..n]);
-                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+            let (_head, _body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => return,
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 total_bytes
@@ -886,7 +848,7 @@ fn spawn_local_model_server_recording() -> (
     Arc<std::sync::Mutex<String>>,
     std::thread::JoinHandle<()>,
 ) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("recording fixture bind");
     let addr = listener.local_addr().expect("recording fixture addr");
@@ -902,21 +864,10 @@ fn spawn_local_model_server_recording() -> (
     .to_string();
     let handle = std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                match socket.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let head_text = String::from_utf8_lossy(&buf).into_owned();
+            let (head_text, _body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => return,
+            };
             let request_line = head_text.lines().next().unwrap_or("").to_string();
             *captured_clone.lock().unwrap() = request_line;
             let response = format!(
@@ -1351,7 +1302,7 @@ async fn local_model_secret_in_failed_structured_output_not_reflected() {
 fn spawn_local_model_server_counting(
     response_body: Option<String>,
 ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("counting fixture bind");
     let addr = listener.local_addr().expect("counting fixture addr");
@@ -1364,43 +1315,10 @@ fn spawn_local_model_server_counting(
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let mut head = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                match socket.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        head.extend_from_slice(&tmp[..n]);
-                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            if head.is_empty() {
-                continue;
-            }
-            let head_text = String::from_utf8_lossy(&head).into_owned();
-            let content_length = head_text
-                .lines()
-                .find_map(|l| l.split_once(':'))
-                .and_then(|(k, v)| {
-                    k.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| v.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            let mut body_buf = vec![0u8; content_length];
-            let mut read = 0;
-            while read < content_length {
-                match socket.read(&mut body_buf[read..]) {
-                    Ok(0) => break,
-                    Ok(n) => read += n,
-                    Err(_) => break,
-                }
-            }
+            let (_head, _body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => continue,
+            };
             if let Some(response_body) = &response_body {
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1425,46 +1343,16 @@ fn spawn_local_model_server_delayed(
     response_body: String,
     delay: Duration,
 ) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").expect("delayed fixture bind");
     let addr = listener.local_addr().expect("delayed fixture addr");
     let handle = std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
-            let mut head = Vec::new();
-            let mut tmp = [0u8; 4096];
-            loop {
-                match socket.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        head.extend_from_slice(&tmp[..n]);
-                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let head_text = String::from_utf8_lossy(&head).into_owned();
-            let content_length = head_text
-                .lines()
-                .find_map(|l| l.split_once(':'))
-                .and_then(|(k, v)| {
-                    k.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| v.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            let mut body_buf = vec![0u8; content_length];
-            let mut read = 0;
-            while read < content_length {
-                match socket.read(&mut body_buf[read..]) {
-                    Ok(0) => break,
-                    Ok(n) => read += n,
-                    Err(_) => break,
-                }
-            }
+            let (_head, _body) = match read_http_request(&mut socket) {
+                Some(v) => v,
+                None => return,
+            };
             std::thread::sleep(delay);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1686,4 +1574,71 @@ async fn local_model_latency_reflects_actual_inference() {
         "latencyMs {latency} is implausibly low for a 200ms delayed fixture"
     );
     server.join().expect("server thread joins");
+}
+
+// ---------------------------------------------------------------------------
+// Regression: the fixture must parse the request's Content-Length header
+// from the whole head, not only the first colon-bearing line (the Host
+// header). The old parse returned 0 for every request, so the fixture
+// never read the request body and closed the socket with bytes pending;
+// on Windows the client observed WSAECONNRESET/WSAECONNABORTED (10054 /
+// 10053) at read instead of the graceful FIN — the intermittent
+// transport-error flake this fixture caused under parallel test load.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_parse_content_length_ignores_host_line() {
+    let head = "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:54321\r\nContent-Type: application/json\r\nContent-Length: 88\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: prometheos-lite\r\n\r\n";
+    assert_eq!(parse_content_length(head), 88);
+}
+
+#[test]
+fn fixture_parse_content_length_is_case_insensitive() {
+    let head =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:1\r\ncONTENT-lENGTH: 12\r\n\r\n";
+    assert_eq!(parse_content_length(head), 12);
+}
+
+#[test]
+fn fixture_parse_content_length_missing_or_unparseable_yields_zero() {
+    assert_eq!(
+        parse_content_length("POST / HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"),
+        0
+    );
+    assert_eq!(
+        parse_content_length("POST / HTTP/1.1\r\nContent-Length: not-a-number\r\n\r\n"),
+        0
+    );
+}
+
+#[test]
+fn fixture_parse_content_length_skips_non_header_colon_lines() {
+    let head = "x-trace-id: aa:bb\r\nHost: 127.0.0.1:1\r\nContent-Length: 7\r\n\r\n";
+    assert_eq!(parse_content_length(head), 7);
+}
+
+#[test]
+fn fixture_read_http_request_carries_over_read_body_bytes() {
+    // The client sends the head and body in one write; one read() therefore
+    // returns both. The fixture must not discard the body bytes already in
+    // the buffer — reading them from the socket again blocks forever (the
+    // deterministic Windows failure mode this fix removes).
+    let body = "x".repeat(88);
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:1\r\nContent-Length: 88\r\n\r\n{body}"
+    );
+    let mut cursor = std::io::Cursor::new(request.into_bytes());
+    let (head, parsed) = read_http_request(&mut cursor).expect("request parses");
+    assert!(head.contains("POST /v1/chat/completions"));
+    assert_eq!(parsed.len(), 88);
+    assert_eq!(parsed, body.as_bytes());
+}
+
+#[test]
+fn fixture_read_http_request_without_body() {
+    let request =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:1\r\nContent-Length: 0\r\n\r\n";
+    let mut cursor = std::io::Cursor::new(request.as_bytes().to_vec());
+    let (_head, parsed) = read_http_request(&mut cursor).expect("request parses");
+    assert!(parsed.is_empty());
 }
