@@ -1249,7 +1249,9 @@ mod bounded_writer_tests {
 mod send_line_fail_closed_tests {
     use super::*;
 
-    fn stub_writer(capacity: usize) -> (BoundedStdinWriter, std::sync::mpsc::Receiver<Vec<u8>>) {
+    fn unconnected_bounded_writer(
+        capacity: usize,
+    ) -> (BoundedStdinWriter, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(capacity);
         let (_ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         (
@@ -1264,7 +1266,7 @@ mod send_line_fail_closed_tests {
 
     #[test]
     fn send_line_refuses_a_full_bounded_queue() {
-        let (writer, _rx) = stub_writer(1);
+        let (writer, _rx) = unconnected_bounded_writer(1);
         // Occupy the only slot and keep the receiver alive; never drain it.
         writer
             .tx
@@ -1280,7 +1282,7 @@ mod send_line_fail_closed_tests {
 
     #[test]
     fn send_line_refuses_a_disconnected_writer() {
-        let (writer, rx) = stub_writer(1);
+        let (writer, rx) = unconnected_bounded_writer(1);
         drop(rx); // simulate the writer thread having terminated
         let cancel = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(1);
