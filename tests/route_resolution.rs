@@ -177,6 +177,200 @@ fn requirements_with(extra: serde_json::Value) -> WorkRequirements {
     serde_json::from_value(value).expect("synthetic requirements parse")
 }
 
+fn budgets_cost(cost: u64) -> Budgets {
+    serde_json::from_value(json!({ "cost": cost })).expect("budgets parse")
+}
+
+fn budgets_tokens_cost(tokens: u64, cost: u64) -> Budgets {
+    serde_json::from_value(json!({ "tokens": tokens, "cost": cost })).expect("budgets parse")
+}
+
+fn authority_with_budgets_mixed(tokens: Option<u64>, cost: Option<u64>) -> AuthorityProfile {
+    let mut value = json!({
+        "executionClass": "deterministic",
+        "mutation": "none",
+        "budgets": {},
+    });
+    if let Some(t) = tokens {
+        value["budgets"]["tokens"] = json!(t);
+    }
+    if let Some(c) = cost {
+        value["budgets"]["cost"] = json!(c);
+    }
+    serde_json::from_value(value).expect("authority profile with mixed budgets parses")
+}
+
+fn local_decl_with_mixed_ceilings() -> HarnessDeclarationV1 {
+    let mut caps = capability_set(
+        "harness-local",
+        "local-harness",
+        "v1",
+        &["test.capability"],
+        Some(Locality::Local),
+        &[],
+    );
+    caps.budget_ceilings = Some(budgets_tokens_cost(950, 30));
+    HarnessDeclarationV1 {
+        schema_version: HARNESS_SCHEMA_VERSION.to_string(),
+        harness_id: "harness-local".to_string(),
+        identity: Identity {
+            name: "local-harness".to_string(),
+            revision: "v1".to_string(),
+        },
+        family: HarnessFamily::LocalModel,
+        declared_capabilities: vec!["test.capability".to_string()],
+        claimed_capabilities: vec!["test.capability".to_string()],
+        capabilities: caps,
+        content_digest: None,
+    }
+    .sealed()
+}
+
+#[test]
+fn effective_budget_is_the_strict_intersection_of_all_ceilings() {
+    // The concrete review case: declared 1000, effective authority 50,
+    // work hard limit 900, candidate 500. The effective token ceiling must
+    // never exceed 50 - and never silently discard the stricter ceiling.
+    let registry = registry(vec![local_decl_with_budget_ceiling()]);
+    let declared = authority_with_budgets(1000);
+    let effective = authority_with_budgets(50);
+    let requirements = requirements_with(json!({ "hardLimits": { "tokens": 900 } }));
+    let mut c = candidate("route-intersect", Locality::Local, "harness-local", "v1", 1);
+    c.budget = Some(budgets(500));
+    let request = RouteResolutionRequest {
+        route_set_id: "routes-intersect".to_string(),
+        route_set_version: "1.0.0".to_string(),
+        candidates: vec![c],
+        pinned_candidate_id: None,
+        requirements: &requirements,
+        authority_declared: &declared,
+        authority_effective: &effective,
+        profile: RouteProfile::Standard,
+        evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+        workspace: None,
+    };
+    let resolution = resolve_route(&request, &registry)
+        .expect("candidate ceiling narrows to the effective authority grant");
+    assert_eq!(
+        resolution.snapshot.effective_profile.effective.budgets,
+        Some(budgets(50))
+    );
+    assert_eq!(
+        resolution.snapshot.effective_profile.declared.budgets,
+        Some(budgets(900)),
+        "declared side is the strict intersection of authority/hard-limit/runtime ceilings"
+    );
+    // Sealed artifacts still pass integrity checks.
+    assert!(resolution.snapshot.verify().is_ok());
+    assert!(resolution.evidence.verify().is_ok());
+    let snapshot = serde_json::to_value(&resolution.snapshot).expect("snapshot serializes");
+    assert_eq!(
+        snapshot["effectiveProfile"]["effective"]["budgets"]["tokens"],
+        json!(50)
+    );
+    assert_eq!(
+        snapshot["effectiveProfile"]["declared"]["budgets"]["tokens"],
+        json!(900)
+    );
+}
+
+#[test]
+fn budget_intersection_is_per_dimension_and_independent() {
+    // Partially populated sources intersect independently per dimension:
+    // tokens -> min(authority 1000, hard 900, runtime 950) = 900,
+    // cost    -> min(authority 40, runtime 30, eff authority 20, candidate 10) = 10.
+    let registry = registry(vec![local_decl_with_mixed_ceilings()]);
+    let declared = authority_with_budgets_mixed(Some(1000), Some(40));
+    let effective = authority_with_budgets_mixed(None, Some(20));
+    let requirements = requirements_with(json!({ "hardLimits": { "tokens": 900 } }));
+    let mut c = candidate("route-dims", Locality::Local, "harness-local", "v1", 1);
+    c.budget = Some(budgets_cost(10));
+    let request = RouteResolutionRequest {
+        route_set_id: "routes-dims".to_string(),
+        route_set_version: "1.0.0".to_string(),
+        candidates: vec![c],
+        pinned_candidate_id: None,
+        requirements: &requirements,
+        authority_declared: &declared,
+        authority_effective: &effective,
+        profile: RouteProfile::Standard,
+        evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+        workspace: None,
+    };
+    let resolution =
+        resolve_route(&request, &registry).expect("per-dimension intersection resolves");
+    let effective_budgets = resolution
+        .snapshot
+        .effective_profile
+        .effective
+        .budgets
+        .as_ref()
+        .expect("effective budgets present");
+    assert_eq!(
+        effective_budgets.tokens,
+        Some(serde_json::Number::from(900u64))
+    );
+    assert_eq!(
+        effective_budgets.cost,
+        Some(serde_json::Number::from(10u64))
+    );
+    let declared_budgets = resolution
+        .snapshot
+        .effective_profile
+        .declared
+        .budgets
+        .as_ref()
+        .expect("declared budgets present");
+    assert_eq!(
+        declared_budgets.tokens,
+        Some(serde_json::Number::from(900u64))
+    );
+    assert_eq!(declared_budgets.cost, Some(serde_json::Number::from(30u64)));
+    assert!(resolution.snapshot.verify().is_ok());
+    assert!(resolution.evidence.verify().is_ok());
+}
+
+#[test]
+fn future_dated_verified_at_is_refused() {
+    let registry = registry(vec![local_decl()]);
+    let mut c = candidate("route-future", Locality::Local, "harness-local", "v1", 1);
+    // One second after evaluatedAt (2026-10-22T12:00:00Z)
+    c.trust = trust("2026-10-22T12:00:01Z", 3600);
+    let err = resolve_standard(vec![c], &registry, RouteProfile::Standard, None)
+        .expect_err("future-dated verification refuses");
+    assert!(format!("{err:#}").contains("later than evaluatedAt"));
+}
+
+#[test]
+fn verified_at_exactly_evaluated_at_is_permitted() {
+    let registry = registry(vec![local_decl()]);
+    let mut c = candidate("route-now", Locality::Local, "harness-local", "v1", 1);
+    c.trust = trust("2026-10-22T12:00:00Z", 3600);
+    let resolution = resolve_standard(vec![c], &registry, RouteProfile::Standard, None)
+        .expect("verifiedAt == evaluatedAt is permitted");
+    assert_eq!(resolution.snapshot.selected.candidate_id, "route-now");
+}
+
+#[test]
+fn ttl_seconds_u64_max_refuses_without_wrapping() {
+    let registry = registry(vec![local_decl()]);
+    let mut c = candidate("route-ttl-max", Locality::Local, "harness-local", "v1", 1);
+    c.trust = trust("2026-10-22T00:00:00Z", u64::MAX);
+    let err = resolve_standard(vec![c], &registry, RouteProfile::Standard, None)
+        .expect_err("u64::MAX ttlSeconds refuses without wrapping");
+    assert!(format!("{err:#}").contains("representable duration"));
+}
+
+#[test]
+fn ttl_seconds_overflowing_the_instant_refuses() {
+    let registry = registry(vec![local_decl()]);
+    let mut c = candidate("route-ttl-over", Locality::Local, "harness-local", "v1", 1);
+    c.trust = trust("2026-10-22T00:00:00Z", i64::MAX as u64);
+    let err = resolve_standard(vec![c], &registry, RouteProfile::Standard, None)
+        .expect_err("ttlSeconds whose addition overflows the instant refuses");
+    assert!(format!("{err:#}").contains("representable chrono duration"));
+}
+
 fn budgets(tokens: u64) -> Budgets {
     serde_json::from_value(json!({ "tokens": tokens })).expect("budgets parse")
 }
@@ -649,7 +843,9 @@ fn candidate_budget_must_fit_work_hard_limits() {
 
 #[test]
 fn candidate_budget_without_work_hard_limits_refuses() {
-    let registry = registry(vec![local_decl_with_budget_ceiling()]);
+    // No declared ceiling anywhere bounds the candidate's tokens dimension
+    // (minimal authority, no runtime ceilings, no work hardLimits) -> refuse.
+    let registry = registry(vec![local_decl()]);
     let mut undeclared = candidate("route-unbounded", Locality::Local, "harness-local", "v1", 1);
     undeclared.budget = Some(budgets(50));
     let requirements = requirements(&["test.capability"]); // no hardLimits
