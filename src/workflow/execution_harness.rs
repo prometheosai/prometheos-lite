@@ -193,7 +193,7 @@ fn canonical_json_digest<T: Serialize>(value: &T) -> Result<String> {
 // ---------------------------------------------------------------------------
 
 /// Canonical adapter-family lexeme for a workspace adapter kind.
-fn workspace_adapter_family(adapter: AdapterKind) -> &'static str {
+pub(crate) fn workspace_adapter_family(adapter: AdapterKind) -> &'static str {
     match adapter {
         AdapterKind::GitWorktree => "git-worktree",
         AdapterKind::ExistingReadOnly => "existing-read-only",
@@ -210,8 +210,8 @@ fn workspace_mode_lexeme(mode: WorkspaceMode) -> &'static str {
 
 /// Defect found by [`validate_workspace_manifest`]. The caller maps the
 /// defect to its own refusal code (HSEL-0009 for `select`, HSEL-0008 for
-/// `verify_against`).
-enum WorkspaceManifestDefect {
+/// `verify_against`, ROUTE-0006 for route resolution).
+pub(crate) enum WorkspaceManifestDefect {
     /// The #171 policy engine rejected the manifest structure.
     IntegrityCheckFailed(String),
     /// The manifest schema version is not the supported version.
@@ -223,7 +223,7 @@ enum WorkspaceManifestDefect {
 /// Validate a workspace manifest with the existing #171 workspace policy
 /// engine: schema version, structural parse (schema, identity, writable
 /// scopes), and sealed content digest.
-fn validate_workspace_manifest(
+pub(crate) fn validate_workspace_manifest(
     manifest: &WorkspaceManifestV1,
 ) -> Result<(), WorkspaceManifestDefect> {
     let manifest_json = serde_json::to_string(manifest).map_err(|error| {
@@ -251,7 +251,10 @@ fn validate_workspace_manifest(
 /// Whether the manifest's mode satisfies the required workspace boundary.
 /// `ReadOnly` satisfies `Read` but not `Write`; no required boundary is
 /// always satisfied.
-fn workspace_mode_satisfies(mode: WorkspaceMode, requirements: &WorkRequirements) -> bool {
+pub(crate) fn workspace_mode_satisfies(
+    mode: WorkspaceMode,
+    requirements: &WorkRequirements,
+) -> bool {
     let Some(required) = requirements.workspace else {
         return true;
     };

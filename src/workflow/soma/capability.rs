@@ -419,7 +419,7 @@ pub struct RequirementConstraints {
 /// chrono parse then verifies it is a GENUINE calendar instant — a
 /// punctuation-shaped impossibility like `9999-99-99T99:99:99Z` matches
 /// the schema's regex but is not a real date-time and must fail closed.
-fn is_rfc3339_z(s: &str) -> bool {
+pub(crate) fn is_rfc3339_z(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 20
         && b[4] == b'-'
@@ -438,7 +438,7 @@ fn is_rfc3339_z(s: &str) -> bool {
 /// The vendored schemas pin version lexemes to `^\d+\.\d+\.\d+$`
 /// (digits-only, exactly three components). Compatibility is judged
 /// separately (SOMA-CMP-0001); this is pure lexeme validity.
-fn is_semver_shaped(s: &str) -> bool {
+pub(crate) fn is_semver_shaped(s: &str) -> bool {
     let mut parts = s.split('.');
     let all_digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
@@ -454,7 +454,7 @@ fn is_semver_shaped(s: &str) -> bool {
 /// integers while `1.5` is not — so the integer check is
 /// `fract() == 0.0` on the finite value (large integral decimals and
 /// u64/i64 integers alike), not the parser's storage representation.
-fn validate_budgets(label: &str, budgets: Option<&Budgets>) -> Result<(), String> {
+pub(crate) fn validate_budgets(label: &str, budgets: Option<&Budgets>) -> Result<(), String> {
     let Some(b) = budgets else {
         return Ok(());
     };
