@@ -380,7 +380,7 @@ impl EffectiveExecutionSnapshotV1 {
     }
 }
 
-fn is_hex64(value: &str) -> bool {
+pub(crate) fn is_hex64(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -395,7 +395,7 @@ fn canonical_value_digest<T: serde::Serialize>(value: &T) -> anyhow::Result<Stri
 
 /// A resolved route: the immutable effective execution snapshot plus the
 /// sealed route evidence. No adapter is invoked; this is preflight only.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RouteResolution {
     pub snapshot: EffectiveExecutionSnapshotV1,
     pub evidence: RouteEvidenceV1,
@@ -411,7 +411,7 @@ struct EvaluatedCandidate {
     capability_set_digest: String,
 }
 
-fn validate_trust(trust: &RouteTrust, evaluated_at: &str) -> Result<(), String> {
+pub(crate) fn validate_trust(trust: &RouteTrust, evaluated_at: &str) -> Result<(), String> {
     let verified = chrono::NaiveDateTime::parse_from_str(&trust.verified_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|_| format!("trust.verifiedAt {:?} is not parseable", trust.verified_at))?;
     let evaluated = chrono::NaiveDateTime::parse_from_str(evaluated_at, "%Y-%m-%dT%H:%M:%SZ")
