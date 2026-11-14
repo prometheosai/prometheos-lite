@@ -38,7 +38,15 @@
 //!   best priority without a pin.
 //! * `ROUTE-0006` — request-precondition failure (empty route set id, invalid
 //!   route set version/evaluatedAt, requirements demand a workspace that was
-//!   not provided, or workspace manifest integrity/mode refusal).
+//!   not provided, workspace manifest integrity/mode refusal, or ceilings
+//!   whose per-dimension strict intersection is unrepresentable).
+//!
+//! Budget rule (no sampling, no source precedence by accident): the effective
+//! ceiling is the per-dimension strict intersection across declared authority
+//! budgets, effective authority budgets, work hard limits, runtime capability
+//! ceilings, and the candidate budget. An omitted dimension in one source
+//! never erases another source's ceiling; the effective ceiling never exceeds
+//! any applicable limit.
 
 use anyhow::{Context, bail};
 use std::collections::HashSet;
@@ -408,9 +416,34 @@ fn validate_trust(trust: &RouteTrust, evaluated_at: &str) -> Result<(), String> 
         .map_err(|_| format!("trust.verifiedAt {:?} is not parseable", trust.verified_at))?;
     let evaluated = chrono::NaiveDateTime::parse_from_str(evaluated_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|_| format!("evaluatedAt {evaluated_at:?} is not parseable"))?;
-    let expiry = verified
-        .checked_add_signed(chrono::Duration::seconds(trust.ttl_seconds as i64))
-        .ok_or_else(|| "trust.verifiedAt + trust.ttlSeconds overflows".to_string())?;
+    // Fail closed on future-dated verification: metadata "verified" after the
+    // evaluation instant could not have been observed yet.
+    if verified > evaluated {
+        return Err(format!(
+            "trust.verifiedAt {} is later than evaluatedAt {}; refusing future-dated verification",
+            trust.verified_at, evaluated_at
+        ));
+    }
+    // Checked conversion: an arbitrary u64 TTL is never silently wrapped into
+    // a signed duration.
+    let ttl_seconds = i64::try_from(trust.ttl_seconds).map_err(|_| {
+        format!(
+            "trust.ttlSeconds {} exceeds the representable duration",
+            trust.ttl_seconds
+        )
+    })?;
+    let duration = chrono::Duration::try_seconds(ttl_seconds).ok_or_else(|| {
+        format!(
+            "trust.ttlSeconds {} exceeds the representable chrono duration",
+            trust.ttl_seconds
+        )
+    })?;
+    let Some(expiry) = verified.checked_add_signed(duration) else {
+        return Err(format!(
+            "trust.verifiedAt {} + trust.ttlSeconds {} overflows the representable instant",
+            trust.verified_at, trust.ttl_seconds
+        ));
+    };
     if expiry <= evaluated {
         return Err(format!(
             "capability metadata stale: trust.verifiedAt {} + ttlSeconds {} expires at or before evaluatedAt {}",
@@ -418,6 +451,59 @@ fn validate_trust(trust: &RouteTrust, evaluated_at: &str) -> Result<(), String> 
         ));
     }
     Ok(())
+}
+
+/// Compute the per-dimension strict intersection (minimum) across all
+/// applicable budget ceilings. An omitted dimension in one source does NOT
+/// erase a ceiling supplied by another; incomparable lexemes fail closed.
+fn intersect_budgets(label: &str, sources: &[&Budgets]) -> Result<Option<Budgets>, String> {
+    let mut tokens = None;
+    let mut cost = None;
+    let mut duration = None;
+    let mut retries = None;
+    let mut concurrency = None;
+    for dim in Budgets::DIMENSIONS {
+        let mut min: Option<serde_json::Number> = None;
+        for source in sources {
+            let Some(value) = source.get(dim) else {
+                continue;
+            };
+            match &min {
+                None => min = Some(value.clone()),
+                Some(current) => match crate::workflow::soma::types::number_cmp(value, current) {
+                    crate::workflow::soma::types::Cmp::Greater => {}
+                    crate::workflow::soma::types::Cmp::NotGreater => min = Some(value.clone()),
+                    crate::workflow::soma::types::Cmp::Incomparable => {
+                        return Err(format!(
+                            "{label} {dim} ceiling is outside the number policy"
+                        ));
+                    }
+                },
+            }
+        }
+        match dim {
+            "tokens" => tokens = min,
+            "cost" => cost = min,
+            "duration" => duration = min,
+            "retries" => retries = min,
+            "concurrency" => concurrency = min,
+            _ => unreachable!("Budgets::DIMENSIONS is exhaustive"),
+        }
+    }
+    if [&tokens, &cost, &duration, &retries, &concurrency]
+        .iter()
+        .any(|dim| dim.is_some())
+    {
+        Ok(Some(Budgets {
+            tokens,
+            cost,
+            duration,
+            retries,
+            concurrency,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn check_budget_ceiling(label: &str, effective: &Budgets, ceiling: &Budgets) -> Vec<String> {
@@ -523,21 +609,45 @@ fn evaluate_candidate(
         reasons.push(reason);
     }
 
-    // --- Budget ceilings (candidate narrows; work hardLimits and the
-    // declared authority envelope bound what may be used).
-    if let Some(hard_limits) = &request.requirements.hard_limits {
-        if let Some(candidate_budget) = &candidate.budget {
+    // --- Budget ceilings: candidate may only narrow; every dimension it sets
+    // must be verifiable against at least one declared ceiling (authority,
+    // work hardLimits, or runtime capability ceilings).
+    if let Some(candidate_budget) = &candidate.budget {
+        if let Some(hard_limits) = &request.requirements.hard_limits {
             reasons.extend(check_budget_ceiling(
                 "candidate budget",
                 candidate_budget,
                 hard_limits,
             ));
         }
-    } else if candidate.budget.is_some() {
-        reasons.push(
-            "candidate budget ceiling is unverifiable: requirements declare no hardLimits to bind it"
-                .to_string(),
-        );
+        for dim in Budgets::DIMENSIONS {
+            if candidate_budget.get(dim).is_none() {
+                continue;
+            }
+            let bounded = request
+                .authority_declared
+                .budgets
+                .as_ref()
+                .and_then(|b| b.get(dim))
+                .is_some()
+                || request
+                    .requirements
+                    .hard_limits
+                    .as_ref()
+                    .and_then(|b| b.get(dim))
+                    .is_some()
+                || declaration
+                    .capabilities
+                    .budget_ceilings
+                    .as_ref()
+                    .and_then(|b| b.get(dim))
+                    .is_some();
+            if !bounded {
+                reasons.push(format!(
+                    "candidate budget dimension {dim} is unverifiable: no declared ceiling (authority budget, hardLimits, or runtime) bounds it"
+                ));
+            }
+        }
     }
 
     // --- Workspace binding (exact adapter kind + revision match).
@@ -768,6 +878,14 @@ pub fn resolve_route(
     }
 
     // ---- Build the immutable effective execution snapshot (SPEC 006).
+    //
+    // Per-dimension strict intersection across ALL applicable ceilings. The
+    // effective ceiling never exceeds any of them, and an omitted dimension
+    // in one source never erases a ceiling supplied by another.
+    //
+    // Declared side: ceilings the calling contracts publish — declared
+    // authority envelope, work hard limits, and the runtime capability
+    // ceilings claimed by the harness (the SPEC 006 declared contract).
     let snapshot_id = format!(
         "{}/{}",
         request.route_set_id, selected.candidate.candidate_id
@@ -775,27 +893,30 @@ pub fn resolve_route(
     let authority_declared_digest = canonical_value_digest(request.authority_declared)?;
     let authority_effective_digest = canonical_value_digest(request.authority_effective)?;
     let decision_digest = canonical_value_digest(&selected.decision)?;
-    let effective_budgets = selected
-        .candidate
-        .budget
-        .clone()
-        .or_else(|| request.authority_effective.budgets.clone())
-        .or_else(|| request.requirements.hard_limits.clone());
-    let declared_budgets = request
-        .authority_declared
-        .budgets
-        .clone()
-        .or_else(|| request.requirements.hard_limits.clone());
-    // Fail-closed: an effective ceiling may never exceed the work's hard
-    // limits, regardless of source (candidate, authority, or work).
-    if let Some(hard_limits) = &request.requirements.hard_limits
-        && let Some(effective) = &effective_budgets
-    {
-        let reasons = check_budget_ceiling("effective budget", effective, hard_limits);
-        if let Some(reason) = reasons.into_iter().next() {
-            bail!("ROUTE-0006: {reason}");
-        }
-    }
+    let hard_limits = request.requirements.hard_limits.clone();
+    let runtime_ceilings = selected.declaration.capabilities.budget_ceilings.clone();
+    let declared_sources: Vec<&Budgets> = [
+        &request.authority_declared.budgets,
+        &hard_limits,
+        &runtime_ceilings,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let declared_budgets = intersect_budgets("declared budget", &declared_sources)
+        .map_err(|error| anyhow::anyhow!("ROUTE-0006: {error}"))?;
+    // Effective side: never above the declared intersection, the effective
+    // authority grant, or the candidate ceiling (the actual narrowing).
+    let effective_sources: Vec<&Budgets> = [
+        &declared_budgets,
+        &request.authority_effective.budgets,
+        &selected.candidate.budget,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let effective_budgets = intersect_budgets("effective budget", &effective_sources)
+        .map_err(|error| anyhow::anyhow!("ROUTE-0006: {error}"))?;
 
     let effective_profile = ExecutionProfile {
         id: snapshot_id.clone(),
