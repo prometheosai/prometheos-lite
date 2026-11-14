@@ -262,6 +262,10 @@ pub struct RouteEvidenceV1 {
     pub authority_declared_digest: String,
     pub authority_effective_digest: String,
     pub snapshot_digest: String,
+    /// Canonical digest of the complete operator-owned candidate set the
+    /// negotiation ran over (order as submitted). Re-derived at dispatch;
+    /// any drift refuses.
+    pub candidate_set_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_digest: Option<String>,
 }
@@ -298,6 +302,7 @@ impl RouteEvidenceV1 {
             ("authorityDeclaredDigest", &self.authority_declared_digest),
             ("authorityEffectiveDigest", &self.authority_effective_digest),
             ("snapshotDigest", &self.snapshot_digest),
+            ("candidateSetDigest", &self.candidate_set_digest),
         ] {
             ensure!(is_hex64(value), "{label} is not a lower hex sha256 digest");
         }
@@ -380,14 +385,25 @@ impl EffectiveExecutionSnapshotV1 {
     }
 }
 
-fn is_hex64(value: &str) -> bool {
+pub(crate) fn is_hex64(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-fn canonical_value_digest<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
+/// Canonical digest of the complete operator-owned route candidate set, in
+/// the order the operator declared it. Any change to any candidate field
+/// (including trust timestamps, budgets, locality, priority or membership)
+/// produces a different digest; dispatch re-derives and compares it so a
+/// mutated set can never silently ride a sealed resolution.
+pub(crate) fn candidate_set_digest(candidates: &[RouteCandidateV1]) -> anyhow::Result<String> {
+    let value = serde_json::to_value(candidates).context("route candidate set serializes")?;
+    soma::try_canonical_digest(&value)
+        .map_err(|error| anyhow::anyhow!("route candidate set canonical digest failed: {error}"))
+}
+
+pub(crate) fn canonical_value_digest<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
     let value = serde_json::to_value(value).context("canonical digest input serializes")?;
     soma::try_canonical_digest(&value)
         .map_err(|error| anyhow::anyhow!("canonical digest failed: {error}"))
@@ -395,7 +411,7 @@ fn canonical_value_digest<T: serde::Serialize>(value: &T) -> anyhow::Result<Stri
 
 /// A resolved route: the immutable effective execution snapshot plus the
 /// sealed route evidence. No adapter is invoked; this is preflight only.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RouteResolution {
     pub snapshot: EffectiveExecutionSnapshotV1,
     pub evidence: RouteEvidenceV1,
@@ -411,7 +427,7 @@ struct EvaluatedCandidate {
     capability_set_digest: String,
 }
 
-fn validate_trust(trust: &RouteTrust, evaluated_at: &str) -> Result<(), String> {
+pub(crate) fn validate_trust(trust: &RouteTrust, evaluated_at: &str) -> Result<(), String> {
     let verified = chrono::NaiveDateTime::parse_from_str(&trust.verified_at, "%Y-%m-%dT%H:%M:%SZ")
         .map_err(|_| format!("trust.verifiedAt {:?} is not parseable", trust.verified_at))?;
     let evaluated = chrono::NaiveDateTime::parse_from_str(evaluated_at, "%Y-%m-%dT%H:%M:%SZ")
@@ -1021,6 +1037,7 @@ pub fn resolve_route(
         authority_declared_digest,
         authority_effective_digest,
         snapshot_digest: snapshot.try_compute_digest()?,
+        candidate_set_digest: candidate_set_digest(&request.candidates)?,
         content_digest: None,
     }
     .try_sealed()?;
