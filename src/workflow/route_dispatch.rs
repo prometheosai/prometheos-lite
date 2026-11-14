@@ -35,13 +35,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::workflow::execution_harness::{
-    HarnessDispatch, HarnessOutcome, HarnessRegistry, HarnessStep, workspace_adapter_family,
+    HarnessDispatch, HarnessOutcome, HarnessRegistry, HarnessStep,
 };
 use crate::workflow::node_runner::{JournalEntryV1, NodeRunner};
 use crate::workflow::policy::LocalRestrictions;
 use crate::workflow::route_resolution::{
-    EffectiveExecutionSnapshotV1, RouteCandidateV1, RouteResolution, RouteResolutionRequest,
-    is_hex64, validate_trust,
+    EffectiveExecutionSnapshotV1, RouteResolution, RouteResolutionRequest, candidate_set_digest,
+    canonical_value_digest, is_hex64,
 };
 use crate::workflow::soma;
 use crate::workflow::soma::capability::is_rfc3339_z;
@@ -216,10 +216,47 @@ pub struct RoutedDispatchRequest<'a> {
     pub local_restrictions: &'a LocalRestrictions,
     /// Known secrets for gate-7 redaction.
     pub known_secrets: Vec<String>,
-    /// Trusted dispatch instant (RFC 3339 UTC-Z), injected. Not a wall clock.
-    pub dispatched_at: &'a str,
+    /// Trusted dispatch instant source (RFC 3339 UTC-Z), injected by the
+    /// execution authority. Task-controlled arguments never reach it.
+    pub clock: &'a dyn TrustedTimeSource,
     /// The governed step to execute.
     pub step: HarnessStep,
+}
+
+/// The trusted time source for the effectful dispatch boundary.
+///
+/// Production execution binds [`SystemTrustedTimeSource`] (the executing
+/// process's own clock). Task-controlled arguments never reach this trait;
+/// only the execution authority injects an implementation. Tests inject a
+/// fixed source for determinism — that is the whole provenance contract.
+pub trait TrustedTimeSource {
+    /// RFC 3339 UTC-Z instant at the actual effectful dispatch boundary.
+    fn now_rfc3339_z(&self) -> String;
+}
+
+/// Production trusted time source: the wall clock of the executing process.
+pub struct SystemTrustedTimeSource;
+
+impl TrustedTimeSource for SystemTrustedTimeSource {
+    fn now_rfc3339_z(&self) -> String {
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    }
+}
+
+/// Deterministic trusted time source for tests and test fixtures. It is not
+/// a substitute for the system clock in production dispatch.
+pub struct FixedTrustedTimeSource(String);
+
+impl FixedTrustedTimeSource {
+    pub fn new(now: &str) -> Self {
+        Self(now.to_string())
+    }
+}
+
+impl TrustedTimeSource for FixedTrustedTimeSource {
+    fn now_rfc3339_z(&self) -> String {
+        self.0.clone()
+    }
 }
 
 fn verify_journal_entry(entry: &JournalEntryV1) -> anyhow::Result<()> {
@@ -236,6 +273,12 @@ fn verify_journal_entry(entry: &JournalEntryV1) -> anyhow::Result<()> {
 
 use anyhow::{Context, anyhow};
 
+fn recompute_candidate_set_digest(
+    candidates: &[crate::workflow::route_resolution::RouteCandidateV1],
+) -> anyhow::Result<String> {
+    candidate_set_digest(candidates)
+}
+
 /// Resolve → revalidate → dispatch → bind.
 ///
 /// Returns [`RoutedDispatchOutcome`] on success; [`RoutedDispatchFailure`]
@@ -243,17 +286,19 @@ use anyhow::{Context, anyhow};
 pub async fn dispatch_resolved_route(
     req: RoutedDispatchRequest<'_>,
 ) -> Result<RoutedDispatchOutcome, RoutedDispatchFailure> {
-    // ---- Trusted dispatch instant shape and monotonicity.
-    if !is_rfc3339_z(req.dispatched_at) {
+    // ---- Trusted dispatch instant: the execution authority's clock, never
+    // a task-controlled string.
+    let now = req.clock.now_rfc3339_z();
+    if !is_rfc3339_z(&now) {
         return Err(RoutedDispatchFailure::refused(format!(
-            "dispatchedAt {:?} is not a genuine RFC 3339 UTC-Z timestamp",
-            req.dispatched_at
+            "trusted clock produced {:?}, which is not a genuine RFC 3339 UTC-Z timestamp",
+            now
         )));
     }
-    if req.dispatched_at < req.resolution.snapshot.evaluated_at.as_str() {
+    if now.as_str() < req.resolution.snapshot.evaluated_at.as_str() {
         return Err(RoutedDispatchFailure::refused(format!(
-            "dispatchedAt {} precedes the snapshot's evaluatedAt {}; refusing a non-monotonic dispatch",
-            req.dispatched_at, req.resolution.snapshot.evaluated_at
+            "trusted clock {now} precedes the snapshot's evaluatedAt {}; refusing a non-monotonic dispatch",
+            req.resolution.snapshot.evaluated_at
         )));
     }
 
@@ -267,6 +312,82 @@ pub async fn dispatch_resolved_route(
     })?;
 
     let snapshot: &EffectiveExecutionSnapshotV1 = &req.resolution.snapshot;
+
+    // ---- Complete policy inputs are re-bound, not spot-checked: an altered
+    // candidate, a stale-but-valid-looking set, a swapped pin or profile, a
+    // broadened authority, a changed requirement or privacy class — none of
+    // these can ride the sealed resolution.
+    if req.original_request.route_set_id != snapshot.route_set_id {
+        return Err(RoutedDispatchFailure::refused(format!(
+            "route set id {:?} does not match the sealed snapshot {:?}",
+            req.original_request.route_set_id, snapshot.route_set_id
+        )));
+    }
+    if req.original_request.route_set_version != snapshot.route_set_version {
+        return Err(RoutedDispatchFailure::refused(format!(
+            "route set version {:?} does not match the sealed snapshot {:?}",
+            req.original_request.route_set_version, snapshot.route_set_version
+        )));
+    }
+    if req.original_request.profile != snapshot.profile {
+        return Err(RoutedDispatchFailure::refused(format!(
+            "route request policy profile {:?} does not match the sealed snapshot {:?}",
+            req.original_request.profile, snapshot.profile
+        )));
+    }
+    if req.original_request.pinned_candidate_id.map(str::to_string)
+        != req.resolution.evidence.pinned_candidate_id
+    {
+        return Err(RoutedDispatchFailure::refused(format!(
+            "route request pin {:?} does not match the sealed resolution pin {:?}",
+            req.original_request.pinned_candidate_id, req.resolution.evidence.pinned_candidate_id
+        )));
+    }
+    let requirements_digest = req
+        .original_request
+        .requirements
+        .canonical_digest()
+        .map_err(|error| {
+            RoutedDispatchFailure::refused(format!("work requirements digest failed: {error}"))
+        })?;
+    if requirements_digest != snapshot.requirements_digest {
+        return Err(RoutedDispatchFailure::refused(
+            "work requirements changed since resolution; the sealed decision does not authorize these inputs"
+                .to_string(),
+        ));
+    }
+    let authority_declared_digest = canonical_value_digest(req.original_request.authority_declared)
+        .map_err(|error| {
+            RoutedDispatchFailure::refused(format!("declared authority digest failed: {error}"))
+        })?;
+    if authority_declared_digest != snapshot.authority_declared_digest {
+        return Err(RoutedDispatchFailure::refused(
+            "declared authority changed since resolution; the sealed decision does not authorize it"
+                .to_string(),
+        ));
+    }
+    let authority_effective_digest =
+        canonical_value_digest(req.original_request.authority_effective).map_err(|error| {
+            RoutedDispatchFailure::refused(format!("effective authority digest failed: {error}"))
+        })?;
+    if authority_effective_digest != snapshot.authority_effective_digest {
+        return Err(RoutedDispatchFailure::refused(
+            "effective authority changed since resolution; the sealed decision does not authorize it"
+                .to_string(),
+        ));
+    }
+    let candidate_set_digest = recompute_candidate_set_digest(&req.original_request.candidates)
+        .map_err(|error| {
+            RoutedDispatchFailure::refused(format!(
+                "route candidate set canonical digest failed: {error}"
+            ))
+        })?;
+    if candidate_set_digest != req.resolution.evidence.candidate_set_digest {
+        return Err(RoutedDispatchFailure::refused(
+            "route candidate set changed since resolution (fields, membership, or ordering); the sealed decision authorizes no such input"
+                .to_string(),
+        ));
+    }
 
     // ---- Registry identity: the harness must be present, sealed, and
     // exactly the declaration the snapshot attests to.
@@ -317,85 +438,35 @@ pub async fn dispatch_resolved_route(
         return Err(RoutedDispatchFailure::refused("selected harness capability set digest does not match the snapshot; registry may have been mutated".to_string()));
     }
 
-    // ---- Candidate rebound: the operator-owned set must still contain the
-    // exact selected candidate, by value.
-    let candidate: &RouteCandidateV1 = req
-        .original_request
-        .candidates
-        .iter()
-        .find(|candidate| candidate.candidate_id == snapshot.selected.candidate_id)
-        .ok_or_else(|| {
-            RoutedDispatchFailure::refused(format!(
-                "selected candidate {:?} is no longer present in the operator-owned route set",
-                snapshot.selected.candidate_id
-            ))
-        })?;
-    if candidate.harness_id != snapshot.selected.harness_id {
+    // ---- SOMA decision revalidation at the TRUSTED dispatch instant: the
+    // entire operator-owned set is re-resolved with `now` as the evaluation
+    // instant. A stale or ineligible candidate fails here — the resolution
+    // clock time is not recycled as permission.
+    let refreshed_request = RouteResolutionRequest {
+        route_set_id: req.original_request.route_set_id.clone(),
+        route_set_version: req.original_request.route_set_version.clone(),
+        candidates: req.original_request.candidates.clone(),
+        pinned_candidate_id: req.original_request.pinned_candidate_id,
+        requirements: req.original_request.requirements,
+        authority_declared: req.original_request.authority_declared,
+        authority_effective: req.original_request.authority_effective,
+        profile: req.original_request.profile,
+        evaluated_at: now.clone(),
+        workspace: req.original_request.workspace,
+    };
+    let refreshed =
+        crate::workflow::route_resolution::resolve_route(&refreshed_request, req.registry)
+            .map_err(|error| {
+                RoutedDispatchFailure::refused(format!(
+                    "route set no longer resolves at the dispatch instant: {error:#}"
+                ))
+            })?;
+    if refreshed.snapshot.selected != snapshot.selected {
         return Err(RoutedDispatchFailure::refused(format!(
-            "candidate {:?} now names harness {:?}; snapshot bound {:?}",
-            candidate.candidate_id, candidate.harness_id, snapshot.selected.harness_id
+            "route set no longer resolves to the sealed selected route {:?}; the sealed decision does not authorize {:?}",
+            snapshot.selected.candidate_id, refreshed.snapshot.selected.candidate_id
         )));
     }
-    if candidate.harness_revision != snapshot.selected.harness_revision {
-        return Err(RoutedDispatchFailure::refused(format!(
-            "candidate {:?} now names revision {:?}; snapshot bound revision {:?}",
-            candidate.candidate_id, candidate.harness_revision, snapshot.selected.harness_revision
-        )));
-    }
-    if candidate.provider_identity != snapshot.selected.provider_identity {
-        return Err(RoutedDispatchFailure::refused(format!(
-            "candidate {:?} now names provider {:?}; snapshot bound provider {:?}",
-            candidate.candidate_id,
-            candidate.provider_identity,
-            snapshot.selected.provider_identity
-        )));
-    }
-    if candidate.model != snapshot.selected.model {
-        return Err(RoutedDispatchFailure::refused(format!(
-            "candidate {:?} now names model {:?}; snapshot bound model {:?}",
-            candidate.candidate_id, candidate.model, snapshot.selected.model
-        )));
-    }
-    if candidate.priority != snapshot.selected.priority {
-        return Err(RoutedDispatchFailure::refused(format!(
-            "candidate {:?} now has priority {}; snapshot bound priority {}",
-            candidate.candidate_id, candidate.priority, snapshot.selected.priority
-        )));
-    }
-    if candidate.experimental != snapshot.selected.experimental {
-        return Err(RoutedDispatchFailure::refused(format!(
-            "candidate {:?} now has experimental flag {}; snapshot bound {}",
-            candidate.candidate_id, candidate.experimental, snapshot.selected.experimental
-        )));
-    }
-    match (&candidate.workspace, &snapshot.workspace) {
-        (None, None) => {}
-        (Some(binding), Some(evidence)) => {
-            if workspace_adapter_family(binding.adapter) != evidence.adapter
-                || binding.revision != evidence.adapter_revision
-            {
-                return Err(RoutedDispatchFailure::refused(format!(
-                    "candidate {:?} workspace binding {:?}/{:?} does not match snapshot binding {:?}/{:?}",
-                    candidate.candidate_id,
-                    binding.adapter,
-                    binding.revision,
-                    evidence.adapter,
-                    evidence.adapter_revision
-                )));
-            }
-        }
-        _ => {
-            return Err(RoutedDispatchFailure::refused(format!(
-                "candidate {:?} workspace binding and snapshot workspace disagree",
-                candidate.candidate_id
-            )));
-        }
-    }
-
-    // ---- Trust freshness at the dispatch instant (the resolution's own
-    // evaluatedAt is not a standing permission).
-    validate_trust(&candidate.trust, req.dispatched_at)
-        .map_err(|reason| RoutedDispatchFailure::Refused(anyhow!("{reason}")))?;
 
     // ---- Workspace re-verification: the route binds an exact workspace
     // manifest; the dispatch must see exactly that manifest.

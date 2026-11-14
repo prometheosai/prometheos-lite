@@ -22,11 +22,12 @@ use prometheos_lite::workflow::native_harness::{
 use prometheos_lite::workflow::node_runner::{Capability, CapabilityRegistry, NodeRunner};
 use prometheos_lite::workflow::policy::LocalRestrictions;
 use prometheos_lite::workflow::route_dispatch::{
-    RoutedDispatchFailure, RoutedDispatchOutcome, RoutedDispatchRequest, dispatch_resolved_route,
+    FixedTrustedTimeSource, RoutedDispatchFailure, RoutedDispatchOutcome, RoutedDispatchRequest,
+    dispatch_resolved_route,
 };
 use prometheos_lite::workflow::route_resolution::{
-    RouteCandidateV1, RouteProfile, RouteResolutionRequest, RouteTrust, RouteWorkspaceBinding,
-    resolve_route,
+    RouteCandidateV1, RouteProfile, RouteResolution, RouteResolutionRequest, RouteTrust,
+    RouteWorkspaceBinding, resolve_route,
 };
 use prometheos_lite::workflow::soma::capability::{
     Identity, SUPPORTED_CAPABILITY_SCHEMA_VERSION, WorkRequirements,
@@ -339,7 +340,7 @@ async fn dispatch(
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at,
+        clock: &FixedTrustedTimeSource::new(dispatched_at),
         step: step(),
     })
     .await
@@ -379,7 +380,7 @@ async fn attempt_binds_registry_candidate_provider_model_and_workspace() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -418,7 +419,7 @@ async fn stale_metadata_between_resolve_and_dispatch_refuses() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -442,7 +443,7 @@ async fn dispatched_at_before_evaluated_at_refuses() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-11-30T11:00:00Z", // before evaluatedAt
+        clock: &FixedTrustedTimeSource::new("2026-11-30T11:00:00Z"), // before evaluatedAt
         step: step(),
     })
     .await
@@ -469,7 +470,7 @@ async fn tampered_snapshot_refuses_before_effects() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -494,7 +495,7 @@ async fn tampered_evidence_refuses_before_effects() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -520,7 +521,7 @@ async fn registry_mutation_after_resolution_refuses() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -571,7 +572,7 @@ async fn swapped_candidate_model_refuses_before_effects() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -620,7 +621,7 @@ async fn swapped_candidate_provider_refuses_before_effects() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -660,7 +661,7 @@ async fn swapped_candidate_removed_from_set_refuses() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -707,7 +708,7 @@ async fn workspace_manifest_changed_between_resolve_and_dispatch_refuses() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -760,7 +761,7 @@ async fn step_capability_not_declared_by_selected_harness_refuses() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: undeclared_step,
     })
     .await
@@ -839,7 +840,7 @@ async fn cancelled_failure_preserves_typed_evidence_without_replay() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -934,7 +935,7 @@ async fn failing_attempt_preserves_prior_evidence_and_does_not_replay() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step1.clone(),
     })
     .await
@@ -951,7 +952,7 @@ async fn failing_attempt_preserves_prior_evidence_and_does_not_replay() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:02Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:02Z"),
         step: HarnessStep {
             step_id: "step-second".to_string(),
             ..step1
@@ -1043,7 +1044,7 @@ async fn successful_second_attempt_chains_onto_first_attempt_evidence() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step_one,
     })
     .await
@@ -1061,7 +1062,7 @@ async fn successful_second_attempt_chains_onto_first_attempt_evidence() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:02Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:02Z"),
         step: step_two,
     })
     .await
@@ -1104,7 +1105,7 @@ async fn pinned_route_dispatches_the_pin_not_the_priority_winner() {
         manifest: &manifest(),
         local_restrictions: &restrictions(),
         known_secrets: vec![],
-        dispatched_at: "2026-12-01T12:00:01Z",
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
         step: step(),
     })
     .await
@@ -1126,4 +1127,358 @@ async fn attempt_tampering_fails_verification() {
     let mut tampered_budget = outcome.attempt.clone();
     tampered_budget.journal_entry.entry_digest = "0".repeat(64);
     assert!(tampered_budget.verify().is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial battery (Slice B review): every element of the sealed policy
+// input is re-bound at the dispatch instant. Every mutated case must
+// produce ZERO capability effects.
+// ---------------------------------------------------------------------------
+
+fn authority_budgets(tokens: u64) -> AuthorityProfile {
+    serde_json::from_value(json!({
+        "executionClass": "deterministic",
+        "mutation": "none",
+        "budgets": { "tokens": tokens },
+    }))
+    .expect("authority with budgets parses")
+}
+
+fn privacy_requirements() -> WorkRequirements {
+    serde_json::from_value(json!({
+        "id": "reqs-priv",
+        "schemaVersion": SUPPORTED_CAPABILITY_SCHEMA_VERSION,
+        "version": "1.0.0",
+        "requiredSpecVersion": SUPPORTED_CAPABILITY_SCHEMA_VERSION,
+        "degradationPermitted": false,
+        "forbidSubstitution": true,
+        "requiredCapabilities": ["filesystem-read"],
+        "locality": { "privacy": ["no-secrets"] },
+    }))
+    .expect("privacy requirements parse")
+}
+
+struct BaseSet {
+    request: RouteResolutionRequest<'static>,
+}
+
+fn base_set(
+    candidates: Vec<RouteCandidateV1>,
+    pinned: Option<&'static str>,
+    profile: RouteProfile,
+) -> BaseSet {
+    let requirements = Box::leak(Box::new(requirements()));
+    let authority = Box::leak(Box::new(authority()));
+    BaseSet {
+        request: RouteResolutionRequest {
+            route_set_id: "routes-slice-b".to_string(),
+            route_set_version: "1.0.0".to_string(),
+            candidates,
+            pinned_candidate_id: pinned,
+            requirements,
+            authority_declared: authority,
+            authority_effective: authority,
+            profile,
+            evaluated_at: "2026-12-01T12:00:00Z".to_string(),
+            workspace: None,
+        },
+    }
+}
+
+async fn dispatch_request(
+    fixture: &mut Fixture,
+    resolution: &RouteResolution,
+    request: &RouteResolutionRequest<'_>,
+) -> Result<RoutedDispatchOutcome, RoutedDispatchFailure> {
+    dispatch_resolved_route(RoutedDispatchRequest {
+        resolution,
+        original_request: request,
+        registry: &fixture.harness_registry,
+        runner: &mut fixture.runner,
+        manifest: &manifest(),
+        local_restrictions: &restrictions(),
+        known_secrets: vec![],
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:00:01Z"),
+        step: step(),
+    })
+    .await
+}
+
+async fn expect_refused(
+    fixture: &mut Fixture,
+    resolution: &RouteResolution,
+    mutated_request: &RouteResolutionRequest<'_>,
+) {
+    let outcome = dispatch_request(fixture, resolution, mutated_request).await;
+    assert_eq!(fixture.counter.load(Ordering::SeqCst), 0);
+    match outcome {
+        Err(RoutedDispatchFailure::Refused(error)) => {
+            assert!(!format!("{error:#}").is_empty(), "refusal carries a reason");
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}
+
+fn rebuild_request<'a>(
+    request: &'a RouteResolutionRequest<'a>,
+    candidates: Vec<RouteCandidateV1>,
+) -> RouteResolutionRequest<'a> {
+    RouteResolutionRequest {
+        route_set_id: request.route_set_id.clone(),
+        route_set_version: request.route_set_version.clone(),
+        candidates,
+        pinned_candidate_id: request.pinned_candidate_id,
+        requirements: request.requirements,
+        authority_declared: request.authority_declared,
+        authority_effective: request.authority_effective,
+        profile: request.profile,
+        evaluated_at: request.evaluated_at.clone(),
+        workspace: request.workspace,
+    }
+}
+
+#[tokio::test]
+async fn adversarial_refreshed_trust_cannot_revive_stale_route() {
+    // The exact review exploit: resolve at a fresh instant, then at dispatch
+    // replace only the candidate's trust timestamp so it looks fresh again at
+    // the dispatch instant, with the sealed resolution untouched.
+    let mut fixture = fixture();
+    let mut short = candidate("revive-a", 10);
+    short.trust = trust("2026-12-01T12:00:00Z", 300); // expires 12:05:00Z
+    let set = base_set(vec![short.clone()], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves (fresh)");
+
+    // Attacker freshens trust to 12:09:30Z (fresh at 12:10:00Z; original expired).
+    let mut revived = short.clone();
+    revived.trust = trust("2026-12-01T12:09:30Z", 300);
+    let attack_request = rebuild_request(&set.request, vec![revived]);
+    let outcome = dispatch_resolved_route(RoutedDispatchRequest {
+        resolution: &resolution,
+        original_request: &attack_request,
+        registry: &fixture.harness_registry,
+        runner: &mut fixture.runner,
+        manifest: &manifest(),
+        local_restrictions: &restrictions(),
+        known_secrets: vec![],
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:10:00Z"),
+        step: step(),
+    })
+    .await;
+    assert_eq!(fixture.counter.load(Ordering::SeqCst), 0);
+    assert!(matches!(outcome, Err(RoutedDispatchFailure::Refused(_))));
+
+    // The untouched original also refuses at the expired instant (12:10:00Z).
+    let stale_outcome = dispatch_resolved_route(RoutedDispatchRequest {
+        resolution: &resolution,
+        original_request: &rebuild_request(&set.request, vec![short]),
+        registry: &fixture.harness_registry,
+        runner: &mut fixture.runner,
+        manifest: &manifest(),
+        local_restrictions: &restrictions(),
+        known_secrets: vec![],
+        clock: &FixedTrustedTimeSource::new("2026-12-01T12:10:00Z"),
+        step: step(),
+    })
+    .await;
+    assert_eq!(fixture.counter.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        stale_outcome,
+        Err(RoutedDispatchFailure::Refused(_))
+    ));
+}
+
+#[tokio::test]
+async fn adversarial_candidate_budget_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(
+        vec![candidate("budget-a", 10)],
+        None,
+        RouteProfile::Standard,
+    );
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mut mutated_candidate = candidate("budget-a", 10);
+    mutated_candidate.budget = Some(budgets(10));
+    let mutated = rebuild_request(&set.request, vec![mutated_candidate]);
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_provider_locality_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(
+        vec![candidate("loc-a", 10)],
+        None,
+        RouteProfile::Conservative,
+    );
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mut mutated_candidate = candidate("loc-a", 10);
+    mutated_candidate.provider_locality =
+        prometheos_lite::workflow::soma::capability::Locality::Remote;
+    let mutated = rebuild_request(&set.request, vec![mutated_candidate]);
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_route_set_id_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("id-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mutated = RouteResolutionRequest {
+        route_set_id: "routes-evil".to_string(),
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_route_set_version_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("ver-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mutated = RouteResolutionRequest {
+        route_set_version: "1.1.0".to_string(),
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_policy_profile_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("prof-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mutated = RouteResolutionRequest {
+        profile: RouteProfile::Experimental,
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_requirements_privacy_added_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("priv-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let privacy = Box::leak(Box::new(privacy_requirements()));
+    let authority = set.request.authority_declared;
+    let mutated = RouteResolutionRequest {
+        requirements: privacy,
+        authority_declared: authority,
+        authority_effective: authority,
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_effective_authority_widened_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("auth-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let wider = Box::leak(Box::new(authority_budgets(1000)));
+    let requirements = set.request.requirements;
+    let declared = set.request.authority_declared; // narrow declared
+    let mutated = RouteResolutionRequest {
+        authority_effective: wider,
+        requirements,
+        authority_declared: declared,
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_inserted_competing_candidate_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("ins-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mut fleet = set.request.candidates.clone();
+    let mut intruder = candidate("ins-b", 1); // strictly better priority
+    intruder.provider_identity = "provider-ins-b".to_string();
+    fleet.push(intruder);
+    let mutated = rebuild_request(&set.request, fleet);
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_candidate_priority_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(vec![candidate("prio-a", 10)], None, RouteProfile::Standard);
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mutated_candidate = candidate("prio-a", 1); // strictly better than the resolved 10
+    let mutated = rebuild_request(&set.request, vec![mutated_candidate]);
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+}
+
+#[tokio::test]
+async fn adversarial_explicit_pin_changed_refuses() {
+    let mut fixture = fixture();
+    let set = base_set(
+        vec![candidate("pin-a", 10), candidate("pin-b", 9)],
+        Some("pin-a"),
+        RouteProfile::Standard,
+    );
+    let resolution =
+        resolve_route(&set.request, &fixture.harness_registry).expect("route resolves");
+    let mutated = RouteResolutionRequest {
+        pinned_candidate_id: Some("pin-b"),
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &mutated).await;
+
+    // And the pin removed entirely.
+    let removed = RouteResolutionRequest {
+        pinned_candidate_id: None,
+        ..rebuild_request(&set.request, set.request.candidates.clone())
+    };
+    expect_refused(&mut fixture, &resolution, &removed).await;
+}
+
+#[tokio::test]
+async fn adversarial_forged_dispatch_time_with_still_expired_freshness() {
+    // The trusted clock at dispatch time is beyond TTL. Passing any other
+    // instant cannot help; the request carries no caller time at all.
+    let fixture_state = fixture();
+    let mut short = candidate("forged-a", 10);
+    short.trust = trust("2026-11-01T00:00:00Z", 120); // long expired everywhere
+    let set = base_set(vec![short], None, RouteProfile::Standard);
+    // Even resolution itself refuses because the metadata is already stale
+    // before dispatch; pinning that invariant here.
+    let err = resolve_route(&set.request, &fixture_state.harness_registry)
+        .expect_err("stale at resolve refuses");
+    assert!(format!("{err:#}").contains("stale"));
+
+    // Dispatch after resolution with the same fixed instant still refuses
+    // before effects.
+    let mut fixture2 = fixture();
+    let fresh = candidate("forged-b", 10);
+    let set2 = base_set(vec![fresh], None, RouteProfile::Standard);
+    let resolution2 =
+        resolve_route(&set2.request, &fixture2.harness_registry).expect("route resolves");
+    let outcome = dispatch_resolved_route(RoutedDispatchRequest {
+        resolution: &resolution2,
+        original_request: &set2.request,
+        registry: &fixture2.harness_registry,
+        runner: &mut fixture2.runner,
+        manifest: &manifest(),
+        local_restrictions: &restrictions(),
+        known_secrets: vec![],
+        // Beyond the original trust TTL (86_400s from 2026-12-01T00:00:00Z):
+        clock: &FixedTrustedTimeSource::new("2026-12-05T12:00:00Z"),
+        step: step(),
+    })
+    .await
+    .expect_err("expired at dispatch-time instant refuses");
+    assert_eq!(fixture2.counter.load(Ordering::SeqCst), 0);
+    assert!(matches!(outcome, RoutedDispatchFailure::Refused(_)));
 }
