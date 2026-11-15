@@ -150,13 +150,15 @@ nSdKs47cVOd7jkTF/a9wDixA3r1EBb1GfmfqFuwQrBaZVUJqIAJVkbWaw0TL3GU=\n\
 -----END CERTIFICATE-----\n";
 
 fn fixture_python() -> &'static str {
-    if Command::new("python3").arg("--version").output().is_ok() {
-        return "python3";
+    for candidate in ["python3", "python"] {
+        match Command::new(candidate).arg("--version").output() {
+            Ok(out) if out.status.success() => return candidate,
+            // Spawn success is not enough: the Windows Store "python3"
+            // alias spawns and exits 9009 without interpreter output.
+            _ => {}
+        }
     }
-    if Command::new("python").arg("--version").output().is_ok() {
-        return "python";
-    }
-    panic!("remote_service_fixture requires python3 (or python) on PATH");
+    panic!("remote_service_fixture requires a working python3 (or python) on PATH");
 }
 
 struct FixtureGuard {
