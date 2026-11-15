@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "1.0.0",
+  "namespace": "lite.fixtures.scenario",
+  "scenarioId": "lite-rust-bugfix-arithmetic-001",
+  "version": "1.0.0",
+  "title": "Rust bugfix: sum subtracts instead of adding",
+  "kind": "bugfix",
+  "language": "rust",
+  "task": {
+    "statement": "The fixture crate fixture-buggy-sum in this workspace exposes sum(a: i64, b: i64) -> i64 in src/lib.rs, but it returns a - b. Fix the implementation so sum(2, 2) == 4. Make the minimal change; do not alter the public signature or the test."
+  },
+  "repository": {
+    "fixture": "tests/fixtures/scenarios/rust-bugfix-arithmetic/repo",
+    "contentDigest": "d4234cd58be74da1e9b369ab21bdecf96d33f1d43e12c4a5f7ae848dc2e400d6",
+    "revision": "scenario-fixture-v1"
+  },
+  "expected": {
+    "outcome": "attempt-recorded-and-accounted",
+    "observableOutcome": "the governed dispatch records a sealed, accounted attempt; for the pinned loopback fixture the model response body is fixed, so reruns reproduce the canonical evidence chain",
+    "evidenceArtifacts": [
+      "route-evidence",
+      "snapshot",
+      "attempt",
+      "journal-entry",
+      "accounting-record",
+      "graph-accounting"
+    ]
+  },
+  "requirements": {
+    "degradationPermitted": false,
+    "forbidSubstitution": true
+  },
+  "policy": {
+    "profile": "standard",
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "readableScopes": [
+      "repo://fixture"
+    ],
+    "writableScopes": [],
+    "networkPolicyDefault": "deny"
+  },
+  "workspace": {
+    "adapter": "existing-read-only",
+    "adapterRevision": "lite.workspace.adapter.v1",
+    "mode": "read-only",
+    "writableScopes": []
+  },
+  "harness": {
+    "id": "lite.harness.local_model",
+    "revision": "v1"
+  },
+  "route": {
+    "routeSetId": "routes-scenario-fixtures",
+    "routeSetVersion": "1.0.0",
+    "candidateId": "fixture-local-route",
+    "providerIdentity": "demo-local",
+    "providerLocality": "local",
+    "model": "tiny-local-model",
+    "priority": 10,
+    "profile": "standard",
+    "evaluatedAt": "2026-12-01T12:00:00Z",
+    "dispatchAt": "2026-12-01T12:00:01Z",
+    "trustVerifiedAt": "2026-12-01T00:00:00Z",
+    "trustTtlSeconds": 86400,
+    "pinnedCandidateId": "fixture-local-route"
+  },
+  "dimensions": {
+    "controlled": [
+      "repository-content",
+      "task-statement",
+      "policy-profile",
+      "authority",
+      "workspace",
+      "harness",
+      "harness-revision",
+      "route",
+      "provider",
+      "model",
+      "evaluation-instant",
+      "context-rules",
+      "expected-evidence"
+    ],
+    "variable": []
+  }
+}

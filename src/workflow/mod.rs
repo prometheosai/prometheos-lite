@@ -53,6 +53,7 @@ pub mod repo_index;
 pub mod retention;
 pub mod route_dispatch;
 pub mod route_resolution;
+pub mod scenario;
 pub mod schema;
 pub mod soma;
 pub mod subprocess_harness;

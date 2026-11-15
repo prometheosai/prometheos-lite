@@ -104,6 +104,7 @@ Every identifiable surface in PrometheOS Lite, classified by maturity.
 
 | Surface | Status | Notes |
 |---|---|---|
+| Governed-workflow evaluation fixtures | experimental | Lite-owned, repeatable scenario descriptors + deterministic local fixture runner + raw evidence export (#136 Slice A); explicitly NOT the Foundry external evaluation format - no scores, comparisons or certification |
 | SQLite database layer | internal | 20+ repository modules |
 | Configuration loading | internal | JSON/env/defaults |
 | Control files system | internal | SOUL.md, SKILLS.md, FLOWS.md, etc. |

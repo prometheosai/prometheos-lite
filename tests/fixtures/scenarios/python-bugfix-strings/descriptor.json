@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "1.0.0",
+  "namespace": "lite.fixtures.scenario",
+  "scenarioId": "lite-python-bugfix-slugify-001",
+  "version": "1.0.0",
+  "title": "Python bugfix: slugify does not collapse whitespace runs",
+  "kind": "bugfix",
+  "language": "python",
+  "task": {
+    "statement": "The fixture module slugify.py in this workspace defines slugify(text: str) -> str, but whitespace runs are not collapsed. Fix the implementation so slugify('Hello   World') == 'hello-world'. Make the minimal change; do not alter the function signature."
+  },
+  "repository": {
+    "fixture": "tests/fixtures/scenarios/python-bugfix-strings/repo",
+    "contentDigest": "435ea2ed1cc4f80e286e070e84bb1c4dd800e446cdc346b909bba5ef1267d135",
+    "revision": "scenario-fixture-v1"
+  },
+  "expected": {
+    "outcome": "attempt-recorded-and-accounted",
+    "observableOutcome": "the governed dispatch records a sealed, accounted attempt; for the pinned loopback fixture the model response body is fixed, so reruns reproduce the canonical evidence chain",
+    "evidenceArtifacts": [
+      "route-evidence",
+      "snapshot",
+      "attempt",
+      "journal-entry",
+      "accounting-record",
+      "graph-accounting"
+    ]
+  },
+  "requirements": {
+    "degradationPermitted": false,
+    "forbidSubstitution": true
+  },
+  "policy": {
+    "profile": "standard",
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "readableScopes": [
+      "repo://fixture"
+    ],
+    "writableScopes": [],
+    "networkPolicyDefault": "deny"
+  },
+  "workspace": {
+    "adapter": "existing-read-only",
+    "adapterRevision": "lite.workspace.adapter.v1",
+    "mode": "read-only",
+    "writableScopes": []
+  },
+  "harness": {
+    "id": "lite.harness.local_model",
+    "revision": "v1"
+  },
+  "route": {
+    "routeSetId": "routes-scenario-fixtures",
+    "routeSetVersion": "1.0.0",
+    "candidateId": "fixture-local-route",
+    "providerIdentity": "demo-local",
+    "providerLocality": "local",
+    "model": "tiny-local-model",
+    "priority": 10,
+    "profile": "standard",
+    "evaluatedAt": "2026-12-01T12:00:00Z",
+    "dispatchAt": "2026-12-01T12:00:01Z",
+    "trustVerifiedAt": "2026-12-01T00:00:00Z",
+    "trustTtlSeconds": 86400,
+    "pinnedCandidateId": "fixture-local-route"
+  },
+  "dimensions": {
+    "controlled": [
+      "repository-content",
+      "task-statement",
+      "policy-profile",
+      "authority",
+      "workspace",
+      "harness",
+      "harness-revision",
+      "route",
+      "provider",
+      "model",
+      "evaluation-instant",
+      "context-rules",
+      "expected-evidence"
+    ],
+    "variable": []
+  }
+}
