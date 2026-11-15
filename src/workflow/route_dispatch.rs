@@ -141,6 +141,9 @@ impl RoutedAttemptV1 {
 pub struct RoutedDispatchOutcome {
     pub outcome: HarnessOutcome,
     pub attempt: RoutedAttemptV1,
+    /// Wall-clock ms measured at the dispatch boundary (provenance:
+    /// `measured-by-route-dispatch`, not provider-claimed).
+    pub latency_ms: u64,
 }
 
 /// The failure detail of a failed governed effect: typed error, call count
@@ -259,7 +262,7 @@ impl TrustedTimeSource for FixedTrustedTimeSource {
     }
 }
 
-fn verify_journal_entry(entry: &JournalEntryV1) -> anyhow::Result<()> {
+pub(crate) fn verify_journal_entry(entry: &JournalEntryV1) -> anyhow::Result<()> {
     let mut clone = entry.clone();
     clone.entry_digest = String::new();
     let value = serde_json::to_value(&clone).context("journal entry serializes")?;
@@ -501,6 +504,7 @@ pub async fn dispatch_resolved_route(
     }
 
     // ---- Execute through the existing governed boundary.
+    let dispatch_started = std::time::Instant::now();
     let mut dispatch = HarnessDispatch::new(
         harness,
         req.manifest,
@@ -588,5 +592,11 @@ pub async fn dispatch_resolved_route(
         .try_sealed()
         .map_err(|error| RoutedDispatchFailure::failed(error, calls, None))?;
 
-    Ok(RoutedDispatchOutcome { outcome, attempt })
+    let dispatch_latency_ms = dispatch_started.elapsed().as_millis() as u64;
+
+    Ok(RoutedDispatchOutcome {
+        outcome,
+        attempt,
+        latency_ms: dispatch_latency_ms,
+    })
 }

@@ -14,6 +14,7 @@
 //! (or generated upstream by a `PatchProvider`). The safety value is the gating, not the
 //! generation.
 
+pub mod accounting;
 pub mod artifact_integrity;
 pub mod composite_expansion;
 pub mod context_planner;
