@@ -978,10 +978,16 @@ fn build_local_model_success(
         json!(content_str)
     };
     let usage_raw = parsed.get("usage").cloned().unwrap_or(Value::Null);
+    // Usage fields pass through verbatim as reported (strings, floats,
+    // negatives included): the accounting layer is the fail-closed arbiter
+    // of what is a valid unsigned integer. Destroying malformed values here
+    // would erase the evidence refusal depends on.
+    let usage_field =
+        |snake: &str| -> Value { usage_raw.get(snake).cloned().unwrap_or(Value::Null) };
     let usage = json!({
-        "promptTokens": usage_raw.get("prompt_tokens").and_then(Value::as_u64),
-        "completionTokens": usage_raw.get("completion_tokens").and_then(Value::as_u64),
-        "totalTokens": usage_raw.get("total_tokens").and_then(Value::as_u64),
+        "promptTokens": usage_field("prompt_tokens"),
+        "completionTokens": usage_field("completion_tokens"),
+        "totalTokens": usage_field("total_tokens"),
     });
     Ok(json!({
         "harnessId": LOCAL_MODEL_HARNESS_ID,

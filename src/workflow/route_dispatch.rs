@@ -262,7 +262,7 @@ impl TrustedTimeSource for FixedTrustedTimeSource {
     }
 }
 
-fn verify_journal_entry(entry: &JournalEntryV1) -> anyhow::Result<()> {
+pub(crate) fn verify_journal_entry(entry: &JournalEntryV1) -> anyhow::Result<()> {
     let mut clone = entry.clone();
     clone.entry_digest = String::new();
     let value = serde_json::to_value(&clone).context("journal entry serializes")?;

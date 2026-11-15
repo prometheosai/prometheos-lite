@@ -1068,10 +1068,16 @@ fn run_external_subject_guarded(
         }
     };
     let usage_raw = comp_result.get("usage").cloned().unwrap_or(Value::Null);
+    // Usage fields pass through verbatim as reported (strings, floats,
+    // negatives included): the accounting layer is the fail-closed arbiter
+    // of what is a valid unsigned integer. Destroying malformed values here
+    // would erase the evidence refusal depends on.
+    let usage_field =
+        |camel: &str| -> Value { usage_raw.get(camel).cloned().unwrap_or(Value::Null) };
     let usage = json!({
-        "promptTokens": usage_raw.get("promptTokens").and_then(Value::as_u64),
-        "completionTokens": usage_raw.get("completionTokens").and_then(Value::as_u64),
-        "totalTokens": usage_raw.get("totalTokens").and_then(Value::as_u64),
+        "promptTokens": usage_field("promptTokens"),
+        "completionTokens": usage_field("completionTokens"),
+        "totalTokens": usage_field("totalTokens"),
     });
     let latency_ms = started.elapsed().as_millis() as u64;
 

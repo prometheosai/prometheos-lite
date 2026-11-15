@@ -12,8 +12,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use prometheos_lite::workflow::accounting::{
-    AccountingContext, AccountingLedger, CostAccounting, CostMethod, InsertOutcome, LedgerError,
-    PricingBook, UsageAccounting, account_routed_failure, account_routed_outcome,
+    AccountingContext, AccountingError, AccountingLedger, CostAccounting, CostMethod,
+    InsertOutcome, LedgerError, PricingBook, UsageAccounting, account_routed_failure,
+    account_routed_outcome,
 };
 use prometheos_lite::workflow::execution_harness::HarnessRegistry;
 use prometheos_lite::workflow::local_model_harness::{
@@ -23,10 +24,11 @@ use prometheos_lite::workflow::local_model_harness::{
 use prometheos_lite::workflow::node_runner::{CapabilityRegistry, NodeRunner};
 use prometheos_lite::workflow::policy::LocalRestrictions;
 use prometheos_lite::workflow::route_dispatch::{
-    FixedTrustedTimeSource, RoutedDispatchRequest, dispatch_resolved_route,
+    FixedTrustedTimeSource, RoutedDispatchOutcome, RoutedDispatchRequest, dispatch_resolved_route,
 };
 use prometheos_lite::workflow::route_resolution::{
-    RouteCandidateV1, RouteProfile, RouteResolutionRequest, RouteTrust, resolve_route,
+    RouteCandidateV1, RouteProfile, RouteResolution, RouteResolutionRequest, RouteTrust,
+    resolve_route,
 };
 
 mod common;
@@ -405,12 +407,12 @@ async fn known_usage_and_directed_pricing_books_bind_one_journal_entry() {
     )
     .expect("accounting succeeds");
     assert_eq!(
-        record.attempt_digest,
-        outcome.attempt.content_digest.as_deref().unwrap()
+        record.attempt_digest.as_deref(),
+        outcome.attempt.content_digest.as_deref()
     );
     assert_eq!(
-        record.journal_digest,
-        outcome.attempt.journal_entry.entry_digest
+        record.journal_digest.as_deref(),
+        Some(outcome.attempt.journal_entry.entry_digest.as_str())
     );
     assert!(matches!(
         record.outcome,
@@ -495,7 +497,7 @@ async fn missing_pricing_entry_yields_unknown_cost_not_a_fabricated_zero() {
     match &record.cost {
         CostAccounting::Known(cost) => {
             assert_eq!(cost.currency, "EUR");
-            assert_eq!(cost.minor_units, 7 * 800 / 1000 + 4 * 1600 / 1000);
+            assert_eq!(cost.minor_units, (7 * 800 + 4 * 1600) / 1000);
         }
         other => panic!("expected EUR-derived cost, got {other:?}"),
     }
@@ -575,7 +577,7 @@ async fn accounting_record_is_sealed_and_tamper_fails_verify() {
     )
     .expect("accounting succeeds");
     assert!(record.verify().is_ok());
-    record.journal_digest = "0".repeat(64);
+    record.journal_digest = Some("0".repeat(64));
     assert!(record.verify().is_err());
 }
 
@@ -695,7 +697,9 @@ async fn graph_and_node_aggregation_with_unknown_coverage_is_not_overstated() {
         )
         .expect("node 2 record registers");
 
-    let graph = ledger.aggregate_graph("graph-acct-1");
+    let graph = ledger
+        .aggregate_graph("graph-acct-1")
+        .expect("graph aggregates");
     assert_eq!(graph.attempts, 2);
     assert_eq!(graph.completed, 2);
     assert_eq!(graph.usage.known_attempts, 1);
@@ -747,7 +751,9 @@ async fn known_two_attempt_graph_aggregates_to_exact_totals() {
         )
         .expect("node 2 record registers");
 
-    let graph = ledger.aggregate_graph("graph-acct-1");
+    let graph = ledger
+        .aggregate_graph("graph-acct-1")
+        .expect("graph aggregates");
     assert_eq!(graph.usage.total_tokens, 26);
     assert_eq!(graph.usage.completion_tokens, 9);
     assert_eq!(graph.usage.known_attempts, 2);
@@ -798,7 +804,9 @@ async fn mixed_currencies_are_never_summed_together() {
         )
         .expect("eur record registers");
 
-    let graph = ledger.aggregate_graph("graph-acct-1");
+    let graph = ledger
+        .aggregate_graph("graph-acct-1")
+        .expect("graph aggregates");
     assert_eq!(graph.cost.currencies.len(), 2);
     assert!(graph.cost.mixed_currencies.contains(&"USD".to_string()));
     assert!(graph.cost.mixed_currencies.contains(&"EUR".to_string()));
@@ -900,27 +908,46 @@ async fn price_book_fails_closed_on_bad_input() {
 
 #[tokio::test]
 async fn cost_cannot_exceed_upper_bounds_by_construction_and_never_softens_zero() {
-    let mut fixture = fixture(Some(response_with_usage(u64::MAX - 1, 4, Some(u64::MAX))));
-    let set = admitted_set(vec![candidate("model-n", 10)]);
+    // u64::MAX prompt tokens with a rate that overflows the final minor-unit
+    // conversion -> cost Unknown. Never panics, never wraps, never rounds up.
+    let mut fixture = fixture(Some(response_with_usage(u64::MAX, 0, Some(u64::MAX))));
+    let mut overflow_candidate = candidate("model-n", 10);
+    overflow_candidate.provider_identity = "local-fixture".to_string();
+    overflow_candidate.model = Some("overflow-model".to_string());
+    let set = admitted_set(vec![overflow_candidate]);
     let outcome = dispatched(&mut fixture, &set, STEP_ID)
         .await
         .expect("dispatch succeeds");
     let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
-    let pricing = PricingBook::from_json(PRICE_BOOK).expect("book validates");
+    let overflow_book = PricingBook::from_json(
+        r#"{
+            "schemaVersion": "1.0.0",
+            "source": "operator-price-book",
+            "version": "price-book-2026-11",
+            "entries": [
+                { "provider": "local-fixture", "model": "overflow-model", "currency": "USD",
+                  "promptMinorPer1k": 18446744073, "completionMinorPer1k": 0 }
+            ]
+        }"#,
+    )
+    .expect("overflow book validates");
     let record = account_routed_outcome(
         &outcome,
         &resolution,
         &accounting_context(Some("USD")),
-        Some(&pricing),
+        Some(&overflow_book),
     )
     .expect("accounting succeeds");
-    // The huge usage values definitely exceed u64 for the multiplication
-    // before division — the ceiling refuses to produce a cost and keeps
-    // Unknown rather than a wrapped value.
     match &record.cost {
-        CostAccounting::Unknown { .. } => {}
+        CostAccounting::Unknown { reason } => assert!(
+            reason.contains("overflow"),
+            "huge usage with huge rate must overflow to Unknown, got: {reason}"
+        ),
         CostAccounting::Known(cost) => {
-            assert_eq!(cost.method, CostMethod::DirectedRates);
+            panic!(
+                "overflowed usage must not produce a finite cost, got {:?}",
+                cost
+            )
         }
     }
 }
@@ -1026,5 +1053,354 @@ async fn replayed_identical_attempt_is_idempotent_duplicate() {
     let _ = ledger.record(record.clone()).expect("first registers");
     let second = ledger.record(record).expect("replay registers");
     assert_eq!(second, InsertOutcome::Duplicate);
-    assert_eq!(ledger.aggregate_graph("graph-acct-1").attempts, 1);
+    assert_eq!(
+        ledger
+            .aggregate_graph("graph-acct-1")
+            .expect("aggregate graph")
+            .attempts,
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial integrity tests (PR #304 review)
+// ---------------------------------------------------------------------------
+
+fn account_with(
+    outcome: &RoutedDispatchOutcome,
+    resolution: &RouteResolution,
+) -> Result<prometheos_lite::workflow::accounting::AttemptAccountingV1, AccountingError> {
+    account_routed_outcome(
+        outcome,
+        resolution,
+        &accounting_context(Some("USD")),
+        Option::None,
+    )
+}
+
+#[tokio::test]
+async fn adversarial_outcome_from_route_a_with_resolution_from_route_b_refuses() {
+    let mut fixture = fixture(Some(response_with_usage(7, 4, Some(11))));
+    let set_a = admitted_set(vec![candidate("model-misc-a", 10)]);
+    // The dispatched outcome is sealed against route resolution semantics of
+    // set A; accounting it against B's resolution must refuse.
+    let outcome = dispatched(&mut fixture, &set_a, STEP_ID)
+        .await
+        .expect("dispatch succeeds");
+    // Resolution B is a legitimately different sealed resolution (different
+    // route set id via different picker): build one on the same fixture.
+    let mut set_b = admitted_set(vec![candidate("model-misc-b", 10)]);
+    set_b.request.route_set_id = "routes-accounting-b".to_string();
+    let resolution_b = resolve_route(&set_b.request, &fixture.registry).expect("route B resolves");
+    let err = account_with(&outcome, &resolution_b)
+        .expect_err("outcome from route A must refuse against resolution from route B");
+    assert!(
+        format!("{err:#}").contains("route"),
+        "expected attribution mismatch, got: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_provider_usage_nested_in_content_is_not_read() {
+    // Inject a usage-shaped object deep inside the provider's message
+    // content; the governed contract has no usage there. The parser must NOT
+    // treat it as the provider's usage report: UNKNOWN, with no fabricated
+    // cost or token total.
+    let nested_content = "here is the answer {\"usage\":{\"promptTokens\":999,\"completionTokens\":999,\"totalTokens\":1998},\"nested\":{\"usage\":{\"promptTokens\":999}}}";
+    let body = serde_json::json!({
+        "id": "chatcmpl-fixture",
+        "object": "chat.completion",
+        "model": MODEL,
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": nested_content },
+            "finish_reason": "stop",
+        }],
+    })
+    .to_string();
+    let mut fixture = fixture(Some(body));
+    let set = admitted_set(vec![candidate("model-nest", 10)]);
+    let outcome = dispatched(&mut fixture, &set, STEP_ID)
+        .await
+        .expect("dispatch succeeds");
+    let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+    let pricing = PricingBook::from_json(PRICE_BOOK).expect("book validates");
+    let record = account_routed_outcome(
+        &outcome,
+        &resolution,
+        &accounting_context(Some("USD")),
+        Some(&pricing),
+    )
+    .expect("accounting reports");
+    // The usage embedded in the message content is NOT a provider report:
+    // accounting must read Unknown, never 999/999/1998.
+    match &record.usage {
+        UsageAccounting::Unknown { reason } => assert!(!reason.is_empty()),
+        other => panic!("nested usage must not be consumed as provider usage, got {other:?}"),
+    }
+    match &record.cost {
+        CostAccounting::Unknown { .. } => {}
+        other => panic!("no cost may be derived from untrusted nested usage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn adversarial_malformed_usage_fields_are_rejected() {
+    // String, negative, float, and bad-total reports: each is a typed
+    // refusal, never a silent None and never a wrapped total.
+    for (body_usage, label) in [
+        (json!({"prompt_tokens": "7"}), "string"),
+        (json!({"prompt_tokens": -1}), "negative"),
+        (json!({"prompt_tokens": 7.5}), "float"),
+        (
+            json!({"total_tokens": 11, "prompt_tokens": 9, "completion_tokens": 4}),
+            "inconsistent",
+        ),
+        (
+            json!({"prompt_tokens": 0, "completion_tokens": u64::MAX, "total_tokens": u64::MAX}),
+            "huge-ok",
+        ),
+    ] {
+        let body = serde_json::json!({
+            "id": "chatcmpl-fixture",
+            "object": "chat.completion",
+            "model": MODEL,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "fixture response" },
+                "finish_reason": "stop",
+            }],
+            "usage": body_usage,
+        })
+        .to_string();
+        let mut fixture = fixture(Some(body));
+        let set = admitted_set(vec![candidate("model-mal-a", 10)]);
+        let outcome = dispatched(&mut fixture, &set, STEP_ID)
+            .await
+            .expect("dispatch succeeds");
+        let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+        let record = account_routed_outcome(
+            &outcome,
+            &resolution,
+            &accounting_context(Some("USD")),
+            Option::None,
+        );
+        match (label, record) {
+            ("huge-ok", Ok(record)) => {
+                // promptTokens=0 + completionTokens=u64::MAX: sum overflows,
+                // but totalTokens is present and consistent with completion;
+                // is_consistent uses checked_add, so u64::MAX + 0 succeeds.
+                assert!(matches!(record.usage, UsageAccounting::Known(_)));
+            }
+            ("huge-ok", Err(_)) => panic!("consistent huge usage must not be refused"),
+            (_, Err(error)) => assert!(
+                format!("{error:#}").contains("usage"),
+                "malformed case {label} must refuse with a usage reason, got: {error:#}"
+            ),
+            (label, Ok(record)) => panic!(
+                "malformed case {label} must refuse but produced: {:?}",
+                record.usage
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn adversarial_same_journal_with_changed_accounting_content_conflicts() {
+    let mut fixture = fixture(Some(response_with_usage(7, 4, Some(11))));
+    let set = admitted_set(vec![candidate("model-rev-a", 10)]);
+    let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+    let outcome = dispatched(&mut fixture, &set, STEP_ID)
+        .await
+        .expect("dispatch succeeds");
+    let pricing = PricingBook::from_json(PRICE_BOOK).expect("book validates");
+    let mut ledger = AccountingLedger::new();
+    let record = account_routed_outcome(
+        &outcome,
+        &resolution,
+        &accounting_context(Some("USD")),
+        Some(&pricing),
+    )
+    .expect("accounting succeeds");
+    ledger.record(record.clone()).expect("first registers");
+    // Same execution, same journal digest, changed price book version: the
+    // sealed record digest differs, so the binding must refuse.
+    let other_book = PricingBook::from_json(
+        r#"{
+            "schemaVersion": "1.0.0",
+            "source": "operator-price-book",
+            "version": "price-book-2027-01",
+            "entries": [
+                { "provider": "local-fixture", "model": "tiny-local-model", "currency": "USD",
+                  "promptMinorPer1k": 1000, "completionMinorPer1k": 2000 }
+            ]
+        }"#,
+    )
+    .expect("book validates");
+    let changed = account_routed_outcome(
+        &outcome,
+        &resolution,
+        &accounting_context(Some("USD")),
+        Some(&other_book),
+    )
+    .expect("accounting succeeds");
+    assert_ne!(record.content_digest, changed.content_digest);
+    let error = ledger
+        .record(changed)
+        .expect_err("changed usage/cost record under the same journal must conflict");
+    assert!(matches!(error, LedgerError::IdempotencyConflict { .. }));
+    assert_eq!(ledger.records().len(), 1);
+}
+
+#[tokio::test]
+async fn adversarial_aggregation_overflow_fails_typed_not_saturated() {
+    // Three distinct executions each reporting promptTokens = u64::MAX with
+    // full completion tokens must overflow checked aggregation — never a
+    // silently saturated-looking total.
+    let mut ledger = AccountingLedger::new();
+    for attempt in 0..3u8 {
+        let mut fixture = fixture(Some(response_with_usage(u64::MAX, 4, None)));
+        let set = admitted_set(vec![{
+            let mut c = candidate(&format!("model-ovf-a-{attempt}"), 10);
+            c.priority = attempt as u32;
+            c
+        }]);
+        let outcome = dispatched(&mut fixture, &set, &format!("acct-overflow-{attempt}"))
+            .await
+            .expect("dispatch succeeds");
+        let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+        let record = account_routed_outcome(
+            &outcome,
+            &resolution,
+            &accounting_context(Some("USD")),
+            Option::None,
+        )
+        .expect("accounting succeeds");
+        ledger.record(record).expect("record registers");
+    }
+    let err = ledger
+        .aggregate_graph("graph-acct-1")
+        .expect_err("near-u64::MAX token sums must refuse, not wrap");
+    assert!(
+        format!("{err:#}").contains("aggregation would overflow"),
+        "expected typed overflow error, got: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_aggregation_overflow_total_tokens_is_refused() {
+    let mut ledger = AccountingLedger::new();
+    for attempt in 0..2u8 {
+        let mut fixture = fixture(Some(response_with_usage(u64::MAX, 0, Some(u64::MAX))));
+        let set = admitted_set(vec![{
+            let mut c = candidate(&format!("model-ovf-b-{attempt}"), 10);
+            c.priority = attempt as u32;
+            c
+        }]);
+        let outcome = dispatched(&mut fixture, &set, &format!("acct-overflow-t-{attempt}"))
+            .await
+            .expect("dispatch succeeds");
+        let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+        let record = account_routed_outcome(
+            &outcome,
+            &resolution,
+            &accounting_context(Some("USD")),
+            Option::None,
+        )
+        .expect("accounting succeeds");
+        ledger.record(record).expect("record registers");
+    }
+    let err = ledger
+        .aggregate_graph("graph-acct-1")
+        .expect_err("near-u64::MAX token sums must refuse, not wrap");
+    assert!(format!("{err:#}").contains("aggregation would overflow"));
+}
+
+#[tokio::test]
+async fn directed_rate_rounding_is_floor_of_exact_sum() {
+    // 1 token * (1000 USD/1k) + 1 token * (2000 USD/1k): floor(3000/1000) = 3.
+    // Cost must not round components independently (which would floor to 0+2=2).
+    let mut fixture = fixture(Some(response_with_usage(1, 1, Some(2))));
+    let set = admitted_set(vec![candidate("model-round-a", 10)]);
+    let outcome = dispatched(&mut fixture, &set, STEP_ID)
+        .await
+        .expect("dispatch succeeds");
+    let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+    let pricing = PricingBook::from_json(PRICE_BOOK).expect("book validates");
+    let record = account_routed_outcome(
+        &outcome,
+        &resolution,
+        &accounting_context(Some("USD")),
+        Some(&pricing),
+    )
+    .expect("accounting succeeds");
+    match &record.cost {
+        CostAccounting::Known(cost) => assert_eq!(cost.minor_units, 3),
+        other => panic!("expected known cost, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pricing_book_is_validated_at_point_of_use() {
+    // Construct an invalid book by hand (bypassing from_json); derive must
+    // refuse, not derive from invalid data.
+    let book = PricingBook {
+        source: "operator-price-book".to_string(),
+        version: "bad-version".to_string(),
+        schema_version: "0.0.9".to_string(), // unsupported
+        entries: vec![prometheos_lite::workflow::accounting::PricingEntry {
+            provider: "local-fixture".to_string(),
+            model: MODEL.to_string(),
+            currency: "USD".to_string(),
+            prompt_minor_per_1k: Some(1000),
+            completion_minor_per_1k: Some(2000),
+            flat_minor_per_1k: None,
+        }],
+    };
+    let mut fixture = fixture(Some(response_with_usage(7, 4, Some(11))));
+    let set = admitted_set(vec![candidate("model-use-a", 10)]);
+    let outcome = dispatched(&mut fixture, &set, STEP_ID)
+        .await
+        .expect("dispatch succeeds");
+    let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+    let record = account_routed_outcome(
+        &outcome,
+        &resolution,
+        &accounting_context(Some("USD")),
+        Some(&book),
+    )
+    .expect("accounting succeeds; invalid book yields Unknown not panic");
+    match &record.cost {
+        CostAccounting::Unknown { reason } => {
+            assert!(reason.contains("invalid") || reason.contains("unsupported"))
+        }
+        other => panic!("invalid book must not derive a known cost, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn failure_with_full_bindings_requires_them_but_absence_is_allowed() {
+    let fixture = fixture(Some(response_with_usage(7, 4, Some(11))));
+    let set = admitted_set(vec![candidate("model-fail-a", 10)]);
+    let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+    let res = account_routed_failure(
+        &resolution,
+        "failed",
+        &accounting_context(Some("USD")),
+        STEP_ID,
+        None,
+        42,
+    );
+    assert!(
+        res.attempt_digest.is_none(),
+        "failure never claims an attempt digest"
+    );
+    assert!(
+        res.journal_digest.is_none(),
+        "pre-effect failure journal digest is optional"
+    );
+    assert!(
+        res.verify().is_ok(),
+        "failed records without bindings still verify"
+    );
 }
