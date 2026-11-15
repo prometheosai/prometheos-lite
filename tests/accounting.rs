@@ -1404,3 +1404,73 @@ async fn failure_with_full_bindings_requires_them_but_absence_is_allowed() {
         "failed records without bindings still verify"
     );
 }
+
+#[tokio::test]
+async fn golden_route_to_dispatch_to_accounting_path() {
+    // The full governed path in one seam: resolve (immutable snapshot +
+    // sealed evidence) -> dispatch (exactly once) -> re-verify attempt and
+    // journal -> account -> ledger -> graph aggregate. Every artifact is
+    // digest-sealed; no secrets or raw authority material appear in any
+    // serialized artifact.
+    let mut fixture = fixture(Some(response_with_usage(7, 4, Some(11))));
+    let set = admitted_set(vec![candidate("golden-route", 10)]);
+
+    // 1. Resolve: no effects may occur here.
+    let resolution = resolve_route(&set.request, &fixture.registry).expect("route resolves");
+    resolution.evidence.verify().expect("evidence verifies");
+    resolution.snapshot.verify().expect("snapshot verifies");
+
+    // 2. Dispatch exactly once.
+    let outcome = dispatched(&mut fixture, &set, STEP_ID)
+        .await
+        .expect("dispatch succeeds");
+    outcome
+        .attempt
+        .verify()
+        .expect("attempt (journal binding included) verifies");
+
+    // 3. Account against the example operator price book.
+    let pricing = PricingBook::from_json(PRICE_BOOK).expect("price book validates");
+    let record = account_routed_outcome(
+        &outcome,
+        &resolution,
+        &accounting_context(Some("USD")),
+        Some(&pricing),
+    )
+    .expect("accounting succeeds");
+    record.verify().expect("accounting record verifies");
+    assert_eq!(record.attempt_digest, outcome.attempt.content_digest);
+    assert_eq!(
+        record.journal_digest.as_deref(),
+        Some(outcome.attempt.journal_entry.entry_digest.as_str()),
+        "accounting record binds the journal digest, not anything else"
+    );
+
+    // 4. Ledger -> graph aggregate, exact totals.
+    let mut ledger = AccountingLedger::new();
+    ledger.record(record.clone()).expect("record registers");
+    let graph = ledger
+        .aggregate_graph("graph-acct-1")
+        .expect("graph aggregates");
+    assert_eq!(graph.attempts, 1);
+    assert_eq!(graph.completed, 1);
+    assert!(graph.usage.complete);
+    assert_eq!(graph.usage.total_tokens, 11);
+    assert_eq!(graph.latency_ms_total, record.latency_ms);
+    assert_eq!(graph.cost.currencies.get("USD").copied(), Some(15));
+    assert!(graph.cost.total_known_exact);
+
+    // 5. No canary secret or raw authority material rides any artifact.
+    let artifacts = [
+        serde_json::to_string(&resolution.evidence).expect("evidence serializes"),
+        serde_json::to_string(&resolution.snapshot).expect("snapshot serializes"),
+        serde_json::to_string(&outcome.attempt).expect("attempt serializes"),
+        serde_json::to_string(&record).expect("record serializes"),
+        serde_json::to_string(&graph).expect("graph serializes"),
+    ];
+    for artifact in artifacts {
+        assert!(!artifact.contains("PROMETHEOS_TEST_SECRET_9f83c0ffee"));
+        assert!(!artifact.contains("repo://secret-scope"));
+        assert!(!artifact.contains("\"secrets\""));
+    }
+}

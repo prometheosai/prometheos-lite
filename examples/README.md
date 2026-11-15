@@ -12,6 +12,16 @@ prometheos flow examples/codegen.flow.json --input '{"task":"Build a Rust CLI to
 
 ## Available Flows
 
+### governed_route_to_accounting.rs (Rust example)
+
+The governed route -> dispatch -> accounting path, end to end, with deterministic local fixtures — no production provider, no network beyond loopback:
+
+```bash
+cargo run --example governed_route_to_accounting
+```
+
+Resolves one route (standard profile, fresh-attested trust), dispatches one governed local-model effect through the local-model harness, re-verifies the attempt and journal, accounts token usage and cost, records in a ledger, aggregates the graph, and prints an operator summary of identities, digests and currencies. An embedded canary proves known secrets never appear in any sealed artifact. The price book in the example is operator demo data, not production rates.
+
 ### codegen.flow.json
 
 A complete code generation pipeline that demonstrates the full flow execution path:

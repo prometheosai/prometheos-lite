@@ -1314,3 +1314,59 @@ fn read_only_workspace_cannot_satisfy_write_boundary() {
         .expect_err("read-only manifest cannot satisfy a write boundary");
     assert!(format!("{err:#}").contains("ROUTE-0006"));
 }
+
+#[test]
+fn refusal_diagnostics_carry_no_authority_secret_material() {
+    // Authority envelope carries secrets and scoped handles. A refusal must
+    // surface only deterministic policy metadata (ids, codes, digests) - the
+    // operator-owned secret handles and scope strings never appear in the
+    // error chain, however the refusal happened.
+    let registry = registry(vec![local_decl(), remote_decl()]);
+    let authority = serde_json::from_value(json!({
+        "executionClass": "deterministic",
+        "mutation": "none",
+        "readableScopes": ["repo://secret-scope"],
+        "secrets": [{ "name": "secret-handle-0" }],
+    }))
+    .expect("authority with secrets parses");
+    let requirements = requirements_with(json!({
+        "locality": { "allowedExecution": ["local"] }
+    }));
+    let remote = candidate(
+        "route-remote-secret",
+        Locality::Remote,
+        "harness-remote",
+        "v1",
+        1,
+    );
+    let request = RouteResolutionRequest {
+        route_set_id: "routes-refusal".to_string(),
+        route_set_version: "1.0.0".to_string(),
+        candidates: vec![remote],
+        pinned_candidate_id: None,
+        requirements: &requirements,
+        authority_declared: &authority,
+        authority_effective: &authority,
+        profile: RouteProfile::Standard,
+        evaluated_at: "2026-10-22T12:00:00Z".to_string(),
+        workspace: None,
+    };
+    let err = resolve_route(&request, &registry)
+        .expect_err("remote route under local-only locality constraint refuses");
+    assert!(format!("{err}").contains("ROUTE-0003"));
+    let texts = [format!("{err}"), format!("{err:#}")];
+    for text in &texts {
+        for forbidden in [
+            "repo://secret-scope",
+            "secret-handle-0",
+            "\"readableScopes\"",
+            "\"secrets\"",
+            "executionClass",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "refusal diagnostics leaked authority material: {forbidden}"
+            );
+        }
+    }
+}
