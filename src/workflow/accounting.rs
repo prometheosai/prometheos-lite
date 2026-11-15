@@ -67,14 +67,24 @@ impl TokenUsage {
             || self.total_tokens.is_some()
     }
 
-    fn is_consistent(&self) -> bool {
+    fn is_consistent(&self) -> Result<(), String> {
         match (
             self.prompt_tokens,
             self.completion_tokens,
             self.total_tokens,
         ) {
-            (Some(p), Some(c), Some(t)) => p.saturating_add(c) == t,
-            _ => true,
+            (Some(p), Some(c), Some(t)) => {
+                let sum = p.checked_add(c).ok_or_else(|| {
+                    format!("promptTokens ({p}) + completionTokens ({c}) overflows")
+                })?;
+                if sum != t {
+                    return Err(format!(
+                        "provider reported inconsistent token usage: promptTokens {p} + completionTokens {c} != totalTokens {t}"
+                    ));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -244,7 +254,14 @@ impl PricingBook {
     }
 
     /// Derive a known cost, or an honest reason why it is unknown. Unknown is
-    /// never zero. Empty denominator (no rates) is refused at load.
+    /// never zero. The price book is re-validated at the point of use, so a
+    /// book built directly through public fields is held to the same rules.
+    ///
+    /// Rounding convention: directed-rate costs are computed from the SUM
+    /// (`(prompt * prompt_rate + completion * completion_rate) / 1000`) with
+    /// a single integer division toward zero (floor for nonnegatives);
+    /// flat-total costs scale `(total * flat_rate) / 1000` likewise. No
+    /// per-component rounding — every cent of misalignment is accounted.
     pub fn derive_cost(
         &self,
         usage: &TokenUsage,
@@ -252,18 +269,14 @@ impl PricingBook {
         model: &str,
         currency: &str,
     ) -> Result<CostComputation, CostDefect> {
+        self.validate()
+            .map_err(|defect| CostDefect::BookInvalid { reason: defect.0 })?;
         let Some(entry) = self.find(provider, model, currency) else {
             return Err(CostDefect::NoPricingMatch {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 currency: currency.to_string(),
             });
-        };
-        let scale = |tokens: u64, per_1k: u64| -> Result<u64, CostDefect> {
-            let scaled = (tokens as u128)
-                .checked_mul(per_1k as u128)
-                .ok_or(CostDefect::Overflow)?;
-            u64::try_from(scaled / 1_000).map_err(|_| CostDefect::Overflow)
         };
         if let (Some(p_rate), Some(c_rate)) =
             (entry.prompt_minor_per_1k, entry.completion_minor_per_1k)
@@ -274,9 +287,16 @@ impl PricingBook {
             let completion = usage.completion_tokens.ok_or(CostDefect::PartialUsage {
                 missing: "completionTokens".to_string(),
             })?;
-            let p_cost = scale(prompt, p_rate)?;
-            let c_cost = scale(completion, c_rate)?;
-            let total = p_cost.checked_add(c_cost).ok_or(CostDefect::Overflow)?;
+            let prompt_units = (prompt as u128)
+                .checked_mul(p_rate as u128)
+                .ok_or(CostDefect::Overflow)?;
+            let completion_units = (completion as u128)
+                .checked_mul(c_rate as u128)
+                .ok_or(CostDefect::Overflow)?;
+            let total_units = prompt_units
+                .checked_add(completion_units)
+                .ok_or(CostDefect::Overflow)?;
+            let total = u64::try_from(total_units / 1_000).map_err(|_| CostDefect::Overflow)?;
             let tokens = prompt.checked_add(completion).ok_or(CostDefect::Overflow)?;
             return Ok(CostComputation {
                 minor_units: total,
@@ -291,7 +311,10 @@ impl PricingBook {
             let total = usage.total_tokens.ok_or(CostDefect::PartialUsage {
                 missing: "totalTokens".to_string(),
             })?;
-            let cost = scale(total, f_rate)?;
+            let total_units = (total as u128)
+                .checked_mul(f_rate as u128)
+                .ok_or(CostDefect::Overflow)?;
+            let cost = u64::try_from(total_units / 1_000).map_err(|_| CostDefect::Overflow)?;
             return Ok(CostComputation {
                 minor_units: cost,
                 currency: entry.currency.clone(),
@@ -319,6 +342,10 @@ pub enum CostDefect {
     },
     Overflow,
     EntryRatesUnusable,
+    /// The price book failed validation at the point of use.
+    BookInvalid {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for CostDefect {
@@ -340,6 +367,7 @@ impl std::fmt::Display for CostDefect {
             }
             CostDefect::Overflow => write!(f, "cost or usage derivation overflows"),
             CostDefect::EntryRatesUnusable => write!(f, "price entry carries no usable rates"),
+            CostDefect::BookInvalid { reason } => write!(f, "price book invalid at use: {reason}"),
         }
     }
 }
@@ -363,6 +391,14 @@ pub struct OverBudgetEvidence {
 // Per-attempt accounting record
 // ---------------------------------------------------------------------------
 
+/// The outcome class, which selects the required binding semantics.
+///
+/// * `Completed` — a sealed routed attempt exists; BOTH `attempt_digest`
+///   and `journal_digest` are REQUIRED.
+/// * `Failed` / `Cancelled` — the routed operation did NOT complete through
+///   a sealed attempt; `attempt_digest` MUST be absent (a snapshot digest
+///   masquerades nothing), and `journal_digest` is present only when the
+///   dispatch produced a partial journal entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcomeKind", rename_all = "camelCase")]
 pub enum AttemptOutcomeAccounting {
@@ -379,8 +415,13 @@ pub struct AttemptAccountingV1 {
     pub graph_id: String,
     pub node_id: String,
     pub idempotency_key: String,
-    pub attempt_digest: String,
-    pub journal_digest: String,
+    /// Digest of the sealed routed attempt; REQUIRED for `Completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_digest: Option<String>,
+    /// Digest of the terminal journal entry. REQUIRED for `Completed`;
+    /// absent when the dispatch produced no journal entry (pre-effect failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_digest: Option<String>,
     pub harness_id: String,
     pub harness_revision: String,
     pub provider_identity: String,
@@ -421,20 +462,56 @@ impl AttemptAccountingV1 {
             "unsupported accounting schema version {} (supported {ACCOUNTING_SCHEMA_VERSION})",
             self.schema_version
         );
-        for (label, value) in [
-            ("attemptDigest", &self.attempt_digest),
-            ("journalDigest", &self.journal_digest),
-        ] {
-            if !value.is_empty() {
+        ensure!(
+            !self.idempotency_key.is_empty(),
+            "idempotencyKey must be non-empty"
+        );
+        ensure!(
+            !self.route_set_id.is_empty(),
+            "routeSetId must be non-empty"
+        );
+        ensure!(!self.graph_id.is_empty(), "graphId must be non-empty");
+        ensure!(!self.node_id.is_empty(), "nodeId must be non-empty");
+        ensure!(!self.harness_id.is_empty(), "harnessId must be non-empty");
+        ensure!(
+            !self.harness_revision.is_empty(),
+            "harnessRevision must be non-empty"
+        );
+        match self.outcome {
+            AttemptOutcomeAccounting::Completed => {
+                let attempt = self.attempt_digest.as_deref().unwrap_or("");
+                let journal = self.journal_digest.as_deref().unwrap_or("");
                 ensure!(
-                    crate::workflow::route_resolution::is_hex64(value),
-                    "{label} is not lower hex sha256"
+                    !attempt.is_empty(),
+                    "Completed attempt requires attemptDigest"
+                );
+                ensure!(
+                    !journal.is_empty(),
+                    "Completed attempt requires journalDigest"
+                );
+                ensure!(
+                    crate::workflow::route_resolution::is_hex64(attempt),
+                    "attemptDigest is not lower hex sha256"
+                );
+                ensure!(
+                    crate::workflow::route_resolution::is_hex64(journal),
+                    "journalDigest is not lower hex sha256"
                 );
             }
+            AttemptOutcomeAccounting::Failed { .. }
+            | AttemptOutcomeAccounting::Cancelled { .. } => {
+                ensure!(
+                    self.attempt_digest.is_none(),
+                    "failed/cancelled attempts must not claim an attempt digest (a snapshot digest is not an attempt)"
+                );
+                if let Some(journal) = &self.journal_digest {
+                    ensure!(
+                        crate::workflow::route_resolution::is_hex64(journal),
+                        "journalDigest is not lower hex sha256"
+                    );
+                }
+            }
         }
-        // An empty journal digest marks "no terminal journal entry" (a
-        // pre-effect failure); it is not a valid digest, but the record is
-        // still bound by its attempt/snapshot digest.
         let expected = self.try_compute_digest()?;
         match &self.content_digest {
             Some(actual) if *actual == expected => Ok(()),
@@ -459,57 +536,73 @@ pub struct AccountingContext {
     pub currency: Option<String>,
 }
 
-/// Deterministic recursive lookup: the first "usage" key in BTreeMap key
-/// order, anywhere in the document. Harness documents nest their result
-/// under varying depths (`output`, `content`, ...), so the search covers
-/// every shape without an "output unwrap" guess.
-fn find_key<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
-    match value {
-        serde_json::Value::Object(map) => {
-            if let Some(found) = map.get(key) {
-                return Some(found);
-            }
-            map.values().find_map(|child| find_key(child, key))
-        }
-        _ => None,
-    }
+/// Path-specific reader for the governed harness result document. Each
+/// supported model harness emits exactly the same governed-success shape
+/// (see `local_model`, `remote_service`, `external_subject`):
+///
+///   {"success": true, "status": "ok",
+///    "output": {"harnessId": …, "capability": …,
+///               "content": {…provider-reported document incl. "usage"…},
+///               "latencyMs": …, "requestId": …, "correlationId": …}}
+///
+/// The usage facts, if any, live at `output.content.usage`. Any other path —
+/// including a nested "usage" inside tool payloads or prompt text — is not
+/// the provider's usage report and is never read as one. Documents that
+/// don't match this envelope are Unknown("usage provenance unavailable").
+fn provider_usage_path(
+    document: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    document
+        .get("output")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|output| output.get("content"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|content| content.get("usage"))
+        .and_then(serde_json::Value::as_object)
 }
 
-/// Parse the capability result document's usage section, fail-closed on
-/// malformed or inconsistent reports (total != prompt + completion).
+/// Parse the provider's usage report, fail-closed on malformed numeric
+/// fields. Every present field must be an unsigned integer; any present
+/// field of any other type is a typed refusal, not a silent None.
 fn parse_reported_usage(output: &str) -> Result<UsageAccounting, String> {
     let document: serde_json::Value = serde_json::from_str(output)
         .map_err(|error| format!("result document does not parse: {error}"))?;
-    let usage = find_key(&document, "usage");
-    let Some(usage) = usage else {
+
+    if document.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
         return Ok(UsageAccounting::Unknown {
-            reason: "provider returned no usage section".to_string(),
-        });
-    };
-    if usage.is_null() {
-        return Ok(UsageAccounting::Unknown {
-            reason: "provider returned null usage".to_string(),
+            reason: "provider success document is missing success=true (provenance unavailable)"
+                .to_string(),
         });
     }
-    let obj = usage
-        .as_object()
-        .ok_or_else(|| "usage section is not an object".to_string())?;
-    let prompt = obj.get("promptTokens").and_then(serde_json::Value::as_u64);
-    let completion = obj
-        .get("completionTokens")
-        .and_then(serde_json::Value::as_u64);
-    let total = obj.get("totalTokens").and_then(serde_json::Value::as_u64);
+    let Some(usage) = provider_usage_path(&document) else {
+        return Ok(UsageAccounting::Unknown {
+            reason:
+                "provider usage provenance unavailable (no usage object at output.content.usage)"
+                    .to_string(),
+        });
+    };
+    let field = |key: &str| -> Result<Option<u64>, String> {
+        match usage.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(number)) => match number.as_u64() {
+                Some(value) => Ok(Some(value)),
+                None => Err(format!(
+                    "usage.{key} must be an unsigned 64-bit integer, got {number}"
+                )),
+            },
+            Some(other) => Err(format!("usage.{key} must be a number, got {other}")),
+        }
+    };
+    let prompt = field("promptTokens")?;
+    let completion = field("completionTokens")?;
+    let total = field("totalTokens")?;
     let usage = TokenUsage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
     };
-    if !usage.is_consistent() {
-        return Err(format!(
-            "provider reported inconsistent token usage (prompt={:?} completion={:?} total={:?})",
-            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
-        ));
-    }
+    usage.is_consistent()?;
     if !usage.any_known() {
         return Ok(UsageAccounting::Unknown {
             reason: "provider returned usage with no usable fields".to_string(),
@@ -526,27 +619,23 @@ pub fn account_routed_failure(
     journal_entry: Option<JournalEntryV1>,
     latency_ms: u64,
 ) -> AttemptAccountingV1 {
-    let attempt_digest = resolution
-        .snapshot
-        .content_digest
-        .clone()
-        .unwrap_or_default();
-    let journal_digest = journal_entry
-        .as_ref()
-        .map(|entry| entry.entry_digest.clone())
-        .unwrap_or_default();
+    // A failed operation through routed dispatch is NOT a sealed routed
+    // attempt. `attempt_digest` is absent by construction; `journal_digest`
+    // is populated if the dispatch produced a partial journal entry.
     AttemptAccountingV1 {
         schema_version: ACCOUNTING_SCHEMA_VERSION.to_string(),
         accounting_id: format!("acct/{}/{}/{}", context.graph_id, context.node_id, step_id),
         graph_id: context.graph_id.clone(),
         node_id: context.node_id.clone(),
         idempotency_key: step_id.to_string(),
-        attempt_digest,
-        journal_digest,
+        attempt_digest: None,
+        journal_digest: journal_entry
+            .as_ref()
+            .map(|entry| entry.entry_digest.clone()),
         harness_id: resolution.snapshot.selected.harness_id.clone(),
-        harness_revision: snapshot_revision(resolution),
+        harness_revision: resolution.snapshot.selected.harness_revision.clone(),
         provider_identity: resolution.snapshot.selected.provider_identity.clone(),
-        model: snapshot_model(resolution),
+        model: resolution.snapshot.selected.model.clone(),
         route_set_id: resolution.snapshot.route_set_id.clone(),
         usage: UsageAccounting::Unknown {
             reason: format!("attempt {failure_kind}; provider usage unavailable"),
@@ -606,10 +695,90 @@ pub fn account_routed_outcome(
     context: &AccountingContext,
     pricing: Option<&PricingBook>,
 ) -> Result<AttemptAccountingV1, AccountingError> {
+    let attempt = &outcome.attempt;
+    let snapshot = &resolution.snapshot;
+
+    // The sealed routed attempt must itself verify — we are about to price
+    // against it; a broken attempt is not a pricing source.
+    outcome.attempt.verify().map_err(|error| {
+        AccountingError::AttributionMismatch(format!(
+            "sealed routed attempt does not verify: {error}"
+        ))
+    })?;
+
+    if outcome.outcome.harness_id != snapshot.selected.harness_id {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "outcome harness {:?} is not the snapshot-selected harness {:?}",
+            outcome.outcome.harness_id, snapshot.selected.harness_id
+        )));
+    }
+    if outcome.outcome.evidence_entry_digest != attempt.journal_entry.entry_digest {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "outcome evidence digest {:?} does not equal the attempt's journal digest {:?}",
+            outcome.outcome.evidence_entry_digest, attempt.journal_entry.entry_digest
+        )));
+    }
+    let expected_snapshot_digest = snapshot.content_digest.as_deref().unwrap_or_default();
+    if attempt.snapshot_digest != expected_snapshot_digest {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt snapshot digest {:?} does not equal the resolution snapshot digest {:?}",
+            attempt.snapshot_digest, expected_snapshot_digest
+        )));
+    }
+    let expected_evidence_digest = resolution
+        .evidence
+        .content_digest
+        .as_deref()
+        .unwrap_or_default();
+    if attempt.route_evidence_digest != expected_evidence_digest {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt route-evidence digest {:?} does not equal the resolution evidence digest {:?}",
+            attempt.route_evidence_digest, expected_evidence_digest
+        )));
+    }
+    if attempt.decision_digest != snapshot.decision_digest {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt decision digest {:?} does not equal the resolution decision digest {:?}",
+            attempt.decision_digest, snapshot.decision_digest
+        )));
+    }
+    if attempt.harness_id != snapshot.selected.harness_id {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt harness id {:?} does not equal the snapshot-selected harness id {:?}",
+            attempt.harness_id, snapshot.selected.harness_id
+        )));
+    }
+    if attempt.harness_id != snapshot.selected.harness_id {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt harness id {:?} does not equal the snapshot-selected harness id {:?}",
+            attempt.harness_id, snapshot.selected.harness_id
+        )));
+    }
+    if attempt.provider_identity != snapshot.selected.provider_identity {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt provider {:?} does not equal the snapshot-selected provider {:?}",
+            attempt.provider_identity, snapshot.selected.provider_identity
+        )));
+    }
+    if attempt.model != snapshot.selected.model {
+        return Err(AccountingError::AttributionMismatch(format!(
+            "attempt model {:?} does not equal the snapshot-selected model {:?}",
+            attempt.model, snapshot.selected.model
+        )));
+    }
+
+    // Re-verify the journal entry digest against its contents; the journal
+    // is attacker-influenced input at this layer.
+    crate::workflow::route_dispatch::verify_journal_entry(&attempt.journal_entry).map_err(
+        |error| {
+            AccountingError::AttributionMismatch(format!("journal entry does not verify: {error}"))
+        },
+    )?;
+
     let usage = parse_reported_usage(&outcome.outcome.output)
         .map_err(AccountingError::InconsistentProviderReport)?;
-    let model = snapshot_model(resolution);
-    let (provider, _) = (resolution.snapshot.selected.provider_identity.as_str(), ());
+    let model = snapshot.selected.model.clone();
+    let provider = resolution.snapshot.selected.provider_identity.as_str();
     let cost = derive_cost_or_unknown(
         pricing,
         &usage,
@@ -626,30 +795,29 @@ pub fn account_routed_outcome(
             .budgets
             .as_ref(),
     );
-    // Defensive re-verification of the attempt the record binds to: if the
-    // caller hands in a structurally valid but tampered attempt, we refuse
-    // to fabricate a binding instead of refusing it.
-    outcome
-        .attempt
-        .verify()
-        .map_err(|error| AccountingError::Internal(format!("attempt does not verify: {error}")))?;
+
+    let journal_digest_str = outcome.attempt.journal_entry.entry_digest.clone();
+    let journal_digest_prefix = &journal_digest_str[..16.min(journal_digest_str.len())];
 
     AttemptAccountingV1 {
         schema_version: ACCOUNTING_SCHEMA_VERSION.to_string(),
         accounting_id: format!(
-            "acct/{}/{}/{}",
-            context.graph_id, context.node_id, outcome.attempt.idempotency_key
+            "acct/{}/{}/{}/{}",
+            context.graph_id,
+            context.node_id,
+            outcome.attempt.idempotency_key,
+            journal_digest_prefix
         ),
         graph_id: context.graph_id.clone(),
         node_id: context.node_id.clone(),
         idempotency_key: outcome.attempt.idempotency_key.clone(),
-        attempt_digest: outcome.attempt.content_digest.clone().unwrap_or_default(),
-        journal_digest: outcome.attempt.journal_entry.entry_digest.clone(),
-        harness_id: outcome.attempt.harness_id.clone(),
-        harness_revision: resolution.snapshot.selected.harness_revision.clone(),
-        provider_identity: outcome.attempt.provider_identity.clone(),
+        attempt_digest: outcome.attempt.content_digest.clone(),
+        journal_digest: Some(journal_digest_str.clone()),
+        harness_id: snapshot.selected.harness_id.clone(),
+        harness_revision: snapshot.selected.harness_revision.clone(),
+        provider_identity: snapshot.selected.provider_identity.clone(),
         model,
-        route_set_id: resolution.snapshot.route_set_id.clone(),
+        route_set_id: snapshot.route_set_id.clone(),
         usage,
         latency_ms: outcome.latency_ms,
         cost,
@@ -659,14 +827,6 @@ pub fn account_routed_outcome(
     }
     .try_sealed()
     .map_err(|error| AccountingError::Internal(error.to_string()))
-}
-
-fn snapshot_model(resolution: &RouteResolution) -> Option<String> {
-    resolution.snapshot.selected.model.clone()
-}
-
-fn snapshot_revision(resolution: &RouteResolution) -> String {
-    resolution.snapshot.selected.harness_revision.clone()
 }
 
 fn derive_cost_or_unknown(
@@ -711,6 +871,12 @@ pub enum AccountingError {
     /// The provider's usage report is internally inconsistent; recording it
     /// would invent a false fact. The attempt's outcome/evidence is untouched.
     InconsistentProviderReport(String),
+    /// Attempt, route snapshot, decision, outcome and journal do not refer to
+    /// the same actual execution. Refused before any cost fact is derived.
+    AttributionMismatch(String),
+    /// A checked arithmetic operation in aggregation would overflow. Never
+    /// reports a saturated value as if it were exact.
+    AggregationOverflow { field: String },
     /// An accounting fact cannot be sealed/digested (never fabricated).
     Internal(String),
 }
@@ -720,6 +886,12 @@ impl std::fmt::Display for AccountingError {
         match self {
             AccountingError::InconsistentProviderReport(reason) => {
                 write!(f, "provider usage report refused: {reason}")
+            }
+            AccountingError::AttributionMismatch(reason) => {
+                write!(f, "outcome does not match the resolved route: {reason}")
+            }
+            AccountingError::AggregationOverflow { field } => {
+                write!(f, "aggregation would overflow on field {field}")
             }
             AccountingError::Internal(reason) => write!(f, "internal error: {reason}"),
         }
@@ -731,9 +903,34 @@ impl std::error::Error for AccountingError {}
 // Aggregation: per-node, per-graph, with honest coverage semantics
 // ---------------------------------------------------------------------------
 
+/// Checked u64 accumulator: never saturates. Overflow is an explicit, typed
+/// failure naming the field, never a silently clipped total.
+#[inline]
+fn checked_u64_add(acc: &mut u64, value: u64, field: &str) -> Result<(), AccountingError> {
+    *acc = acc
+        .checked_add(value)
+        .ok_or_else(|| AccountingError::AggregationOverflow {
+            field: field.to_string(),
+        })?;
+    Ok(())
+}
+
+/// Checked u128 accumulator (here for currencies: exact minor units never
+/// wrap even at extreme totals).
+#[inline]
+fn checked_u128_add(acc: &mut u128, value: u128, field: &str) -> Result<(), AccountingError> {
+    *acc = acc
+        .checked_add(value)
+        .ok_or_else(|| AccountingError::AggregationOverflow {
+            field: field.to_string(),
+        })?;
+    Ok(())
+}
+
 /// Aggregated token usage across attempts. `complete` is true only when
-/// every contributing attempt reported total usage; otherwise the totals
-/// are partial and `unknown_attempts` / `partial_attempts` say so.
+/// every contributing attempt reported total usage and every sum was
+/// representable; otherwise the totals are partial and the coverage counters
+/// say so. A saturated total is never presented as an exact observation.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageAggregate {
@@ -747,7 +944,9 @@ pub struct UsageAggregate {
 }
 
 /// Aggregated cost, bucketed per currency. Currencies are never summed
-/// together; `mixed_currencies` lists every currency that contributed.
+/// together; `mixed_currencies` lists every currency that contributed, and
+/// `total_known_exact` is true only when every contributing attempt had a
+/// known cost — an unknown cost prevents an exact currency total claim.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CostAggregate {
@@ -755,6 +954,9 @@ pub struct CostAggregate {
     pub known_attempts: BTreeMap<String, u64>,
     pub unknown_attempts: u64,
     pub mixed_currencies: Vec<String>,
+    /// Set false when ANY contributing cost is unknown; exact currency
+    /// totals may then only be claimed for the known subset, not the whole.
+    pub total_known_exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -787,99 +989,126 @@ pub struct GraphAccounting {
     pub latency_ms_max: u64,
 }
 
-/// Strict coverage arithmetic — nothing is silently zeroed.
-fn add_usage(target: &mut UsageAggregate, u: &TokenUsage) {
-    if let Some(p) = u.prompt_tokens {
-        target.prompt_tokens = target.prompt_tokens.saturating_add(p);
-    }
-    if let Some(c) = u.completion_tokens {
-        target.completion_tokens = target.completion_tokens.saturating_add(c);
-    }
-    if let Some(t) = u.total_tokens {
-        target.total_tokens = target.total_tokens.saturating_add(t);
-    }
-}
-
 fn usage_complete(u: &TokenUsage) -> bool {
     u.prompt_tokens.is_some() && u.completion_tokens.is_some() && u.total_tokens.is_some()
 }
 
-fn aggregate_usage(records: &[&AttemptAccountingV1]) -> UsageAggregate {
+fn aggregate_usage(records: &[&AttemptAccountingV1]) -> Result<UsageAggregate, AccountingError> {
     let mut agg = UsageAggregate::default();
     for record in records {
         match &record.usage {
             UsageAccounting::Known(usage) => {
-                add_usage(&mut agg, usage);
+                if let Some(p) = usage.prompt_tokens {
+                    checked_u64_add(&mut agg.prompt_tokens, p, "promptTokens")?;
+                }
+                if let Some(c) = usage.completion_tokens {
+                    checked_u64_add(&mut agg.completion_tokens, c, "completionTokens")?;
+                }
+                if let Some(t) = usage.total_tokens {
+                    checked_u64_add(&mut agg.total_tokens, t, "totalTokens")?;
+                }
                 if usage_complete(usage) {
-                    agg.known_attempts += 1;
+                    checked_u64_add(&mut agg.known_attempts, 1, "knownAttempts")?;
                 } else {
-                    agg.partial_attempts += 1;
+                    checked_u64_add(&mut agg.partial_attempts, 1, "partialAttempts")?;
                 }
             }
-            UsageAccounting::Unknown { .. } => agg.unknown_attempts += 1,
+            UsageAccounting::Unknown { .. } => {
+                checked_u64_add(&mut agg.unknown_attempts, 1, "unknownAttempts")?;
+            }
         }
     }
-    agg.complete = records.iter().all(|r| match &r.usage {
-        UsageAccounting::Known(u) => usage_complete(u),
-        UsageAccounting::Unknown { .. } => false,
-    });
-    agg
+    let mut all_complete = true;
+    for record in records {
+        match &record.usage {
+            UsageAccounting::Known(u) => {
+                if !usage_complete(u) {
+                    all_complete = false;
+                }
+            }
+            UsageAccounting::Unknown { .. } => all_complete = false,
+        }
+    }
+    agg.complete = all_complete && !records.is_empty();
+    Ok(agg)
 }
 
-fn aggregate_cost(records: &[&AttemptAccountingV1]) -> CostAggregate {
-    let mut agg = CostAggregate::default();
+fn aggregate_cost(records: &[&AttemptAccountingV1]) -> Result<CostAggregate, AccountingError> {
+    let mut agg = CostAggregate {
+        // Nothing is known until at least one cost fact exists; exactness is
+        // earned, never presumed.
+        total_known_exact: true,
+        ..CostAggregate::default()
+    };
     for record in records {
         match &record.cost {
             CostAccounting::Known(computation) => {
-                let entry = agg
+                let sum = agg
                     .currencies
                     .entry(computation.currency.clone())
                     .or_insert(0);
-                *entry = entry.saturating_add(computation.minor_units as u128);
-                *agg.known_attempts
+                checked_u128_add(sum, computation.minor_units as u128, "costMinorUnits")?;
+                let known = agg
+                    .known_attempts
                     .entry(computation.currency.clone())
-                    .or_insert(0) += 1;
+                    .or_insert(0);
+                checked_u64_add(known, 1, "costKnownAttempts")?;
+                if !agg.mixed_currencies.contains(&computation.currency) {
+                    agg.mixed_currencies.push(computation.currency.clone());
+                }
             }
-            CostAccounting::Unknown { .. } => agg.unknown_attempts += 1,
+            CostAccounting::Unknown { .. } => {
+                checked_u64_add(&mut agg.unknown_attempts, 1, "costUnknownAttempts")?;
+                agg.total_known_exact = false;
+            }
         }
     }
-    // Mixed-currency buckets: every contributing currency is reported so no
-    // caller sums unrelated units together.
-    for currency in agg.currencies.keys() {
-        agg.mixed_currencies.push(currency.clone());
-    }
-    agg
+    agg.mixed_currencies.sort();
+    Ok(agg)
 }
 
-fn outcome_counts(records: &[&AttemptAccountingV1]) -> (u64, u64, u64, u64) {
+fn outcome_counts(
+    records: &[&AttemptAccountingV1],
+) -> Result<(u64, u64, u64, u64), AccountingError> {
     let mut attempts = 0u64;
     let mut completed = 0u64;
     let mut failed = 0u64;
     let mut cancelled = 0u64;
     for record in records {
-        attempts += 1;
+        checked_u64_add(&mut attempts, 1, "outcomeAttempts")?;
         match &record.outcome {
-            AttemptOutcomeAccounting::Completed => completed += 1,
-            AttemptOutcomeAccounting::Failed { .. } => failed += 1,
-            AttemptOutcomeAccounting::Cancelled { .. } => cancelled += 1,
+            AttemptOutcomeAccounting::Completed => checked_u64_add(&mut completed, 1, "completed")?,
+            AttemptOutcomeAccounting::Failed { .. } => checked_u64_add(&mut failed, 1, "failed")?,
+            AttemptOutcomeAccounting::Cancelled { .. } => {
+                checked_u64_add(&mut cancelled, 1, "cancelled")?
+            }
         }
     }
-    (attempts, completed, failed, cancelled)
+    Ok((attempts, completed, failed, cancelled))
 }
 
-fn aggregate_records(records: Vec<&AttemptAccountingV1>) -> NodeAccounting {
+fn latency_max(records: &[&AttemptAccountingV1]) -> u64 {
+    records.iter().map(|r| r.latency_ms).max().unwrap_or(0)
+}
+
+fn aggregate_records(
+    records: Vec<&AttemptAccountingV1>,
+) -> Result<NodeAccounting, AccountingError> {
     let node_id = records
         .first()
         .map(|r| r.node_id.clone())
         .unwrap_or_default();
-    let (attempts, completed, failed, cancelled) = outcome_counts(&records);
-    let usage = aggregate_usage(&records);
-    let cost = aggregate_cost(&records);
-    let latency_ms_total = records
-        .iter()
-        .fold(0u64, |acc, r| acc.saturating_add(r.latency_ms));
-    let latency_ms_max = records.iter().map(|r| r.latency_ms).max().unwrap_or(0);
-    NodeAccounting {
+    let (attempts, completed, failed, cancelled) = outcome_counts(&records)?;
+    let usage = aggregate_usage(&records)?;
+    let cost = aggregate_cost(&records)?;
+    let latency_ms_total = records.iter().try_fold(0u64, |acc, r| {
+        acc.checked_add(r.latency_ms)
+            .ok_or_else(|| AccountingError::AggregationOverflow {
+                field: "latencyMsTotal".to_string(),
+            })
+    })?;
+    let latency_ms_max = latency_max(&records);
+    Ok(NodeAccounting {
         node_id,
         attempts,
         completed,
@@ -889,34 +1118,46 @@ fn aggregate_records(records: Vec<&AttemptAccountingV1>) -> NodeAccounting {
         cost,
         latency_ms_total,
         latency_ms_max,
-    }
+    })
 }
 
-/// A bounded in-memory ledger with journal-bound idempotency. Replay of the
-/// same (key, journalDigest) is a no-op; the same key with a different
-/// digest is a hard conflict and nothing is recorded.
+/// Scope of a ledger binding: graph, node and idempotency key. The same key
+/// MUST bind to one sealed record forever; different keys in the same graph
+/// may name different outstanding attempts.
+type LedgerScope = (String, String, String);
+
+/// The sealed facts a binding commits to: journal digest, attempt digest and
+/// the record's own content digest.
+type LedgerBinding = (Option<String>, Option<String>, Option<String>);
+
+/// A bounded in-memory ledger with journal-bound idempotency, scoped by
+/// graph, node and idempotency key. The whole sealed accounting record must
+/// match for a duplicate; anything else is a hard conflict that records
+/// nothing.
 #[derive(Debug, Default)]
 pub struct AccountingLedger {
     records: Vec<AttemptAccountingV1>,
-    /// idempotency key -> journal digest.
-    bindings: BTreeMap<String, String>,
+    bindings: BTreeMap<LedgerScope, LedgerBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// Record accepted and appended.
     Recorded,
-    /// Same (key, journalDigest) recorded before; nothing changed.
+    /// Identical sealed record observed before; nothing changed.
     Duplicate,
 }
 
 #[derive(Debug)]
 pub enum LedgerError {
-    /// Same idempotency key bound to a different journal digest.
+    /// Same binding triple observed with a different accounting record —
+    /// usage, cost, latency or outcome moved. Fail closed: record nothing.
     IdempotencyConflict {
         key: String,
-        existing_digest: String,
-        incoming_digest: String,
+        graph_id: String,
+        node_id: String,
+        existing: Option<String>,
+        incoming: Option<String>,
     },
     Internal(String),
 }
@@ -925,12 +1166,14 @@ impl std::fmt::Display for LedgerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LedgerError::IdempotencyConflict {
+                graph_id,
+                node_id,
                 key,
-                existing_digest,
-                incoming_digest,
+                existing,
+                incoming,
             } => write!(
                 f,
-                "idempotency key {key:?} already bound to journal digest {existing_digest}; refusing to bind it to {incoming_digest}"
+                "idempotency key {key:?} in graph {graph_id:?} node {node_id:?} rebound to a different sealed accounting record (digest {existing:?} vs {incoming:?})"
             ),
             LedgerError::Internal(reason) => write!(f, "internal accounting error: {reason}"),
         }
@@ -943,22 +1186,38 @@ impl AccountingLedger {
         Self::default()
     }
 
+    /// The scope of a binding: graph + node + idempotency key. Two different
+    /// keys in the same graph/node may legitimately name different
+    /// outstanding attempts; the same key MUST bind to one record forever.
+    fn scope_of(record: &AttemptAccountingV1) -> LedgerScope {
+        (
+            record.graph_id.clone(),
+            record.node_id.clone(),
+            record.idempotency_key.clone(),
+        )
+    }
+
     pub fn record(&mut self, record: AttemptAccountingV1) -> Result<InsertOutcome, LedgerError> {
         record
             .verify()
             .map_err(|error| LedgerError::Internal(error.to_string()))?;
-        match self.bindings.get(&record.idempotency_key) {
-            Some(existing) if *existing == record.journal_digest => Ok(InsertOutcome::Duplicate),
+        let scope = Self::scope_of(&record);
+        let incoming = (
+            record.journal_digest.clone(),
+            record.attempt_digest.clone(),
+            record.content_digest.clone(),
+        );
+        match self.bindings.get(&scope) {
+            Some(existing) if *existing == incoming => Ok(InsertOutcome::Duplicate),
             Some(existing) => Err(LedgerError::IdempotencyConflict {
                 key: record.idempotency_key.clone(),
-                existing_digest: existing.clone(),
-                incoming_digest: record.journal_digest.clone(),
+                graph_id: record.graph_id.clone(),
+                node_id: record.node_id.clone(),
+                existing: existing.2.clone(),
+                incoming: record.content_digest.clone(),
             }),
             None => {
-                self.bindings.insert(
-                    record.idempotency_key.clone(),
-                    record.journal_digest.clone(),
-                );
+                self.bindings.insert(scope, incoming);
                 self.records.push(record);
                 Ok(InsertOutcome::Recorded)
             }
@@ -969,7 +1228,8 @@ impl AccountingLedger {
         &self.records
     }
 
-    pub fn aggregate_graph(&self, graph_id: &str) -> GraphAccounting {
+    /// Sum every attempt in `graph_id` into a graph-scoped aggregate.
+    pub fn aggregate_graph(&self, graph_id: &str) -> Result<GraphAccounting, AccountingError> {
         let mut nodes: BTreeMap<String, Vec<&AttemptAccountingV1>> = BTreeMap::new();
         let mut records = Vec::new();
         for record in &self.records {
@@ -982,15 +1242,21 @@ impl AccountingLedger {
                 .push(record);
             records.push(record);
         }
-        let node_list: Vec<NodeAccounting> = nodes.into_values().map(aggregate_records).collect();
-        let (attempts, completed, failed, cancelled) = outcome_counts(&records);
-        let usage = aggregate_usage(&records);
-        let cost = aggregate_cost(&records);
-        let latency_ms_total = records
-            .iter()
-            .fold(0u64, |acc, r| acc.saturating_add(r.latency_ms));
-        let latency_ms_max = records.iter().map(|r| r.latency_ms).max().unwrap_or(0);
-        GraphAccounting {
+        let node_list: Vec<NodeAccounting> = nodes
+            .into_values()
+            .map(aggregate_records)
+            .collect::<Result<_, _>>()?;
+        let (attempts, completed, failed, cancelled) = outcome_counts(&records)?;
+        let usage = aggregate_usage(&records)?;
+        let cost = aggregate_cost(&records)?;
+        let latency_ms_total = records.iter().try_fold(0u64, |acc, r| {
+            acc.checked_add(r.latency_ms)
+                .ok_or_else(|| AccountingError::AggregationOverflow {
+                    field: "graphLatencyMsTotal".to_string(),
+                })
+        })?;
+        let latency_ms_max = latency_max(&records);
+        Ok(GraphAccounting {
             schema_version: ACCOUNTING_SCHEMA_VERSION.to_string(),
             graph_id: graph_id.to_string(),
             nodes: node_list,
@@ -1002,7 +1268,7 @@ impl AccountingLedger {
             cost,
             latency_ms_total,
             latency_ms_max,
-        }
+        })
     }
 
     pub fn over_budget_records(&self) -> Vec<&AttemptAccountingV1> {
