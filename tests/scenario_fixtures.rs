@@ -199,13 +199,6 @@ fn workspace_adapter(kind: ScenarioWorkspaceAdapter) -> AdapterKind {
     }
 }
 
-fn adapter_family_name(adapter: AdapterKind) -> &'static str {
-    match adapter {
-        AdapterKind::ExistingReadOnly => "existing-read-only",
-        AdapterKind::GitWorktree => "git-worktree",
-    }
-}
-
 fn build_workspace_manifest(descriptor: &ScenarioDescriptor) -> WorkspaceManifestV1 {
     WorkspaceManifestV1 {
         schema_version: "1.0.0".to_string(),
@@ -349,6 +342,7 @@ fn run_scenario(descriptor_text: &str) -> ScenarioRun {
         escalation_target: "human-review".into(),
     };
 
+    let dispatch_started = std::time::Instant::now();
     let dispatch =
         dispatch_resolved_route_block_on(dispatch_resolved_route(RoutedDispatchRequest {
             resolution: &resolution,
@@ -370,20 +364,53 @@ fn run_scenario(descriptor_text: &str) -> ScenarioRun {
                 }),
             },
         }));
-    let _ = server.receiver.recv();
+    let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
+    let dispatch_wait = match &dispatch {
+        // A refusal before effect never reaches the network: waiting on the
+        // loopback fixture would hang forever. Bound every wait.
+        Ok(_) | Err(RoutedDispatchFailure::ExecutionFailed(_)) => {
+            std::time::Duration::from_secs(10)
+        }
+        Err(RoutedDispatchFailure::Refused(_)) => std::time::Duration::ZERO,
+    };
+    if dispatch_wait.is_zero() {
+        drop(server);
+    } else {
+        let _ = server.receiver.recv_timeout(dispatch_wait);
+    }
 
-    let accounting = dispatch.as_ref().ok().map(|outcome| {
-        let pricing = PricingBook::from_json(PRICE_BOOK).expect("price book parses");
-        let context = AccountingContext {
-            graph_id: GRAPH_ID.to_string(),
-            node_id: NODE_ID.to_string(),
-            currency: Some("USD".to_string()),
-        };
-        let record = account_routed_outcome(outcome, &resolution, &context, Some(&pricing))
-            .expect("outcome accounts");
-        record.verify().expect("accounting record verifies");
-        record
-    });
+    let accounting_context = AccountingContext {
+        graph_id: GRAPH_ID.to_string(),
+        node_id: NODE_ID.to_string(),
+        currency: Some("USD".to_string()),
+    };
+    let accounting = match dispatch.as_ref() {
+        Ok(outcome) => {
+            let pricing = PricingBook::from_json(PRICE_BOOK).expect("price book parses");
+            let record =
+                account_routed_outcome(outcome, &resolution, &accounting_context, Some(&pricing))
+                    .expect("outcome accounts");
+            record.verify().expect("accounting record verifies");
+            Some(record)
+        }
+        Err(RoutedDispatchFailure::ExecutionFailed(failure)) => {
+            // Account the typed execution failure instead of dropping it:
+            // no attempt was sealed, usage/cost stay unknown, journal digest
+            // binds the partial journal when one exists.
+            Some(
+                prometheos_lite::workflow::accounting::account_routed_failure(
+                    &resolution,
+                    "execution-failed",
+                    &accounting_context,
+                    STEP_ID,
+                    failure.journal_entry.clone(),
+                    dispatch_elapsed_ms,
+                ),
+            )
+        }
+        // Refused before any effect: nothing was dispatched, nothing to account.
+        Err(RoutedDispatchFailure::Refused(_)) => None,
+    };
     let graph = accounting.as_ref().map(|record| {
         let mut ledger = AccountingLedger::new();
         ledger.record(record.clone()).expect("record registers");
@@ -392,70 +419,26 @@ fn run_scenario(descriptor_text: &str) -> ScenarioRun {
 
     let classification = scenario::classify_completed_run(true, &dispatch, accounting.is_some());
 
-    let envelope = match (dispatch.as_ref(), accounting.as_ref(), graph.as_ref()) {
-        (Ok(outcome), Some(record), Some(graph)) => {
-            let attempt = &outcome.attempt;
-            let chain = scenario::RunEvidenceChain {
-                route_evidence_digest: resolution
-                    .evidence
-                    .content_digest
-                    .clone()
-                    .expect("evidence seals"),
-                snapshot_digest: resolution
-                    .snapshot
-                    .content_digest
-                    .clone()
-                    .expect("snapshot seals"),
-                decision_digest: resolution.evidence.decision_digest.clone(),
-                requirements_digest: resolution.evidence.requirements_digest.clone(),
-                candidate_set_digest: resolution.evidence.candidate_set_digest.clone(),
-                attempt_digest: attempt.content_digest.clone().expect("attempt seals"),
-                journal_entry_digest: attempt.journal_entry.entry_digest.clone(),
-                accounting_record_digest: record.content_digest.clone().expect("record seals"),
-                graph_id: graph.graph_id.clone(),
-                graph_attempts: graph.attempts,
-                graph_completed: graph.completed,
-            };
-            let route = scenario::RunRoutePin {
-                route_set_id: resolution.evidence.route_set_id.clone(),
-                route_set_version: resolution.evidence.route_set_version.clone(),
-                candidate_id: resolution.evidence.selected.candidate_id.clone(),
-                provider_identity: resolution.evidence.selected.provider_identity.clone(),
-                provider_locality: descriptor.route.provider_locality.clone(),
-                model: resolution
-                    .evidence
-                    .selected
-                    .model
-                    .clone()
-                    .unwrap_or_default(),
-                harness_id: resolution.evidence.selected.harness_id.clone(),
-                harness_revision: resolution.evidence.selected.harness_revision.clone(),
-                profile: descriptor.route.profile.clone(),
-            };
-            let workspace = Some(scenario::RunWorkspacePin {
-                manifest_digest: workspace_manifest.compute_digest(),
-                adapter: adapter_family_name(workspace_manifest.adapter).to_string(),
-                adapter_revision: workspace_manifest.adapter_revision.clone(),
-                mode: match workspace_manifest.mode {
-                    WorkspaceMode::ReadOnly => "read-only".to_string(),
-                    WorkspaceMode::Writable => "writable".to_string(),
-                },
-                base_revision: workspace_manifest.base_revision.clone(),
-            });
-            scenario::LiteScenarioRunEvidence::sealed(
-                &descriptor,
-                descriptor.route.dispatch_at.clone(),
-                route,
-                workspace,
-                chain,
-                record.clone(),
-                graph.clone(),
-                classification,
-            )
-            .ok()
-        }
-        _ => None,
-    };
+    let envelope: Option<prometheos_lite::workflow::scenario::LiteScenarioRunEvidence> =
+        match (dispatch.as_ref(), accounting.as_ref(), graph.as_ref()) {
+            (Ok(outcome), Some(record), Some(graph)) => {
+                let result = scenario::LiteScenarioRunEvidence::sealed(
+                    descriptor,
+                    &resolution,
+                    &manifest,
+                    outcome,
+                    record.clone(),
+                    graph.clone(),
+                    Some(&workspace_manifest),
+                    classification,
+                );
+                if let Err(error) = &result {
+                    panic!("happy-path envelope failed to seal: {error:#}");
+                }
+                result.ok()
+            }
+            _ => None,
+        };
 
     ScenarioRun {
         resolution: Some(resolution),
@@ -728,21 +711,35 @@ fn rust_scenario_runs_through_the_governed_boundary() {
     let envelope = run.envelope.as_ref().expect("envelope seals");
     envelope.verify().expect("envelope verifies");
     assert_eq!(envelope.namespace, "lite.evidence.scenario-run");
-    assert_eq!(envelope.evidence.graph_attempts, 1);
-    assert_eq!(envelope.evidence.graph_completed, 1);
-    // The evidence chain binds the very records the resolver/dispatcher sealed.
+    assert_eq!(envelope.graph_accounting.attempts, 1);
+    assert_eq!(envelope.graph_accounting.completed, 1);
+    assert_eq!(envelope.manifest.node_id, NODE_ID);
+    // The envelope embeds the very records the resolver/dispatcher sealed,
+    // and every reference between them re-verifies from the embedded bytes.
     let resolution = run.resolution.as_ref().expect("resolution sealed");
     assert_eq!(
-        envelope.evidence.snapshot_digest,
+        envelope.snapshot.content_digest.clone().unwrap(),
         resolution.snapshot.content_digest.clone().unwrap()
     );
     assert_eq!(
-        envelope.evidence.route_evidence_digest,
+        resolution.evidence.snapshot_digest,
+        resolution.snapshot.content_digest.clone().unwrap()
+    );
+    assert_eq!(
+        envelope.attempt.snapshot_digest,
+        envelope.snapshot.content_digest.clone().unwrap()
+    );
+    assert_eq!(
+        envelope.attempt.route_evidence_digest,
         resolution.evidence.content_digest.clone().unwrap()
     );
     assert_eq!(
-        envelope.evidence.accounting_record_digest,
-        record.content_digest.clone().unwrap()
+        envelope.attempt_accounting.attempt_digest.as_deref(),
+        envelope.attempt.content_digest.as_deref()
+    );
+    assert_eq!(
+        envelope.attempt_accounting.journal_digest.as_deref(),
+        Some(envelope.attempt.journal_entry.entry_digest.as_str())
     );
 }
 
@@ -755,7 +752,7 @@ fn python_scenario_runs_through_the_same_governed_boundary() {
     );
     let envelope = run.envelope.as_ref().expect("envelope seals");
     envelope.verify().expect("envelope verifies");
-    assert_eq!(envelope.scenario_id, "lite-python-bugfix-slugify-001");
+    assert_eq!(envelope.scenario_id(), "lite-python-bugfix-slugify-001");
 }
 
 #[test]
@@ -776,27 +773,28 @@ fn reruns_reproduce_the_stable_canonical_parts() {
     );
 
     // Pinned-time canonical parts: byte-for-byte stable across reruns.
-    assert_eq!(a.scenario_digest, b.scenario_digest);
+    // The envelope DERIVES its scenario digest from the embedded descriptor,
+    // so equality here also proves the descriptor itself is byte-stable.
+    assert_eq!(a.scenario_digest().unwrap(), b.scenario_digest().unwrap());
     assert_eq!(a.classification, b.classification);
-    assert_eq!(a.repository, b.repository);
-    assert_eq!(a.route, b.route);
-    assert_eq!(a.workspace, b.workspace);
+    assert_eq!(a.descriptor, b.descriptor);
+    assert_eq!(a.route_evidence, b.route_evidence);
+    assert_eq!(a.snapshot, b.snapshot);
+    assert_eq!(a.workspace_manifest, b.workspace_manifest);
     assert_eq!(
-        a.evidence.route_evidence_digest,
-        b.evidence.route_evidence_digest
-    );
-    assert_eq!(a.evidence.snapshot_digest, b.evidence.snapshot_digest);
-    assert_eq!(a.evidence.decision_digest, b.evidence.decision_digest);
-    assert_eq!(
-        a.evidence.requirements_digest,
-        b.evidence.requirements_digest
+        a.route_evidence.decision_digest,
+        b.route_evidence.decision_digest
     );
     assert_eq!(
-        a.evidence.candidate_set_digest,
-        b.evidence.candidate_set_digest
+        a.route_evidence.requirements_digest,
+        b.route_evidence.requirements_digest
     );
-    assert_eq!(a.evidence.graph_attempts, b.evidence.graph_attempts);
-    assert_eq!(a.evidence.graph_completed, b.evidence.graph_completed);
+    assert_eq!(
+        a.route_evidence.candidate_set_digest,
+        b.route_evidence.candidate_set_digest
+    );
+    assert_eq!(a.graph_accounting.attempts, b.graph_accounting.attempts);
+    assert_eq!(a.graph_accounting.completed, b.graph_accounting.completed);
 
     // Effect-side records: re-verified on both runs; wall-clock-free
     // fields match exactly.
@@ -996,4 +994,406 @@ fn descriptor_error_report_carries_classification() {
 
     let setup_only = ScenarioDescriptorError(vec![scenario::ScenarioDefect::setup("missing pin")]);
     assert_eq!(setup_only.class(), ScenarioOutcomeClass::SetupError);
+}
+// ---------------------------------------------------------------------------
+// Adversarial envelope tests: a re-sealed lie must not verify
+//
+// Model: the attacker holds a valid sealed envelope, modifies one record or
+// pin, re-computes every digest they can recompute (the embedded accounting
+// record and the outer envelope digest), and presents the result for re-
+// verification. Every such forgery must fail `verify()`.
+// ---------------------------------------------------------------------------
+
+use prometheos_lite::workflow::accounting::AttemptAccountingV1;
+use prometheos_lite::workflow::scenario::LiteScenarioRunEvidence;
+
+const FORGED_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const FORGED_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const FORGED_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+fn ok_envelope() -> LiteScenarioRunEvidence {
+    let run = run_scenario(RUST_DESCRIPTOR);
+    run.envelope
+        .expect("happy-path fixture produces a sealed envelope")
+}
+
+/// Re-seal the OUTER envelope digest after an attacker-side mutation.
+fn with_outer_reseal(
+    envelope: &LiteScenarioRunEvidence,
+    tamper: impl FnOnce(&mut LiteScenarioRunEvidence),
+) -> LiteScenarioRunEvidence {
+    let mut envelope = envelope.clone();
+    tamper(&mut envelope);
+    envelope.content_digest = None;
+    envelope.content_digest = Some(
+        envelope
+            .compute_digest()
+            .expect("outer digest recomputes for an attacker-controlled record"),
+    );
+    envelope
+}
+
+/// Re-seal the embedded ACCOUNTING record after an attacker-side mutation.
+fn reseal_accounting(
+    record: &AttemptAccountingV1,
+    tamper: impl FnOnce(&mut AttemptAccountingV1),
+) -> AttemptAccountingV1 {
+    let mut record = record.clone();
+    tamper(&mut record);
+    record.content_digest = None;
+    record
+        .try_sealed()
+        .expect("tampered accounting re-seals for the attacker")
+}
+
+fn forge_envelope(
+    envelope: &LiteScenarioRunEvidence,
+    tamper_accounting: impl FnOnce(&mut AttemptAccountingV1),
+) -> LiteScenarioRunEvidence {
+    let forged_accounting = reseal_accounting(&envelope.attempt_accounting, tamper_accounting);
+    // Graph stays exactly as embedded: a naive attacker only re-seals what
+    // has a digest; the graph must then fail re-derivation instead.
+    with_outer_reseal(envelope, |e| e.attempt_accounting = forged_accounting)
+}
+
+fn assert_rejected(envelope: LiteScenarioRunEvidence, reason: &str) {
+    assert!(
+        envelope.verify().is_err(),
+        "forged envelope must not verify: {reason}"
+    );
+}
+
+#[test]
+fn attempt_content_digest_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.attempt.content_digest = Some(FORGED_A.into()));
+    assert_rejected(forged, "attempt contentDigest does not re-derive");
+}
+
+#[test]
+fn journal_entry_digest_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.attempt.journal_entry.entry_digest = FORGED_B.into()
+    });
+    assert_rejected(forged, "journal entry digest does not re-derive");
+}
+
+#[test]
+fn attempt_idempotency_key_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.attempt.idempotency_key = "forged-step".into());
+    assert_rejected(forged, "journal identity no longer binds the attempt key");
+}
+
+#[test]
+fn accounting_attempt_digest_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.attempt_digest = Some(FORGED_A.into()));
+    assert_rejected(
+        forged,
+        "accounting.attemptDigest must bind the embedded attempt",
+    );
+}
+
+#[test]
+fn accounting_journal_digest_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.journal_digest = Some(FORGED_B.into()));
+    assert_rejected(
+        forged,
+        "accounting.journalDigest must bind the embedded journal entry",
+    );
+}
+
+#[test]
+fn accounting_provider_identity_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.provider_identity = "forged-provider".into());
+    assert_rejected(
+        forged,
+        "provider identity must bind attempt/evidence/descriptor",
+    );
+}
+
+#[test]
+fn accounting_model_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.model = Some("forged-model".into()));
+    assert_rejected(forged, "model must bind attempt/evidence/descriptor");
+}
+
+#[test]
+fn accounting_harness_id_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.harness_id = "forged.harness".into());
+    assert_rejected(forged, "harness id must bind attempt/snapshot/descriptor");
+}
+
+#[test]
+fn accounting_harness_revision_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.harness_revision = "v999".into());
+    assert_rejected(
+        forged,
+        "harness revision must bind descriptor/route selection",
+    );
+}
+
+#[test]
+fn accounting_route_set_id_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.route_set_id = "forged-routes".into());
+    assert_rejected(forged, "route set id must bind route evidence");
+}
+
+#[test]
+fn accounting_node_id_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.node_id = "forged-node".into());
+    assert_rejected(forged, "accounting node id must bind the node manifest");
+}
+
+#[test]
+fn accounting_idempotency_key_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.idempotency_key = "forged-step".into());
+    assert_rejected(forged, "accounting/attempt/journal keys must bind together");
+}
+
+#[test]
+fn accounting_graph_id_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = forge_envelope(&base, |r| r.graph_id = "forged-graph".into());
+    assert_rejected(forged, "accounting graph id must bind the graph aggregate");
+}
+
+#[test]
+fn graph_id_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.graph_accounting.graph_id = "forged-graph".into()
+    });
+    assert_rejected(
+        forged,
+        "graph id must re-derive from embedded accounting records",
+    );
+}
+
+#[test]
+fn graph_attempts_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.graph_accounting.attempts += 1);
+    assert_rejected(
+        forged,
+        "graph attempts must re-derive from embedded accounting records",
+    );
+}
+
+#[test]
+fn graph_completed_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.graph_accounting.completed = 0);
+    assert_rejected(
+        forged,
+        "graph completed must re-derive from embedded accounting records",
+    );
+}
+
+#[test]
+fn graph_usage_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.graph_accounting.usage.total_tokens += 1);
+    assert_rejected(
+        forged,
+        "graph usage must re-derive from embedded accounting records",
+    );
+}
+
+#[test]
+fn graph_cost_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.graph_accounting
+            .cost
+            .currencies
+            .insert("EUR".to_string(), 1);
+        e.graph_accounting
+            .cost
+            .known_attempts
+            .insert("EUR".to_string(), 1);
+    });
+    assert_rejected(
+        forged,
+        "graph cost must re-derive from embedded accounting records",
+    );
+}
+
+#[test]
+fn graph_latency_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.graph_accounting.latency_ms_total += 1);
+    assert_rejected(
+        forged,
+        "graph latency must re-derive from embedded accounting records",
+    );
+}
+
+#[test]
+fn descriptor_route_candidate_tampered_is_rejected() {
+    let base = ok_envelope();
+    // Flip BOTH the candidate pin and the route pin consistently so the
+    // descriptor still validates; the route-evidence binding must catch it.
+    let forged = with_outer_reseal(&base, |e| {
+        e.descriptor.route.candidate_id = "forged-route".into();
+        e.descriptor.route.pinned_candidate_id = "forged-route".into();
+    });
+    assert_rejected(
+        forged,
+        "descriptor route pin must bind the route evidence selection",
+    );
+}
+
+#[test]
+fn descriptor_provider_identity_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.descriptor.route.provider_identity = "forged-provider".into()
+    });
+    assert_rejected(
+        forged,
+        "descriptor provider identity must bind the route evidence",
+    );
+}
+
+#[test]
+fn descriptor_harness_revision_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.descriptor.harness.revision = "v999".into());
+    assert_rejected(
+        forged,
+        "descriptor harness revision must bind the route evidence",
+    );
+}
+
+#[test]
+fn descriptor_repository_revision_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.descriptor.repository.revision = "scenario-fixture-v2".into()
+    });
+    assert_rejected(
+        forged,
+        "descriptor repository revision must bind the workspace manifest",
+    );
+}
+
+#[test]
+fn descriptor_workspace_adapter_revision_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.descriptor.workspace.adapter_revision = "forged.adapter.v1".into()
+    });
+    assert_rejected(
+        forged,
+        "descriptor workspace adapter revision must bind the manifest",
+    );
+}
+
+#[test]
+fn descriptor_expected_artifact_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.descriptor.expected.evidence_artifacts = vec!["benchmark-score".into()]
+    });
+    assert_rejected(
+        forged,
+        "unknown expected-evidence artifacts must fail closed",
+    );
+}
+
+#[test]
+fn route_evidence_provider_identity_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        e.route_evidence.selected.provider_identity = "forged-provider".into()
+    });
+    assert_rejected(
+        forged,
+        "route evidence must re-verify (provider identity binding)",
+    );
+}
+
+#[test]
+fn snapshot_content_digest_swapped_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.snapshot.content_digest = Some(FORGED_C.into()));
+    assert_rejected(forged, "snapshot must re-verify against its sealed digest");
+}
+
+#[test]
+fn outer_envelope_digest_swapped_is_rejected() {
+    let base = ok_envelope();
+    let mut forged = base.clone();
+    forged.content_digest = Some(FORGED_A.into()); // NOT recomputed
+    assert_rejected(forged, "outer envelope digest must re-derive");
+}
+
+#[test]
+fn manifest_purpose_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| e.manifest.purpose = "forged purpose".into());
+    assert_rejected(forged, "manifest must bind the attempt manifest digest");
+}
+
+#[test]
+fn workspace_manifest_adapter_tampered_is_rejected() {
+    let base = ok_envelope();
+    let forged = with_outer_reseal(&base, |e| {
+        let mut workspace = e.workspace_manifest.clone().expect("workspace embedded");
+        workspace.adapter = AdapterKind::GitWorktree;
+        e.workspace_manifest = Some(workspace.sealed());
+    });
+    assert_rejected(
+        forged,
+        "workspace manifest adapter must bind the descriptor pin",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_with_symbolic_link_is_refused() {
+    let descriptor = ScenarioDescriptor::parse_json(RUST_DESCRIPTOR).expect("descriptor validates");
+    let source = fixture_root(&descriptor);
+    let temp = tempfile::tempdir().expect("staging dir");
+    copy_tree(&source, temp.path());
+    std::os::unix::fs::symlink(temp.path().join("src/lib.rs"), temp.path().join("link.rs"))
+        .expect("symlink created");
+    let error = scenario::fixture_content_digest(temp.path())
+        .expect_err("a symlinked fixture must be refused");
+    assert!(
+        error.to_string().contains("symbolic link"),
+        "refusal should name the symlink: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_with_unsupported_file_type_is_refused() {
+    let descriptor = ScenarioDescriptor::parse_json(RUST_DESCRIPTOR).expect("descriptor validates");
+    let source = fixture_root(&descriptor);
+    let temp = tempfile::tempdir().expect("staging dir");
+    copy_tree(&source, temp.path());
+    let fifo = temp.path().join("note.fifo");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo available on the test host");
+    assert!(status.success(), "mkfifo failed");
+    let error = scenario::fixture_content_digest(temp.path())
+        .expect_err("a fifo in the pinned fixture must be refused");
+    assert!(
+        error.to_string().contains("unsupported file type"),
+        "refusal should name the unsupported file type: {error}"
+    );
 }
