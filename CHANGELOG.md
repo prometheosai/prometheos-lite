@@ -1,5 +1,31 @@
 ## Unreleased
 
+- #136 E7/I01 Slice B - one genuinely executed repository-task fixture. A new
+  writable, isolated execute scenario (`lite-rust-bugfix-arithmetic-execute-001`,
+  `tests/fixtures/scenarios/rust-bugfix-arithmetic-execute/descriptor.json`)
+  pins the same content-digested Rust bugfix bytes as Slice A but under a
+  `git-worktree` writable workspace (`lite.workspace.adapter.v1`, scope
+  `repo://fixture`) with the disposal revision pinned to a deterministic
+  commit. The runner (`tests/scenario_task_execution.rs`) verifies the pinned
+  bytes, stages a disposable deterministic source repository, acquires an
+  isolated writable worktree under the #171 workspace contract, applies a
+  controlled, fixture-scripted repair through the filesystem permission
+  boundary (`FilePolicy` + `FileSet` + `apply_patch_with_rollback`), runs the
+  real validator (`cargo test --offline`) and records its exit status, then
+  seals a Lite-internal task-run envelope
+  (`lite.evidence.task-run`, `src/workflow/scenario.rs`) that embeds and
+  re-verifies the full Slice A evidence chain plus the baseline/post-run tree
+  digests (a worktree-pointer-safe digest), the repair record
+  (`origin: scripted-fixture`) and the validator record. A pre-scripted repair
+  is labelled scripted, never model coding skill; no benchmark score,
+  comparison or certification is produced. Refusal classes (modified fixture
+  pin, wrong/unresolvable workspace revision, read-only workspace, out-of-scope
+  or traversal edits, inapplicable repair) all classify as `setup-error` with
+  zero filesystem effects; a failing repair classifies as
+  `governed-product-outcome` (task failure); a validator that cannot run
+  classifies as `infrastructure-error`. No false-success classification is
+  reachable from any of these paths.
+
 - #136 E7/I01 Slice A - governed-workflow evaluation fixtures. A versioned
   Lite-internal scenario descriptor (`lite.fixtures.scenario`,
   `src/workflow/scenario.rs`) pins one Rust and one Python fixture

@@ -681,9 +681,66 @@ pub fn fixture_content_digest(root: &Path) -> Result<String> {
     );
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     collect_files(root, root, &mut entries)?;
+    hash_fixture_entries(&mut entries)
+}
+
+/// Deterministic digest of a task-run workspace source tree, like
+/// [`fixture_content_digest`] but skipping a **top-level `.git` entry**.
+///
+/// A git worktree's `.git` is a regular file whose content embeds the
+/// absolute path of the source repository's worktree metadata directory, so
+/// it is machine-dependent and must not participate in a content pin. The
+/// git object store itself lives in the SOURCE repository, never in the
+/// worktree, so skipping the pointer file loses no source bytes. Only the
+/// top-level entry is skipped; a nested `.git` is rejected like any other
+/// unexpected file type. Fail-closed on everything else.
+pub fn task_run_tree_digest(root: &Path) -> Result<String> {
+    let root_type = std::fs::symlink_metadata(root)
+        .with_context(|| format!("task root {root:?} does not exist"))?;
+    anyhow::ensure!(
+        root_type.is_dir(),
+        "task root {root:?} is not a directory (symlink?)"
+    );
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(root).with_context(|| format!("task dir {root:?} unreadable"))? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "pinned fixture contains a symbolic link: {} (unexpected link; refused)",
+                path.display()
+            );
+        }
+        if file_type.is_dir() {
+            collect_files(root, &path, &mut entries)?;
+        } else if file_type.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .with_context(|| format!("fixture path {path:?} escapes root {root:?}"))?;
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            entries.push((rel, path));
+        } else {
+            anyhow::bail!(
+                "pinned fixture contains an unsupported file type: {} (only regular files and directories are pinned)",
+                path.display()
+            );
+        }
+    }
+    hash_fixture_entries(&mut entries)
+}
+
+fn hash_fixture_entries(entries: &mut [(String, PathBuf)]) -> Result<String> {
     entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let mut material = String::new();
-    for (rel, full) in &entries {
+    for (rel, full) in entries.iter() {
         let bytes =
             std::fs::read(full).with_context(|| format!("fixture file {full:?} unreadable"))?;
         let file_digest = hex_lower(&Sha256::digest(&bytes));
@@ -1413,4 +1470,401 @@ pub fn classify_completed_run(
 /// struct order; callers compare digests, never raw strings, across platforms.
 pub fn envelope_json(evidence: &LiteScenarioRunEvidence) -> Result<String> {
     serde_json::to_string_pretty(evidence).context("scenario-run evidence serializes")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #136 Slice B — task-execution fixture evidence (Lite-internal)
+// ---------------------------------------------------------------------------
+
+/// Schema version of the Lite-internal task-run evidence document.
+pub const TASK_RUN_SCHEMA_VERSION: &str = "1.0.0";
+/// Namespace of the Lite-internal task-run evidence envelope. Lite-internal;
+/// explicitly NOT a Foundry namespace.
+pub const TASK_RUN_NAMESPACE: &str = "lite.evidence.task-run";
+/// Identifier of the local fixture runner that executes the task fixture.
+pub const TASK_RUN_RUNNER_ID: &str = "lite-task-execution-fixture-runner";
+/// Revision of the task fixture runner. Bump on any behavioural change.
+pub const TASK_RUN_RUNNER_REVISION: &str = "1";
+
+/// Where the repair content came from. Exactly one origin exists in Slice B
+/// and it is **not** a model: a pre-scripted, committed, reviewed repair
+/// fixture. Typed (not a free-form string) so "the model fixed the bug" can
+/// never be smuggled into this record; genuine model coding skill is out of
+/// scope for this fixture and no field in this document claims it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskRepairOrigin {
+    /// Scripted fixture repair, authored against the pinned bytes.
+    ScriptedFixture,
+}
+
+/// What happened to the task itself. Deliberately distinct from
+/// [`ScenarioOutcomeClass`] (which says which part of the system ran): a
+/// repair that applies cleanly and still fails `cargo test` is a **task
+/// failure**, a pre-effect refusal is a **setup failure**, and neither is a
+/// false success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskOutcome {
+    /// Patch applied; the validator ran and exited 0; the post-run tree
+    /// digest moved off the baseline.
+    Repaired,
+    /// Patch applied but the task was not achieved: the validator failed,
+    /// timed out, or could not run. Never a false success.
+    RepairFailed,
+    /// Pre-effect refusal (pin/workspace/authority/policy/fixture mismatch).
+    /// Zero filesystem effects by construction; never a false success.
+    RepairRefused,
+}
+
+/// The repair the fixture runner attempted. Single-file scoped on purpose:
+/// the task fixture is one source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskRepairRecord {
+    pub origin: TaskRepairOrigin,
+    /// Patch action used, e.g. `"search-replace"`.
+    pub action: String,
+    /// Repo-relative, forward-slash paths the patch touched. Empty iff
+    /// `applied` is false.
+    pub changed_files: Vec<String>,
+    /// sha256 of the single target file before the patch.
+    pub file_before_digest: String,
+    /// sha256 of the single target file after the patch (equal to
+    /// `file_before_digest` when refused).
+    pub file_after_digest: String,
+    /// sha256 of the canonical patch document (the edit operations).
+    pub patch_digest: String,
+    /// Whether the patch was actually applied to the workspace.
+    pub applied: bool,
+}
+
+/// The validator the fixture runner executed. A missing/broken validator is
+/// an infrastructure condition, recorded as-is — never silently upgraded to
+/// a pass and never counted as a model-quality signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskValidatorRecord {
+    /// The command actually executed, e.g. `"cargo test --offline"`.
+    pub command: String,
+    /// Process exit code, or `None` when the validator never produced one
+    /// (tool missing or timed out and was killed).
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+}
+
+/// The Lite-internal task-run evidence envelope. **Embeds the entire
+/// [`LiteScenarioRunEvidence`]** (descriptor, route evidence, snapshot,
+/// attempt, journal entry, accounting, graph aggregate, workspace manifest)
+/// rather than referencing it by digest, so [`LiteTaskRunEvidence::verify`]
+/// re-derives everything from embedded bytes alone. Never a Foundry
+/// contract; the external evaluation format stays UNSUPPORTED.
+///
+/// Honesty boundary: this record proves a scripted, fixture-authored repair
+/// was applied in an authorised disposable workspace and that the pinned
+/// validator ran and exited with the recorded status. It does **not**
+/// prove model coding ability, does not rank anything, and carries no
+/// benchmark semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiteTaskRunEvidence {
+    pub schema_version: String,
+    pub namespace: String,
+    /// Pinned evaluation instant of the underlying run (deterministic).
+    pub evaluated_at: String,
+    pub scenario_run: LiteScenarioRunEvidence,
+    pub repair: TaskRepairRecord,
+    pub validator: TaskValidatorRecord,
+    /// [`task_run_tree_digest`] of the workspace source tree before any
+    /// effect (git worktree pointer excluded).
+    pub baseline_content_digest: String,
+    /// [`task_run_tree_digest`] of the workspace source tree after the patch
+    /// and after the validator ran (includes validator-created files such as
+    /// `Cargo.lock`).
+    pub post_run_content_digest: String,
+    pub task_outcome: TaskOutcome,
+    pub classification: ScenarioOutcomeClass,
+    pub external_evaluation_format: ExternalEvaluationFormat,
+    pub provenance: RunProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+}
+
+/// Derive the outcome that follows from the measured fields. Used by
+/// [`LiteTaskRunEvidence::verify`] so a re-sealed envelope cannot assert a
+/// success the measurements do not support.
+fn derive_task_outcome(repair: &TaskRepairRecord, validator: &TaskValidatorRecord) -> TaskOutcome {
+    if !repair.applied {
+        return TaskOutcome::RepairRefused;
+    }
+    if validator.exit_code == Some(0) && !validator.timed_out {
+        return TaskOutcome::Repaired;
+    }
+    TaskOutcome::RepairFailed
+}
+
+/// Every task-run-specific binding that must hold before sealing. Returns
+/// the full list of violations (empty = bound). Shared by `sealed` and
+/// `verify`.
+fn check_task_run_bindings(
+    repair: &TaskRepairRecord,
+    validator: &TaskValidatorRecord,
+    baseline: &str,
+    post_run: &str,
+    task_outcome: TaskOutcome,
+    classification: ScenarioOutcomeClass,
+) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let mut fail = |message: String| violations.push(message);
+
+    if repair.action.trim().is_empty() {
+        fail("repair.action must be non-empty".to_string());
+    }
+    if !is_hex64(&repair.file_before_digest) {
+        fail("repair.fileBeforeDigest must be a lower hex sha256 digest".to_string());
+    }
+    if !is_hex64(&repair.file_after_digest) {
+        fail("repair.fileAfterDigest must be a lower hex sha256 digest".to_string());
+    }
+    if !is_hex64(&repair.patch_digest) {
+        fail("repair.patchDigest must be a lower hex sha256 digest".to_string());
+    }
+    if !is_hex64(baseline) {
+        fail("baselineContentDigest must be a lower hex sha256 digest".to_string());
+    }
+    if !is_hex64(post_run) {
+        fail("postRunContentDigest must be a lower hex sha256 digest".to_string());
+    }
+    if validator.command.trim().is_empty() {
+        fail("validator.command must be non-empty".to_string());
+    }
+    for path in &repair.changed_files {
+        if let Err(message) = check_fixture_path(path) {
+            fail(format!("repair.changedFiles: {message}"));
+        }
+        if path.contains('\\') || Path::new(path).is_absolute() {
+            fail(format!(
+                "repair.changedFiles entry {path:?} is not repo-relative"
+            ));
+        }
+    }
+    if repair.applied != !repair.changed_files.is_empty() {
+        fail("repair.applied and repair.changedFiles disagree (empty change set but applied, or vice versa)".to_string());
+    }
+    if repair.applied && repair.file_after_digest == repair.file_before_digest {
+        fail("repair claims to be applied but the file digest did not move".to_string());
+    }
+    if !repair.applied && repair.file_after_digest != repair.file_before_digest {
+        fail("repair was refused but the file digest moved".to_string());
+    }
+    if repair.applied && post_run == baseline {
+        fail("repair was applied but the tree digest did not move off the baseline".to_string());
+    }
+    if !repair.applied && post_run != baseline {
+        fail(
+            "pre-effect refusal must leave the tree digest at the baseline (zero effects)"
+                .to_string(),
+        );
+    }
+    if validator.timed_out && validator.exit_code.is_some() {
+        fail("a timed-out validator cannot carry an exit code".to_string());
+    }
+
+    // The outcome must follow from the measurements, and the classification
+    // must follow from the outcome. No combination asserts success without
+    // the validator's exit status supporting it.
+    let derived = derive_task_outcome(repair, validator);
+    if derived != task_outcome {
+        fail(format!(
+            "taskOutcome {task_outcome:?} does not follow from applied={} exit_code={:?} timed_out={} (derived {derived:?})",
+            repair.applied, validator.exit_code, validator.timed_out
+        ));
+    }
+    match task_outcome {
+        TaskOutcome::Repaired => {
+            if classification != ScenarioOutcomeClass::GovernedProductOutcome {
+                fail("a repaired task must be a governed-product-outcome, not a setup/infrastructure class".to_string());
+            }
+        }
+        TaskOutcome::RepairFailed => {
+            if !matches!(
+                classification,
+                ScenarioOutcomeClass::GovernedProductOutcome
+                    | ScenarioOutcomeClass::InfrastructureError
+            ) {
+                fail("a failed repair must classify as governed-product-outcome (validator ran and failed) or infrastructure-error (validator could not complete), never as success or setup".to_string());
+            }
+        }
+        TaskOutcome::RepairRefused => {
+            if !matches!(
+                classification,
+                ScenarioOutcomeClass::SetupError | ScenarioOutcomeClass::InvalidTask
+            ) {
+                fail(
+                    "a refused repair (pre-effect) must classify as setup-error or invalid-task"
+                        .to_string(),
+                );
+            }
+            if validator.exit_code.is_some() || validator.timed_out {
+                fail(
+                    "a refused repair must not carry a validator result (the validator never ran)"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    if validator.timed_out && classification != ScenarioOutcomeClass::InfrastructureError {
+        fail("a timed-out validator classifies as infrastructure-error".to_string());
+    }
+    if validator.exit_code.is_none()
+        && !validator.timed_out
+        && classification != ScenarioOutcomeClass::SetupError
+        && classification != ScenarioOutcomeClass::InvalidTask
+        && classification != ScenarioOutcomeClass::InfrastructureError
+    {
+        fail("a validator without an exit code cannot be a governed-product-outcome".to_string());
+    }
+
+    violations
+}
+
+impl LiteTaskRunEvidence {
+    /// Canonical digest of the envelope minus `contentDigest`.
+    pub fn compute_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self).context("task-run evidence serializes")?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        soma::try_canonical_digest(&value)
+            .map_err(|error| anyhow::anyhow!("task-run evidence canonical digest failed: {error}"))
+    }
+
+    /// Scenario identity, derived from the embedded descriptor.
+    pub fn scenario_id(&self) -> &str {
+        self.scenario_run.scenario_id()
+    }
+
+    /// Canonical digest of the embedded descriptor.
+    pub fn scenario_digest(&self) -> Result<String> {
+        self.scenario_run.scenario_digest()
+    }
+
+    /// Build and seal a task-run envelope from the records of one completed
+    /// (or refused) task run. Every binding is checked BEFORE sealing; on any
+    /// mismatch this returns the collected discrepancies and nothing is
+    /// exported. Nothing here is caller-asserted into place: the outcome is
+    /// re-derived from the measured fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sealed(
+        scenario_run: LiteScenarioRunEvidence,
+        repair: TaskRepairRecord,
+        validator: TaskValidatorRecord,
+        baseline_content_digest: String,
+        post_run_content_digest: String,
+        classification: ScenarioOutcomeClass,
+    ) -> Result<Self> {
+        let task_outcome = derive_task_outcome(&repair, &validator);
+        let violations = check_task_run_bindings(
+            &repair,
+            &validator,
+            &baseline_content_digest,
+            &post_run_content_digest,
+            task_outcome,
+            classification,
+        );
+        if !violations.is_empty() {
+            anyhow::bail!(
+                "task-run evidence refuses to seal; {} binding(s) failed: {}",
+                violations.len(),
+                violations.join("; ")
+            );
+        }
+        scenario_run.verify()?;
+        let mut record = Self {
+            schema_version: TASK_RUN_SCHEMA_VERSION.to_string(),
+            namespace: TASK_RUN_NAMESPACE.to_string(),
+            evaluated_at: scenario_run.evaluated_at.clone(),
+            scenario_run,
+            repair,
+            validator,
+            baseline_content_digest,
+            post_run_content_digest,
+            task_outcome,
+            classification,
+            external_evaluation_format: ExternalEvaluationFormat::unsupported(),
+            provenance: RunProvenance {
+                runner: TASK_RUN_RUNNER_ID.to_string(),
+                runner_revision: TASK_RUN_RUNNER_REVISION.to_string(),
+                injected_clock: true,
+                fixture_only: true,
+                redaction: "digest-sealed artifacts carry identities and digests only; raw secret material is never serialized (canary-verified in tests)".to_string(),
+            },
+            content_digest: None,
+        };
+        record.content_digest = Some(record.compute_digest()?);
+        Ok(record)
+    }
+
+    /// Fail-closed re-verification from the embedded bytes alone.
+    ///
+    /// Re-verifies the embedded scenario-run envelope (which re-derives every
+    /// route/attempt/journal/accounting/workspace binding), then re-checks the
+    /// task-run-specific bindings and re-derives the outcome from the
+    /// measured fields. An envelope sealed over measurements that do not
+    /// support a claimed outcome is rejected, never admitted.
+    pub fn verify(&self) -> anyhow::Result<()> {
+        use anyhow::ensure;
+        ensure!(
+            self.schema_version == TASK_RUN_SCHEMA_VERSION,
+            "unsupported task-run schema version {} (supported {TASK_RUN_SCHEMA_VERSION})",
+            self.schema_version
+        );
+        ensure!(
+            self.namespace == TASK_RUN_NAMESPACE,
+            "task-run namespace {:?} is not {TASK_RUN_NAMESPACE:?}",
+            self.namespace
+        );
+        match &self.content_digest {
+            Some(actual) => {
+                let expected = self.compute_digest()?;
+                ensure!(
+                    *actual == expected,
+                    "task-run evidence contentDigest does not verify"
+                );
+            }
+            None => anyhow::bail!("task-run evidence is missing its contentDigest"),
+        }
+        ensure!(
+            self.evaluated_at == self.scenario_run.evaluated_at,
+            "task-run evaluatedAt does not bind the embedded run's evaluation instant"
+        );
+        self.scenario_run.verify()?;
+        let violations = check_task_run_bindings(
+            &self.repair,
+            &self.validator,
+            &self.baseline_content_digest,
+            &self.post_run_content_digest,
+            self.task_outcome,
+            self.classification,
+        );
+        ensure!(
+            violations.is_empty(),
+            "task-run evidence failed binding checks: {}",
+            violations.join("; ")
+        );
+        ensure!(
+            self.external_evaluation_format.status == "unsupported",
+            "externalEvaluationFormat.status must be \"unsupported\""
+        );
+        ensure!(
+            self.provenance.fixture_only && self.provenance.injected_clock,
+            "task-run evidence must be fixture-only with an injected clock"
+        );
+        Ok(())
+    }
+}
+
+/// Serialize the task-run envelope as canonical-ish JSON for inspection.
+pub fn task_run_json(evidence: &LiteTaskRunEvidence) -> Result<String> {
+    serde_json::to_string_pretty(evidence).context("task-run evidence serializes")
 }

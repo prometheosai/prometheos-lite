@@ -1,7 +1,8 @@
 # Governed-workflow evaluation fixtures (Lite-owned, experimental)
 
 Issue #136 Slice A delivers the first repeatable, governed-workflow evaluation
-fixtures for PrometheOS Lite. This page documents what Lite owns, what it
+fixtures for PrometheOS Lite. Slice B executes one bounded repair task end to
+end on those bytes. This page documents what Lite owns, what it
 deliberately does not own, and the exact status of the Foundry boundary.
 
 **No benchmark score, pass rate, comparison, certification or public claim is
@@ -23,6 +24,67 @@ Lite produces tasks and raw evidence. Foundry owns everything downstream of
 that. Nothing in this repository may present Lite-internal envelopes as a
 Foundry contract, and no code path treats a Lite-internal record as a
 benchmark result.
+
+## What Slice B adds
+
+Slice B proves the executed-task path end to end on ONE bounded fixture; it
+does not replace or extend Slice A and it does not rebuild the scenario
+framework.
+
+- **Execute scenario** — `lite-rust-bugfix-arithmetic-execute-001`
+  (`tests/fixtures/scenarios/rust-bugfix-arithmetic-execute/descriptor.json`).
+  Same content-pinned Rust bugfix bytes as Slice A (`rust-bugfix-arithmetic`),
+  new writable + isolated workspace pins: `git-worktree` adapter (revision
+  `lite.workspace.adapter.v1`), `mode: writable`, scope `repo://fixture`, and
+  a revision pinned to the deterministic commit of the disposable source
+  repository (fixed author identity `lite-fixture` and fixed commit timestamp,
+  so the commit — and the pin — reproduce on every platform; the blob bytes
+  are the pinned fixture bytes, never modified). Slice A's read-only scenarios
+  are untouched.
+- **Disposable, deterministic staging** — the runner copies the pinned fixture
+  bytes into a fresh temporary git repository, commits with fixed identity and
+  timestamps, and checks the produced commit against
+  `repository.revision` **before** any workspace exists. The committed source
+  fixture in this repository is never mutated in place.
+- **Writable isolated worktree** — acquired through the existing #171
+  `GitWorktreeWorkspace` adapter under a sealed, writable
+  `WorkspaceManifestV1`: the adapter's writable-only gate runs first, the
+  acquired revision is re-read and compared to the pin, the workspace is
+  validated, and the worktree source tree is digested and compared to the
+  fixture pin before any effect. `ensure_writable()` must pass before the
+  repair runs.
+- **The controlled repair action** — a fixture-scripted `search-replace` edit
+  (`a - b` → `a + b`) applied through the filesystem permission boundary
+  (`FilePolicy` + `FileSet` + `apply_patch_with_rollback`), with the editable
+  set restricted to `src/lib.rs`. The governed model dispatch holds **no**
+  write authority; the repair write is gated by the workspace boundary and
+  the file permission policy, not by the model. The repair is a **scripted
+  fixture** — it demonstrates the executed-task path, never model coding
+  ability, and no field in the evidence claims otherwise
+  (`repair.origin: scripted-fixture`).
+- **The real validator** — `cargo test --offline` executed in the worktree
+  with the exit code captured (missing tools and timeouts are recorded as
+  such, never as success). The validator may create `Cargo.lock`; that is a
+  validator artefact, not a repair effect.
+- **Task-run evidence** — `LiteTaskRunEvidence` (namespace
+  `lite.evidence.task-run`, `schemaVersion: "1.0.0"`) **embeds** the full
+  Slice A envelope and re-verifies it, then adds: the `task_run_tree_digest`
+  before and after the run (a worktree-pointer-safe digest that excludes the
+  top-level `.git` file, unlike the fixture pin), the repair record
+  (origin, action, changed files, before/after file digests, canonical patch
+  digest, applied flag), the validator record (command, exit code, timeout
+  flag) and a `taskOutcome` re-derived from the measurements — `repaired` /
+  `repair-failed` / `repair-refused` — with `externalEvaluationFormat` and
+  provenance pinned `unsupported`/`fixture_only`. `verify()` re-checks every
+  binding from the embedded bytes and rejects claims the measurements do not
+  support.
+- **Classification** — `setup-error` for any pre-effect refusal (fixture
+  digest drift, staged/pinned revision mismatch, read-only workspace, no
+  worktree, out-of-scope or traversal edits, inapplicable repair);
+  `governed-product-outcome` with `taskOutcome: repair-failed` for a repair
+  that applies but fails the validator; `infrastructure-error` when the
+  validator cannot complete; `governed-product-outcome` + `repaired` only for
+  applied repair + validator exit 0. No path produces a false success.
 
 ## What Slice A contains
 
