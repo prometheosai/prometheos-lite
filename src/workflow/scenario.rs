@@ -106,6 +106,7 @@ pub const ALLOWED_DIMENSIONS: &[&str] = &[
     "evaluation-instant",
     "context-rules",
     "expected-evidence",
+    "validation",
 ];
 
 // ---------------------------------------------------------------------------
@@ -362,6 +363,38 @@ pub struct RoutePin {
     pub pinned_candidate_id: String,
 }
 
+/// Versioned pins for the validator that "success" means for a task.
+/// Embedded on every executed-task descriptor; absent on read-only
+/// descriptors. Validated fail-closed when present. Task-run sealing
+/// REQUIRES these pins: a repaired claim is only meaningful against a
+/// pinned expected assertion and a pinned command/argv. The pins are
+/// immutable control data, not operator input — a scenario that does not
+/// pin its validator cannot produce task-run success evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ValidationPin {
+    /// Document version of this section. Supported: "1.0.0".
+    pub schema_version: String,
+    /// Exact validator executable, e.g. `cargo`.
+    pub command: String,
+    /// Exact validator arguments, e.g. `["test", "--offline"]`.
+    pub args: Vec<String>,
+    /// The only exit code that means "the task assertion holds".
+    pub expected_exit_code: i32,
+    /// Human statement of the expected task assertion (the fixture's
+    /// definition of done).
+    pub expected_assertion: String,
+    /// sha256 of the post-repair file the validator validated
+    /// (portable: single file, no toolchain artifacts). A forged repair
+    /// record with different bytes cannot satisfy this pin.
+    pub expected_file_after_digest: String,
+    /// sha256 tree digest of the post-run workspace (via
+    /// [`task_run_tree_digest`]; includes validator-created files such as
+    /// `Cargo.lock`, so it is toolchain-sensitive — the descriptor pins
+    /// fail closed on drift on purpose).
+    pub expected_post_run_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DimensionsPin {
@@ -394,6 +427,9 @@ pub struct ScenarioDescriptor {
     pub harness: HarnessPin,
     pub route: RoutePin,
     pub dimensions: DimensionsPin,
+    /// Optional, required for executed-task (task-run) sealing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<ValidationPin>,
 }
 
 impl ScenarioDescriptor {
@@ -523,6 +559,59 @@ impl ScenarioDescriptor {
                 "requirements must pin degradationPermitted=false and forbidSubstitution=true"
                     .to_string(),
             ));
+        }
+
+        // Validator pins (optional at parse; required for task-run sealing).
+        if let Some(validation) = &self.validation {
+            if validation.schema_version != "1.0.0" {
+                defects.push(ScenarioDefect::setup(format!(
+                    "validation.schemaVersion {:?} is not \"1.0.0\"",
+                    validation.schema_version
+                )));
+            }
+            if validation.command.trim().is_empty() {
+                defects.push(ScenarioDefect::setup(
+                    "validation.command must be non-empty".to_string(),
+                ));
+            }
+            if validation
+                .command
+                .chars()
+                .any(|c| matches!(c, '/' | '\\' | '\0'))
+            {
+                defects.push(ScenarioDefect::setup(
+                    "validation.command must be a bare executable name, not a path".to_string(),
+                ));
+            }
+            if validation.args.is_empty() {
+                defects.push(ScenarioDefect::setup(
+                    "validation.args must pin at least one argument".to_string(),
+                ));
+            }
+            for arg in &validation.args {
+                if arg.trim().is_empty() {
+                    defects.push(ScenarioDefect::setup(
+                        "validation.args entries must be non-empty".to_string(),
+                    ));
+                }
+            }
+            if validation.expected_assertion.trim().len() < 8 {
+                defects.push(ScenarioDefect::setup(
+                    "validation.expectedAssertion must state the expected assertion".to_string(),
+                ));
+            }
+            if !is_hex64(&validation.expected_file_after_digest) {
+                defects.push(ScenarioDefect::setup(
+                    "validation.expectedFileAfterDigest must be a lower hex sha256 digest"
+                        .to_string(),
+                ));
+            }
+            if !is_hex64(&validation.expected_post_run_digest) {
+                defects.push(ScenarioDefect::setup(
+                    "validation.expectedPostRunDigest must be a lower hex sha256 digest"
+                        .to_string(),
+                ));
+            }
         }
 
         // Harness pins.
@@ -1476,15 +1565,20 @@ pub fn envelope_json(evidence: &LiteScenarioRunEvidence) -> Result<String> {
 // Issue #136 Slice B — task-execution fixture evidence (Lite-internal)
 // ---------------------------------------------------------------------------
 
-/// Schema version of the Lite-internal task-run evidence document.
-pub const TASK_RUN_SCHEMA_VERSION: &str = "1.0.0";
+/// Schema version of the Lite-internal task-run evidence document. 1.1.0
+/// binds the validator record to the descriptor's pinned command/argv,
+/// expected assertion and result receipt provenance.
+pub const TASK_RUN_SCHEMA_VERSION: &str = "1.1.0";
 /// Namespace of the Lite-internal task-run evidence envelope. Lite-internal;
 /// explicitly NOT a Foundry namespace.
 pub const TASK_RUN_NAMESPACE: &str = "lite.evidence.task-run";
 /// Identifier of the local fixture runner that executes the task fixture.
 pub const TASK_RUN_RUNNER_ID: &str = "lite-task-execution-fixture-runner";
 /// Revision of the task fixture runner. Bump on any behavioural change.
-pub const TASK_RUN_RUNNER_REVISION: &str = "1";
+pub const TASK_RUN_RUNNER_REVISION: &str = "2";
+/// What `LiteTaskRunEvidence::verify` proves and does not prove about the
+/// validator receipt. Pinned on every envelope and enforced at sealing.
+pub const TASK_RUN_VERIFICATION_SCOPE: &str = "internally consistent operator-observed measurements: the embedded records re-derive cleanly. It is NOT cryptographic proof that an external process produced the recorded output; a fully consistent re-forgery cannot be detected from bytes alone. The pinned descriptor command/argv and the pinned expected-outcome digests narrow the forgery surface but do not remove it.";
 
 /// Where the repair content came from. Exactly one origin exists in Slice B
 /// and it is **not** a model: a pre-scripted, committed, reviewed repair
@@ -1517,12 +1611,45 @@ pub enum TaskOutcome {
     RepairRefused,
 }
 
+/// Where the repair write authority came from. Exactly one source exists in
+/// this fixture and it is **not** the model: a scripted fixture repair,
+/// authorized by the isolated writable workspace and the file policy. The
+/// governed model dispatch itself holds no write authority (its node
+/// manifest pins `writableScopes: []`); this record makes the separation
+/// explicit instead of borrowing the model's authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskRepairWriteAuthority {
+    /// Write authorized by the isolated writable workspace (#171) plus the
+    /// file policy editable set for a fixture-scripted patch. Never the
+    /// model's authority.
+    ScriptedFixtureWorkspaceFilePolicy,
+}
+
+/// How the recorded validator result was observed. Only a subprocess the
+/// runner spawned itself with captured output/exit code is `ObservedSubprocess`;
+/// anything the runner did not execute carries `NotExecuted` and can never
+/// support a repaired outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskValidatorProvenance {
+    /// The fixture runner spawned the subprocess, captured stdout+stderr,
+    /// measured the exit code and the wall time in-process.
+    ObservedSubprocess,
+    /// The validator did not produce a process result (refused preflight,
+    /// or a tool that could not be spawned/executed).
+    NotExecuted,
+}
+
 /// The repair the fixture runner attempted. Single-file scoped on purpose:
 /// the task fixture is one source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskRepairRecord {
     pub origin: TaskRepairOrigin,
+    /// Whose authority made the write. Explicitly the scripted-fixture
+    /// workspace/file-policy permit — never the governed model dispatch.
+    pub write_authority: TaskRepairWriteAuthority,
     /// Patch action used, e.g. `"search-replace"`.
     pub action: String,
     /// Repo-relative, forward-slash paths the patch touched. Empty iff
@@ -1539,18 +1666,39 @@ pub struct TaskRepairRecord {
     pub applied: bool,
 }
 
-/// The validator the fixture runner executed. A missing/broken validator is
-/// an infrastructure condition, recorded as-is — never silently upgraded to
-/// a pass and never counted as a model-quality signal.
+/// The validator the fixture runner executed. The command/argv/expected
+/// exit code are PINNED by the descriptor's `validation` section and
+/// re-checked here; a different command, argument list, expected assertion
+/// or receipt shape masquerading as this validator is rejected at
+/// verification. A missing/broken validator is an infrastructure condition,
+/// recorded as-is — never silently upgraded to pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskValidatorRecord {
-    /// The command actually executed, e.g. `"cargo test --offline"`.
+    /// Exact executable, copied from the descriptor pin.
     pub command: String,
+    /// Exact argument vector, copied from the descriptor pin.
+    pub args: Vec<String>,
+    /// The pinned expected exit code that means the assertion holds.
+    pub expected_exit_code: i32,
+    /// The pinned expected-assertion statement (what "done" means).
+    pub assertion: String,
     /// Process exit code, or `None` when the validator never produced one
     /// (tool missing or timed out and was killed).
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// sha256 (hex64) of the captured stdout+stderr bytes. `None` only when
+    /// the validator never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<String>,
+    /// Total captured stdout+stderr bytes.
+    pub output_bytes: u64,
+    /// Measured wall time of the validator subprocess in milliseconds.
+    /// Provenance of the measurement, not a benchmark.
+    pub duration_ms: u64,
+    /// How the result was observed. Only `ObservedSubprocess` may carry a
+    /// repaired outcome.
+    pub provenance: TaskValidatorProvenance,
 }
 
 /// The Lite-internal task-run evidence envelope. **Embeds the entire
@@ -1576,28 +1724,49 @@ pub struct LiteTaskRunEvidence {
     pub repair: TaskRepairRecord,
     pub validator: TaskValidatorRecord,
     /// [`task_run_tree_digest`] of the workspace source tree before any
-    /// effect (git worktree pointer excluded).
+    /// effect (git worktree pointer excluded). Must equal the embedded
+    /// descriptor's pinned `repository.contentDigest`.
     pub baseline_content_digest: String,
     /// [`task_run_tree_digest`] of the workspace source tree after the patch
     /// and after the validator ran (includes validator-created files such as
-    /// `Cargo.lock`).
+    /// `Cargo.lock`). Must equal the descriptor's pinned
+    /// `validation.expectedPostRunDigest` when the repair was applied.
     pub post_run_content_digest: String,
     pub task_outcome: TaskOutcome,
     pub classification: ScenarioOutcomeClass,
     pub external_evaluation_format: ExternalEvaluationFormat,
     pub provenance: RunProvenance,
+    /// Pinned at sealing to [`TASK_RUN_VERIFICATION_SCOPE`]; re-verified at
+    /// verification. States exactly what this record proves and does not
+    /// prove about the validator receipt.
+    pub verification_scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_digest: Option<String>,
 }
 
+/// Well-known sha256 of the empty byte string. Receipt consistency for the
+/// zero-output-bytes case is checkable and is checked.
+fn sha256_empty_hex() -> String {
+    hex_lower(&Sha256::digest([]))
+}
+
 /// Derive the outcome that follows from the measured fields. Used by
 /// [`LiteTaskRunEvidence::verify`] so a re-sealed envelope cannot assert a
-/// success the measurements do not support.
-fn derive_task_outcome(repair: &TaskRepairRecord, validator: &TaskValidatorRecord) -> TaskOutcome {
+/// success the measurements do not support: success requires a subprocess the
+/// runner actually executed whose exit code equals the descriptor-pinned
+/// expected exit code.
+fn derive_task_outcome(
+    repair: &TaskRepairRecord,
+    validator: &TaskValidatorRecord,
+    expected_exit_code: i32,
+) -> TaskOutcome {
     if !repair.applied {
         return TaskOutcome::RepairRefused;
     }
-    if validator.exit_code == Some(0) && !validator.timed_out {
+    if validator.provenance == TaskValidatorProvenance::ObservedSubprocess
+        && validator.exit_code == Some(expected_exit_code)
+        && !validator.timed_out
+    {
         return TaskOutcome::Repaired;
     }
     TaskOutcome::RepairFailed
@@ -1605,8 +1774,11 @@ fn derive_task_outcome(repair: &TaskRepairRecord, validator: &TaskValidatorRecor
 
 /// Every task-run-specific binding that must hold before sealing. Returns
 /// the full list of violations (empty = bound). Shared by `sealed` and
-/// `verify`.
+/// `verify`. `descriptor` is the embedded run's descriptor: the validator
+/// receipt is checked against ITS pins, so a spliced record cannot borrow
+/// another scenario's expectation.
 fn check_task_run_bindings(
+    descriptor: &ScenarioDescriptor,
     repair: &TaskRepairRecord,
     validator: &TaskValidatorRecord,
     baseline: &str,
@@ -1635,8 +1807,92 @@ fn check_task_run_bindings(
     if !is_hex64(post_run) {
         fail("postRunContentDigest must be a lower hex sha256 digest".to_string());
     }
-    if validator.command.trim().is_empty() {
-        fail("validator.command must be non-empty".to_string());
+    // ---- Descriptor-pinned validator surface -------------------------------
+    let pins = match &descriptor.validation {
+        Some(pins) => Some(pins),
+        None => {
+            fail(
+                "task-run evidence requires the descriptor to pin a `validation` section (command/argv, expected exit code, expected assertion and expected digests); unpinned validators carry no claim of success"
+                    .to_string(),
+            );
+            None
+        }
+    };
+    if let Some(pins) = pins {
+        if validator.command != pins.command {
+            fail(format!(
+                "validator.command {:?} != descriptor validation.command {:?}",
+                validator.command, pins.command
+            ));
+        }
+        if validator.args != pins.args {
+            fail(format!(
+                "validator.args {:?} != descriptor validation.args {:?}",
+                validator.args, pins.args
+            ));
+        }
+        if validator.expected_exit_code != pins.expected_exit_code {
+            fail(
+                "validator.expectedExitCode != descriptor validation.expectedExitCode".to_string(),
+            );
+        }
+        if validator.assertion != pins.expected_assertion {
+            fail("validator.assertion != descriptor validation.expectedAssertion".to_string());
+        }
+        if baseline != descriptor.repository.content_digest {
+            fail(
+                "baselineContentDigest != descriptor.repository.contentDigest (the measured pre-image is not the pinned fixture)"
+                    .to_string(),
+            );
+        }
+    }
+
+    // ---- Validator receipt consistency --------------------------------------
+    match validator.provenance {
+        TaskValidatorProvenance::NotExecuted => {
+            if validator.exit_code.is_some() || validator.timed_out {
+                fail("a NotExecuted validator cannot carry a process result".to_string());
+            }
+            if validator.output_digest.is_some() {
+                fail("a NotExecuted validator cannot carry an output digest".to_string());
+            }
+            if validator.output_bytes != 0 {
+                fail("a NotExecuted validator must carry zero captured bytes".to_string());
+            }
+        }
+        TaskValidatorProvenance::ObservedSubprocess => match &validator.output_digest {
+            None => fail(
+                "an ObservedSubprocess validator must carry the digest of its captured output"
+                    .to_string(),
+            ),
+            Some(digest) => {
+                if !is_hex64(digest) {
+                    fail("validator.outputDigest must be a lower hex sha256 digest".to_string());
+                } else if validator.output_bytes == 0 && digest != &sha256_empty_hex() {
+                    fail(
+                        "a zero-byte capture must digest to the well-known empty sha256"
+                            .to_string(),
+                    );
+                }
+            }
+        },
+    }
+    if validator.exit_code.is_some()
+        && validator.provenance != TaskValidatorProvenance::ObservedSubprocess
+    {
+        fail("only an ObservedSubprocess validator can carry an exit code".to_string());
+    }
+
+    // The outcome must follow from the measurements, and the classification
+    // must follow from the outcome. No combination asserts success without
+    // the pinned validator's exit status supporting it.
+    let expected_exit_code = pins.map(|pins| pins.expected_exit_code).unwrap_or(0);
+    let derived = derive_task_outcome(repair, validator, expected_exit_code);
+    if derived != task_outcome {
+        fail(format!(
+            "taskOutcome {task_outcome:?} does not follow from applied={} exit_code={:?} timed_out={} (derived {derived:?})",
+            repair.applied, validator.exit_code, validator.timed_out
+        ));
     }
     for path in &repair.changed_files {
         if let Err(message) = check_fixture_path(path) {
@@ -1670,20 +1926,36 @@ fn check_task_run_bindings(
         fail("a timed-out validator cannot carry an exit code".to_string());
     }
 
-    // The outcome must follow from the measurements, and the classification
-    // must follow from the outcome. No combination asserts success without
-    // the validator's exit status supporting it.
-    let derived = derive_task_outcome(repair, validator);
-    if derived != task_outcome {
-        fail(format!(
-            "taskOutcome {task_outcome:?} does not follow from applied={} exit_code={:?} timed_out={} (derived {derived:?})",
-            repair.applied, validator.exit_code, validator.timed_out
-        ));
-    }
     match task_outcome {
         TaskOutcome::Repaired => {
             if classification != ScenarioOutcomeClass::GovernedProductOutcome {
                 fail("a repaired task must be a governed-product-outcome, not a setup/infrastructure class".to_string());
+            }
+            if validator.provenance != TaskValidatorProvenance::ObservedSubprocess {
+                fail(
+                    "a repaired outcome requires ObservedSubprocess validator provenance"
+                        .to_string(),
+                );
+            }
+            if let Some(pins) = &descriptor.validation {
+                if validator.exit_code != Some(pins.expected_exit_code) {
+                    fail(
+                        "repaired outcome but validator.exitCode != pinned validation.expectedExitCode"
+                            .to_string(),
+                    );
+                }
+                if repair.file_after_digest != pins.expected_file_after_digest {
+                    fail(
+                        "repaired outcome but repair.fileAfterDigest != pinned validation.expectedFileAfterDigest"
+                            .to_string(),
+                    );
+                }
+                if post_run != pins.expected_post_run_digest {
+                    fail(
+                        "repaired outcome but postRunContentDigest != pinned validation.expectedPostRunDigest"
+                            .to_string(),
+                    );
+                }
             }
         }
         TaskOutcome::RepairFailed => {
@@ -1763,8 +2035,18 @@ impl LiteTaskRunEvidence {
         post_run_content_digest: String,
         classification: ScenarioOutcomeClass,
     ) -> Result<Self> {
-        let task_outcome = derive_task_outcome(&repair, &validator);
+        let task_outcome = derive_task_outcome(
+            &repair,
+            &validator,
+            scenario_run
+                .descriptor
+                .validation
+                .as_ref()
+                .map(|pins| pins.expected_exit_code)
+                .unwrap_or(0),
+        );
         let violations = check_task_run_bindings(
+            &scenario_run.descriptor,
             &repair,
             &validator,
             &baseline_content_digest,
@@ -1799,6 +2081,7 @@ impl LiteTaskRunEvidence {
                 fixture_only: true,
                 redaction: "digest-sealed artifacts carry identities and digests only; raw secret material is never serialized (canary-verified in tests)".to_string(),
             },
+            verification_scope: TASK_RUN_VERIFICATION_SCOPE.to_string(),
             content_digest: None,
         };
         record.content_digest = Some(record.compute_digest()?);
@@ -1838,8 +2121,13 @@ impl LiteTaskRunEvidence {
             self.evaluated_at == self.scenario_run.evaluated_at,
             "task-run evaluatedAt does not bind the embedded run's evaluation instant"
         );
+        ensure!(
+            self.verification_scope == TASK_RUN_VERIFICATION_SCOPE,
+            "task-run verificationScope must be pinned to the documented verification limitation"
+        );
         self.scenario_run.verify()?;
         let violations = check_task_run_bindings(
+            &self.scenario_run.descriptor,
             &self.repair,
             &self.validator,
             &self.baseline_content_digest,

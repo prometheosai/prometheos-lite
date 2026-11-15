@@ -2,7 +2,7 @@
   "schemaVersion": "1.0.0",
   "namespace": "lite.fixtures.scenario",
   "scenarioId": "lite-rust-bugfix-arithmetic-execute-001",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "title": "Rust bugfix (executed): sum subtracts instead of adding",
   "kind": "bugfix",
   "language": "rust",
@@ -83,8 +83,21 @@
       "model",
       "evaluation-instant",
       "context-rules",
-      "expected-evidence"
+      "expected-evidence",
+      "validation"
     ],
     "variable": []
+  },
+  "validation": {
+    "schemaVersion": "1.0.0",
+    "command": "cargo",
+    "args": [
+      "test",
+      "--offline"
+    ],
+    "expectedExitCode": 0,
+    "expectedAssertion": "pinned-fixture-task: sum(2, 2) == 4 (src/lib.rs); verified by `cargo test --offline` in the isolated workspace",
+    "expectedFileAfterDigest": "28c2fe0394cb607ead1337d151fefe63b2c15ffd256725e3dbfd31dc9c576667",
+    "expectedPostRunDigest": "6335830cfd80a56ab742fe0c67c44a402695c968efb152c7058ad18d30acb6c7"
   }
 }

@@ -61,23 +61,51 @@ framework.
   the file permission policy, not by the model. The repair is a **scripted
   fixture** — it demonstrates the executed-task path, never model coding
   ability, and no field in the evidence claims otherwise
-  (`repair.origin: scripted-fixture`).
-- **The real validator** — `cargo test --offline` executed in the worktree
-  with the exit code captured (missing tools and timeouts are recorded as
-  such, never as success). The validator may create `Cargo.lock`; that is a
-  validator artefact, not a repair effect.
+  (`repair.origin: scripted-fixture`,
+  `repair.writeAuthority: scripted-fixture-workspace-file-policy`; the model
+  node's manifest pins `writableScopes: []`).
+- **The real validator, pinned** — the descriptor pins a versioned
+  `validation` section (`schemaVersion: "1.0.0"`): the exact executable
+  (`cargo`), the exact argv (`test --offline`), the expected exit code
+  (`0`), the human-readable expected assertion (`sum(2, 2) == 4`), the
+  expected post-repair file digest and the expected post-run tree digest.
+  The fixture runner executes exactly the pinned argv, captures stdout and
+  stderr (bounded at 1 MB, digested into a receipt), records the exit code,
+  wall-clock duration and provenance (`observed-subprocess` /
+  `not-executed`), and binds all of it into the envelope. A different
+  command, argument vector, expected exit code or assertion — or an
+  unaltered command with a doctored exit code or claim — cannot seal.
+- **Verification limitation, stated** — a re-sealed envelope whose records
+  are all mutually recomputed remains undetectable-by-bytes; `verify()`
+  proves only internal consistency of operator-observed measurements. The
+  envelope pins a `verificationScope` statement to that effect and rejects
+  envelopes carrying anything else. It is not cryptographic proof that an
+  external process produced the recorded output; the pinned command/argv and
+  expected-outcome digests narrow the forgery surface but do not remove it.
 - **Task-run evidence** — `LiteTaskRunEvidence` (namespace
-  `lite.evidence.task-run`, `schemaVersion: "1.0.0"`) **embeds** the full
+  `lite.evidence.task-run`, `schemaVersion: "1.1.0"`) **embeds** the full
   Slice A envelope and re-verifies it, then adds: the `task_run_tree_digest`
   before and after the run (a worktree-pointer-safe digest that excludes the
-  top-level `.git` file, unlike the fixture pin), the repair record
-  (origin, action, changed files, before/after file digests, canonical patch
-  digest, applied flag), the validator record (command, exit code, timeout
-  flag) and a `taskOutcome` re-derived from the measurements — `repaired` /
-  `repair-failed` / `repair-refused` — with `externalEvaluationFormat` and
-  provenance pinned `unsupported`/`fixture_only`. `verify()` re-checks every
-  binding from the embedded bytes and rejects claims the measurements do not
-  support.
+  top-level `.git` file, unlike the fixture pin; the baseline is bound to
+  the embedded descriptor's pinned `repository.contentDigest`), the repair
+  record, the validator receipt and a `taskOutcome` re-derived from the
+  measurements — `repaired` / `repair-failed` / `repair-refused` — with
+  `externalEvaluationFormat` and provenance pinned `unsupported`/`fixture_only`.
+- **Preflight order (load-bearing)** — the runner executes: (1) fixture
+  content verification, (2) descriptor completeness (a `validation` section
+  must be pinned — without it the task is `invalid-task` and is never
+  dispatched), (3) deterministic staging with the staged commit checked
+  against the pin, (4) isolated writable workspace acquisition and
+  verification (writable-only gate, `ensure_writable`, adapter validation,
+  revision, baseline tree digest), (5) a repair-target authorization
+  preflight (repo-relative paths, editable-set gate, existence check,
+  transaction dry-run against the live bytes — zero writes), and only then
+  (6) the governed dispatch. A preflight refusal is `setup-error` (or
+  `invalid-task`), never runs a model, and carries capability-execution
+  counters reading zero, with no accounting record and no sealed evidence.
+  On every preflight refusal the loopback server is never spawned and the
+  governed boundary is never entered; the positive path dispatches exactly
+  once.
 - **Classification** — `setup-error` for any pre-effect refusal (fixture
   digest drift, staged/pinned revision mismatch, read-only workspace, no
   worktree, out-of-scope or traversal edits, inapplicable repair);
