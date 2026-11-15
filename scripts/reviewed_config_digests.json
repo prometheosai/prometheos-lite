@@ -3,7 +3,7 @@
   "note": "Digests of executable configuration surfaces (build, bundler, toolchain and verification-runner configuration). A change to a pinned file fails the repository policy gate until a human re-pins it deliberately with scripts/review_config_digests.py. Digests are over LF-normalized bytes so a platform checkout does not change the verdict.",
   "files": {
     ".cargo/config.toml": "c75eda3bf5bf8944eeeb48670ea59c816435f3f55cb0433744e26e7c3d855426",
-    ".gitattributes": "dcba1494827fe76c16ed5842634c0acc2f597cebcd36c0091f1cb92f806cb036",
+    ".gitattributes": "939d0f5ac0e68b733d3c7f5d348af7c0dc5270902ff6998295a8f6462f9465c7",
     "Cargo.lock": "bfd5092d58e24313c81796a5446282cf5a3c0cb5af552c560afaefcd6a428eae",
     "Cargo.toml": "e67ad085b3f42228f53179c00a971de075d7eff061d566ea4a50eac902035ffd",
     "clippy.toml": "34fe5d6236ee0e8df00792d5e11a8e5c96c01143593e100626a5d63398cf006a",
