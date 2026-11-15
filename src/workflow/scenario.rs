@@ -40,6 +40,17 @@
 //!   ran and produced (or refused without effect, then a sealed attempt)
 //!   evidence. A failure inside the governed effect is still a product
 //!   outcome and is accounted as such; it is not a setup error.
+//!
+//! Verification boundary of the run envelope: every record the envelope
+//! embeds is re-verified from the embedded bytes alone, and every
+//! cross-object binding between them is re-checked (descriptor ↔ route
+//! evidence ↔ snapshot ↔ manifest ↔ attempt ↔ accounting ↔ graph, plus the
+//! execution workspace manifest). Nothing is hex-checked-and-trusted: any
+//! digest present in the envelope is re-derived from the embedded bytes.
+//! What the envelope does NOT prove is enumerated on
+//! [`LiteScenarioRunEvidence`] itself (fixture bytes, latency provenance,
+//! provider-reported usage truthfulness); the Foundry external format stays
+//! UNSUPPORTED.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -656,7 +667,18 @@ fn check_fixture_path(path: &str) -> Result<(), String> {
 /// the concatenation of `"{relpath} {hex-sha256-of-file}\n"` lines. The same
 /// tree yields the same digest on every platform; a single byte of fixture
 /// drift changes the digest.
+///
+/// Fail-closed on pinned fixtures: symbolic links and any file type other
+/// than a regular file or directory (fifos, sockets, devices, unknown mounts)
+/// are REJECTED, never silently omitted — an omitted entry could change the
+/// meaning of a pinned fixture without changing its digest.
 pub fn fixture_content_digest(root: &Path) -> Result<String> {
+    let root_type = std::fs::symlink_metadata(root)
+        .with_context(|| format!("fixture root {root:?} does not exist"))?;
+    anyhow::ensure!(
+        root_type.is_dir(),
+        "fixture root {root:?} is not a directory (symlink?)"
+    );
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     collect_files(root, root, &mut entries)?;
     entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
@@ -693,6 +715,12 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> R
         let entry = entry?;
         let path = entry.path();
         let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "pinned fixture contains a symbolic link: {} (unexpected link; refused)",
+                path.display()
+            );
+        }
         if file_type.is_dir() {
             collect_files(root, &path, out)?;
         } else if file_type.is_file() {
@@ -705,9 +733,12 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> R
                 .collect::<Vec<_>>()
                 .join("/");
             out.push((rel, path));
+        } else {
+            anyhow::bail!(
+                "pinned fixture contains an unsupported file type: {} (only regular files and directories are pinned)",
+                path.display()
+            );
         }
-        // Symlinks and other non-regular files are ignored: the fixture
-        // digest pins regular file content only.
     }
     Ok(())
 }
@@ -723,6 +754,15 @@ fn hex_lower(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 // Lite-internal run evidence envelope
 // ---------------------------------------------------------------------------
+
+use crate::workflow::accounting::ACCOUNTING_SCHEMA_VERSION;
+use crate::workflow::node_contracts::NodeManifestV1;
+use crate::workflow::route_dispatch::RoutedAttemptV1;
+use crate::workflow::route_dispatch::RoutedDispatchOutcome;
+use crate::workflow::route_resolution::{
+    EffectiveExecutionSnapshotV1, RouteEvidenceV1, RouteResolution,
+};
+use crate::workflow::workspace::{WorkspaceManifestV1, WorkspaceMode};
 
 /// Explicit, typed "we do not ship the Foundry external format yet" marker.
 /// There is no public constructor that flips the status; every exported
@@ -751,38 +791,6 @@ impl ExternalEvaluationFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RunRepositoryPin {
-    pub fixture: String,
-    pub content_digest: String,
-    pub revision: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RunRoutePin {
-    pub route_set_id: String,
-    pub route_set_version: String,
-    pub candidate_id: String,
-    pub provider_identity: String,
-    pub provider_locality: String,
-    pub model: String,
-    pub harness_id: String,
-    pub harness_revision: String,
-    pub profile: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RunWorkspacePin {
-    pub manifest_digest: String,
-    pub adapter: String,
-    pub adapter_revision: String,
-    pub mode: String,
-    pub base_revision: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunProvenance {
     pub runner: String,
     pub runner_revision: String,
@@ -791,49 +799,50 @@ pub struct RunProvenance {
     pub redaction: String,
 }
 
-/// The Lite-internal scenario-run evidence envelope. Carries verified, raw
-/// Lite records and digests. NEVER a Foundry contract; see module docs.
+/// The Lite-internal scenario-run evidence envelope. **Every record the
+/// envelope references is embedded in it**, so [`LiteScenarioRunEvidence::verify`]
+/// re-verifies each record's own sealed digest AND every cross-object binding
+/// from the embedded bytes alone — no digest in the envelope is taken on
+/// trust, and nothing is labelled as verified that is not re-derived. NEVER a
+/// Foundry contract; see module docs.
+///
+/// What the envelope does NOT prove (honesty boundary, not a defect):
+/// - the fixture directory's bytes (bound by `repository.contentDigest`,
+///   enforced at pin time by [`verify_fixture_content`]; not re-hashed here);
+/// - the wall-clock provenance of the measured dispatch latency;
+/// - the truthfulness of the (loopback) provider's reported usage numbers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiteScenarioRunEvidence {
     pub schema_version: String,
     pub namespace: String,
-    pub scenario_id: String,
-    pub scenario_digest: String,
     pub evaluated_at: String,
-    pub repository: RunRepositoryPin,
-    pub route: RunRoutePin,
+    /// The embedded, validated scenario descriptor. `scenario_id` and
+    /// `scenario_digest` are DERIVED from it, never stored separately.
+    pub descriptor: ScenarioDescriptor,
+    /// Raw sealed route evidence (resolution decision; self-verifies).
+    pub route_evidence: RouteEvidenceV1,
+    /// Raw sealed effective execution snapshot (self-verifies, incl. the
+    /// SPEC 006 ExecutionProfile audit).
+    pub snapshot: EffectiveExecutionSnapshotV1,
+    /// Raw node manifest under the reviewed permit.
+    pub manifest: NodeManifestV1,
+    /// Raw sealed routed attempt (self-verifies, incl. journal binding).
+    pub attempt: RoutedAttemptV1,
+    /// The execution workspace manifest, when one was pinned and provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<RunWorkspacePin>,
-    pub evidence: RunEvidenceChain,
+    pub workspace_manifest: Option<WorkspaceManifestV1>,
     /// The raw, sealed attempt-accounting record produced natively by Lite.
     pub attempt_accounting: AttemptAccountingV1,
     /// The raw, aggregated graph accounting produced natively by Lite.
+    /// Derived; [`LiteScenarioRunEvidence::verify`] re-derives it from the
+    /// embedded accounting records and requires equality.
     pub graph_accounting: GraphAccounting,
     pub classification: ScenarioOutcomeClass,
     pub external_evaluation_format: ExternalEvaluationFormat,
     pub provenance: RunProvenance,
-    /// Digest of the sealed accounting record (real, measured-latency digest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_digest: Option<String>,
-}
-
-/// Digest chain over the native Lite records produced by the run. Every
-/// digest re-verifies against the sealed records.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RunEvidenceChain {
-    pub route_evidence_digest: String,
-    pub snapshot_digest: String,
-    pub decision_digest: String,
-    pub requirements_digest: String,
-    pub candidate_set_digest: String,
-    pub attempt_digest: String,
-    pub journal_entry_digest: String,
-    pub accounting_record_digest: String,
-    pub graph_id: String,
-    pub graph_attempts: u64,
-    pub graph_completed: u64,
 }
 
 impl LiteScenarioRunEvidence {
@@ -848,31 +857,60 @@ impl LiteScenarioRunEvidence {
         })
     }
 
+    /// Scenario identity, derived from the embedded descriptor.
+    pub fn scenario_id(&self) -> &str {
+        &self.descriptor.scenario_id
+    }
+
+    /// Canonical digest of the embedded descriptor.
+    pub fn scenario_digest(&self) -> Result<String> {
+        self.descriptor.scenario_digest()
+    }
+
+    /// Build and seal an envelope from the records of one completed run.
+    ///
+    /// Every cross-object binding is checked BEFORE the envelope is sealed;
+    /// on any mismatch this returns the collected discrepancies and nothing is
+    /// exported. The caller passes the run's actual records; nothing here is
+    /// caller-asserted into place.
     #[allow(clippy::too_many_arguments)]
     pub fn sealed(
-        descriptor: &ScenarioDescriptor,
-        evaluated_at: String,
-        route: RunRoutePin,
-        workspace: Option<RunWorkspacePin>,
-        evidence: RunEvidenceChain,
+        descriptor: ScenarioDescriptor,
+        resolution: &RouteResolution,
+        manifest: &NodeManifestV1,
+        outcome: &RoutedDispatchOutcome,
         attempt_accounting: AttemptAccountingV1,
         graph_accounting: GraphAccounting,
+        workspace_manifest: Option<&WorkspaceManifestV1>,
         classification: ScenarioOutcomeClass,
     ) -> Result<Self> {
+        let violations = check_cross_bindings(
+            &descriptor,
+            &resolution.evidence,
+            &resolution.snapshot,
+            manifest,
+            &outcome.attempt,
+            workspace_manifest,
+            &attempt_accounting,
+            &graph_accounting,
+        );
+        if !violations.is_empty() {
+            anyhow::bail!(
+                "scenario-run evidence refuses to seal; {} cross-object binding(s) failed: {}",
+                violations.len(),
+                violations.join("; ")
+            );
+        }
         let mut record = Self {
             schema_version: SCENARIO_RUN_SCHEMA_VERSION.to_string(),
             namespace: SCENARIO_RUN_NAMESPACE.to_string(),
-            scenario_id: descriptor.scenario_id.clone(),
-            scenario_digest: descriptor.scenario_digest()?,
-            evaluated_at,
-            repository: RunRepositoryPin {
-                fixture: descriptor.repository.fixture.clone(),
-                content_digest: descriptor.repository.content_digest.clone(),
-                revision: descriptor.repository.revision.clone(),
-            },
-            route,
-            workspace,
-            evidence,
+            evaluated_at: resolution.evidence.evaluated_at.clone(),
+            descriptor,
+            route_evidence: resolution.evidence.clone(),
+            snapshot: resolution.snapshot.clone(),
+            manifest: manifest.clone(),
+            attempt: outcome.attempt.clone(),
+            workspace_manifest: workspace_manifest.cloned(),
             attempt_accounting,
             graph_accounting,
             classification,
@@ -890,7 +928,17 @@ impl LiteScenarioRunEvidence {
         Ok(record)
     }
 
-    /// Fail-closed re-verification.
+    /// Fail-closed re-verification from the embedded bytes alone.
+    ///
+    /// Verifies: document version/namespace; the envelope's own digest; each
+    /// embedded record's own sealed digest (descriptor validation, route
+    /// evidence, snapshot incl. the SPEC 006 audit, attempt incl. its journal
+    /// entry, accounting record, workspace manifest); EVERY cross-object
+    /// binding (descriptor ↔ repository/route/harness/provider identity,
+    /// snapshot ↔ route evidence, attempt ↔ snapshot/manifest, attempt ↔
+    /// accounting, accounting ↔ graph re-derived from embedded records,
+    /// workspace manifest ↔ descriptor pins and snapshot). Nothing is
+    /// hex-checked-and-trusted: every value is re-derived or cross-bound.
     pub fn verify(&self) -> anyhow::Result<()> {
         use anyhow::ensure;
         ensure!(
@@ -913,41 +961,50 @@ impl LiteScenarioRunEvidence {
             }
             None => anyhow::bail!("scenario-run evidence is missing its contentDigest"),
         }
+        // The embedded descriptor must be coherent on its own.
+        let defects = self.descriptor.validate();
         ensure!(
-            is_hex64(&self.scenario_digest),
-            "scenarioDigest is not lower hex sha256"
+            defects.is_empty(),
+            "embedded scenario descriptor is invalid: {}",
+            defects
+                .iter()
+                .map(|defect| defect.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
         );
-        for (label, value) in [
-            ("routeEvidenceDigest", &self.evidence.route_evidence_digest),
-            ("snapshotDigest", &self.evidence.snapshot_digest),
-            ("decisionDigest", &self.evidence.decision_digest),
-            ("requirementsDigest", &self.evidence.requirements_digest),
-            ("candidateSetDigest", &self.evidence.candidate_set_digest),
-            ("attemptDigest", &self.evidence.attempt_digest),
-            ("journalEntryDigest", &self.evidence.journal_entry_digest),
-            (
-                "accountingRecordDigest",
-                &self.evidence.accounting_record_digest,
-            ),
-        ] {
-            ensure!(is_hex64(value), "{label} is not lower hex sha256");
-        }
-        if let Some(workspace) = &self.workspace {
+        // Embedded records re-verify against their own sealed digests.
+        self.route_evidence.verify()?;
+        self.snapshot.verify()?;
+        self.attempt.verify()?;
+        self.attempt_accounting.verify()?;
+        if let Some(workspace) = &self.workspace_manifest {
+            let stored = workspace.content_digest.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("workspace manifest is missing its contentDigest")
+            })?;
+            let recomputed = workspace.compute_digest();
             ensure!(
-                is_hex64(&workspace.manifest_digest),
-                "workspace manifestDigest is not lower hex sha256"
+                stored == recomputed,
+                "workspace manifest contentDigest does not verify"
             );
         }
-        // Raw records re-verify against their own sealed digests.
-        self.attempt_accounting.verify()?;
-        ensure!(
-            self.attempt_accounting.content_digest.as_deref()
-                == Some(self.evidence.accounting_record_digest.as_str()),
-            "accountingRecordDigest does not bind the embedded accounting record"
+        // Cross-object bindings from the embedded bytes alone.
+        let violations = check_cross_bindings(
+            &self.descriptor,
+            &self.route_evidence,
+            &self.snapshot,
+            &self.manifest,
+            &self.attempt,
+            self.workspace_manifest.as_ref(),
+            &self.attempt_accounting,
+            &self.graph_accounting,
         );
         ensure!(
-            self.graph_accounting.schema_version
-                == crate::workflow::accounting::ACCOUNTING_SCHEMA_VERSION,
+            violations.is_empty(),
+            "scenario-run evidence failed cross-object binding checks: {}",
+            violations.join("; ")
+        );
+        ensure!(
+            self.graph_accounting.schema_version == ACCOUNTING_SCHEMA_VERSION,
             "embedded graph accounting has an unsupported schema version"
         );
         // The external format stays unsupported. Fail closed otherwise.
@@ -961,6 +1018,367 @@ impl LiteScenarioRunEvidence {
         );
         Ok(())
     }
+}
+
+fn workspace_adapter_family(adapter: crate::workflow::workspace::AdapterKind) -> &'static str {
+    match adapter {
+        crate::workflow::workspace::AdapterKind::ExistingReadOnly => "existing-read-only",
+        crate::workflow::workspace::AdapterKind::GitWorktree => "git-worktree",
+    }
+}
+
+fn workspace_mode_name(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::ReadOnly => "read-only",
+        WorkspaceMode::Writable => "writable",
+    }
+}
+
+/// Mode spelling used by the route snapshot's WorkspaceEvidenceV1 (SPEC 006
+/// mapping), which differs from the workspace manifest's own spelling.
+fn snapshot_workspace_mode_name(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::ReadOnly => "read",
+        WorkspaceMode::Writable => "write",
+    }
+}
+
+/// Every cross-object binding required for the envelope to be trustworthy.
+/// Returns the full list of violations (empty = bound). Shared by `sealed`
+/// (refuses to export on violations) and `verify` (refuses to re-admit).
+#[allow(clippy::too_many_arguments)]
+fn check_cross_bindings(
+    descriptor: &ScenarioDescriptor,
+    route_evidence: &RouteEvidenceV1,
+    snapshot: &EffectiveExecutionSnapshotV1,
+    manifest: &NodeManifestV1,
+    attempt: &RoutedAttemptV1,
+    workspace_manifest: Option<&WorkspaceManifestV1>,
+    accounting: &AttemptAccountingV1,
+    graph: &GraphAccounting,
+) -> Vec<String> {
+    use crate::workflow::route_resolution::RouteProfile;
+    let mut violations: Vec<String> = Vec::new();
+    let mut fail = |message: String| violations.push(message);
+
+    // ---- Scenario descriptor <-> route evidence -----------------------------
+    if route_evidence.route_set_id != descriptor.route.route_set_id {
+        fail(format!(
+            "routeEvidence.routeSetId {:?} != descriptor.route.routeSetId {:?}",
+            route_evidence.route_set_id, descriptor.route.route_set_id
+        ));
+    }
+    if route_evidence.route_set_version != descriptor.route.route_set_version {
+        fail("routeEvidence.routeSetVersion != descriptor.route.routeSetVersion".to_string());
+    }
+    if route_evidence.evaluated_at != descriptor.route.evaluated_at {
+        fail("routeEvidence.evaluatedAt != descriptor.route.evaluatedAt".to_string());
+    }
+    if route_evidence.selected.candidate_id != descriptor.route.candidate_id {
+        fail("routeEvidence.selected.candidateId != descriptor.route.candidateId".to_string());
+    }
+    if route_evidence.selected.provider_identity != descriptor.route.provider_identity {
+        fail(
+            "routeEvidence.selected.providerIdentity != descriptor.route.providerIdentity"
+                .to_string(),
+        );
+    }
+    if route_evidence.selected.model.as_deref() != Some(descriptor.route.model.as_str()) {
+        fail("routeEvidence.selected.model != descriptor.route.model".to_string());
+    }
+    if route_evidence.selected.harness_id != descriptor.harness.id {
+        fail("routeEvidence.selected.harnessId != descriptor.harness.id".to_string());
+    }
+    if route_evidence.selected.harness_revision != descriptor.harness.revision {
+        fail("routeEvidence.selected.harnessRevision != descriptor.harness.revision".to_string());
+    }
+    if route_evidence.selected.priority != descriptor.route.priority {
+        fail("routeEvidence.selected.priority != descriptor.route.priority".to_string());
+    }
+    if route_evidence.pinned_candidate_id.as_deref()
+        != Some(descriptor.route.pinned_candidate_id.as_str())
+    {
+        fail("routeEvidence.pinnedCandidateId != descriptor.route.pinnedCandidateId".to_string());
+    }
+    if descriptor.route.pinned_candidate_id != descriptor.route.candidate_id {
+        fail("descriptor.route.pinnedCandidateId != descriptor.route.candidateId".to_string());
+    }
+    if route_evidence.profile != RouteProfile::Standard || descriptor.route.profile != "standard" {
+        fail("profile must be \"standard\" in the evidence and the descriptor pin".to_string());
+    }
+
+    // ---- Route evidence <-> snapshot ----------------------------------------
+    if snapshot.route_set_id != route_evidence.route_set_id
+        || snapshot.route_set_version != route_evidence.route_set_version
+        || snapshot.evaluated_at != route_evidence.evaluated_at
+    {
+        fail("snapshot route set/version/instant does not match the route evidence".to_string());
+    }
+    if snapshot.selected != route_evidence.selected {
+        fail("snapshot.selected != routeEvidence.selected".to_string());
+    }
+    if snapshot.decision_digest != route_evidence.decision_digest {
+        fail("snapshot.decisionDigest != routeEvidence.decisionDigest".to_string());
+    }
+    if snapshot.requirements_digest != route_evidence.requirements_digest {
+        fail("snapshot.requirementsDigest != routeEvidence.requirementsDigest".to_string());
+    }
+    if snapshot.capability_set_digest != route_evidence.capability_set_digest {
+        fail("snapshot.capabilitySetDigest != routeEvidence.capabilitySetDigest".to_string());
+    }
+    if snapshot.authority_declared_digest != route_evidence.authority_declared_digest {
+        fail(
+            "snapshot.authorityDeclaredDigest != routeEvidence.authorityDeclaredDigest".to_string(),
+        );
+    }
+    if snapshot.authority_effective_digest != route_evidence.authority_effective_digest {
+        fail(
+            "snapshot.authorityEffectiveDigest != routeEvidence.authorityEffectiveDigest"
+                .to_string(),
+        );
+    }
+    if route_evidence.snapshot_digest != snapshot.content_digest.clone().unwrap_or_default() {
+        fail("routeEvidence.snapshotDigest does not bind the embedded snapshot".to_string());
+    }
+
+    // ---- Attempt <-> snapshot / route evidence / manifest --------------------
+    if attempt.snapshot_digest != snapshot.content_digest.clone().unwrap_or_default() {
+        fail("attempt.snapshotDigest does not bind the embedded snapshot".to_string());
+    }
+    if Some(attempt.route_evidence_digest.as_str()) != route_evidence.content_digest.as_deref() {
+        fail("attempt.routeEvidenceDigest does not bind the embedded route evidence".to_string());
+    }
+    if attempt.decision_digest != route_evidence.decision_digest {
+        fail("attempt.decisionDigest != routeEvidence.decisionDigest".to_string());
+    }
+    match serde_json::to_value(manifest).map_err(|error| error.to_string()) {
+        Ok(manifest_value) => match soma::try_canonical_digest(&manifest_value) {
+            Ok(manifest_digest) => {
+                if attempt.manifest_digest != manifest_digest {
+                    fail("attempt.manifestDigest does not bind the embedded manifest".to_string());
+                }
+            }
+            Err(error) => fail(format!("manifest canonical digest failed: {error}")),
+        },
+        Err(error) => fail(format!("manifest does not serialize: {error}")),
+    }
+    if attempt.harness_id != snapshot.selected.harness_id {
+        fail("attempt.harnessId != snapshot.selected.harnessId".to_string());
+    }
+    if attempt.provider_identity != snapshot.selected.provider_identity {
+        fail("attempt.providerIdentity != snapshot.selected.providerIdentity".to_string());
+    }
+    if attempt.model != snapshot.selected.model {
+        fail("attempt.model != snapshot.selected.model".to_string());
+    }
+
+    // ---- Workspace manifest <-> descriptor / snapshot / attempt ---------------
+    match (workspace_manifest, &snapshot.workspace) {
+        (Some(workspace), Some(ws_evidence)) => {
+            let recomputed_manifest = workspace.compute_digest();
+            if workspace.content_digest.as_deref() != Some(recomputed_manifest.as_str()) {
+                fail("workspace manifest contentDigest does not verify".to_string());
+            }
+            let manifest_family = workspace_adapter_family(workspace.adapter);
+            let pin_family = match descriptor.workspace.adapter {
+                ScenarioWorkspaceAdapter::ExistingReadOnly => "existing-read-only",
+                ScenarioWorkspaceAdapter::GitWorktree => "git-worktree",
+            };
+            if manifest_family != pin_family {
+                fail("workspace manifest adapter does not match the descriptor pin".to_string());
+            }
+            if workspace.adapter_revision != descriptor.workspace.adapter_revision {
+                fail(
+                    "workspace manifest adapterRevision != descriptor.workspace.adapterRevision"
+                        .to_string(),
+                );
+            }
+            let manifest_mode = workspace_mode_name(workspace.mode);
+            let pin_mode = match descriptor.workspace.mode {
+                ScenarioWorkspaceMode::ReadOnly => "read-only",
+                ScenarioWorkspaceMode::Writable => "writable",
+            };
+            if manifest_mode != pin_mode {
+                fail("workspace manifest mode does not match the descriptor pin".to_string());
+            }
+            if workspace.base_revision != descriptor.repository.revision {
+                fail(
+                    "workspace manifest baseRevision != descriptor.repository.revision".to_string(),
+                );
+            }
+            if workspace.writable_scopes != descriptor.workspace.writable_scopes {
+                fail(
+                    "workspace manifest writableScopes != descriptor.workspace.writableScopes"
+                        .to_string(),
+                );
+            }
+            if workspace.workspace_id != format!("scenario-workspace-{}", descriptor.scenario_id) {
+                fail("workspace manifest workspaceId does not bind the scenario id".to_string());
+            }
+            if ws_evidence.workspace_id != workspace.workspace_id {
+                fail(
+                    "snapshot workspace evidence workspaceId != workspace manifest workspaceId"
+                        .to_string(),
+                );
+            }
+            if ws_evidence.adapter != workspace_adapter_family(workspace.adapter) {
+                fail(
+                    "snapshot workspace evidence adapter != workspace manifest adapter".to_string(),
+                );
+            }
+            if ws_evidence.adapter_revision != workspace.adapter_revision {
+                fail(
+                    "snapshot workspace evidence adapterRevision != workspace manifest adapterRevision"
+                        .to_string(),
+                );
+            }
+            if ws_evidence.mode != snapshot_workspace_mode_name(workspace.mode) {
+                fail("snapshot workspace evidence mode != workspace manifest mode".to_string());
+            }
+            if ws_evidence.manifest_digest != workspace.compute_digest() {
+                fail(
+                    "snapshot workspace evidence manifestDigest != workspace manifest digest"
+                        .to_string(),
+                );
+            }
+            if attempt.workspace_manifest_digest.as_deref()
+                != Some(ws_evidence.manifest_digest.as_str())
+            {
+                fail(
+                    "attempt.workspaceManifestDigest does not bind the snapshot workspace evidence"
+                        .to_string(),
+                );
+            }
+        }
+        (None, None) => {
+            if attempt.workspace_manifest_digest.is_some() {
+                fail("attempt binds a workspace manifest but none is embedded".to_string());
+            }
+        }
+        _ => fail(
+            "workspace manifest presence does not match the snapshot workspace binding".to_string(),
+        ),
+    }
+
+    // ---- Accounting <-> attempt / manifest / descriptor / graph --------------
+    if accounting.outcome != crate::workflow::accounting::AttemptOutcomeAccounting::Completed {
+        fail(
+            "accounting outcome is not Completed; this export only seals completed runs"
+                .to_string(),
+        );
+    } else {
+        let attempt_digest = attempt.content_digest.clone().unwrap_or_default();
+        if accounting.attempt_digest.as_deref() != Some(attempt_digest.as_str()) {
+            fail("accounting.attemptDigest does not bind the embedded attempt".to_string());
+        }
+        if attempt.outcome_kind != "completed" {
+            fail(
+                "completed accounting outcome but the attempt outcomeKind is not \"completed\""
+                    .to_string(),
+            );
+        }
+    }
+    if accounting.journal_digest.as_deref() != Some(attempt.journal_entry.entry_digest.as_str()) {
+        fail("accounting.journalDigest does not bind the embedded journal entry".to_string());
+    }
+    if accounting.node_id != manifest.node_id {
+        fail("accounting.nodeId != manifest.nodeId".to_string());
+    }
+    if accounting.idempotency_key != attempt.idempotency_key
+        || attempt.idempotency_key != attempt.journal_entry.identity_key
+    {
+        fail("accounting/attempt/journal idempotency keys do not bind together".to_string());
+    }
+    if accounting.harness_id != attempt.harness_id {
+        fail("accounting.harnessId != attempt.harnessId".to_string());
+    }
+    if accounting.harness_revision != descriptor.harness.revision {
+        fail("accounting.harnessRevision != descriptor.harness.revision".to_string());
+    }
+    if accounting.provider_identity != attempt.provider_identity {
+        fail("accounting.providerIdentity != attempt.providerIdentity".to_string());
+    }
+    if accounting.model != attempt.model {
+        fail("accounting.model != attempt.model".to_string());
+    }
+    if accounting.route_set_id != route_evidence.route_set_id {
+        fail("accounting.routeSetId != routeEvidence.routeSetId".to_string());
+    }
+
+    // ---- Graph <-> accounting (re-derived, never trusted) ---------------------
+    if graph.schema_version != ACCOUNTING_SCHEMA_VERSION {
+        fail("graph accounting schema version is not supported".to_string());
+    }
+    if graph.graph_id != accounting.graph_id {
+        fail("graph.graphId != accounting.graphId".to_string());
+    }
+    let mut ledger = crate::workflow::accounting::AccountingLedger::new();
+    match ledger.record(accounting.clone()) {
+        Ok(_) => match ledger.aggregate_graph(&accounting.graph_id) {
+            Ok(rebuilt) => {
+                if rebuilt.attempts != graph.attempts {
+                    fail(format!(
+                        "graph.attempts {} != re-derived {}",
+                        graph.attempts, rebuilt.attempts
+                    ));
+                }
+                if rebuilt.completed != graph.completed {
+                    fail(format!(
+                        "graph.completed {} != re-derived {}",
+                        graph.completed, rebuilt.completed
+                    ));
+                }
+                if rebuilt.failed != graph.failed {
+                    fail(format!(
+                        "graph.failed {} != re-derived {}",
+                        graph.failed, rebuilt.failed
+                    ));
+                }
+                if rebuilt.cancelled != graph.cancelled {
+                    fail(format!(
+                        "graph.cancelled {} != re-derived {}",
+                        graph.cancelled, rebuilt.cancelled
+                    ));
+                }
+                if rebuilt.usage != graph.usage {
+                    fail(
+                        "graph.usage != re-derived usage from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+                if rebuilt.cost != graph.cost {
+                    fail(
+                        "graph.cost != re-derived cost from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+                if rebuilt.latency_ms_total != graph.latency_ms_total
+                    || rebuilt.latency_ms_max != graph.latency_ms_max
+                {
+                    fail(
+                        "graph latency aggregates != re-derived from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+                let mut rebuilt_nodes = rebuilt.nodes.clone();
+                let mut graph_nodes = graph.nodes.clone();
+                rebuilt_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+                graph_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+                if rebuilt_nodes != graph_nodes {
+                    fail(
+                        "graph nodes != re-derived node aggregates from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(error) => fail(format!("graph aggregate cannot be re-derived: {error}")),
+        },
+        Err(error) => fail(format!(
+            "embedded accounting record is rejected by the ledger: {error}"
+        )),
+    }
+
+    violations
 }
 
 /// Classify a completed run into the outcome lattice. The governed boundary

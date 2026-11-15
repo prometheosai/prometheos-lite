@@ -51,12 +51,24 @@ benchmark result.
   fixture. No network beyond `127.0.0.1`, no paid provider, no fixture
   toolchain execution, no unattended authority.
 - **Lite-internal run envelope** — `LiteScenarioRunEvidence` (namespace
-  `lite.evidence.scenario-run`, `schemaVersion: "1.0.0"`) carries: scenario id
-  and digest, repository/route/workspace pins, the full digest chain over the
-  native records (route evidence, snapshot, decision, requirements, candidate
-  set, attempt, journal entry, accounting record), the raw sealed accounting
-  record and graph aggregate, the classification, and an explicitly typed
-  `externalEvaluationFormat: { status: "unsupported" }` stub.
+  `lite.evidence.scenario-run`, `schemaVersion: "1.0.0"`) **embeds every record
+  it references** — the validated scenario descriptor, the sealed route
+  evidence, the sealed effective execution snapshot, the node manifest, the
+  sealed routed attempt, the execution workspace manifest, the raw sealed
+  accounting record and the graph aggregate — and an explicitly typed
+  `externalEvaluationFormat: { status: "unsupported" }` stub. `verify()`
+  re-derives the envelope's own digest, then re-verifies each embedded record
+  against its own sealed digest, then re-checks EVERY cross-object binding
+  from the embedded bytes alone: descriptor ↔ route evidence ↔ snapshot ↔
+  manifest ↔ attempt ↔ accounting ↔ workspace manifest (identity, digest and
+  field level), and the graph aggregate by RE-DERIVING it from the embedded
+  accounting records and requiring equality. A forged envelope that splices
+  plausible 64-hex digests together, or re-seals a record whose identity
+  disagrees with the rest of the chain, fails verification. What the envelope
+  does NOT prove is enumerated on the type itself (fixture bytes, measured
+  latency provenance, loopback-provider usage truthfulness). Nothing is
+  labelled verified that is not re-derived; no cross-object relation is
+  checked by hex64 shape alone.
 
 ## Failure classification
 
