@@ -1,4 +1,5 @@
 tests/projection_golden/** -text
+tests/fixtures/scenarios/** -text
 
 # Digest-locked vendored SOMA bundle artifacts and Slice 1B projection
 # goldens: byte-stable on every platform (-text disables EOL conversion).

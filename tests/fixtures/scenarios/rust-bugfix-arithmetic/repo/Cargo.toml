@@ -1,0 +1,6 @@
+[package]
+name = "fixture-buggy-sum"
+version = "0.1.0"
+edition = "2021"
+description = "Pinned evaluation fixture for issue #136 Slice A. Intentionally broken; never published."
+license = "MIT"

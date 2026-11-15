@@ -1,5 +1,26 @@
 ## Unreleased
 
+- #136 E7/I01 Slice A - governed-workflow evaluation fixtures. A versioned
+  Lite-internal scenario descriptor (`lite.fixtures.scenario`,
+  `src/workflow/scenario.rs`) pins one Rust and one Python fixture
+  (`tests/fixtures/scenarios/*/`, content-digest pinned, byte-stable via
+  `-text` gitattributes): task statement, repository content digest and
+  revision, expected observable outcome, evidence artifacts, policy profile,
+  authority, workspace configuration (`existing-read-only`, adapter revision
+  `lite.workspace.adapter.v1`), harness identity + revision, route identity with
+  injected evaluation/dispatch/trust instants, and the controlled/variable
+  dimension split. A deterministic local runner
+  (`tests/scenario_fixtures.rs`) executes each scenario through the real
+  governed route-dispatch boundary with a loopback model fixture and exports a
+  Lite-internal evidence envelope (`lite.evidence.scenario-run`) carrying the
+  verified digest chain, the sealed accounting record, the graph aggregate and
+  a raw-records-only provenance block. Failure classification separates
+  `setup-error` / `invalid-task` / `infrastructure-error` from
+  `governed-product-outcome`; pre-effect refusals are setup errors and never a
+  product or model signal. The exported envelope types its external-format
+  stub `unsupported`; the Foundry external evaluation format does not exist,
+  and no score, comparison, certification or Foundry consumption is claimed.
+
 - #154 E6/I07 Slice A — the governed execution-harness seam and its
   conformance foundation. `lite.harness.v1`
   (`src/workflow/execution_harness.rs`) defines a sealed,

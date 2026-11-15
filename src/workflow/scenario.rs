@@ -1,0 +1,1416 @@
+//! Lite-owned governed-workflow evaluation fixtures (issue #136, Slice A).
+//!
+//! This module owns the **versioned Lite-internal scenario descriptor** and the
+//! **Lite-internal evidence envelope** used by the repeatable fixture scenarios
+//! under `tests/fixtures/scenarios/`. It is deliberately **not** a Foundry
+//! contract:
+//!
+//! - Lite owns executable product scenarios, fixture generation and **raw
+//!   evidence**. Foundry owns the external benchmark runner, matrix
+//!   aggregation, metrics, comparisons, certification and the public-claim
+//!   policy. Nothing in this module is labelled as, or implied to be, a
+//!   Foundry artifact, and no benchmark score, pass rate, comparison or
+//!   certification is ever produced here.
+//! - The [`ExternalEvaluationFormat`] stub on every exported record is typed
+//!   `unsupported` on purpose. The Foundry external evaluation format does not
+//!   exist yet; until it is published and pinned by Foundry, Lite exports raw
+//!   JSON records only. That keeps local fixture development unblocked while
+//!   preventing any false claim of Foundry integration.
+//!
+//! Scope of Slice A: ONE complete Rust fixture scenario and ONE Python fixture
+//! scenario, executed deterministically through the existing governed
+//! route-dispatch boundary with fixture-only local effects (a loopback model
+//! fixture; no network beyond loopback, no paid provider, no fixture
+//! toolchain execution). Broken or ambiguous tasks are **classified**, never
+//! counted as product/model failure:
+//!
+//! - [`ScenarioOutcomeClass::SetupError`] — deterministic setup defect:
+//!   malformed descriptor, unsupported version/language, fixture
+//!   content-digest drift, platform path leakage, missing/ambiguous pins,
+//!   pre-effect route/workspace/authority refusal. Scenario defect; tells us
+//!   nothing about the model or the product.
+//! - [`ScenarioOutcomeClass::InvalidTask`] — the task is broken or
+//!   self-contradictory under the pinned authority/workspace (for example a
+//!   task statement with no actionable content, or authority pins that
+//!   contradict each other). Classified, never counted as model failure.
+//! - [`ScenarioOutcomeClass::InfrastructureError`] — the harness/runtime
+//!   pipeline itself failed after a governed dispatch (for example accounting
+//!   failed to seal). A tooling defect, not a product outcome.
+//! - [`ScenarioOutcomeClass::GovernedProductOutcome`] — the governed boundary
+//!   ran and produced (or refused without effect, then a sealed attempt)
+//!   evidence. A failure inside the governed effect is still a product
+//!   outcome and is accounted as such; it is not a setup error.
+//!
+//! Verification boundary of the run envelope: every record the envelope
+//! embeds is re-verified from the embedded bytes alone, and every
+//! cross-object binding between them is re-checked (descriptor ↔ route
+//! evidence ↔ snapshot ↔ manifest ↔ attempt ↔ accounting ↔ graph, plus the
+//! execution workspace manifest). Nothing is hex-checked-and-trusted: any
+//! digest present in the envelope is re-derived from the embedded bytes.
+//! What the envelope does NOT prove is enumerated on
+//! [`LiteScenarioRunEvidence`] itself (fixture bytes, latency provenance,
+//! provider-reported usage truthfulness); the Foundry external format stays
+//! UNSUPPORTED.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use crate::workflow::accounting::{AttemptAccountingV1, GraphAccounting};
+use crate::workflow::route_dispatch::RoutedDispatchFailure;
+use crate::workflow::route_resolution::is_hex64;
+use crate::workflow::soma;
+
+/// Schema version of the scenario descriptor document itself.
+pub const SCENARIO_SCHEMA_VERSION: &str = "1.0.0";
+/// Namespace every scenario descriptor must declare. Lite-internal.
+pub const SCENARIO_NAMESPACE: &str = "lite.fixtures.scenario";
+/// Schema version of the Lite-internal scenario-run evidence envelope.
+pub const SCENARIO_RUN_SCHEMA_VERSION: &str = "1.0.0";
+/// Namespace of the Lite-internal scenario-run evidence envelope. Lite-internal;
+/// explicitly NOT a Foundry namespace.
+pub const SCENARIO_RUN_NAMESPACE: &str = "lite.evidence.scenario-run";
+/// Identifier of the local fixture runner that executes scenarios.
+pub const SCENARIO_RUNNER_ID: &str = "lite-scenario-fixture-runner";
+/// Revision of the local fixture runner. Bump on any behavioural change.
+pub const SCENARIO_RUNNER_REVISION: &str = "1";
+
+/// Expected-evidence artifact names a descriptor may pin. Anything else is a
+/// setup defect (a pin that cannot be verified is not a pin).
+pub const KNOWN_EVIDENCE_ARTIFACTS: &[&str] = &[
+    "route-evidence",
+    "snapshot",
+    "attempt",
+    "journal-entry",
+    "accounting-record",
+    "graph-accounting",
+];
+
+/// Dimensions a descriptor may declare as controlled or variable. Unknown
+/// dimension names are a setup defect; the controlled/variable split is what
+/// lets Foundry later attribute deltas to model, harness, workspace, policy,
+/// context planning, provider or governance.
+pub const ALLOWED_DIMENSIONS: &[&str] = &[
+    "repository-content",
+    "task-statement",
+    "policy-profile",
+    "authority",
+    "workspace",
+    "harness",
+    "harness-revision",
+    "route",
+    "provider",
+    "model",
+    "evaluation-instant",
+    "context-rules",
+    "expected-evidence",
+];
+
+// ---------------------------------------------------------------------------
+// Classification
+// ---------------------------------------------------------------------------
+
+/// How a scenario run (or failure to run) is classified. Deterministic; never
+/// a benchmark signal by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioOutcomeClass {
+    /// Deterministic setup defect: descriptor/fixture/pin/IO problem, or a
+    /// pre-effect refusal. Not a product or model signal.
+    SetupError,
+    /// The task itself is broken or self-contradictory under the pinned
+    /// authority/workspace. Not a product or model signal.
+    InvalidTask,
+    /// The harness/runtime pipeline failed after a governed dispatch.
+    /// A tooling defect, not a product outcome.
+    InfrastructureError,
+    /// The governed boundary ran; the outcome is a product outcome
+    /// (sealed attempt + accounting), whether it succeeded or failed.
+    GovernedProductOutcome,
+}
+
+impl ScenarioOutcomeClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScenarioOutcomeClass::SetupError => "setup-error",
+            ScenarioOutcomeClass::InvalidTask => "invalid-task",
+            ScenarioOutcomeClass::InfrastructureError => "infrastructure-error",
+            ScenarioOutcomeClass::GovernedProductOutcome => "governed-product-outcome",
+        }
+    }
+}
+
+/// One descriptor defect. `class` is either `SetupError` or `InvalidTask` —
+/// never a product outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioDefect {
+    pub class: ScenarioOutcomeClass,
+    pub message: String,
+}
+
+impl ScenarioDefect {
+    pub fn setup(message: impl Into<String>) -> Self {
+        Self {
+            class: ScenarioOutcomeClass::SetupError,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_task(message: impl Into<String>) -> Self {
+        Self {
+            class: ScenarioOutcomeClass::InvalidTask,
+            message: message.into(),
+        }
+    }
+}
+
+/// Parse/validation failure of a scenario descriptor. Carries every defect
+/// found so callers can classify setup vs invalid-task without re-parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioDescriptorError(pub Vec<ScenarioDefect>);
+
+impl fmt::Display for ScenarioDescriptorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "scenario descriptor rejected: ")?;
+        for (index, defect) in self.0.iter().enumerate() {
+            if index > 0 {
+                write!(f, "; ")?;
+            }
+            write!(f, "{}: {}", defect.class.as_str(), defect.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ScenarioDescriptorError {}
+
+impl ScenarioDescriptorError {
+    /// Worst-case classification: `InvalidTask` if any defect is an
+    /// invalid-task defect, otherwise `SetupError`.
+    pub fn class(&self) -> ScenarioOutcomeClass {
+        if self
+            .0
+            .iter()
+            .any(|d| d.class == ScenarioOutcomeClass::InvalidTask)
+        {
+            ScenarioOutcomeClass::InvalidTask
+        } else {
+            ScenarioOutcomeClass::SetupError
+        }
+    }
+}
+
+/// Classify a pre-effect refusal (route resolution or dispatch refused before
+/// any effect ran). A broken scenario/environment is never a model failure.
+pub fn classify_pre_effect_refusal() -> ScenarioOutcomeClass {
+    ScenarioOutcomeClass::SetupError
+}
+
+/// Classify the result of one governed dispatch.
+pub fn classify_dispatch(
+    result: &Result<crate::workflow::route_dispatch::RoutedDispatchOutcome, RoutedDispatchFailure>,
+) -> ScenarioOutcomeClass {
+    match result {
+        Ok(_) => ScenarioOutcomeClass::GovernedProductOutcome,
+        Err(RoutedDispatchFailure::Refused(_)) => classify_pre_effect_refusal(),
+        // The effect ran and failed in a typed, sealed way. That is a governed
+        // product outcome, not a setup error.
+        Err(RoutedDispatchFailure::ExecutionFailed(_)) => {
+            ScenarioOutcomeClass::GovernedProductOutcome
+        }
+    }
+}
+
+/// Classify an accounting failure after a dispatch. The dispatch happened;
+/// the accounting pipeline (local, deterministic) is what failed.
+pub fn classify_accounting_failure() -> ScenarioOutcomeClass {
+    ScenarioOutcomeClass::InfrastructureError
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor document
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioKind {
+    Bugfix,
+    Feature,
+    Test,
+    Documentation,
+    Refactor,
+    CheckpointContinuation,
+}
+
+/// Languages Slice A supports. Anything else fails closed at validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioLanguage {
+    Rust,
+    Python,
+}
+
+/// The expected observable outcome class. Slice A supports exactly one:
+/// the governed path records a sealed, accounted attempt. No benchmark
+/// outcome vocabulary exists here on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExpectedOutcome {
+    AttemptRecordedAndAccounted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioWorkspaceAdapter {
+    ExistingReadOnly,
+    GitWorktree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioWorkspaceMode {
+    ReadOnly,
+    Writable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskPin {
+    /// The task statement exactly as the subject will see it.
+    pub statement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryPin {
+    /// Fixture path relative to the repository root, forward slashes only.
+    /// Never an absolute path, never a user-machine path.
+    pub fixture: String,
+    /// sha256 over the pinned fixture content (see [`fixture_content_digest`]).
+    pub content_digest: String,
+    /// Logical revision of the fixture content (not a git commit; the fixture
+    /// is content-pinned, not history-pinned).
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpectedPin {
+    pub outcome: ExpectedOutcome,
+    /// Human-readable statement of the expected observable outcome.
+    pub observable_outcome: String,
+    /// Evidence artifacts the run must seal. Subset of
+    /// [`KNOWN_EVIDENCE_ARTIFACTS`]; unknown names are a setup defect.
+    pub evidence_artifacts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequirementsPin {
+    pub degradation_permitted: bool,
+    pub forbid_substitution: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PolicyPin {
+    /// Route profile name; must be `standard` in Slice A.
+    pub profile: String,
+    pub execution_class: String,
+    pub mutation: String,
+    pub readable_scopes: Vec<String>,
+    pub writable_scopes: Vec<String>,
+    pub network_policy_default: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePin {
+    pub adapter: ScenarioWorkspaceAdapter,
+    pub adapter_revision: String,
+    pub mode: ScenarioWorkspaceMode,
+    pub writable_scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HarnessPin {
+    pub id: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutePin {
+    pub route_set_id: String,
+    pub route_set_version: String,
+    pub candidate_id: String,
+    pub provider_identity: String,
+    pub provider_locality: String,
+    pub model: String,
+    pub priority: u32,
+    pub profile: String,
+    /// Injected evaluation instant (RFC 3339 UTC-Z). Pinned, never wall-clock.
+    pub evaluated_at: String,
+    /// Injected dispatch instant (RFC 3339 UTC-Z). Pinned, never wall-clock.
+    pub dispatch_at: String,
+    pub trust_verified_at: String,
+    pub trust_ttl_seconds: u64,
+    /// The pin is mandatory: an unpinned route set is ambiguous by definition.
+    pub pinned_candidate_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DimensionsPin {
+    /// Dimensions held constant by this scenario.
+    pub controlled: Vec<String>,
+    /// Dimensions this scenario deliberately varies. Empty in Slice A:
+    /// every committed fixture is fully controlled.
+    pub variable: Vec<String>,
+}
+
+/// The versioned Lite-internal scenario descriptor. Parse with
+/// [`ScenarioDescriptor::parse_json`]; never construct and skip validation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioDescriptor {
+    pub schema_version: String,
+    pub namespace: String,
+    pub scenario_id: String,
+    /// Descriptor document version (independent of schema_version).
+    pub version: String,
+    pub title: String,
+    pub kind: ScenarioKind,
+    pub language: ScenarioLanguage,
+    pub task: TaskPin,
+    pub repository: RepositoryPin,
+    pub expected: ExpectedPin,
+    pub requirements: RequirementsPin,
+    pub policy: PolicyPin,
+    pub workspace: WorkspacePin,
+    pub harness: HarnessPin,
+    pub route: RoutePin,
+    pub dimensions: DimensionsPin,
+}
+
+impl ScenarioDescriptor {
+    /// Fail-closed parse + validation. Every defect found is returned.
+    pub fn parse_json(text: &str) -> Result<Self, ScenarioDescriptorError> {
+        let descriptor: Self = match serde_json::from_str(text) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                return Err(ScenarioDescriptorError(vec![ScenarioDefect::setup(
+                    format!("descriptor is not a valid {SCENARIO_NAMESPACE} document: {error}"),
+                )]));
+            }
+        };
+        let defects = descriptor.validate();
+        if !defects.is_empty() {
+            return Err(ScenarioDescriptorError(defects));
+        }
+        Ok(descriptor)
+    }
+
+    /// Collect all defects. Empty means the descriptor is valid.
+    pub fn validate(&self) -> Vec<ScenarioDefect> {
+        let mut defects = Vec::new();
+
+        if self.schema_version != SCENARIO_SCHEMA_VERSION {
+            defects.push(ScenarioDefect::setup(format!(
+                "unsupported schemaVersion {:?} (supported {SCENARIO_SCHEMA_VERSION})",
+                self.schema_version
+            )));
+        }
+        if self.namespace != SCENARIO_NAMESPACE {
+            defects.push(ScenarioDefect::setup(format!(
+                "namespace {:?} is not {SCENARIO_NAMESPACE:?}",
+                self.namespace
+            )));
+        }
+        if self.scenario_id.trim().is_empty() {
+            defects.push(ScenarioDefect::setup(
+                "scenarioId must be non-empty".to_string(),
+            ));
+        }
+        if self.version.trim().is_empty() {
+            defects.push(ScenarioDefect::setup(
+                "version must be non-empty".to_string(),
+            ));
+        }
+        if self.title.trim().is_empty() {
+            defects.push(ScenarioDefect::setup("title must be non-empty".to_string()));
+        }
+
+        // Task pins: an empty or whitespace task statement is an ambiguous
+        // task, not a product signal.
+        if self.task.statement.trim().len() < 12 {
+            defects.push(ScenarioDefect::invalid_task(
+                "task.statement is empty or too short to be actionable",
+            ));
+        }
+
+        // Repository pins.
+        if let Err(message) = check_fixture_path(&self.repository.fixture) {
+            defects.push(ScenarioDefect::setup(message));
+        }
+        if !is_hex64(&self.repository.content_digest) {
+            defects.push(ScenarioDefect::setup(
+                "repository.contentDigest must be a lower hex sha256 digest".to_string(),
+            ));
+        }
+        if self.repository.revision.trim().is_empty() {
+            defects.push(ScenarioDefect::setup(
+                "repository.revision must be non-empty".to_string(),
+            ));
+        }
+
+        // Expected outcome pins.
+        if self.expected.observable_outcome.trim().is_empty() {
+            defects.push(ScenarioDefect::setup(
+                "expected.observableOutcome must state the expected outcome".to_string(),
+            ));
+        }
+        if self.expected.evidence_artifacts.is_empty() {
+            defects.push(ScenarioDefect::setup(
+                "expected.evidenceArtifacts must pin at least one artifact".to_string(),
+            ));
+        }
+        for artifact in &self.expected.evidence_artifacts {
+            if !KNOWN_EVIDENCE_ARTIFACTS.contains(&artifact.as_str()) {
+                defects.push(ScenarioDefect::setup(format!(
+                    "expected.evidenceArtifacts contains unknown artifact {artifact:?}"
+                )));
+            }
+        }
+
+        // Authority coherence: a read-only workspace cannot hand out writable
+        // authority; pins that contradict each other describe no executable
+        // task.
+        if self.workspace.mode == ScenarioWorkspaceMode::ReadOnly
+            && (!self.workspace.writable_scopes.is_empty()
+                || !self.policy.writable_scopes.is_empty())
+        {
+            defects.push(ScenarioDefect::invalid_task(
+                "read-only workspace pin contradicts declared writable scopes".to_string(),
+            ));
+        }
+        if self.workspace.mode == ScenarioWorkspaceMode::Writable
+            && self.workspace.writable_scopes.is_empty()
+        {
+            defects.push(ScenarioDefect::invalid_task(
+                "writable workspace mode requires at least one writable scope".to_string(),
+            ));
+        }
+
+        // Policy / requirements pins.
+        if self.policy.profile != "standard" {
+            defects.push(ScenarioDefect::setup(format!(
+                "policy.profile {:?} is not \"standard\"",
+                self.policy.profile
+            )));
+        }
+        if self.policy.execution_class != "deterministic" || self.policy.mutation != "none" {
+            defects.push(ScenarioDefect::setup(
+                "policy must pin executionClass \"deterministic\" and mutation \"none\""
+                    .to_string(),
+            ));
+        }
+        if self.requirements.degradation_permitted || !self.requirements.forbid_substitution {
+            defects.push(ScenarioDefect::setup(
+                "requirements must pin degradationPermitted=false and forbidSubstitution=true"
+                    .to_string(),
+            ));
+        }
+
+        // Harness pins.
+        if self.harness.id.trim().is_empty() || self.harness.revision.trim().is_empty() {
+            defects.push(ScenarioDefect::setup(
+                "harness.id and harness.revision must be non-empty".to_string(),
+            ));
+        }
+
+        // Route pins: full pin or nothing. An unpinned candidate is ambiguous.
+        if self.route.pinned_candidate_id != self.route.candidate_id {
+            defects.push(ScenarioDefect::setup(
+                "route.pinnedCandidateId must equal route.candidateId (route sets are pinned)"
+                    .to_string(),
+            ));
+        }
+        if self.route.profile != self.policy.profile {
+            defects.push(ScenarioDefect::invalid_task(
+                "route.profile and policy.profile disagree".to_string(),
+            ));
+        }
+        for (label, instant) in [
+            ("route.evaluatedAt", &self.route.evaluated_at),
+            ("route.dispatchAt", &self.route.dispatch_at),
+            ("route.trustVerifiedAt", &self.route.trust_verified_at),
+        ] {
+            if !is_rfc3339_z(instant) {
+                defects.push(ScenarioDefect::setup(format!(
+                    "{label} {instant:?} is not a genuine RFC 3339 UTC-Z timestamp"
+                )));
+            }
+        }
+        if self.route.trust_ttl_seconds == 0 {
+            defects.push(ScenarioDefect::setup(
+                "route.trustTtlSeconds must be at least 1".to_string(),
+            ));
+        }
+        for (label, value) in [
+            ("route.routeSetId", &self.route.route_set_id),
+            ("route.routeSetVersion", &self.route.route_set_version),
+            ("route.providerIdentity", &self.route.provider_identity),
+            ("route.providerLocality", &self.route.provider_locality),
+            ("route.model", &self.route.model),
+        ] {
+            if value.trim().is_empty() {
+                defects.push(ScenarioDefect::setup(format!("{label} must be non-empty")));
+            }
+        }
+
+        // Dimension pins.
+        for dimension in self
+            .dimensions
+            .controlled
+            .iter()
+            .chain(&self.dimensions.variable)
+        {
+            if !ALLOWED_DIMENSIONS.contains(&dimension.as_str()) {
+                defects.push(ScenarioDefect::setup(format!(
+                    "dimensions contains unknown dimension {dimension:?}"
+                )));
+            }
+        }
+        for dimension in &self.dimensions.variable {
+            if self.dimensions.controlled.contains(dimension) {
+                defects.push(ScenarioDefect::setup(format!(
+                    "dimension {dimension:?} cannot be both controlled and variable"
+                )));
+            }
+        }
+
+        defects
+    }
+
+    /// Canonical digest of the descriptor document. Deterministic across
+    /// platforms; used as `scenarioDigest` in run evidence.
+    pub fn scenario_digest(&self) -> anyhow::Result<String> {
+        let value = serde_json::to_value(self).context("descriptor serializes")?;
+        soma::try_canonical_digest(&value)
+            .map_err(|error| anyhow::anyhow!("descriptor canonical digest failed: {error}"))
+    }
+}
+
+fn is_rfc3339_z(value: &str) -> bool {
+    if value.len() != 20
+        || !value.ends_with('Z')
+        || value.as_bytes()[4] != b'-'
+        || value.as_bytes()[7] != b'-'
+        || value.as_bytes()[10] != b'T'
+        || value.as_bytes()[13] != b':'
+        || value.as_bytes()[16] != b':'
+    {
+        return false;
+    }
+    value[..4].chars().all(|c| c.is_ascii_digit())
+        && value[5..7].chars().all(|c| c.is_ascii_digit())
+        && value[8..10].chars().all(|c| c.is_ascii_digit())
+        && value[11..13].chars().all(|c| c.is_ascii_digit())
+        && value[14..16].chars().all(|c| c.is_ascii_digit())
+        && value[17..19].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Reject any fixture path that is absolute, rooted, drive-qualified,
+/// backslash-separated or escapes the repository root.
+fn check_fixture_path(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("repository.fixture must be non-empty".to_string());
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+        return Err(format!(
+            "repository.fixture {trimmed:?} is absolute; pin a repo-relative path"
+        ));
+    }
+    if trimmed.contains('\\') {
+        return Err(format!(
+            "repository.fixture {trimmed:?} contains backslashes; use forward slashes"
+        ));
+    }
+    if trimmed.contains(':') {
+        return Err(format!(
+            "repository.fixture {trimmed:?} looks drive-qualified; pin a repo-relative path"
+        ));
+    }
+    for segment in trimmed.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(format!(
+                "repository.fixture {trimmed:?} has an empty, '.', or '..' segment"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fixture content pinning
+// ---------------------------------------------------------------------------
+
+/// Deterministic content digest of a fixture directory.
+///
+/// Algorithm: collect every regular file under `root`, express each path
+/// relative to `root` with forward slashes, sort by UTF-8 bytes, then digest
+/// the concatenation of `"{relpath} {hex-sha256-of-file}\n"` lines. The same
+/// tree yields the same digest on every platform; a single byte of fixture
+/// drift changes the digest.
+///
+/// Fail-closed on pinned fixtures: symbolic links and any file type other
+/// than a regular file or directory (fifos, sockets, devices, unknown mounts)
+/// are REJECTED, never silently omitted — an omitted entry could change the
+/// meaning of a pinned fixture without changing its digest.
+pub fn fixture_content_digest(root: &Path) -> Result<String> {
+    let root_type = std::fs::symlink_metadata(root)
+        .with_context(|| format!("fixture root {root:?} does not exist"))?;
+    anyhow::ensure!(
+        root_type.is_dir(),
+        "fixture root {root:?} is not a directory (symlink?)"
+    );
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    collect_files(root, root, &mut entries)?;
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let mut material = String::new();
+    for (rel, full) in &entries {
+        let bytes =
+            std::fs::read(full).with_context(|| format!("fixture file {full:?} unreadable"))?;
+        let file_digest = hex_lower(&Sha256::digest(&bytes));
+        material.push_str(rel);
+        material.push(' ');
+        material.push_str(&file_digest);
+        material.push('\n');
+    }
+    Ok(hex_lower(&Sha256::digest(material.as_bytes())))
+}
+
+/// Verify a fixture directory against its pinned content digest.
+pub fn verify_fixture_content(root: &Path, expected: &str) -> Result<()> {
+    if !is_hex64(expected) {
+        anyhow::bail!("pinned repository.contentDigest is not a lower hex sha256 digest");
+    }
+    let actual = fixture_content_digest(root)?;
+    anyhow::ensure!(
+        actual == expected,
+        "fixture content digest drift: pinned {expected}, on-disk {actual}"
+    );
+    Ok(())
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("fixture dir {dir:?} unreadable"))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "pinned fixture contains a symbolic link: {} (unexpected link; refused)",
+                path.display()
+            );
+        }
+        if file_type.is_dir() {
+            collect_files(root, &path, out)?;
+        } else if file_type.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .with_context(|| format!("fixture path {path:?} escapes root {root:?}"))?;
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push((rel, path));
+        } else {
+            anyhow::bail!(
+                "pinned fixture contains an unsupported file type: {} (only regular files and directories are pinned)",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Lite-internal run evidence envelope
+// ---------------------------------------------------------------------------
+
+use crate::workflow::accounting::ACCOUNTING_SCHEMA_VERSION;
+use crate::workflow::node_contracts::NodeManifestV1;
+use crate::workflow::route_dispatch::RoutedAttemptV1;
+use crate::workflow::route_dispatch::RoutedDispatchOutcome;
+use crate::workflow::route_resolution::{
+    EffectiveExecutionSnapshotV1, RouteEvidenceV1, RouteResolution,
+};
+use crate::workflow::workspace::{WorkspaceManifestV1, WorkspaceMode};
+
+/// Explicit, typed "we do not ship the Foundry external format yet" marker.
+/// There is no public constructor that flips the status; every exported
+/// record carries `unsupported` and [`LiteScenarioRunEvidence::verify`]
+/// refuses anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalEvaluationFormat {
+    /// Always `"unsupported"` in Slice A.
+    pub status: String,
+    /// The contract this would bind to, named precisely, not sketched.
+    pub contract: String,
+    /// Why it is unsupported.
+    pub detail: String,
+}
+
+impl ExternalEvaluationFormat {
+    pub fn unsupported() -> Self {
+        Self {
+            status: "unsupported".to_string(),
+            contract: "foundry.workflow-evaluation (unpublished)".to_string(),
+            detail: "Lite exports raw evidence records only; the Foundry external evaluation format is unpublished. No Foundry consumption, metrics or comparisons are claimed.".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunProvenance {
+    pub runner: String,
+    pub runner_revision: String,
+    pub injected_clock: bool,
+    pub fixture_only: bool,
+    pub redaction: String,
+}
+
+/// The Lite-internal scenario-run evidence envelope. **Every record the
+/// envelope references is embedded in it**, so [`LiteScenarioRunEvidence::verify`]
+/// re-verifies each record's own sealed digest AND every cross-object binding
+/// from the embedded bytes alone — no digest in the envelope is taken on
+/// trust, and nothing is labelled as verified that is not re-derived. NEVER a
+/// Foundry contract; see module docs.
+///
+/// What the envelope does NOT prove (honesty boundary, not a defect):
+/// - the fixture directory's bytes (bound by `repository.contentDigest`,
+///   enforced at pin time by [`verify_fixture_content`]; not re-hashed here);
+/// - the wall-clock provenance of the measured dispatch latency;
+/// - the truthfulness of the (loopback) provider's reported usage numbers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiteScenarioRunEvidence {
+    pub schema_version: String,
+    pub namespace: String,
+    pub evaluated_at: String,
+    /// The embedded, validated scenario descriptor. `scenario_id` and
+    /// `scenario_digest` are DERIVED from it, never stored separately.
+    pub descriptor: ScenarioDescriptor,
+    /// Raw sealed route evidence (resolution decision; self-verifies).
+    pub route_evidence: RouteEvidenceV1,
+    /// Raw sealed effective execution snapshot (self-verifies, incl. the
+    /// SPEC 006 ExecutionProfile audit).
+    pub snapshot: EffectiveExecutionSnapshotV1,
+    /// Raw node manifest under the reviewed permit.
+    pub manifest: NodeManifestV1,
+    /// Raw sealed routed attempt (self-verifies, incl. journal binding).
+    pub attempt: RoutedAttemptV1,
+    /// The execution workspace manifest, when one was pinned and provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_manifest: Option<WorkspaceManifestV1>,
+    /// The raw, sealed attempt-accounting record produced natively by Lite.
+    pub attempt_accounting: AttemptAccountingV1,
+    /// The raw, aggregated graph accounting produced natively by Lite.
+    /// Derived; [`LiteScenarioRunEvidence::verify`] re-derives it from the
+    /// embedded accounting records and requires equality.
+    pub graph_accounting: GraphAccounting,
+    pub classification: ScenarioOutcomeClass,
+    pub external_evaluation_format: ExternalEvaluationFormat,
+    pub provenance: RunProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+}
+
+impl LiteScenarioRunEvidence {
+    /// Canonical digest of the envelope minus `contentDigest`.
+    pub fn compute_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self).context("scenario-run evidence serializes")?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("contentDigest");
+        }
+        soma::try_canonical_digest(&value).map_err(|error| {
+            anyhow::anyhow!("scenario-run evidence canonical digest failed: {error}")
+        })
+    }
+
+    /// Scenario identity, derived from the embedded descriptor.
+    pub fn scenario_id(&self) -> &str {
+        &self.descriptor.scenario_id
+    }
+
+    /// Canonical digest of the embedded descriptor.
+    pub fn scenario_digest(&self) -> Result<String> {
+        self.descriptor.scenario_digest()
+    }
+
+    /// Build and seal an envelope from the records of one completed run.
+    ///
+    /// Every cross-object binding is checked BEFORE the envelope is sealed;
+    /// on any mismatch this returns the collected discrepancies and nothing is
+    /// exported. The caller passes the run's actual records; nothing here is
+    /// caller-asserted into place.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sealed(
+        descriptor: ScenarioDescriptor,
+        resolution: &RouteResolution,
+        manifest: &NodeManifestV1,
+        outcome: &RoutedDispatchOutcome,
+        attempt_accounting: AttemptAccountingV1,
+        graph_accounting: GraphAccounting,
+        workspace_manifest: Option<&WorkspaceManifestV1>,
+        classification: ScenarioOutcomeClass,
+    ) -> Result<Self> {
+        let violations = check_cross_bindings(
+            &descriptor,
+            &resolution.evidence,
+            &resolution.snapshot,
+            manifest,
+            &outcome.attempt,
+            workspace_manifest,
+            &attempt_accounting,
+            &graph_accounting,
+        );
+        if !violations.is_empty() {
+            anyhow::bail!(
+                "scenario-run evidence refuses to seal; {} cross-object binding(s) failed: {}",
+                violations.len(),
+                violations.join("; ")
+            );
+        }
+        let mut record = Self {
+            schema_version: SCENARIO_RUN_SCHEMA_VERSION.to_string(),
+            namespace: SCENARIO_RUN_NAMESPACE.to_string(),
+            evaluated_at: resolution.evidence.evaluated_at.clone(),
+            descriptor,
+            route_evidence: resolution.evidence.clone(),
+            snapshot: resolution.snapshot.clone(),
+            manifest: manifest.clone(),
+            attempt: outcome.attempt.clone(),
+            workspace_manifest: workspace_manifest.cloned(),
+            attempt_accounting,
+            graph_accounting,
+            classification,
+            external_evaluation_format: ExternalEvaluationFormat::unsupported(),
+            provenance: RunProvenance {
+                runner: SCENARIO_RUNNER_ID.to_string(),
+                runner_revision: SCENARIO_RUNNER_REVISION.to_string(),
+                injected_clock: true,
+                fixture_only: true,
+                redaction: "digest-sealed artifacts carry identities and digests only; raw secret material is never serialized (canary-verified in tests)".to_string(),
+            },
+            content_digest: None,
+        };
+        record.content_digest = Some(record.compute_digest()?);
+        Ok(record)
+    }
+
+    /// Fail-closed re-verification from the embedded bytes alone.
+    ///
+    /// Verifies: document version/namespace; the envelope's own digest; each
+    /// embedded record's own sealed digest (descriptor validation, route
+    /// evidence, snapshot incl. the SPEC 006 audit, attempt incl. its journal
+    /// entry, accounting record, workspace manifest); EVERY cross-object
+    /// binding (descriptor ↔ repository/route/harness/provider identity,
+    /// snapshot ↔ route evidence, attempt ↔ snapshot/manifest, attempt ↔
+    /// accounting, accounting ↔ graph re-derived from embedded records,
+    /// workspace manifest ↔ descriptor pins and snapshot). Nothing is
+    /// hex-checked-and-trusted: every value is re-derived or cross-bound.
+    pub fn verify(&self) -> anyhow::Result<()> {
+        use anyhow::ensure;
+        ensure!(
+            self.schema_version == SCENARIO_RUN_SCHEMA_VERSION,
+            "unsupported scenario-run schema version {} (supported {SCENARIO_RUN_SCHEMA_VERSION})",
+            self.schema_version
+        );
+        ensure!(
+            self.namespace == SCENARIO_RUN_NAMESPACE,
+            "scenario-run namespace {:?} is not {SCENARIO_RUN_NAMESPACE:?}",
+            self.namespace
+        );
+        match &self.content_digest {
+            Some(actual) => {
+                let expected = self.compute_digest()?;
+                ensure!(
+                    *actual == expected,
+                    "scenario-run evidence contentDigest does not verify"
+                );
+            }
+            None => anyhow::bail!("scenario-run evidence is missing its contentDigest"),
+        }
+        // The embedded descriptor must be coherent on its own.
+        let defects = self.descriptor.validate();
+        ensure!(
+            defects.is_empty(),
+            "embedded scenario descriptor is invalid: {}",
+            defects
+                .iter()
+                .map(|defect| defect.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        // Embedded records re-verify against their own sealed digests.
+        self.route_evidence.verify()?;
+        self.snapshot.verify()?;
+        self.attempt.verify()?;
+        self.attempt_accounting.verify()?;
+        if let Some(workspace) = &self.workspace_manifest {
+            let stored = workspace.content_digest.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("workspace manifest is missing its contentDigest")
+            })?;
+            let recomputed = workspace.compute_digest();
+            ensure!(
+                stored == recomputed,
+                "workspace manifest contentDigest does not verify"
+            );
+        }
+        // Cross-object bindings from the embedded bytes alone.
+        let violations = check_cross_bindings(
+            &self.descriptor,
+            &self.route_evidence,
+            &self.snapshot,
+            &self.manifest,
+            &self.attempt,
+            self.workspace_manifest.as_ref(),
+            &self.attempt_accounting,
+            &self.graph_accounting,
+        );
+        ensure!(
+            violations.is_empty(),
+            "scenario-run evidence failed cross-object binding checks: {}",
+            violations.join("; ")
+        );
+        ensure!(
+            self.graph_accounting.schema_version == ACCOUNTING_SCHEMA_VERSION,
+            "embedded graph accounting has an unsupported schema version"
+        );
+        // The external format stays unsupported. Fail closed otherwise.
+        ensure!(
+            self.external_evaluation_format.status == "unsupported",
+            "externalEvaluationFormat.status must be \"unsupported\" in Slice A"
+        );
+        ensure!(
+            self.provenance.fixture_only && self.provenance.injected_clock,
+            "scenario-run evidence must be fixture-only with an injected clock"
+        );
+        Ok(())
+    }
+}
+
+fn workspace_adapter_family(adapter: crate::workflow::workspace::AdapterKind) -> &'static str {
+    match adapter {
+        crate::workflow::workspace::AdapterKind::ExistingReadOnly => "existing-read-only",
+        crate::workflow::workspace::AdapterKind::GitWorktree => "git-worktree",
+    }
+}
+
+fn workspace_mode_name(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::ReadOnly => "read-only",
+        WorkspaceMode::Writable => "writable",
+    }
+}
+
+/// Mode spelling used by the route snapshot's WorkspaceEvidenceV1 (SPEC 006
+/// mapping), which differs from the workspace manifest's own spelling.
+fn snapshot_workspace_mode_name(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::ReadOnly => "read",
+        WorkspaceMode::Writable => "write",
+    }
+}
+
+/// Every cross-object binding required for the envelope to be trustworthy.
+/// Returns the full list of violations (empty = bound). Shared by `sealed`
+/// (refuses to export on violations) and `verify` (refuses to re-admit).
+#[allow(clippy::too_many_arguments)]
+fn check_cross_bindings(
+    descriptor: &ScenarioDescriptor,
+    route_evidence: &RouteEvidenceV1,
+    snapshot: &EffectiveExecutionSnapshotV1,
+    manifest: &NodeManifestV1,
+    attempt: &RoutedAttemptV1,
+    workspace_manifest: Option<&WorkspaceManifestV1>,
+    accounting: &AttemptAccountingV1,
+    graph: &GraphAccounting,
+) -> Vec<String> {
+    use crate::workflow::route_resolution::RouteProfile;
+    let mut violations: Vec<String> = Vec::new();
+    let mut fail = |message: String| violations.push(message);
+
+    // ---- Scenario descriptor <-> route evidence -----------------------------
+    if route_evidence.route_set_id != descriptor.route.route_set_id {
+        fail(format!(
+            "routeEvidence.routeSetId {:?} != descriptor.route.routeSetId {:?}",
+            route_evidence.route_set_id, descriptor.route.route_set_id
+        ));
+    }
+    if route_evidence.route_set_version != descriptor.route.route_set_version {
+        fail("routeEvidence.routeSetVersion != descriptor.route.routeSetVersion".to_string());
+    }
+    if route_evidence.evaluated_at != descriptor.route.evaluated_at {
+        fail("routeEvidence.evaluatedAt != descriptor.route.evaluatedAt".to_string());
+    }
+    if route_evidence.selected.candidate_id != descriptor.route.candidate_id {
+        fail("routeEvidence.selected.candidateId != descriptor.route.candidateId".to_string());
+    }
+    if route_evidence.selected.provider_identity != descriptor.route.provider_identity {
+        fail(
+            "routeEvidence.selected.providerIdentity != descriptor.route.providerIdentity"
+                .to_string(),
+        );
+    }
+    if route_evidence.selected.model.as_deref() != Some(descriptor.route.model.as_str()) {
+        fail("routeEvidence.selected.model != descriptor.route.model".to_string());
+    }
+    if route_evidence.selected.harness_id != descriptor.harness.id {
+        fail("routeEvidence.selected.harnessId != descriptor.harness.id".to_string());
+    }
+    if route_evidence.selected.harness_revision != descriptor.harness.revision {
+        fail("routeEvidence.selected.harnessRevision != descriptor.harness.revision".to_string());
+    }
+    if route_evidence.selected.priority != descriptor.route.priority {
+        fail("routeEvidence.selected.priority != descriptor.route.priority".to_string());
+    }
+    if route_evidence.pinned_candidate_id.as_deref()
+        != Some(descriptor.route.pinned_candidate_id.as_str())
+    {
+        fail("routeEvidence.pinnedCandidateId != descriptor.route.pinnedCandidateId".to_string());
+    }
+    if descriptor.route.pinned_candidate_id != descriptor.route.candidate_id {
+        fail("descriptor.route.pinnedCandidateId != descriptor.route.candidateId".to_string());
+    }
+    if route_evidence.profile != RouteProfile::Standard || descriptor.route.profile != "standard" {
+        fail("profile must be \"standard\" in the evidence and the descriptor pin".to_string());
+    }
+
+    // ---- Route evidence <-> snapshot ----------------------------------------
+    if snapshot.route_set_id != route_evidence.route_set_id
+        || snapshot.route_set_version != route_evidence.route_set_version
+        || snapshot.evaluated_at != route_evidence.evaluated_at
+    {
+        fail("snapshot route set/version/instant does not match the route evidence".to_string());
+    }
+    if snapshot.selected != route_evidence.selected {
+        fail("snapshot.selected != routeEvidence.selected".to_string());
+    }
+    if snapshot.decision_digest != route_evidence.decision_digest {
+        fail("snapshot.decisionDigest != routeEvidence.decisionDigest".to_string());
+    }
+    if snapshot.requirements_digest != route_evidence.requirements_digest {
+        fail("snapshot.requirementsDigest != routeEvidence.requirementsDigest".to_string());
+    }
+    if snapshot.capability_set_digest != route_evidence.capability_set_digest {
+        fail("snapshot.capabilitySetDigest != routeEvidence.capabilitySetDigest".to_string());
+    }
+    if snapshot.authority_declared_digest != route_evidence.authority_declared_digest {
+        fail(
+            "snapshot.authorityDeclaredDigest != routeEvidence.authorityDeclaredDigest".to_string(),
+        );
+    }
+    if snapshot.authority_effective_digest != route_evidence.authority_effective_digest {
+        fail(
+            "snapshot.authorityEffectiveDigest != routeEvidence.authorityEffectiveDigest"
+                .to_string(),
+        );
+    }
+    if route_evidence.snapshot_digest != snapshot.content_digest.clone().unwrap_or_default() {
+        fail("routeEvidence.snapshotDigest does not bind the embedded snapshot".to_string());
+    }
+
+    // ---- Attempt <-> snapshot / route evidence / manifest --------------------
+    if attempt.snapshot_digest != snapshot.content_digest.clone().unwrap_or_default() {
+        fail("attempt.snapshotDigest does not bind the embedded snapshot".to_string());
+    }
+    if Some(attempt.route_evidence_digest.as_str()) != route_evidence.content_digest.as_deref() {
+        fail("attempt.routeEvidenceDigest does not bind the embedded route evidence".to_string());
+    }
+    if attempt.decision_digest != route_evidence.decision_digest {
+        fail("attempt.decisionDigest != routeEvidence.decisionDigest".to_string());
+    }
+    match serde_json::to_value(manifest).map_err(|error| error.to_string()) {
+        Ok(manifest_value) => match soma::try_canonical_digest(&manifest_value) {
+            Ok(manifest_digest) => {
+                if attempt.manifest_digest != manifest_digest {
+                    fail("attempt.manifestDigest does not bind the embedded manifest".to_string());
+                }
+            }
+            Err(error) => fail(format!("manifest canonical digest failed: {error}")),
+        },
+        Err(error) => fail(format!("manifest does not serialize: {error}")),
+    }
+    if attempt.harness_id != snapshot.selected.harness_id {
+        fail("attempt.harnessId != snapshot.selected.harnessId".to_string());
+    }
+    if attempt.provider_identity != snapshot.selected.provider_identity {
+        fail("attempt.providerIdentity != snapshot.selected.providerIdentity".to_string());
+    }
+    if attempt.model != snapshot.selected.model {
+        fail("attempt.model != snapshot.selected.model".to_string());
+    }
+
+    // ---- Workspace manifest <-> descriptor / snapshot / attempt ---------------
+    match (workspace_manifest, &snapshot.workspace) {
+        (Some(workspace), Some(ws_evidence)) => {
+            let recomputed_manifest = workspace.compute_digest();
+            if workspace.content_digest.as_deref() != Some(recomputed_manifest.as_str()) {
+                fail("workspace manifest contentDigest does not verify".to_string());
+            }
+            let manifest_family = workspace_adapter_family(workspace.adapter);
+            let pin_family = match descriptor.workspace.adapter {
+                ScenarioWorkspaceAdapter::ExistingReadOnly => "existing-read-only",
+                ScenarioWorkspaceAdapter::GitWorktree => "git-worktree",
+            };
+            if manifest_family != pin_family {
+                fail("workspace manifest adapter does not match the descriptor pin".to_string());
+            }
+            if workspace.adapter_revision != descriptor.workspace.adapter_revision {
+                fail(
+                    "workspace manifest adapterRevision != descriptor.workspace.adapterRevision"
+                        .to_string(),
+                );
+            }
+            let manifest_mode = workspace_mode_name(workspace.mode);
+            let pin_mode = match descriptor.workspace.mode {
+                ScenarioWorkspaceMode::ReadOnly => "read-only",
+                ScenarioWorkspaceMode::Writable => "writable",
+            };
+            if manifest_mode != pin_mode {
+                fail("workspace manifest mode does not match the descriptor pin".to_string());
+            }
+            if workspace.base_revision != descriptor.repository.revision {
+                fail(
+                    "workspace manifest baseRevision != descriptor.repository.revision".to_string(),
+                );
+            }
+            if workspace.writable_scopes != descriptor.workspace.writable_scopes {
+                fail(
+                    "workspace manifest writableScopes != descriptor.workspace.writableScopes"
+                        .to_string(),
+                );
+            }
+            if workspace.workspace_id != format!("scenario-workspace-{}", descriptor.scenario_id) {
+                fail("workspace manifest workspaceId does not bind the scenario id".to_string());
+            }
+            if ws_evidence.workspace_id != workspace.workspace_id {
+                fail(
+                    "snapshot workspace evidence workspaceId != workspace manifest workspaceId"
+                        .to_string(),
+                );
+            }
+            if ws_evidence.adapter != workspace_adapter_family(workspace.adapter) {
+                fail(
+                    "snapshot workspace evidence adapter != workspace manifest adapter".to_string(),
+                );
+            }
+            if ws_evidence.adapter_revision != workspace.adapter_revision {
+                fail(
+                    "snapshot workspace evidence adapterRevision != workspace manifest adapterRevision"
+                        .to_string(),
+                );
+            }
+            if ws_evidence.mode != snapshot_workspace_mode_name(workspace.mode) {
+                fail("snapshot workspace evidence mode != workspace manifest mode".to_string());
+            }
+            if ws_evidence.manifest_digest != workspace.compute_digest() {
+                fail(
+                    "snapshot workspace evidence manifestDigest != workspace manifest digest"
+                        .to_string(),
+                );
+            }
+            if attempt.workspace_manifest_digest.as_deref()
+                != Some(ws_evidence.manifest_digest.as_str())
+            {
+                fail(
+                    "attempt.workspaceManifestDigest does not bind the snapshot workspace evidence"
+                        .to_string(),
+                );
+            }
+        }
+        (None, None) => {
+            if attempt.workspace_manifest_digest.is_some() {
+                fail("attempt binds a workspace manifest but none is embedded".to_string());
+            }
+        }
+        _ => fail(
+            "workspace manifest presence does not match the snapshot workspace binding".to_string(),
+        ),
+    }
+
+    // ---- Accounting <-> attempt / manifest / descriptor / graph --------------
+    if accounting.outcome != crate::workflow::accounting::AttemptOutcomeAccounting::Completed {
+        fail(
+            "accounting outcome is not Completed; this export only seals completed runs"
+                .to_string(),
+        );
+    } else {
+        let attempt_digest = attempt.content_digest.clone().unwrap_or_default();
+        if accounting.attempt_digest.as_deref() != Some(attempt_digest.as_str()) {
+            fail("accounting.attemptDigest does not bind the embedded attempt".to_string());
+        }
+        if attempt.outcome_kind != "completed" {
+            fail(
+                "completed accounting outcome but the attempt outcomeKind is not \"completed\""
+                    .to_string(),
+            );
+        }
+    }
+    if accounting.journal_digest.as_deref() != Some(attempt.journal_entry.entry_digest.as_str()) {
+        fail("accounting.journalDigest does not bind the embedded journal entry".to_string());
+    }
+    if accounting.node_id != manifest.node_id {
+        fail("accounting.nodeId != manifest.nodeId".to_string());
+    }
+    if accounting.idempotency_key != attempt.idempotency_key
+        || attempt.idempotency_key != attempt.journal_entry.identity_key
+    {
+        fail("accounting/attempt/journal idempotency keys do not bind together".to_string());
+    }
+    if accounting.harness_id != attempt.harness_id {
+        fail("accounting.harnessId != attempt.harnessId".to_string());
+    }
+    if accounting.harness_revision != descriptor.harness.revision {
+        fail("accounting.harnessRevision != descriptor.harness.revision".to_string());
+    }
+    if accounting.provider_identity != attempt.provider_identity {
+        fail("accounting.providerIdentity != attempt.providerIdentity".to_string());
+    }
+    if accounting.model != attempt.model {
+        fail("accounting.model != attempt.model".to_string());
+    }
+    if accounting.route_set_id != route_evidence.route_set_id {
+        fail("accounting.routeSetId != routeEvidence.routeSetId".to_string());
+    }
+
+    // ---- Graph <-> accounting (re-derived, never trusted) ---------------------
+    if graph.schema_version != ACCOUNTING_SCHEMA_VERSION {
+        fail("graph accounting schema version is not supported".to_string());
+    }
+    if graph.graph_id != accounting.graph_id {
+        fail("graph.graphId != accounting.graphId".to_string());
+    }
+    let mut ledger = crate::workflow::accounting::AccountingLedger::new();
+    match ledger.record(accounting.clone()) {
+        Ok(_) => match ledger.aggregate_graph(&accounting.graph_id) {
+            Ok(rebuilt) => {
+                if rebuilt.attempts != graph.attempts {
+                    fail(format!(
+                        "graph.attempts {} != re-derived {}",
+                        graph.attempts, rebuilt.attempts
+                    ));
+                }
+                if rebuilt.completed != graph.completed {
+                    fail(format!(
+                        "graph.completed {} != re-derived {}",
+                        graph.completed, rebuilt.completed
+                    ));
+                }
+                if rebuilt.failed != graph.failed {
+                    fail(format!(
+                        "graph.failed {} != re-derived {}",
+                        graph.failed, rebuilt.failed
+                    ));
+                }
+                if rebuilt.cancelled != graph.cancelled {
+                    fail(format!(
+                        "graph.cancelled {} != re-derived {}",
+                        graph.cancelled, rebuilt.cancelled
+                    ));
+                }
+                if rebuilt.usage != graph.usage {
+                    fail(
+                        "graph.usage != re-derived usage from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+                if rebuilt.cost != graph.cost {
+                    fail(
+                        "graph.cost != re-derived cost from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+                if rebuilt.latency_ms_total != graph.latency_ms_total
+                    || rebuilt.latency_ms_max != graph.latency_ms_max
+                {
+                    fail(
+                        "graph latency aggregates != re-derived from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+                let mut rebuilt_nodes = rebuilt.nodes.clone();
+                let mut graph_nodes = graph.nodes.clone();
+                rebuilt_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+                graph_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+                if rebuilt_nodes != graph_nodes {
+                    fail(
+                        "graph nodes != re-derived node aggregates from embedded accounting records"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(error) => fail(format!("graph aggregate cannot be re-derived: {error}")),
+        },
+        Err(error) => fail(format!(
+            "embedded accounting record is rejected by the ledger: {error}"
+        )),
+    }
+
+    violations
+}
+
+/// Classify a completed run into the outcome lattice. The governed boundary
+/// ran either to a sealed attempt or to a typed, sealed failure; both are
+/// product outcomes. Only pre-effect refusals and pipeline defects classify
+/// otherwise.
+pub fn classify_completed_run(
+    resolution_ok: bool,
+    dispatch: &Result<
+        crate::workflow::route_dispatch::RoutedDispatchOutcome,
+        RoutedDispatchFailure,
+    >,
+    accounting_ok: bool,
+) -> ScenarioOutcomeClass {
+    if !resolution_ok {
+        return classify_pre_effect_refusal();
+    }
+    match classify_dispatch(dispatch) {
+        ScenarioOutcomeClass::SetupError => ScenarioOutcomeClass::SetupError,
+        ScenarioOutcomeClass::GovernedProductOutcome => {
+            if accounting_ok {
+                ScenarioOutcomeClass::GovernedProductOutcome
+            } else {
+                classify_accounting_failure()
+            }
+        }
+        other => other,
+    }
+}
+
+/// Serialize the envelope as canonical-ish JSON for inspection. Key order is
+/// struct order; callers compare digests, never raw strings, across platforms.
+pub fn envelope_json(evidence: &LiteScenarioRunEvidence) -> Result<String> {
+    serde_json::to_string_pretty(evidence).context("scenario-run evidence serializes")
+}
