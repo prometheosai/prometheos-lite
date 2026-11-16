@@ -100,7 +100,12 @@ framework.
   revision, baseline tree digest), (5) a repair-target authorization
   preflight (repo-relative paths, editable-set gate, existence check,
   transaction dry-run against the live bytes — zero writes), and only then
-  (6) the governed dispatch. A preflight refusal is `setup-error` (or
+  (6) the governed dispatch. A result gate immediately after the dispatch
+  refuses to repair after ANY `Err` (typed `Refused` or `ExecutionFailed`):
+  no repair, no validator, no success envelope, typed failure/journal/
+  accounting evidence preserved exactly as measured, zero filesystem effects —
+  a refused or failed dispatch never authorizes the repair. A preflight
+  refusal is `setup-error` (or
   `invalid-task`), never runs a model, and carries capability-execution
   counters reading zero, with no accounting record and no sealed evidence.
   On every preflight refusal the loopback server is never spawned and the

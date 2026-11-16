@@ -19,7 +19,11 @@
   #171 contract (writable-only gate, `ensure_writable`, adapter validation,
   revision, baseline tree-digest == pin), then a repair-target authorization
   preflight (repo-relative paths, editable set, transaction dry-run — zero
-  writes) — and ONLY then the governed dispatch. Preflight refusals
+  writes) — and ONLY then the governed dispatch. A result gate immediately after the dispatch refuses
+   to repair after ANY `Err` (typed `Refused` or `ExecutionFailed`): no
+   repair, no validator, no success envelope, typed failure/journal/
+   accounting evidence preserved exactly as measured, zero filesystem
+   effects, no replay or hidden fallback. Preflight refusals
   (`setup-error` / `invalid-task`) never spawn the loopback server: a real
   capability-effects counter reads zero, no accounting record exists,
   capability_effects == 0 and changed_vs_baseline is empty in every refusal
