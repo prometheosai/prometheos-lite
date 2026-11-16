@@ -1,5 +1,56 @@
 ## Unreleased
 
+- #136 E7/I01 Slice C - task variety and replayable failure evidence on the
+  Slice B executed-task path. Two new deterministic, actually executed
+  Lite-owned scenario kinds. (1) An executed DOCUMENTATION task
+  (`lite-rust-docs-sum-execute-001`,
+  `tests/fixtures/scenarios/rust-docs-sum-execute/descriptor.json`): the
+  `fixture-docs-sum` crate has a correct implementation whose README claims
+  `a - b` and `sum(2, 2) == 0`; the task repairs ONLY the README (the sole
+  authorized editable file; `src/lib.rs` and `tests/docs.rs` are out of
+  scope and refused in the preflight with zero effects), validated by a
+  doc-content check run as `cargo test --offline --test docs` (asserts the
+  README states `a + b` / `sum(2, 2) == 4`) - content validation, not code
+  tests, and never reported as such. Same pinned pattern as Slice B:
+  content digest, deterministic revision, writable `git-worktree`, pinned
+  validator command/argv, expected exit code, expected file-after digest and
+  expected post-run tree digest. (2) A replayable failure → replay →
+  verified-repair chain on the pinned Slice B bytes:
+  `lite-rust-bugfix-arithmetic-replay-001`
+  (`tests/fixtures/scenarios/rust-bugfix-arithmetic-replay/descriptor.json`)
+  is a versioned Lite-internal failure-replay descriptor
+  (`lite.fixtures.failure-replay`, schema `1.0.0`) pinning the execute
+  descriptor's canonical scenario digest, the pinned baseline, the known
+  failed validator (`cargo test --offline`, observed exit 101), the failed
+  file-after digest, the failed post-run tree digest, the replay expectation
+  (`repaired`, exit 0) and the exact authority BOTH runs must hold
+  (writable scopes, `scripted-fixture` origin,
+  `scripted-fixture-workspace-file-policy` write authority, changed files
+  `["src/lib.rs"]`). `LiteFailureReplayEvidence`
+  (`lite.evidence.failure-replay`, schema `1.0.0`,
+  `src/workflow/failure_replay.rs`) embeds BOTH sealed task-run envelopes
+  and re-derives every binding; a wall-clock-free `failureIdentity`
+  (scenario digest + validator argv + exit code + baseline + failed
+  post-run digest) is the dedup/idempotency key - the same wrong
+  fixture-scripted repair reproduces the same identity. The distinct
+  failure class is `governed-validation-failure` (governed dispatch
+  completed, scripted repair applied, pinned validator exited non-zero); a
+  zero-exit "failure", a `setup-error`/`invalid-task` failure or a changed
+  classification is rejected. A replay may never be an unrelated success
+  (same scenario descriptor digest required), never swap validators, never
+  widen authority or the changed-file set, never re-present the failure as a
+  repair; cross-scenario splices, altered evidence, stale digests, changed
+  classifications and authority widening all fail closed with zero
+  unauthorized filesystem effects. Accounting is preserved exactly: known
+  loopback usage/latency/cost where measured, explicit Unknown (never
+  zero) elsewhere, no fabricated attempt digest on the HTTP 500 failed
+  dispatch, graph aggregates re-derived. The shared task-execution runner
+  was extracted to `tests/common/task_execution.rs` (Slice B behavior
+  unchanged; 41 Slice B tests pass) and drives both new suites (33 docs +
+  28 replay tests). Scripted-fixture labels are kept; no model coding
+  skill, benchmark, certification or Foundry compatibility is claimed; the
+  Foundry external evaluation format remains `unsupported`.
+
 - #136 E7/I01 Slice B - one genuinely executed repository-task fixture,
   execution-integrity repaired after #307 review. A new
   writable, isolated execute scenario (`lite-rust-bugfix-arithmetic-execute-001`,

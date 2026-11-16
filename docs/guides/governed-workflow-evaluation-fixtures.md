@@ -2,8 +2,10 @@
 
 Issue #136 Slice A delivers the first repeatable, governed-workflow evaluation
 fixtures for PrometheOS Lite. Slice B executes one bounded repair task end to
-end on those bytes. This page documents what Lite owns, what it
-deliberately does not own, and the exact status of the Foundry boundary.
+end on those bytes. Slice C adds a second executed task type (documentation)
+and a replayable failure → replay → verified-repair evidence chain. This page
+documents what Lite owns, what it deliberately does not own, and the exact
+status of the Foundry boundary.
 
 **No benchmark score, pass rate, comparison, certification or public claim is
 produced by these fixtures. There is no Foundry integration claim.**
@@ -24,6 +26,102 @@ Lite produces tasks and raw evidence. Foundry owns everything downstream of
 that. Nothing in this repository may present Lite-internal envelopes as a
 Foundry contract, and no code path treats a Lite-internal record as a
 benchmark result.
+
+## What Slice C adds
+
+Slice C adds a second executed task type and a replayable-failure evidence
+chain on the Slice B bytes. It does not change Slice A/B behaviour, does not
+rebuild the scenario framework, and produces no external evaluation claim.
+
+- **Executed documentation task** - `lite-rust-docs-sum-execute-001`
+  (`tests/fixtures/scenarios/rust-docs-sum-execute/descriptor.json`).
+  `kind: "documentation"`. The fixture crate `fixture-docs-sum` has a CORRECT
+  implementation (`sum(a, b) == a + b`) but its README claims `a - b` and
+  `sum(2, 2) == 0`. The task repairs ONLY the README — the sole editable file,
+  pinned by the descriptor's `validation` surface. The pinned validator is a
+  doc-content check executed as `cargo test --offline --test docs`
+  (`tests/docs.rs` reads the committed README): it asserts the README states
+  `a + b` and `sum(2, 2) == 4` and no longer states the wrong claims. It
+  validates the **documentation content**, and is not code-test evidence of
+  any other fact. The repair is a fixture-scripted `search-replace` edit,
+  applied with permission under the Slice B preflight order (editable set =
+  `README.md`; `src/lib.rs` and `tests/docs.rs` are out of scope and refused
+  before any effect). Same pins pattern: content digest, deterministic
+  revision, writable `git-worktree` workspace, pinned validator command/argv,
+  expected exit code, expected post-repair file digest and expected post-run
+  tree digest. Classification and refusal semantics are identical to Slice B:
+  `setup-error`/`invalid-task` preflight refusals with zero effects,
+  `governed-product-outcome` + `repair-failed` for a validator that ran and
+  failed, `infrastructure-error` when the validator cannot complete,
+  `governed-product-outcome` + `repaired` only for applied repair + exit 0.
+- **Replayable failure evidence** - `lite-rust-bugfix-arithmetic-replay-001`
+  (`tests/fixtures/scenarios/rust-bugfix-arithmetic-replay/descriptor.json`)
+  is a versioned Lite-internal **failure-replay descriptor**
+  (`lite.fixtures.failure-replay`, schema `1.0.0`). It pins: the canonical
+  scenario digest of the Slice B execute descriptor, the pinned baseline
+  content digest, the known failed validator (`cargo test --offline`,
+  observed exit 101), the failed file-after digest, the failed post-run tree
+  digest, the replay expectation (`repaired`, classification
+  `governed-product-outcome`, exit 0) and the exact authority BOTH runs must
+  hold (`repo://fixture` writable scopes, repair origin `scripted-fixture`,
+  repair write authority `scripted-fixture-workspace-file-policy`, changed
+  files `["src/lib.rs"]`).
+- **The failure → replay → verified-repair chain** -
+  `LiteFailureReplayEvidence` (`lite.evidence.failure-replay`, schema
+  `1.0.0`, module `src/workflow/failure_replay.rs`) embeds BOTH previously
+  sealed task-run envelopes — the genuine failure (validator exit 101,
+  `taskOutcome: repair-failed`, `classification: governed-product-outcome`)
+  and the replay that followed it (validator exit 0, `repaired`) — and
+  re-derives every binding at verification time. The distinct failure class
+  is `governed-validation-failure`: the governed dispatch completed, the
+  fixture-scripted repair was applied with permission, and the pinned
+  validator exited non-zero. A zero-exit "failure", a `setup-error` failure
+  or an `invalid-task` failure is not a replayable governed validation
+  failure and is rejected.
+- **The stable failure identity (dedup/idempotency)** - a wall-clock-free
+  canonical digest of {scenario digest, validator command/args, observed
+  exit code, classification, task outcome, baseline digest, failed post-run
+  digest, failed file-after digest}. The same wrong fixture-scripted repair
+  against the same pinned fixture reproduces the same `failureIdentity` on
+  every run; a different fixture, validator, repair or exit code derives a
+  different one. The identity is recorded on the evidence and re-derived at
+  verification. The identity is NOT the envelope digest (which embeds
+  measured wall-clock); the envelope digest binds one concrete sealed
+  instance, the identity binds the failure across instances.
+- **A replay may never be an unrelated success and never gains authority** -
+  verification requires: both embeds re-verify on their own; the replay runs
+  under the SAME embedded scenario descriptor digest (the same pinned task,
+  not a substitute); the validator command/argv are identical between failure
+  and replay; the baseline, writable scopes (workspace and policy), repair
+  origin, repair write authority and changed-file set are identical; the
+  replay's exit code is the pinned replay expectation and the failure's exit
+  code is the pinned non-zero failure expectation. Any widening of writable
+  scopes or changed files, any validator swap, any scenario substitution, any
+  changed classification or re-presented failure outcome, any stale envelope
+  digest, and any cross-scenario splice fails closed.
+- **Negative matrix** - invalid revisions (flip one hex digit; unresolvable
+  `000…0`), out-of-scope edits (the correct source `src/lib.rs` in the docs
+  task; `Cargo.toml` in the bugfix), path traversal, inapplicable repairs,
+  failed dispatch (HTTP 500 → typed failure journal and accounting preserved,
+  no repair), post-dispatch refusal (step-capability refusal → zero effects),
+  incompatible workspace (read-only manifest against the writable-only git
+  worktree), tampered expected digests (seal refuses, infrastructure),
+  re-sealed outcomes, drifted baseline/post-run digests, flipped result
+  provenance, zero-byte capture without the empty digest, swapped validators,
+  widened authority, cross-scenario replay and changed failure
+  classification/outcome all fail closed with zero unauthorized
+  filesystem effects.
+- **Accounting, preserved exactly** - loopback provider usage (7/4/11 tokens)
+  is measured and KNOWN under the example price book with measured latency;
+  the HTTP 500 failed dispatch produces `Failed { kind: "execution-failed" }`
+  accounting with NO attempt digest; unreported measurements remain Unknown
+  (never zero); graph aggregates re-derive from the embedded records.
+
+Verification scope, stated on every record: internal consistency of
+operator-observed measurements only — NOT cryptographic proof of execution
+truth, NOT evidence of model coding ability, NOT a benchmark, NOT a Foundry
+evaluation or certification. The failure-replay descriptor is a bridge for
+issue #156.
 
 ## What Slice B adds
 
