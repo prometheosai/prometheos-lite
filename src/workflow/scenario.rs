@@ -715,7 +715,7 @@ fn is_rfc3339_z(value: &str) -> bool {
 
 /// Reject any fixture path that is absolute, rooted, drive-qualified,
 /// backslash-separated or escapes the repository root.
-fn check_fixture_path(path: &str) -> Result<(), String> {
+pub(crate) fn check_fixture_path(path: &str) -> Result<(), String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("repository.fixture must be non-empty".to_string());

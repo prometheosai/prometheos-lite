@@ -23,6 +23,7 @@ pub mod evaluate;
 pub mod execution_graph;
 pub mod execution_harness;
 pub mod external_subject_harness;
+pub mod failure_replay;
 pub mod governance;
 pub mod governance_compiler;
 pub mod governance_permit;
