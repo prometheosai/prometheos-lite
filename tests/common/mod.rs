@@ -6,5 +6,8 @@
 //! module holds it once.
 
 pub mod governance_permit;
+/// Shared executed-task fixture runner (Slices B and C). Each executed
+/// scenario suite pins its own [`task_execution::TaskExecutionSpec`].
+pub mod task_execution;
 
 pub use governance_permit::permit_for;

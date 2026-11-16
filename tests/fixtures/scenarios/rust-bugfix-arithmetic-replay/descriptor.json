@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1.0.0",
+  "namespace": "lite.fixtures.failure-replay",
+  "replayId": "lite-rust-bugfix-arithmetic-replay-001",
+  "version": "1.0.0",
+  "title": "Failure replay: the pinned Slice B validation failure (cargo test --offline exits 101), replayed to the verified repair",
+  "original": {
+    "scenarioId": "lite-rust-bugfix-arithmetic-execute-001",
+    "scenarioDigest": "af2d5780917ce9102d6dff0ff8c471866e5a4f0db8f50abf36bce1ab1c886dce",
+    "baselineContentDigest": "d4234cd58be74da1e9b369ab21bdecf96d33f1d43e12c4a5f7ae848dc2e400d6",
+    "classification": "governed-product-outcome",
+    "taskOutcome": "repair-failed",
+    "failureClass": "governed-validation-failure",
+    "validator": {
+      "command": "cargo",
+      "args": [
+        "test",
+        "--offline"
+      ],
+      "exitCode": 101
+    },
+    "failedFileAfterDigest": "ee0fc1a2f85a324a999e792b0c5d1bd490dc80c6d554500a440af9ce564a2379",
+    "failedPostRunContentDigest": "099c84f3afec65c339c07ad6e0057990f6400e35f18b3e18f495dc82bd4ecf01"
+  },
+  "replay": {
+    "taskOutcome": "repaired",
+    "classification": "governed-product-outcome",
+    "expectedExitCode": 0
+  },
+  "authority": {
+    "writableScopes": [
+      "repo://fixture"
+    ],
+    "repairOrigin": "scripted-fixture",
+    "repairWriteAuthority": "scripted-fixture-workspace-file-policy",
+    "changedFiles": [
+      "src/lib.rs"
+    ]
+  }
+}

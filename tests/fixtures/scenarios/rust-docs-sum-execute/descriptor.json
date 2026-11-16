@@ -1,0 +1,105 @@
+{
+  "schemaVersion": "1.0.0",
+  "namespace": "lite.fixtures.scenario",
+  "scenarioId": "lite-rust-docs-sum-execute-001",
+  "version": "1.0.0",
+  "title": "Rust documentation task (executed): README documents the wrong behaviour of sum",
+  "kind": "documentation",
+  "language": "rust",
+  "task": {
+    "statement": "The fixture crate fixture-docs-sum in this workspace implements sum(a: i64, b: i64) -> i64 correctly in src/lib.rs, but README.md documents the wrong behaviour (it claims sum returns a - b and that sum(2, 2) == 0). Fix ONLY the README so it documents the implementation truthfully: sum returns a + b and sum(2, 2) == 4. Do not alter the source, the tests or any other file."
+  },
+  "repository": {
+    "fixture": "tests/fixtures/scenarios/rust-docs-sum-execute/repo",
+    "contentDigest": "53bb96aad9c2b738507d9f1e06e8c648b3f27816d55fc2dd4efef06c28292a5b",
+    "revision": "e5a9c0a3f56af865ef7221e1b911df4d3f54895d"
+  },
+  "expected": {
+    "outcome": "attempt-recorded-and-accounted",
+    "observableOutcome": "the disposable source repository is staged and content-verified, an isolated writable git worktree is acquired under the pinned authority, the fixture-scripted documentation repair (README.md only) is applied with permission, the real doc-content validator (cargo test --offline --test docs) runs and exits 0, and the post-run tree digest reflects the repaired README; the envelope binds route/attempt/journal/accounting/workspace records",
+    "evidenceArtifacts": [
+      "route-evidence",
+      "snapshot",
+      "attempt",
+      "journal-entry",
+      "accounting-record",
+      "graph-accounting"
+    ]
+  },
+  "requirements": {
+    "degradationPermitted": false,
+    "forbidSubstitution": true
+  },
+  "policy": {
+    "profile": "standard",
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "readableScopes": [
+      "repo://fixture"
+    ],
+    "writableScopes": [
+      "repo://fixture"
+    ],
+    "networkPolicyDefault": "deny"
+  },
+  "workspace": {
+    "adapter": "git-worktree",
+    "adapterRevision": "lite.workspace.adapter.v1",
+    "mode": "writable",
+    "writableScopes": [
+      "repo://fixture"
+    ]
+  },
+  "harness": {
+    "id": "lite.harness.local_model",
+    "revision": "v1"
+  },
+  "route": {
+    "routeSetId": "routes-scenario-fixtures",
+    "routeSetVersion": "1.0.0",
+    "candidateId": "fixture-local-route",
+    "providerIdentity": "demo-local",
+    "providerLocality": "local",
+    "model": "tiny-local-model",
+    "priority": 10,
+    "profile": "standard",
+    "evaluatedAt": "2026-12-01T12:00:02Z",
+    "dispatchAt": "2026-12-01T12:00:03Z",
+    "trustVerifiedAt": "2026-12-01T00:00:00Z",
+    "trustTtlSeconds": 86400,
+    "pinnedCandidateId": "fixture-local-route"
+  },
+  "dimensions": {
+    "controlled": [
+      "repository-content",
+      "task-statement",
+      "policy-profile",
+      "authority",
+      "workspace",
+      "harness",
+      "harness-revision",
+      "route",
+      "provider",
+      "model",
+      "evaluation-instant",
+      "context-rules",
+      "expected-evidence",
+      "validation"
+    ],
+    "variable": []
+  },
+  "validation": {
+    "schemaVersion": "1.0.0",
+    "command": "cargo",
+    "args": [
+      "test",
+      "--offline",
+      "--test",
+      "docs"
+    ],
+    "expectedExitCode": 0,
+    "expectedAssertion": "pinned-fixture-task: README.md documents sum(a, b) as a + b and `sum(2, 2) == 4` (and no longer claims a - b or `sum(2, 2) == 0`); verified by `cargo test --offline --test docs` in the isolated workspace",
+    "expectedFileAfterDigest": "a3f6e7a7649967fc28e55956d88b8643f779fe65192f30e95c806964d1124db4",
+    "expectedPostRunDigest": "a6509a10da942186fef8f6d86bbfb001a5137a89f346ef01170f282647e9b120"
+  }
+}

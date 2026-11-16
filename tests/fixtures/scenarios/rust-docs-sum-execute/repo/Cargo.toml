@@ -1,0 +1,6 @@
+[package]
+name = "fixture-docs-sum"
+version = "0.1.0"
+edition = "2021"
+description = "Pinned evaluation fixture for issue #136 Slice C. The implementation is correct; the README documentation is wrong. Never published."
+license = "MIT"
