@@ -138,11 +138,18 @@ struct LoopbackModel {
 }
 
 fn spawn_loopback_model(response_body: String) -> LoopbackModel {
+    spawn_loopback_with_status_line("200 OK", response_body)
+}
+
+/// Loopback with a selectable status line, so the fixture can also simulate
+/// a failing model endpoint deterministically.
+fn spawn_loopback_with_status_line(status_line: &str, response_body: String) -> LoopbackModel {
     let listener = TcpListener::bind("127.0.0.1:0").expect("fixture binds loopback");
     let addr = listener.local_addr().expect("fixture address");
     let (sender, receiver) = mpsc::channel();
     let effects = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let effects_thread = effects.clone();
+    let status_line = status_line.to_string();
     thread::spawn(move || {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -152,7 +159,7 @@ fn spawn_loopback_model(response_body: String) -> LoopbackModel {
         let _ = read_request(&stream);
         let body = response_body.as_bytes();
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             response_body
         );
@@ -723,11 +730,35 @@ fn preflight_refusal(
     }
 }
 
+/// Test-only dispatch boundary injection. `Normal` is the only production
+/// wiring; the other two variants exist purely so the fixture can force a
+/// governed post-preflight failure deterministically, without weakening any
+/// gate (the refusal fires inside the real dispatch code).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchInjection {
+    Normal,
+    /// The step names a capability the selected harness never declared: the
+    /// governed boundary refuses BEFORE any effect (typed refusal).
+    RefuseStepCapability,
+    /// The loopback model endpoint returns HTTP 500: the capability handler
+    /// runs and the boundary fails the effect with a typed, sealed
+    /// `ExecutionFailed` failure and a journal entry.
+    Http500,
+}
+
 /// Execute one task fixture end to end through the governed boundary.
 /// `edits` are the fixture-scripted repair operations. The validator is
 /// NOT caller-selectable: it comes from the descriptor's pinned
 /// `validation` section.
 fn run_task_execution(descriptor_text: &str, edits: Vec<EditOperation>) -> TaskExecutionRun {
+    run_task_execution_with_fault(descriptor_text, edits, DispatchInjection::Normal)
+}
+
+fn run_task_execution_with_fault(
+    descriptor_text: &str,
+    edits: Vec<EditOperation>,
+    injection: DispatchInjection,
+) -> TaskExecutionRun {
     let descriptor = ScenarioDescriptor::parse_json(descriptor_text)
         .expect("descriptor must validate before running");
 
@@ -887,7 +918,21 @@ fn run_task_execution(descriptor_text: &str, edits: Vec<EditOperation>) -> TaskE
     }
 
     // ---- PHASE 7: governed dispatch (first and only effect) --------------
-    let server = spawn_loopback_model(canned_chat_completion());
+    let server = match injection {
+        DispatchInjection::Http500 => {
+            spawn_loopback_with_status_line("500 Internal Server Error", canned_chat_completion())
+        }
+        _ => spawn_loopback_model(canned_chat_completion()),
+    };
+    // The step capability the harness does (not) declare: a mismatch forces
+    // a typed, pre-effect refusal inside the governed dispatch itself —
+    // before the loopback is ever contacted.
+    let step_capability = match injection {
+        DispatchInjection::RefuseStepCapability => {
+            "harness.local_model.infer-not-declared".to_string()
+        }
+        _ => LOCAL_MODEL_INFER_CAPABILITY.to_string(),
+    };
     let candidate = RouteCandidateV1 {
         schema_version: "1.0.0".to_string(),
         candidate_id: descriptor.route.candidate_id.clone(),
@@ -1010,7 +1055,7 @@ fn run_task_execution(descriptor_text: &str, edits: Vec<EditOperation>) -> TaskE
             clock: &FixedTrustedTimeSource::new(&descriptor.route.dispatch_at),
             step: prometheos_lite::workflow::execution_harness::HarnessStep {
                 step_id: STEP_ID.to_string(),
-                capability: LOCAL_MODEL_INFER_CAPABILITY.to_string(),
+                capability: step_capability,
                 args: json!({
                     "model": MODEL,
                     "endpoint": server.endpoint,
@@ -1066,6 +1111,69 @@ fn run_task_execution(descriptor_text: &str, edits: Vec<EditOperation>) -> TaskE
 
     let dispatch_classification =
         scenario::classify_completed_run(true, &dispatch, accounting.is_some());
+
+    // ---- RESULT GATE: a refused or failed dispatch NEVER authorizes the
+    // scripted repair. The workspace+file-policy permit is necessary, not
+    // sufficient. On any Err the run returns with no repair, no validator,
+    // no task-outcome claim, and (for a refusal) no accounting at all;
+    // for a typed ExecutionFailed failure the typed failure/journal/
+    // accounting evidence is preserved exactly as measured.
+    match &dispatch {
+        Ok(_) => {} // the governed effect succeeded; the repair may proceed
+        Err(RoutedDispatchFailure::Refused(refused)) => {
+            let refused_reason = format!("{refused:#}");
+            return TaskExecutionRun {
+                dispatch: Some(dispatch),
+                accounting: None,
+                envelope: None,
+                classification: ScenarioOutcomeClass::SetupError,
+                capability_effects,
+                repaired_lib_rs: std::fs::read_to_string(worktree_root.join("src").join("lib.rs"))
+                    .ok(),
+                changed_vs_baseline: tree_changed_paths(&source, &worktree_root),
+                patched: false,
+                seal_error: None,
+                preflight_error: Some(format!(
+                    "governed dispatch refused before any effect: {refused_reason}"
+                )),
+                stage_error: None,
+                acquire_error: None,
+                repair_preflight_error: None,
+                patch_error: None,
+                staging_digest_ok,
+                baseline_digest,
+                post_run_digest: scenario::task_run_tree_digest(&worktree_root).ok(),
+                validator_provenance: Some(
+                    prometheos_lite::workflow::scenario::TaskValidatorProvenance::NotExecuted,
+                ),
+            };
+        }
+        Err(RoutedDispatchFailure::ExecutionFailed(_)) => {
+            return TaskExecutionRun {
+                dispatch: Some(dispatch),
+                accounting,
+                envelope: None,
+                classification: dispatch_classification,
+                capability_effects,
+                repaired_lib_rs: std::fs::read_to_string(worktree_root.join("src").join("lib.rs"))
+                    .ok(),
+                changed_vs_baseline: tree_changed_paths(&source, &worktree_root),
+                patched: false,
+                seal_error: None,
+                preflight_error: None,
+                stage_error: None,
+                acquire_error: None,
+                repair_preflight_error: None,
+                patch_error: None,
+                staging_digest_ok,
+                baseline_digest,
+                post_run_digest: scenario::task_run_tree_digest(&worktree_root).ok(),
+                validator_provenance: Some(
+                    prometheos_lite::workflow::scenario::TaskValidatorProvenance::NotExecuted,
+                ),
+            };
+        }
+    }
 
     // ---- PHASE 7b: apply the controlled repair (permitted; post-dispatch) --
     let (policy, file_set) = scripted_repair_grant(&worktree_root);
@@ -2209,4 +2317,166 @@ fn task_run_evidence_claims_no_benchmark_success_and_no_foundry_contract() {
         TaskRepairOrigin::ScriptedFixture,
         "scripted repair is labelled scripted, never model skill"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch result gate: a failed or refused governed dispatch never
+// authorizes the scripted repair (regression coverage)
+// ---------------------------------------------------------------------------
+
+fn fixture_lib_rs_bytes() -> Vec<u8> {
+    std::fs::read(
+        repo_root().join("tests/fixtures/scenarios/rust-bugfix-arithmetic/repo/src/lib.rs"),
+    )
+    .expect("fixture readable")
+}
+
+#[test]
+fn governed_refusal_after_preflight_applies_no_repair_and_runs_no_validator() {
+    // Case A: every preflight gate passes (fixture, staging, revision,
+    // worktree, baseline, repair authorization dry-run), then the governed
+    // boundary refuses at the step-eligibility gate — before any effect.
+    // The refusal must stop the run: no repair, no validator, no typed
+    // success claim, zero capability effects (there were none), and zero
+    // filesystem effects (the tree is untouched).
+    let run = run_task_execution_with_fault(
+        EXECUTE_DESCRIPTOR,
+        correct_repair_edits(),
+        DispatchInjection::RefuseStepCapability,
+    );
+    assert_eq!(run.classification, ScenarioOutcomeClass::SetupError);
+    assert_eq!(
+        run.capability_effects, 0,
+        "the refusal happens at the step gate, before any capability executes"
+    );
+    match &run.dispatch {
+        Some(Err(RoutedDispatchFailure::Refused(refused))) => {
+            let msg = format!("{refused:#}");
+            assert!(msg.contains("step capability"), "{msg}");
+        }
+        other => panic!("expected a typed refusal, got {other:?}"),
+    }
+    assert!(
+        run.accounting.is_none(),
+        "a refusal never produces an accounting record (no attempt, no usage)"
+    );
+    assert!(
+        !run.patched,
+        "a refused dispatch never authorizes the repair"
+    );
+    assert_eq!(
+        run.repaired_lib_rs.as_deref().map(str::as_bytes),
+        Some(fixture_lib_rs_bytes().as_slice()),
+        "source bytes unchanged after the refusal"
+    );
+    assert_eq!(run.changed_vs_baseline, Vec::<String>::new());
+    assert_eq!(
+        run.validator_provenance,
+        Some(prometheos_lite::workflow::scenario::TaskValidatorProvenance::NotExecuted),
+        "the validator never runs"
+    );
+    assert_eq!(run.envelope, None, "no task-run success envelope");
+    assert_eq!(
+        Some("d4234cd58be74da1e9b369ab21bdecf96d33f1d43e12c4a5f7ae848dc2e400d6".to_string()),
+        run.baseline_digest.as_ref().map(|d| d.to_string()),
+        "baseline digest is the pinned fixture digest"
+    );
+    assert_eq!(
+        run.baseline_digest, run.post_run_digest,
+        "zero filesystem effects after a refused dispatch"
+    );
+}
+
+#[test]
+fn capability_failure_after_preflight_keeps_typed_failure_and_applies_no_repair() {
+    // Case B: every preflight gate passes, the capability executes and
+    // fails — the loopback endpoint returns HTTP 500, the harness fails the
+    // effect with a typed failure document, and the governed boundary
+    // returns ExecutionFailed. The repair must NOT run and the typed
+    // failure/journal/accounting evidence must be preserved, never
+    // re-manufactured as Completed.
+    let run = run_task_execution_with_fault(
+        EXECUTE_DESCRIPTOR,
+        correct_repair_edits(),
+        DispatchInjection::Http500,
+    );
+    assert_eq!(
+        run.classification,
+        ScenarioOutcomeClass::GovernedProductOutcome
+    );
+    assert_eq!(
+        run.capability_effects, 1,
+        "the capability executed (and failed) — counted truthfully, not zero"
+    );
+    match &run.dispatch {
+        Some(Err(RoutedDispatchFailure::ExecutionFailed(failure))) => {
+            assert!(failure.calls >= 1);
+            assert!(
+                failure.journal_entry.is_some(),
+                "typed failure journal entry is preserved"
+            );
+        }
+        other => panic!("expected a typed ExecutionFailed, got {other:?}"),
+    }
+    let accounting = run.accounting.as_ref().expect("typed failure accounted");
+    accounting.verify().expect("failure accounting verifies");
+    assert_eq!(
+        accounting.outcome,
+        prometheos_lite::workflow::accounting::AttemptOutcomeAccounting::Failed {
+            kind: "execution-failed".to_string()
+        },
+        "typed failure evidence preserved, never a fabricated Completed"
+    );
+    assert_eq!(
+        accounting.attempt_digest, None,
+        "no attempt digest fabricated"
+    );
+    assert!(!run.patched);
+    assert_eq!(run.changed_vs_baseline, Vec::<String>::new());
+    assert_eq!(
+        run.repaired_lib_rs.as_deref().map(str::as_bytes),
+        Some(fixture_lib_rs_bytes().as_slice()),
+        "source bytes unchanged after the failed dispatch"
+    );
+    assert_eq!(
+        run.validator_provenance,
+        Some(prometheos_lite::workflow::scenario::TaskValidatorProvenance::NotExecuted),
+        "the validator never runs after an execution failure"
+    );
+    assert_eq!(run.envelope, None, "no task-run success envelope");
+    assert_eq!(
+        run.baseline_digest, run.post_run_digest,
+        "zero filesystem effects after a failed dispatch"
+    );
+}
+
+#[test]
+fn positive_path_executes_exactly_once_with_repair_and_validator() {
+    // Case C, kept and sharpened: exactly one governed capability effect,
+    // exactly one authorized scripted repair, the pinned validator runs,
+    // and success is sealed only then.
+    let run = run_task_execution(EXECUTE_DESCRIPTOR, correct_repair_edits());
+    assert_eq!(
+        run.capability_effects, 1,
+        "exactly one capability execution"
+    );
+    assert!(run.patched, "the one authorized scripted repair applied");
+    let mut changed = run.changed_vs_baseline.clone();
+    changed.sort();
+    assert!(changed.contains(&"src/lib.rs".to_string()));
+    for c in &changed {
+        assert!(
+            c == "src/lib.rs" || c == "Cargo.lock",
+            "unexpected changed file: {c}"
+        );
+    }
+    assert_eq!(
+        run.validator_provenance,
+        Some(prometheos_lite::workflow::scenario::TaskValidatorProvenance::ObservedSubprocess),
+        "the pinned validator executed"
+    );
+    let envelope = run.envelope.expect("task-run envelope seals");
+    envelope.verify().expect("envelope verifies");
+    assert_eq!(envelope.task_outcome, TaskOutcome::Repaired);
+    assert_eq!(envelope.validator.exit_code, Some(0));
 }
