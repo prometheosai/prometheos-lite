@@ -1,5 +1,57 @@
 ## Unreleased
 
+- #136 E7/I01 Slice B - one genuinely executed repository-task fixture,
+  execution-integrity repaired after #307 review. A new
+  writable, isolated execute scenario (`lite-rust-bugfix-arithmetic-execute-001`,
+  `tests/fixtures/scenarios/rust-bugfix-arithmetic-execute/descriptor.json`)
+  pins the same content-digested Rust bugfix bytes as Slice A but under a
+  `git-worktree` writable workspace (`lite.workspace.adapter.v1`, mode
+  `writable`, scope `repo://fixture`) with the disposal revision pinned to a
+  deterministic commit and the validator surface pinned in the descriptor
+  (`validation` section, schema `1.0.0`: exact executable `cargo`, exact argv
+  `test --offline`, expected exit code `0`, expected assertion, expected
+  file-after digest, expected post-run tree digest). The runner
+  (`tests/scenario_task_execution.rs`) runs preflight phases in a load-bearing
+  order: fixture content verification, descriptor completeness (`validation`
+  pins required — absent, the task is `invalid-task` and is never
+  dispatched), deterministic staging with the staged commit checked against
+  the pin, isolated writable workspace acquisition and verification under the
+  #171 contract (writable-only gate, `ensure_writable`, adapter validation,
+  revision, baseline tree-digest == pin), then a repair-target authorization
+  preflight (repo-relative paths, editable set, transaction dry-run — zero
+  writes) — and ONLY then the governed dispatch. A result gate immediately after the dispatch refuses
+   to repair after ANY `Err` (typed `Refused` or `ExecutionFailed`): no
+   repair, no validator, no success envelope, typed failure/journal/
+   accounting evidence preserved exactly as measured, zero filesystem
+   effects, no replay or hidden fallback. Preflight refusals
+  (`setup-error` / `invalid-task`) never spawn the loopback server: a real
+  capability-effects counter reads zero, no accounting record exists,
+  capability_effects == 0 and changed_vs_baseline is empty in every refusal
+  test; the positive path dispatches exactly once. The repair itself is a
+  fixture-scripted `search-replace` edit applied with permission through
+  `FilePolicy` + `FileSet` + `apply_patch_with_rollback`; the governed model
+  dispatch holds NO write authority (its node manifest pins
+  `writableScopes: []` — the repair carries its own explicit permit,
+  `repair.writeAuthority: scripted-fixture-workspace-file-policy`). The
+  validator output (stdout+stderr) is captured into a bounded, digested
+  receipt with exit code, argv, expected exit code, pinned assertion and
+  `observed-subprocess`/`not-executed` provenance. A Lite-internal task-run
+  envelope (`lite.evidence.task-run`, schema `1.1.0`) embeds and re-verifies
+  the full Slice A evidence chain plus baseline/post-run digests (the
+  baseline is bound to the embedded descriptor's pinned
+  `repository.contentDigest`), the repair record and the validator receipt.
+  `verify()` re-derives the outcome from the measurements and rejects
+  forged success: a failed repair with a flipped exit code, a swapped
+  command/argv, a missing provenance, an unrelated post-run digest, or a
+  tampered baseline. `verificationScope` is pinned to the documented
+  limitation: internal consistency of operator-observed measurements, not
+  cryptographic proof of execution truth. A pre-scripted repair is labelled
+  `scripted-fixture`, never model coding skill; no benchmark score,
+  comparison or certification is produced. Classification: `setup-error` for
+  every pre-effect refusal (with zero effects), `governed-product-outcome` +
+  `taskOutcome: repair-failed` for a failing repair, `infrastructure-error`
+  when the validator cannot run; no false-success path exists.
+
 - #136 E7/I01 Slice A - governed-workflow evaluation fixtures. A versioned
   Lite-internal scenario descriptor (`lite.fixtures.scenario`,
   `src/workflow/scenario.rs`) pins one Rust and one Python fixture
